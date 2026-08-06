@@ -1,0 +1,36 @@
+{
+  "brand": "WinSlim Project",
+  "owners": [
+    "Christianlg97"
+  ],
+  "fixedProfiles": [
+    "Darkeiser003",
+    "Christianlg97"
+  ],
+  "developers": [
+    "Darkeiser003"
+  ],
+  "repositories": [
+    "Darkeiser003/Terminal"
+  ],
+  "platformOverrides": {
+    "linux": {
+      "owners": [],
+      "fixedProfiles": [
+        "Darkeiser003"
+      ],
+      "developers": [
+        "Darkeiser003"
+      ]
+    },
+    "darwin": {
+      "owners": [],
+      "fixedProfiles": [
+        "Darkeiser003"
+      ],
+      "developers": [
+        "Darkeiser003"
+      ]
+    }
+  }
+}

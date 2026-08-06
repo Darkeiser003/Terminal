@@ -1,0 +1,102 @@
+{
+  "name": "winslim-terminal",
+  "version": "1.4.1",
+  "description": "WinSlim Terminal - terminal y hub de proyectos de WinSlim Project",
+  "main": "main.js",
+  "author": "WinSlim Project",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test:integration": "electron . --integration-test",
+    "postinstall": "electron-builder install-app-deps && node scripts/prepare-node-pty.js",
+    "dist:win": "electron-builder --win dir -c.electronFuses.enableEmbeddedAsarIntegrityValidation=true",
+    "dist:linux": "electron-builder --linux AppImage --config electron-builder.linux.js",
+    "test": "node --test",
+    "check": "npm test && node scripts/check-syntax.js && node scripts/validate-i18n.js && node scripts/validate-release-metadata.js && node scripts/validate-build-config.js"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.0.0"
+  },
+  "build": {
+    "appId": "com.winslim.terminal",
+    "productName": "WinSlim Terminal",
+    "copyright": "Copyright © 2026 WinSlim Project",
+    "beforePack": "scripts/prepare-node-pty.js",
+    "asar": true,
+    "compression": "maximum",
+    "electronLanguages": [
+      "es",
+      "en-US"
+    ],
+    "toolsets": {
+      "appimage": "1.0.3"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true
+    },
+    "asarUnpack": [
+      "**/node_modules/node-pty/**"
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "main/**/*",
+      "config/**/*",
+      "renderer/**/*",
+      "package.json",
+      "node_modules/**/*",
+      "build/icon.ico",
+      "build/icon.png",
+      "!**/*.{map,ts,md,markdown,cc,h,gypi,gyp}",
+      "!**/{test,tests,__tests__,docs,example,examples,.github}/**",
+      "!node_modules/node-pty/{src,deps,scripts,typings,third_party}/**",
+      "!node_modules/node-pty/build/**/*.{vcxproj,filters,recipe,tlog,lastbuildstate,idb,pdb,ilk,exp,lib,obj,res}",
+      "!node_modules/node-pty/build/**/*.{iobj,ipdb}",
+      "!node_modules/node-pty/build/{deps,Release/obj,Release/obj.target}/**",
+      "!node_modules/node-pty/bin/**",
+      "!node_modules/node-pty/lib/*.test.js",
+      "!node_modules/node-pty/prebuilds/**",
+      "!node_modules/@xterm/*/src/**"
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.ico",
+      "legalTrademarks": "WinSlim Project"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Development",
+      "synopsis": "Terminal multipestaña y centro local de herramientas",
+      "executableName": "lterminal",
+      "icon": "build/icon.png",
+      "artifactName": "LTerminal-${version}-${arch}.AppImage",
+      "desktop": {
+        "entry": {
+          "Name": "LTerminal",
+          "Comment": "Terminal multipestaña y centro local de herramientas",
+          "Categories": "Utility;TerminalEmulator;Development;",
+          "Keywords": "terminal;shell;scripts;docker;wsl;"
+        }
+      },
+      "files": [
+        "!node_modules/node-pty/prebuilds/**"
+      ]
+    }
+  }
+}

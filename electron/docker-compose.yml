@@ -1,0 +1,18 @@
+# docker-compose.yml - entorno de desarrollo (ver Dockerfile.dev)
+# Uso: docker compose run --rm dev
+# Abre una shell dentro del contenedor con el repo montado en /app, para
+# validar `npm install` / sintaxis sin instalar nada en la máquina host.
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    working_dir: /app
+    tty: true
+    stdin_open: true
+
+volumes:
+  node_modules:

@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Terminal</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';">
+    <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<!-- El texto escrito aquí es el español, que es el idioma de referencia de la
+     aplicación. `data-i18n` (y sus variantes -title y -placeholder) indican
+     con qué clave del catálogo se sustituye al cambiar de idioma: si una clave
+     no está traducida, se queda el texto que ya hay en vez de una clave cruda.
+     Ver main/i18n.js y applyTranslations() en renderer.js. -->
+<body>
+    <div id="toolbar">
+        <div class="toolbar-group">
+            <label for="env-select" data-i18n="toolbar.env">Entorno</label>
+            <select id="env-select"></select>
+            <button id="env-refresh" data-i18n-title="toolbar.envRefresh" title="Volver a detectar entornos">⟳</button>
+        </div>
+        <div class="toolbar-group">
+            <button id="deps-toggle" data-i18n="toolbar.deps">Entorno y dependencias</button>
+            <div id="deps-panel" class="hidden"></div>
+        </div>
+        <div class="toolbar-group">
+            <button id="projects-toggle" data-i18n="toolbar.projects">Proyectos</button>
+            <div id="projects-panel" class="hidden">
+                <div class="scripts-scope-tabs">
+                    <button id="projects-mode-pinned" class="active" data-i18n="projects.pinned">Anclados</button>
+                    <button id="projects-mode-explore" data-i18n="projects.explore">Explorar GitHub</button>
+                </div>
+                <div class="projects-header">
+                    <div>
+                        <strong id="projects-brand">Proyectos</strong>
+                        <span id="projects-folder" class="projects-folder"></span>
+                    </div>
+                    <button id="projects-choose-folder" data-i18n-title="projects.chooseFolder" title="Elegir carpeta local para repositorios">📁</button>
+                    <button id="projects-refresh" data-i18n-title="projects.refresh" title="Actualizar vista">⟳</button>
+                </div>
+                <form id="projects-search" class="projects-search hidden">
+                    <input id="projects-query" type="text" autocomplete="off" data-i18n-placeholder="projects.queryPlaceholder" placeholder="usuario, owner/repo o URL de GitHub">
+                    <button type="submit" class="dep-install-btn" data-i18n="projects.search">Buscar</button>
+                </form>
+                <!-- Filtro local: no consulta a GitHub, solo acota lo que ya
+                     está en pantalla (anclados o resultado de la búsqueda). -->
+                <div class="panel-filter">
+                    <span class="panel-filter-icon" aria-hidden="true">🔍</span>
+                    <input id="projects-filter" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="projects.filterPlaceholder" placeholder="Filtrar por nombre, propietario o lenguaje">
+                    <button type="button" id="projects-filter-clear" class="panel-filter-clear hidden" data-i18n-title="common.clearFilter" title="Limpiar filtro">✕</button>
+                </div>
+                <div id="projects-status" class="scripts-status"></div>
+                <div id="projects-profile"></div>
+                <div id="projects-list"></div>
+            </div>
+        </div>
+        <div class="toolbar-group">
+            <button id="scripts-toggle" data-i18n="toolbar.scripts">Scripts</button>
+            <div id="scripts-panel" class="hidden">
+                <div class="scripts-scope-tabs">
+                    <button id="scripts-mode-library" class="active" data-i18n="scripts.library" data-i18n-title="scripts.libraryTitle" title="Carpeta de scripts persistente y utilidades del sistema">Biblioteca</button>
+                    <button id="scripts-mode-here" data-i18n="scripts.here" data-i18n-title="scripts.hereTitle" title="Buscar en el directorio actual de la pestaña y sus subdirectorios">Aquí</button>
+                </div>
+                <div class="scripts-header">
+                    <span id="scripts-folder-path" class="scripts-folder-path" title=""></span>
+                    <label id="scripts-depth-control" class="scripts-depth-control hidden" data-i18n-title="scripts.depthTitle" title="Profundidad máxima de subdirectorios. El escaneo mantiene límites de seguridad.">
+                        <span data-i18n="scripts.levels">Niveles</span>
+                        <select id="scripts-depth">
+                            <option value="0">0</option>
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3" selected>3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                            <option value="6">6</option>
+                            <option value="8">8</option>
+                            <option value="10">10</option>
+                        </select>
+                    </label>
+                    <button id="scripts-choose-folder" data-i18n-title="scripts.chooseFolder" title="Elegir carpeta para esta vista">📁</button>
+                    <button id="scripts-refresh" data-i18n-title="scripts.refresh" title="Volver a buscar">⟳</button>
+                </div>
+                <!-- Filtro local sobre el último escaneo: no vuelve a recorrer
+                     el disco, solo acota lo que ya se está mostrando. -->
+                <div class="panel-filter">
+                    <span class="panel-filter-icon" aria-hidden="true">🔍</span>
+                    <input id="scripts-filter" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="scripts.filterPlaceholder" placeholder="Filtrar por nombre, carpeta o extensión">
+                    <button type="button" id="scripts-filter-clear" class="panel-filter-clear hidden" data-i18n-title="common.clearFilter" title="Limpiar filtro">✕</button>
+                </div>
+                <details class="scripts-type-filter" open>
+                    <summary>
+                        <span data-i18n="scripts.fileTypes">Tipos de archivo</span>
+                        <span id="scripts-filter-count" class="script-group-count"></span>
+                    </summary>
+                    <div class="scripts-filter-toolbar">
+                        <button id="scripts-filter-defaults" type="button" data-i18n="scripts.typesDefaults">Scripts</button>
+                        <button id="scripts-filter-all" type="button" data-i18n="scripts.typesAll">Todos</button>
+                        <button id="scripts-filter-none" type="button" data-i18n="scripts.typesNone">Ninguno</button>
+                    </div>
+                    <div id="scripts-type-options" class="scripts-type-options"></div>
+                </details>
+                <div id="scripts-status" class="scripts-status hidden"></div>
+                <div id="scripts-list"></div>
+            </div>
+        </div>
+        <div class="toolbar-group">
+            <button id="settings-toggle" data-i18n="toolbar.settings" data-i18n-title="toolbar.settingsTitle" title="Personalizar apariencia y comportamiento">Ajustes</button>
+            <div id="settings-panel" class="hidden">
+                <div class="settings-header">
+                    <div>
+                        <strong id="settings-app-name">Preferencias</strong>
+                        <span data-i18n="settings.subtitle">Personaliza la interfaz sin cambiar el sistema.</span>
+                    </div>
+                    <span id="settings-version" class="settings-version"></span>
+                </div>
+                <form id="settings-form">
+                    <div class="settings-tabs" role="tablist" data-i18n-aria-label="settings.sections" aria-label="Secciones de preferencias">
+                        <button type="button" class="active" data-settings-tab="appearance" data-i18n="settings.appearance">Apariencia</button>
+                        <button type="button" data-settings-tab="terminal" data-i18n="settings.terminal">Terminal</button>
+                        <button type="button" data-settings-tab="behavior" data-i18n="settings.behavior">Comportamiento</button>
+                        <button type="button" data-settings-tab="about" data-i18n="settings.about">Información</button>
+                    </div>
+
+                    <section class="settings-section active" data-settings-section="appearance">
+                        <div class="settings-section-heading">
+                            <strong data-i18n="settings.theme">Tema</strong>
+                            <span data-i18n="settings.themeHint">Todas oscuras, pensadas para lectura prolongada. Una de ellas es de alto contraste.</span>
+                        </div>
+                        <div id="settings-theme-options" class="settings-theme-options"></div>
+                        <div class="settings-preview" id="settings-preview">
+                            <span>usuario@equipo</span><strong>:~/proyecto</strong><em>$</em> npm run check
+                        </div>
+                        <div class="settings-grid settings-grid-colors">
+                            <label class="settings-field settings-color"><span data-i18n="settings.accent">Acento</span><input id="settings-accent" type="color"></label>
+                            <label class="settings-field settings-color"><span data-i18n="settings.terminalBg">Fondo terminal</span><input id="settings-terminal-bg" type="color"></label>
+                            <label class="settings-field settings-color"><span data-i18n="settings.terminalFg">Texto terminal</span><input id="settings-terminal-fg" type="color"></label>
+                            <label class="settings-field"><span data-i18n="settings.density">Densidad de interfaz</span><select id="settings-density"><option value="comfortable" data-i18n="settings.densityComfortable">Cómoda</option><option value="compact" data-i18n="settings.densityCompact">Compacta</option></select></label>
+                        </div>
+                    </section>
+
+                    <section class="settings-section" data-settings-section="terminal">
+                        <div class="settings-section-heading"><strong data-i18n="settings.textCursor">Texto y cursor</strong><span data-i18n="settings.textCursorHint">Ajustes aplicados a todas las pestañas abiertas.</span></div>
+                        <div class="settings-grid settings-grid-terminal">
+                            <label class="settings-field settings-span-2"><span data-i18n="settings.font">Fuente</span><select id="settings-font-family"></select></label>
+                            <label class="settings-field"><span data-i18n="settings.fontSize">Tamaño</span><input id="settings-font-size" type="number" min="10" max="24" step="1"></label>
+                            <label class="settings-field"><span data-i18n="settings.lineHeight">Altura de línea</span><input id="settings-line-height" type="number" min="0.9" max="1.8" step="0.05"></label>
+                            <label class="settings-field"><span data-i18n="settings.letterSpacing">Espaciado</span><input id="settings-letter-spacing" type="number" min="-1" max="3" step="0.1"></label>
+                            <label class="settings-field"><span data-i18n="settings.cursor">Cursor</span><select id="settings-cursor-style"><option value="block" data-i18n="settings.cursorBlock">Bloque</option><option value="bar" data-i18n="settings.cursorBar">Barra</option><option value="underline" data-i18n="settings.cursorUnderline">Subrayado</option></select></label>
+                            <label class="settings-field"><span data-i18n="settings.fontWeight">Grosor</span><select id="settings-font-weight"><option value="normal" data-i18n="settings.fontWeightNormal">Normal</option><option value="bold" data-i18n="settings.fontWeightBold">Negrita</option></select></label>
+                            <label class="settings-field"><span data-i18n="settings.padding">Margen interior</span><input id="settings-terminal-padding" type="number" min="4" max="24" step="1"></label>
+                            <label class="settings-field"><span data-i18n="settings.scrollSensitivity">Velocidad de rueda</span><input id="settings-scroll-sensitivity" type="number" min="1" max="10" step="1"></label>
+                            <label class="settings-field settings-span-2"><span data-i18n="settings.scrollback">Líneas de historial</span><input id="settings-scrollback" type="number" min="1000" max="100000" step="1000"></label>
+                        </div>
+                        <label class="settings-check"><input id="settings-cursor-blink" type="checkbox"> <span><strong data-i18n="settings.cursorBlink">Cursor parpadeante</strong><small data-i18n="settings.cursorBlinkHint">Facilita localizar el punto de escritura.</small></span></label>
+                        <label class="settings-check"><input id="settings-copy-on-select" type="checkbox"> <span><strong data-i18n="settings.copyOnSelect">Copiar al seleccionar</strong><small data-i18n="settings.copyOnSelectHint">Al soltar el ratón, lo seleccionado va al portapapeles.</small></span></label>
+                        <label class="settings-check"><input id="settings-show-banner" type="checkbox"> <span><strong data-i18n="settings.showBanner">Mostrar información del sistema</strong><small data-i18n="settings.showBannerHint">Banner al crear una sesión nueva.</small></span></label>
+                    </section>
+
+                    <section class="settings-section" data-settings-section="behavior">
+                        <div class="settings-section-heading"><strong data-i18n="settings.startupPanels">Inicio y paneles</strong><span data-i18n="settings.startupPanelsHint">Solo cambia el comportamiento de la aplicación.</span></div>
+                        <label class="settings-field"><span data-i18n="settings.language">Idioma</span><select id="settings-language"></select></label>
+                        <div class="settings-field-hint" data-i18n="settings.languageHint">Se aplica a toda la interfaz. No cambia la salida de los comandos que ejecutes.</div>
+                        <label class="settings-field"><span data-i18n="settings.startupEnv">Entorno al iniciar</span><select id="settings-default-env"></select></label>
+                        <label class="settings-field"><span data-i18n="settings.hereDepth">Profundidad de «Aquí»</span><input id="settings-here-depth" type="number" min="0" max="10" step="1"></label>
+                        <label class="settings-check"><input id="settings-auto-docker" type="checkbox"> <span><strong data-i18n="settings.autoDocker">Iniciar Docker automáticamente</strong><small data-i18n="settings.autoDockerHint">Solo cuando está instalado y el daemon no responde.</small></span></label>
+                        <label class="settings-check"><input id="settings-exclusive-groups" type="checkbox"> <span><strong data-i18n="settings.exclusiveGroups">Una lista abierta por panel</strong><small data-i18n="settings.exclusiveGroupsHint">Al abrir una, cierra la anterior.</small></span></label>
+                        <label class="settings-check"><input id="settings-auto-open-group" type="checkbox"> <span><strong data-i18n="settings.autoOpenFirst">Abrir la primera lista</strong><small data-i18n="settings.autoOpenFirstHint">Desactivado mantiene Docker y los demás grupos cerrados.</small></span></label>
+                    </section>
+
+                    <section class="settings-section" data-settings-section="about">
+                        <div class="settings-about-card">
+                            <div class="settings-about-logo">&gt;_</div>
+                            <div><strong id="settings-about-name">Terminal</strong><span id="settings-about-meta"></span></div>
+                        </div>
+                        <div class="settings-section-heading"><strong data-i18n="settings.developers">Desarrolladores</strong><span data-i18n="settings.developersHint">Créditos definidos en el catálogo de distribución.</span></div>
+                        <div id="settings-developers" class="settings-developers"></div>
+                        <div class="settings-section-heading"><strong data-i18n="settings.localConfig">Configuración local</strong></div>
+                        <div id="settings-path" class="settings-path"></div>
+                    </section>
+
+                    <div class="settings-footer">
+                        <div id="settings-status" class="scripts-status hidden"></div>
+                        <button id="settings-reset" type="button" class="modal-btn" data-i18n="settings.reset">Restablecer</button>
+                        <button type="submit" class="dep-install-btn" data-i18n="settings.save">Guardar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <div class="toolbar-group">
+            <button id="logs-open" data-i18n="toolbar.logs" data-i18n-title="toolbar.logsTitle" title="Abrir carpeta de logs">Logs</button>
+        </div>
+    </div>
+
+    <div id="tabbar">
+        <button id="explorer-toggle" data-i18n-title="tabs.explorerTitle" title="Mostrar u ocultar el explorador de archivos (Ctrl+Shift+E)">🗀</button>
+        <div id="tab-strip"></div>
+        <button id="tab-split" data-i18n-title="tabs.splitTitle" title="Dividir vista entre dos terminales">▥</button>
+        <button id="tab-new" data-i18n-title="tabs.newTitle" title="Nueva pestaña del entorno actual (Ctrl+Shift+T)">+</button>
+    </div>
+
+    <div id="workspace">
+        <aside id="explorer" class="hidden">
+            <div class="explorer-header">
+                <button id="explorer-up" data-i18n-title="explorer.up" title="Subir un directorio">↑</button>
+                <button id="explorer-follow" data-i18n-title="explorer.follow" title="Volver al directorio de la terminal">⌖</button>
+                <button id="explorer-refresh" data-i18n-title="explorer.refresh" title="Volver a leer la carpeta">⟳</button>
+                <button id="explorer-cd" data-i18n-title="explorer.cd" title="Llevar la terminal a esta carpeta">cd</button>
+            </div>
+            <div id="explorer-path" class="explorer-path" title=""></div>
+            <div class="explorer-actions">
+                <button id="explorer-new-folder" data-i18n="explorer.addFolder" data-i18n-title="explorer.addFolderTitle" title="Crear una carpeta aquí">+ Carpeta</button>
+                <button id="explorer-new-file" data-i18n="explorer.addFile" data-i18n-title="explorer.addFileTitle" title="Crear un archivo vacío aquí">+ Archivo</button>
+            </div>
+            <form id="explorer-create" class="explorer-create hidden">
+                <input id="explorer-create-name" type="text" autocomplete="off" spellcheck="false">
+                <button type="submit" id="explorer-create-submit" class="dep-install-btn" data-i18n="explorer.create">Crear</button>
+                <button type="button" id="explorer-create-cancel" class="modal-btn">✕</button>
+            </form>
+            <div id="explorer-confirm" class="explorer-confirm hidden">
+                <span id="explorer-confirm-text"></span>
+                <button type="button" id="explorer-confirm-accept" class="dep-install-btn" data-i18n="explorer.delete">Eliminar</button>
+                <button type="button" id="explorer-confirm-cancel" class="modal-btn">✕</button>
+            </div>
+            <div id="explorer-status" class="explorer-status hidden"></div>
+            <div id="explorer-list" class="explorer-list"></div>
+        </aside>
+        <div id="terminal-container"></div>
+    </div>
+
+    <div id="cmd-suggestion" class="hidden"></div>
+    <div id="terminal-context-menu" class="terminal-context-menu hidden">
+        <button type="button" data-action="copy" data-i18n="menu.copy">Copiar</button>
+        <button type="button" data-action="cut" data-i18n="menu.cutInput">Cortar entrada</button>
+        <button type="button" data-action="delete" data-i18n="menu.deleteInput">Borrar entrada</button>
+        <button type="button" data-action="paste" data-i18n="menu.paste">Pegar</button>
+    </div>
+    <!-- Menú del explorador lateral. Comparte estilo con el de la terminal;
+         qué botones se activan lo decide el renderer según haya pulsado sobre
+         un archivo, sobre una carpeta o sobre el hueco de la lista. El texto
+         de "open" y "paste" lo reescribe el renderer según el elemento, así
+         que esos dos no llevan data-i18n. -->
+    <div id="explorer-context-menu" class="terminal-context-menu hidden">
+        <button type="button" data-action="open">Abrir</button>
+        <button type="button" data-action="enter" data-i18n="explorer.enterFolder">Entrar en la carpeta</button>
+        <button type="button" data-action="copy" data-i18n="menu.copy">Copiar</button>
+        <button type="button" data-action="cut" data-i18n="explorer.cut">Cortar</button>
+        <button type="button" data-action="paste">Pegar</button>
+        <button type="button" data-action="rename" data-i18n="explorer.rename">Renombrar</button>
+        <button type="button" data-action="copy-path" data-i18n="explorer.copyPath">Copiar ruta</button>
+        <button type="button" data-action="new-folder" data-i18n="explorer.newFolder">Nueva carpeta</button>
+        <button type="button" data-action="new-file" data-i18n="explorer.newFile">Nuevo archivo</button>
+        <button type="button" data-action="trash" data-i18n="explorer.trash">Eliminar (a la papelera)</button>
+    </div>
+
+    <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+    <script src="renderer.js"></script>
+</body>
+</html>

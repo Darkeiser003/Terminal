@@ -1,0 +1,33 @@
+# Saltos de línea LF en todo el repositorio, tanto en el índice como en la
+# copia de trabajo.
+#
+# Por qué es obligatorio y no una preferencia de estilo: este repositorio se
+# clona en Windows, donde `core.autocrlf=true` es lo habitual, y la carpeta se
+# usa después desde WSL o desde Linux. Un `.sh` con CRLF no arranca allí (el
+# shebang se lee como `bash\r` y el intérprete "no existe"), y `linux/build.sh`
+# es justamente el script que compila el AppImage. Lo mismo vale para los
+# archivos de inicialización que la app genera a partir de estas fuentes.
+#
+# `eol=lf` fuerza LF también al hacer checkout, así que no depende de la
+# configuración local de cada máquina.
+* text=auto eol=lf
+
+# Binarios: nunca se normalizan.
+*.ico binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.gz binary
+*.node binary
+*.dll binary
+*.exe binary
+*.AppImage binary
+
+# Estos dos los ejecuta el propio Windows; da igual el final de línea, pero se
+# dejan en LF como el resto para que el diff no se llene de ruido.
+*.bat text eol=lf
+*.cmd text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
