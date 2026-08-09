@@ -23,7 +23,7 @@
     let status = $state('');
     let statusError = $state(false);
     let query = $state('');
-    let depth = $state(3);
+    let depth = $state(2);
     /** Categorías marcadas. `null` hasta el primer escaneo, que es quien trae
      *  cuáles vienen marcadas de fábrica. */
     let selected = $state<string[] | null>(null);

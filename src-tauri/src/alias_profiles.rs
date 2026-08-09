@@ -129,12 +129,12 @@ pub fn clear_command(
         // reemisiones como una limpieza nueva: la salida del comando
         // desaparecía sola y el banner no volvía a pintarse.
         let mut parts = vec![
-            format!("title {title} {CLEAR_MARKER}{random}"),
-            "cls".to_string(),
-            format!("title {title}"),
+            format!("@title {title} {CLEAR_MARKER}{random}"),
+            "@cls".to_string(),
+            format!("@title {title}"),
         ];
         if let Some(banner) = banner_path {
-            parts.push(format!("type \"{banner}\""));
+            parts.push(format!("@type \"{banner}\""));
         }
         return parts.join(separator);
     }

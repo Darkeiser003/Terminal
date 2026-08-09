@@ -72,6 +72,7 @@ fn migrate_local_data() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     migrate_local_data();
+    system_info::prewarm_hardware_info();
 
     let identity = identity::current();
     let conpty = pty::sideloaded_conpty();

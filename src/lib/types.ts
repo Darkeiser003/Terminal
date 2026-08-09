@@ -105,6 +105,7 @@ export interface Preferences {
     showSystemBanner: boolean;
     themeId: string;
     accentColor: string;
+    fastfetchColor: string;
     terminalBackground: string;
     terminalForeground: string;
     terminalFontFamily: string;

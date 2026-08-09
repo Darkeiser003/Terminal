@@ -36,6 +36,7 @@
         // luego habría que deshacer.
         if (host.clientWidth === 0 || host.clientHeight === 0) return;
         fitAddon.fit();
+        term.scrollToBottom();
         if (term.cols === lastSize.cols && term.rows === lastSize.rows) return;
         lastSize = { cols: term.cols, rows: term.rows };
         void api.resize(tabId, term.cols, term.rows);
@@ -189,17 +190,27 @@
         if (app.activeTabId !== tabId) void app.activateTab(tabId);
     }
 
-    // Al volver a estar visible hay que remedir: mientras estuvo oculta, la
-    // ventana pudo cambiar de tamaño y el xterm no se enteró.
+    // Cuando esta casilla pasa a ser la activa, le damos el foco a su xterm.
+    $effect(() => {
+        if (active && app.activeTabId === tabId) {
+            term?.focus();
+        }
+    });
+
+    // Al volver a estar visible o cambiar el número de paneles hay que remedir.
     $effect(() => {
         if (!active) return;
-        // El foco se lo lleva SOLO la pestaña activa: si no, con la vista
-        // dividida cada casilla se lo robaba a la anterior al montarse.
         const esLaActiva = app.activeTabId === tabId;
+        // Se observa el número de paneles para volver a medir al dividir/unir ventanas
+        app.panes.length;
         requestAnimationFrame(() => {
             fitAndReport();
             if (esLaActiva) term?.focus();
         });
+        const timer = setTimeout(() => {
+            fitAndReport();
+        }, 80);
+        return () => clearTimeout(timer);
     });
 
     // Las preferencias visuales se aplican en caliente, sin recrear el xterm.
@@ -230,6 +241,8 @@
     oncontextmenucapture={onContextMenu}
     onfocusincapture={tomarElFoco}
     onmousedowncapture={tomarElFoco}
+    onpointerdowncapture={tomarElFoco}
+    onpointerdown={tomarElFoco}
     role="presentation"
 ></div>
 
@@ -274,6 +287,7 @@
         inset: 0;
         padding: var(--terminal-padding);
         background: var(--terminal-bg);
+        overflow: hidden;
     }
 
     .menu-backdrop {

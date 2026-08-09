@@ -10,6 +10,15 @@
         await app.closeTab(tabId);
     }
 
+    function onAuxClick(event: MouseEvent, tabId: string): void {
+        // Botón central de la rueda del ratón (button === 1)
+        if (event.button === 1) {
+            event.preventDefault();
+            event.stopPropagation();
+            void app.closeTab(tabId);
+        }
+    }
+
     /** Cuántas casillas se ven ahora. Menos de dos es la vista normal. */
     const panes = $derived(app.panes.length < 2 ? 1 : app.panes.length);
 
@@ -119,6 +128,7 @@
             class:active={tab.id === app.activeTabId}
             title={tab.label}
             onclick={() => app.activateTab(tab.id)}
+            onauxclick={(event) => onAuxClick(event, tab.id)}
         >
             <span class="tab-label">{tab.label}</span>
             <span
@@ -143,10 +153,10 @@
 <style>
     .tab-strip {
         display: flex;
-        align-items: stretch;
-        gap: 2px;
-        height: 32px;
-        padding: 0 6px;
+        align-items: center;
+        gap: 6px;
+        height: 40px;
+        padding: 0 8px;
         background: var(--surface-alt);
         border-bottom: 1px solid var(--border);
         overflow-x: auto;
@@ -158,26 +168,31 @@
         display: flex;
         align-items: center;
         gap: 8px;
+        height: 28px;
+        flex: 0 1 180px;
+        min-width: 80px;
         max-width: 220px;
         padding: 0 10px;
-        border: none;
-        border-top: 2px solid transparent;
-        background: transparent;
-        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--surface);
+        color: var(--text);
         font: inherit;
         font-size: 12px;
         cursor: pointer;
         white-space: nowrap;
+        transition: background 0.15s ease, border-color 0.15s ease;
     }
 
     .tab:hover {
         background: var(--surface-hover);
+        border-color: var(--accent);
         color: var(--text);
     }
 
     .tab.active {
-        background: var(--surface);
-        border-top-color: var(--accent);
+        background: var(--accent-soft);
+        border-color: var(--accent);
         color: var(--text);
     }
 
@@ -188,7 +203,7 @@
 
     .tab-close {
         flex: 0 0 auto;
-        padding: 0 2px;
+        padding: 0 3px;
         border-radius: 3px;
         color: var(--muted);
         font-size: 11px;
@@ -201,33 +216,42 @@
     }
 
     .tab-new {
-        flex: 0 0 auto;
-        width: 28px;
-        border: none;
-        background: transparent;
-        color: var(--muted);
-        font-size: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 28px;
+        min-width: 28px;
+        height: 28px;
+        padding: 0 8px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--surface);
+        color: var(--text);
+        font-size: 14px;
         cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
     }
 
     .tab-new:hover {
         background: var(--surface-hover);
+        border-color: var(--accent);
         color: var(--text);
     }
-    /* Sin estilo propio salía con el botón nativo del navegador: un rectángulo
-       gris claro en medio de una tira oscura. Se peina como el `+` de nueva
-       pestaña, que es el otro botón de la misma tira. */
+
     .side-toggle {
         display: flex;
-        flex: 0 0 auto;
+        flex: 0 0 28px;
+        min-width: 28px;
         align-items: center;
         justify-content: center;
+        height: 28px;
         width: 28px;
-        margin-right: 4px;
-        border: none;
-        background: transparent;
-        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--surface);
+        color: var(--text);
         cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
     }
 
     .side-toggle svg {
@@ -237,28 +261,29 @@
 
     .side-toggle:hover {
         background: var(--surface-hover);
+        border-color: var(--accent);
         color: var(--text);
     }
 
     .side-toggle.on {
         background: var(--accent-soft);
+        border-color: var(--accent);
         color: var(--accent);
     }
 
-    /* Con una sola pestaña no hay nada que dividir: el botón se ve, para que la
-       función se descubra, pero no promete un clic que no haría nada. */
     .side-toggle:disabled {
         opacity: 0.4;
         cursor: default;
     }
 
     .side-toggle:disabled:hover {
-        background: transparent;
+        background: var(--surface);
+        border-color: var(--border);
         color: var(--muted);
     }
 
     /* Separa el par de controles de vista de la primera pestaña. */
     .side-toggle.panes {
-        margin-right: 8px;
+        margin-right: 4px;
     }
 </style>

@@ -73,6 +73,23 @@
             app.cyclePanes();
             return;
         }
+        // Ctrl + Flechas o Alt + Flechas: mover el foco de la terminal en la vista dividida
+        if ((event.ctrlKey || event.altKey) && !event.shiftKey && app.panes.length >= 2) {
+            const key = event.key;
+            if (key === 'ArrowLeft' || key === 'ArrowRight' || key === 'ArrowUp' || key === 'ArrowDown') {
+                event.preventDefault();
+                event.stopPropagation();
+                const dirMap: Record<string, 'left' | 'right' | 'up' | 'down'> = {
+                    ArrowLeft: 'left',
+                    ArrowRight: 'right',
+                    ArrowUp: 'up',
+                    ArrowDown: 'down'
+                };
+                app.navigatePaneDirection(dirMap[key]);
+                return;
+            }
+        }
+
         if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'e') {
             event.preventDefault();
             app.explorerVisible = !app.explorerVisible;
@@ -171,6 +188,8 @@
                         class:hidden={pane === -1}
                         class:focused={app.panes.length > 1 && tab.id === app.activeTabId}
                         style="order: {pane}"
+                        onpointerdown={() => app.activateTab(tab.id)}
+                        role="presentation"
                     >
                         <TerminalPane tabId={tab.id} active={pane !== -1} />
                     </div>
@@ -279,6 +298,8 @@
         display: flex;
         flex: 1 1 auto;
         min-height: 0;
+        background: var(--app-bg);
+        padding: 4px;
     }
 
     /* Dos columnas a partir de la tercera casilla: con cuatro quedan 2x2, y con
@@ -289,10 +310,8 @@
         flex: 1 1 auto;
         min-width: 0;
         grid-template-columns: repeat(min(var(--panes), 2), minmax(0, 1fr));
-        /* Dos píxeles y no uno: con la separación de un pelo, cuatro terminales
-           con texto hasta el borde se leían como una sola pantalla revuelta. */
-        gap: 2px;
-        background: var(--border);
+        gap: 6px;
+        background: var(--app-bg);
     }
 
     .cell {
@@ -300,17 +319,16 @@
         min-width: 0;
         min-height: 0;
         background: var(--terminal-bg);
+        border: 1px solid #282c34;
+        border-radius: 4px;
+        overflow: hidden;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
 
-    /* Cuál recibe lo que se teclea. Con cuatro casillas iguales no había manera
-       de saberlo, y es justo lo que hace falta saber antes de escribir. El
-       borde va por dentro (`inset`) para no desplazar el contenido. */
-    .cell.focused::after {
-        content: '';
-        position: absolute;
-        inset: 0;
-        border: 1px solid var(--accent);
-        pointer-events: none;
+    /* Cuál recibe lo que se teclea. */
+    .cell.focused {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent);
     }
 
     /* `display: none` sí vale aquí: el xterm de dentro se oculta con

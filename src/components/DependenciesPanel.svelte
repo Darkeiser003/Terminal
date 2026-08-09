@@ -422,9 +422,10 @@
     }
 
     .group {
-        margin: 6px 0;
+        margin: 8px 0;
         border: 1px solid var(--border);
-        border-radius: 5px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.2);
         overflow: hidden;
     }
 
@@ -432,48 +433,59 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 7px 8px;
+        padding: 9px 12px;
         background: var(--surface-alt);
         color: var(--accent);
         cursor: pointer;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 600;
+        list-style: none;
+        transition: background 0.15s ease;
+    }
+
+    .group-title::-webkit-details-marker,
+    .subgroup-title::-webkit-details-marker {
+        display: none;
+    }
+
+    .group[open] > .group-title {
+        border-bottom: 1px solid var(--border);
     }
 
     /* Segundo nivel: cada herramienta agrupa sus acciones bajo su propio
-       nombre. Se distingue del apartado padre por sangrado y una guía
-       vertical, no por otro fondo llamativo. */
+       nombre. Se distingue del apartado padre por sangrado y bordes suaves. */
     .subgroup {
-        margin: 3px 0 3px 8px;
-        border-left: 2px solid var(--border);
+        margin: 6px 6px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-alt);
+        overflow: hidden;
     }
 
     .subgroup[open] {
-        border-left-color: var(--accent);
+        border-color: var(--accent);
     }
 
     .subgroup-title {
         display: flex;
-        /* El contador se empuja al extremo con margin-left:auto, no con
-           space-between: así el punto de "ya instalado" puede colarse como
-           primer elemento sin descolocar el nombre. */
         justify-content: flex-start;
         align-items: center;
         gap: 8px;
-        padding: 5px 8px;
+        padding: 8px 10px;
         color: var(--text);
         cursor: pointer;
         font-size: 11px;
         font-weight: 600;
+        list-style: none;
+        transition: background 0.15s ease;
     }
 
     .subgroup-title:hover {
         color: var(--accent);
+        background: var(--surface-hover);
     }
 
-    /* Marca lo que ya está en el sistema: son los plegables que el panel coloca
-       arriba del todo, y el punto evita tener que abrirlos para saber cuáles
-       son. Los que faltan quedan sin punto, agrupados abajo. */
+    /* Marca lo que ya está en el sistema */
     .subgroup.installed > .subgroup-title::before {
         content: '';
         flex: 0 0 auto;
@@ -489,19 +501,16 @@
     }
 
     .subgroup .item {
-        margin-left: 8px;
+        margin: 4px 6px 6px 6px;
     }
 
-    /* Una herramienta con una sola acción: misma guía vertical y mismo sangrado
-       que un plegable, para que la lista se lea como una sola columna. */
+    /* Una herramienta con una sola acción: tarjeta con borde e identidad propia */
     .tool {
-        margin: 3px 0 3px 8px;
-        border-left: 2px solid var(--border);
+        margin: 6px 6px;
     }
 
     .tool .item {
-        margin-left: 8px;
-        border-top: none;
+        margin: 0;
     }
 
     /* El mismo punto que marca lo ya instalado en los plegables. */
@@ -516,9 +525,7 @@
         vertical-align: middle;
     }
 
-    /* El punto de «hay versión nueva». Es de otro color a propósito: el verde
-       de arriba significa «ya está en el sistema», y aquí significa lo
-       contrario — algo pendiente de hacer. */
+    /* El punto de «hay versión nueva». */
     .tool.self.available .label::before {
         content: '';
         display: inline-block;
@@ -537,7 +544,7 @@
 
     .count {
         flex: 0 0 auto;
-        padding: 0 6px;
+        padding: 2px 7px;
         border-radius: 8px;
         background: var(--surface-hover);
         color: var(--muted);
@@ -547,57 +554,58 @@
     .item {
         display: flex;
         flex-direction: column;
-        gap: 2px;
-        padding: 8px;
-        border-top: 1px solid var(--border);
-        border-radius: 4px;
+        gap: 6px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+        transition: background 0.15s ease, border-color 0.15s ease;
     }
 
     .item:hover {
         background: var(--surface-hover);
+        border-color: rgba(255, 255, 255, 0.25);
     }
 
-    /* Texto y boton en la misma linea mientras quepan, y el boton a su propia
-       linea cuando no. Sin `flex-wrap` el boton comprimia la etiqueta hasta
-       taparla, que es el solapamiento que se veia en el panel de Proyectos. */
     .item-row {
         display: flex;
-        flex-wrap: wrap;
+        align-items: flex-start;
         justify-content: space-between;
-        align-items: center;
-        gap: 6px 8px;
+        gap: 12px;
+        width: 100%;
     }
 
-    /* `min-width` en vez de `flex: 1`: por debajo de esto la etiqueta se lleva
-       la linea entera y el boton baja, en lugar de partirse las dos. */
     .label {
         flex: 1 1 auto;
-        min-width: 140px;
+        min-width: 0;
         color: var(--text);
         font-size: 12px;
-        overflow-wrap: anywhere;
-    }
-
-    .run {
-        flex: 0 0 auto;
+        font-weight: 600;
+        line-height: 1.4;
+        word-break: break-word;
     }
 
     .hint {
         color: var(--muted);
         font-size: 11px;
+        line-height: 1.45;
+        margin-top: 2px;
     }
 
     .run {
+        flex: 0 0 auto;
         margin-left: auto;
-        padding: 4px 10px;
+        padding: 4px 12px;
         border: 1px solid var(--border);
         border-radius: 4px;
         background: var(--accent-soft);
         color: var(--text);
         font: inherit;
         font-size: 11px;
+        font-weight: 500;
         white-space: nowrap;
         cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
     }
 
     .run:hover:not(:disabled) {

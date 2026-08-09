@@ -38,6 +38,13 @@ fn categories_from(raw: Option<Vec<String>>) -> Vec<FileCategory> {
     scripts::normalize_categories(raw.as_deref())
 }
 
+fn categories_from_here(raw: Option<Vec<String>>) -> Vec<FileCategory> {
+    match raw {
+        None => scripts::default_here_categories(),
+        Some(ref values) => scripts::normalize_categories(Some(values)),
+    }
+}
+
 // ---- Panel de scripts ----
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,13 +55,18 @@ pub struct FilterOption {
     pub default: bool,
 }
 
-fn filter_options() -> Vec<FilterOption> {
+fn filter_options(is_here: bool) -> Vec<FilterOption> {
+    let defaults = if is_here {
+        scripts::default_here_categories()
+    } else {
+        scripts::default_categories()
+    };
     scripts::FILE_FILTERS
         .iter()
         .map(|filter| FilterOption {
             id: filter.id.id(),
             label: filter.label,
-            default: filter.default,
+            default: defaults.contains(&filter.id),
         })
         .collect()
 }
@@ -103,11 +115,12 @@ fn pinned_scripts(state: &AppState) -> Vec<ScriptEntry> {
 
 impl ScriptsPanel {
     fn empty(mode: &'static str, dir: &str, error: Option<String>) -> ScriptsPanel {
+        let is_here = mode == "here";
         ScriptsPanel {
             mode,
             dir: dir.to_string(),
             scripts: Vec::new(),
-            filters: filter_options(),
+            filters: filter_options(is_here),
             depth: None,
             min_depth: scripts::MIN_HERE_DEPTH,
             max_depth: scripts::MAX_HERE_DEPTH,
@@ -229,7 +242,7 @@ pub fn scripts_list_here(
     here_panel(
         &state,
         &tab_id,
-        &categories_from(categories),
+        &categories_from_here(categories),
         selected_here_depth(depth),
     )
 }
@@ -1039,7 +1052,7 @@ mod tests {
 
     #[test]
     fn los_filtros_conservan_los_identificadores_del_original() {
-        let ids: Vec<&str> = filter_options().iter().map(|f| f.id).collect();
+        let ids: Vec<&str> = filter_options(false).iter().map(|f| f.id).collect();
         assert!(ids.contains(&"other-script"));
         assert!(ids.contains(&"powershell"));
         assert_eq!(ids.len(), scripts::FILE_FILTERS.len());

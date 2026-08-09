@@ -19,4 +19,7 @@ pub use scan::{
     Scope, ScriptEntry, DEFAULT_HERE_DEPTH, MAX_HERE_DEPTH, MAX_HERE_SCRIPTS, MIN_HERE_DEPTH,
     NSUDO_PATH,
 };
-pub use types::{normalize_categories, FileCategory, ScriptType, FILE_FILTERS};
+pub use types::{
+    default_categories, default_here_categories, normalize_categories, FileCategory, ScriptType,
+    FILE_FILTERS,
+};

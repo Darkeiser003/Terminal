@@ -33,7 +33,7 @@ pub fn to_console_ascii(text: &str) -> String {
             // (á -> a), en vez de convertirlas en un signo de interrogación.
             _ => match strip_accent(ch) {
                 Some(plain) => out.push(plain),
-                None => out.push('?'),
+                None => out.push(' '),
             },
         }
     }
@@ -292,11 +292,11 @@ mod tests {
     }
 
     #[test]
-    fn lo_que_no_se_sabe_reducir_acaba_en_interrogacion() {
-        assert_eq!(to_console_ascii("日本"), "??");
+    fn lo_que_no_se_sabe_reducir_acaba_en_espacio() {
+        assert_eq!(to_console_ascii("日本"), "  ");
         // La eñe no lleva tilde que quitar: no es reducible a 'n' sin perder
         // la letra, así que sigue el mismo camino que el resto.
-        assert_eq!(to_console_ascii("ñ"), "?");
+        assert_eq!(to_console_ascii("ñ"), " ");
     }
 
     #[test]

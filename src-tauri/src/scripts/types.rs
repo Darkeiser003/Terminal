@@ -102,8 +102,6 @@ pub static FILE_FILTERS: &[FileFilter] = &[
     FileFilter { id: FileCategory::Video,       label: "Vídeo",                       default: false },
 ];
 
-/// Todas las categorías conocidas. Lo usan los scripts anclados: un anclado no
-/// debe desaparecer porque el filtro activo del panel no incluya su tipo.
 pub fn all_categories() -> Vec<FileCategory> {
     FILE_FILTERS.iter().map(|filter| filter.id).collect()
 }
@@ -114,6 +112,18 @@ pub fn default_categories() -> Vec<FileCategory> {
         .filter(|filter| filter.default)
         .map(|filter| filter.id)
         .collect()
+}
+
+pub fn default_here_categories() -> Vec<FileCategory> {
+    if cfg!(windows) {
+        vec![
+            FileCategory::Batch,
+            FileCategory::Powershell,
+            FileCategory::Vbscript,
+        ]
+    } else {
+        default_categories()
+    }
 }
 
 /// Convierte lo que mande el frontend en una lista de categorías válidas. Una

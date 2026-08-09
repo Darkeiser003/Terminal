@@ -76,11 +76,52 @@ if (-not (Test-Command 'cargo')) {
 $cargoVersion = (& cargo --version) -replace '^cargo\s+', ''
 Write-Ok "cargo $cargoVersion"
 
+function Test-MSVCLinker {
+    if (Test-Command 'link') { return $true }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path $vswhere) {
+        $path = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        if ($path -and (Test-Path $path)) { return $true }
+    }
+    return $false
+}
+
+if (-not (Test-MSVCLinker)) {
+    Write-Warn 'No se encontro el compilador/enlazador de C++ (link.exe / Visual Studio Build Tools).'
+    if (Test-Command 'winget') {
+        Write-Step 'Instalando Visual Studio 2022 Build Tools (C++) mediante winget...'
+        $wingetCode = Invoke-Native 'winget' @(
+            'install',
+            '--id', 'Microsoft.VisualStudio.2022.BuildTools',
+            '--override', '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended',
+            '--accept-source-agreements',
+            '--accept-package-agreements'
+        )
+        # Esperar si el instalador de Visual Studio esta ejecutandose en segundo plano
+        $vsSetup = Get-Process -Name 'setup' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*Microsoft Visual Studio*' }
+        if ($vsSetup) {
+            Write-Host '    Esperando a que finalice la instalacion de Visual Studio Build Tools...' -ForegroundColor Yellow
+            $vsSetup | Wait-Process -Timeout 600 -ErrorAction SilentlyContinue
+        }
+
+        if (Test-MSVCLinker) {
+            Write-Ok 'Visual Studio C++ Build Tools instaladas correctamente'
+        } else {
+            throw 'Faltan las Visual Studio C++ Build Tools (link.exe). Se intento la instalacion con winget pero no concluyo. Instalalas manualmente desde https://visualstudio.microsoft.com/visual-cpp-build-tools/'
+        }
+    } else {
+        throw 'Faltan las Visual Studio C++ Build Tools (link.exe) para compilar en Windows. Instalalas desde https://visualstudio.microsoft.com/visual-cpp-build-tools/'
+    }
+} else {
+    Write-Ok 'Visual Studio C++ Build Tools (link.exe)'
+}
+
 # La version del paquete manda: es la que Tauri incrusta en el .exe y con la que
 # el actualizador compara la release publicada.
 $packageJson = Get-Content (Join-Path $ProjectRoot 'package.json') -Raw | ConvertFrom-Json
 $version = $packageJson.version
 Write-Ok "Version a compilar: $version"
+
 
 # ---------------------------------------------------------------------------
 # 2. conpty.dll
@@ -120,6 +161,14 @@ if ($running) {
     Write-Err 'Cierralo antes de compilar: su .exe y su conpty.dll no se pueden reemplazar en uso.'
     throw 'La aplicacion esta en marcha.'
 }
+
+$esbuildProcs = Get-Process -Name 'esbuild' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*$ProjectRoot*" }
+if ($esbuildProcs) {
+    Write-Warn 'Se detecto un proceso esbuild.exe activo de este proyecto. Deteniendolo para desbloquear node_modules...'
+    $esbuildProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+}
+
 Write-Ok 'Nada bloqueando los archivos'
 
 # ---------------------------------------------------------------------------
@@ -134,7 +183,11 @@ if ($Clean) {
 
 Write-Step 'Instalando dependencias del frontend (npm ci)'
 $code = Invoke-Native 'npm' @('ci')
-if ($code -ne 0) { throw "npm ci fallo (codigo $code)." }
+if ($code -ne 0) {
+    Write-Warn 'npm ci no pudo vaciar node_modules por bloqueo de archivos en Windows. Reintentando con npm install...'
+    $code = Invoke-Native 'npm' @('install')
+    if ($code -ne 0) { throw "La instalacion de dependencias fallo (codigo $code)." }
+}
 Write-Ok 'Dependencias instaladas'
 
 # ---------------------------------------------------------------------------

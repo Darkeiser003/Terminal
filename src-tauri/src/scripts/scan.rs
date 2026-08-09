@@ -22,23 +22,26 @@ use super::types::{
     interpreter_for_ext, resource_type_for_ext, script_type_for_ext, FileCategory, ScriptType,
 };
 
-pub const MAX_HERE_SCRIPTS: usize = 500;
-pub const DEFAULT_HERE_DEPTH: u32 = 3;
+pub const MAX_HERE_SCRIPTS: usize = 300;
+pub const DEFAULT_HERE_DEPTH: u32 = 2;
 pub const MIN_HERE_DEPTH: u32 = 0;
 pub const MAX_HERE_DEPTH: u32 = 10;
-const MAX_HERE_DIRECTORIES: usize = 5000;
-const MAX_HERE_SCAN: Duration = Duration::from_millis(3000);
+const MAX_HERE_DIRECTORIES: usize = 1000;
+const MAX_HERE_SCAN: Duration = Duration::from_millis(800);
 
-/// Árboles que contienen código/dependencias, no scripts del proyecto. Esta
-/// exclusión solo se aplica al ámbito «Aquí»; la Biblioteca sigue siendo una
-/// carpeta elegida explícitamente por el usuario.
+/// Árboles que contienen código/dependencias o carpetas del sistema/metadatos, no scripts del proyecto.
 #[rustfmt::skip]
 const HERE_IGNORED_DIRS: &[&str] = &[
+    "appdata", "programdata", "system volume information", "recovery", "config.msi",
+    "windows", "temp", "tmp", "application data", "local settings",
     "node_modules", "bower_components", "vendor",
     ".git", ".hg", ".svn", ".yarn", ".pnpm-store",
     ".next", ".nuxt", ".svelte-kit", ".cache", ".parcel-cache",
     "coverage", "dist", "out", "build", "target",
     ".venv", "venv", "__pycache__", "site-packages",
+    ".gemini", ".antigravity", ".vscode", ".idea", ".vs",
+    ".cargo", ".rustup", ".docker", ".kube", ".m2", ".gradle", ".nuget",
+    ".npm", ".pip", ".local", ".config",
 ];
 
 /// Tipos que en un proyecto cualquiera son casi siempre código fuente, no algo
@@ -294,6 +297,9 @@ fn normalized_key(path: &Path) -> String {
 
 fn is_ignored_here_directory(name: &str) -> bool {
     let lower = name.to_lowercase();
+    if lower.starts_with('.') || lower.starts_with('$') {
+        return true;
+    }
     HERE_IGNORED_DIRS.contains(&lower.as_str())
         || lower.starts_with("dist-")
         || lower.starts_with("build-")

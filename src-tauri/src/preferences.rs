@@ -137,6 +137,7 @@ pub struct Preferences {
     pub show_system_banner: bool,
     pub theme_id: String,
     pub accent_color: String,
+    pub fastfetch_color: String,
     pub terminal_background: String,
     pub terminal_foreground: String,
     pub terminal_font_family: String,
@@ -183,10 +184,11 @@ impl Default for Preferences {
             show_system_banner: true,
             theme_id: "silver".into(),
             accent_color: "#b8bec6".into(),
+            fastfetch_color: "#b8bec6".into(),
             terminal_background: "#080808".into(),
             terminal_foreground: "#d7d7d7".into(),
             terminal_font_family: "system-mono".into(),
-            terminal_font_size: 14,
+            terminal_font_size: 13,
             terminal_line_height: 1.1,
             terminal_letter_spacing: 0.0,
             terminal_cursor_style: "block".into(),
@@ -340,6 +342,7 @@ pub fn sanitize_preferences(raw: &Value) -> Preferences {
         auto_open_first_group: default_false(get("autoOpenFirstGroup")),
         show_system_banner: default_true(get("showSystemBanner")),
         accent_color: safe_hex_color(get("accentColor"), theme.palette.accent),
+        fastfetch_color: safe_hex_color(get("fastfetchColor"), theme.palette.accent),
         terminal_background: safe_hex_color(
             get("terminalBackground"),
             theme.palette.terminal_background,
@@ -528,7 +531,7 @@ mod tests {
     fn el_json_conserva_los_nombres_de_la_version_electron() {
         let text = serde_json::to_string(&Preferences::default()).unwrap();
         let parsed: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["terminalFontSize"], json!(14));
+        assert_eq!(parsed["terminalFontSize"], json!(13));
         assert_eq!(parsed["scriptsHereDepth"], json!(3));
         assert_eq!(parsed["viewportRows"], json!(24));
     }

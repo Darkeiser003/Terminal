@@ -165,6 +165,48 @@ class AppStore {
         this.panes = unicas.length < 2 ? [] : unicas.slice(0, siguiente);
     }
 
+    /** Navega entre casillas de la rejilla dividida en dirección cardinal (Alt + Flechas). */
+    navigatePaneDirection(direction: 'left' | 'right' | 'up' | 'down'): void {
+        const visible = this.visibleTabs;
+        if (visible.length < 2 || !this.activeTabId) return;
+        const current = visible.indexOf(this.activeTabId);
+        if (current === -1) return;
+
+        let target = current;
+        const count = visible.length;
+
+        if (count === 2) {
+            target = current === 0 ? 1 : 0;
+        } else if (count === 3) {
+            if (current === 0) {
+                target = (direction === 'right' || direction === 'left') ? 1 : 2;
+            } else if (current === 1) {
+                target = (direction === 'left' || direction === 'right') ? 0 : 2;
+            } else if (current === 2) {
+                target = direction === 'right' ? 1 : 0;
+            }
+        } else if (count >= 4) {
+            switch (current) {
+                case 0:
+                    target = (direction === 'right' || direction === 'left') ? 1 : 2;
+                    break;
+                case 1:
+                    target = (direction === 'left' || direction === 'right') ? 0 : 3;
+                    break;
+                case 2:
+                    target = (direction === 'right' || direction === 'left') ? 3 : 0;
+                    break;
+                case 3:
+                    target = (direction === 'left' || direction === 'right') ? 2 : 1;
+                    break;
+            }
+        }
+
+        if (target !== current && visible[target]) {
+            void this.activateTab(visible[target]);
+        }
+    }
+
     /** Mantiene la rejilla coherente cuando la lista de pestañas cambia: una
      *  casilla que apunte a una pestaña cerrada dejaría un hueco negro. */
     private syncPanes(): void {

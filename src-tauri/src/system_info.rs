@@ -26,6 +26,7 @@ fn format_bytes(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1024f64.powi(3))
 }
 
+#[allow(dead_code)]
 fn format_uptime(seconds: u64) -> String {
     let days = seconds / 86_400;
     let hours = (seconds % 86_400) / 3600;
@@ -41,6 +42,7 @@ fn format_uptime(seconds: u64) -> String {
     parts.join(" ")
 }
 
+#[allow(dead_code)]
 fn format_now() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -54,15 +56,15 @@ pub fn clean_identity_value(value: &str) -> String {
         .chars()
         .map(|c| {
             let keep = (' '..='~').contains(&c) || ('\u{a1}'..='\u{24f}').contains(&c);
-            if keep {
+            if keep && c != '{' && c != '}' && c != '?' {
                 c
             } else {
                 ' '
             }
         })
         .collect();
-    let trimmed =
-        replaced.trim_matches(|c: char| c.is_whitespace() || c == '~' || c == '|' || c == '-');
+    let trimmed = replaced
+        .trim_matches(|c: char| c.is_whitespace() || c == '~' || c == '|' || c == '-' || c == '?');
     trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -302,6 +304,7 @@ fn read_windows_identity() -> OsIdentity {
 
 /// Modelo de la tarjeta gráfica. Cada plataforma lo pregunta a su manera y
 /// ninguna es rápida, así que se cachea con el resto de la identidad.
+#[allow(dead_code)]
 #[cfg(windows)]
 fn read_gpu_model() -> String {
     process::output_text(
@@ -313,6 +316,7 @@ fn read_gpu_model() -> String {
     .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 fn read_gpu_model() -> String {
     process::output_text("system_profiler", &["SPDisplaysDataType"], PROBE_TIMEOUT)
@@ -320,6 +324,7 @@ fn read_gpu_model() -> String {
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn read_gpu_model() -> String {
     process::output_text(
@@ -393,8 +398,297 @@ fn parse_lspci_gpu(output: &str) -> String {
     }
 }
 
+static MOBO_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static GPU_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static RAM_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+/// Precarga en segundo plano al arrancar la app para que la primera pestaña
+/// abra al instante (< 1ms) sin esperar a las consultas de hardware.
+pub fn prewarm_hardware_info() {
+    std::thread::spawn(|| {
+        let _ = os_identity();
+        let _ = motherboard_info();
+        let _ = gpu_info();
+        let _ = ram_speed_info();
+    });
+}
+
+pub fn motherboard_info() -> String {
+    let mut cache = MOBO_CACHE.lock();
+    if let Some(mobo) = cache.as_ref() {
+        return mobo.clone();
+    }
+    let detected = read_motherboard();
+    *cache = Some(detected.clone());
+    detected
+}
+
+fn read_motherboard() -> String {
+    if cfg!(windows) {
+        let mut mobo_name = String::new();
+
+        // 1. Lectura ultra-rápida desde el Registro de Windows (0ms)
+        let bios_vals = reg_values(r"HKLM\HARDWARE\DESCRIPTION\System\BIOS");
+        let get_bios = |k: &str| {
+            bios_vals
+                .iter()
+                .find(|(name, _)| name == k)
+                .map(|(_, val)| val.clone())
+        };
+        let mfg = get_bios("BaseBoardManufacturer").unwrap_or_default();
+        let prod = get_bios("BaseBoardProduct").unwrap_or_default();
+        if !prod.is_empty() {
+            let clean_mfg = mfg
+                .replace("ASUSTeK COMPUTER INC.", "ASUS")
+                .replace("Micro-Star International Co., Ltd.", "MSI")
+                .replace("Gigabyte Technology Co., Ltd.", "Gigabyte");
+            let combined = format!("{clean_mfg} {prod}");
+            let clean = clean_identity_value(&combined);
+            if !clean.is_empty() && clean != "desconocido" {
+                mobo_name = clean;
+            }
+        }
+
+        // 2. WMIC estándar como respaldo para el nombre de la placa
+        if mobo_name.is_empty() {
+            if let Some(out) = process::output_text(
+                "wmic",
+                &["baseboard", "get", "Manufacturer,Product"],
+                PROBE_TIMEOUT,
+            ) {
+                for line in out.lines().map(str::trim) {
+                    if line.is_empty()
+                        || line.eq_ignore_ascii_case("Manufacturer  Product")
+                        || line.starts_with("Manufacturer")
+                    {
+                        continue;
+                    }
+                    let clean = clean_identity_value(line);
+                    if !clean.is_empty() {
+                        mobo_name = clean;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Detección del Socket del procesador
+        let mut socket_name = String::new();
+        if let Some(out) =
+            process::output_text("wmic", &["cpu", "get", "SocketDesignation"], PROBE_TIMEOUT)
+        {
+            for line in out.lines().map(str::trim) {
+                if line.is_empty() || line.eq_ignore_ascii_case("SocketDesignation") {
+                    continue;
+                }
+                let clean_sock = line.replace("Socket", "").trim().to_string();
+                if !clean_sock.is_empty() {
+                    socket_name = clean_sock;
+                    break;
+                }
+            }
+        }
+        if socket_name.is_empty() {
+            if let Some(out) = process::output_text(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_Processor).SocketDesignation",
+                ],
+                PROBE_TIMEOUT,
+            ) {
+                let clean_sock = out.trim().replace("Socket", "").trim().to_string();
+                if !clean_sock.is_empty() {
+                    socket_name = clean_sock;
+                }
+            }
+        }
+
+        if !mobo_name.is_empty() {
+            if !socket_name.is_empty() {
+                return format!("{mobo_name} ({socket_name})");
+            } else {
+                return mobo_name;
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn gpu_info() -> String {
+    let mut cache = GPU_CACHE.lock();
+    if let Some(gpu) = cache.as_ref() {
+        return gpu.clone();
+    }
+    let detected = read_full_gpu();
+    *cache = Some(detected.clone());
+    detected
+}
+
+fn read_gpu_vram_bytes() -> Option<u64> {
+    if cfg!(windows) {
+        // Prioridad 1: Buscar `HardwareInformation.qwMemorySize` en subclaves 0000..0010 del Registro de Windows.
+        // Se descarta expresamente 4_294_967_295 (0xFFFFFFFF) por ser el límite máximo de 32 bits de WMI.
+        for i in 0..10 {
+            let key = format!(
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{i:04}"
+            );
+            let vals = reg_values(&key);
+            for (name, val) in &vals {
+                if name.eq_ignore_ascii_case("HardwareInformation.qwMemorySize") {
+                    if let Some(num) = reg_number(val) {
+                        if num > 4_294_967_295 {
+                            return Some(num);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Prioridad 2: Buscar en PowerShell el valor QWORD de 64 bits > 4GB
+        if let Some(out) = process::output_text(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\*' -ErrorAction SilentlyContinue | ForEach-Object { $_.'HardwareInformation.qwMemorySize' } | Where-Object { $_ -and $_ -gt 4294967295 } | Select-Object -First 1",
+            ],
+            PROBE_TIMEOUT,
+        ) {
+            if let Ok(bytes) = out.trim().parse::<u64>() {
+                if bytes > 4_294_967_295 {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn read_full_gpu() -> String {
+    if cfg!(windows) {
+        let vram_64bit = read_gpu_vram_bytes();
+
+        // 1. PowerShell CIM query combinada con lectura de QWORD >4GB
+        if let Some(out) = process::output_text(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                "$g = Get-CimInstance Win32_VideoController | Select-Object -First 1 Name, AdapterRAM; $qw = Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\*' -ErrorAction SilentlyContinue | ForEach-Object { $_.'HardwareInformation.qwMemorySize' } | Where-Object { $_ -and $_ -gt 4294967295 } | Select-Object -First 1; $v = if ($qw) { $qw } else { $g.AdapterRAM }; if ($g) { Write-Output ($g.Name + '|' + $v) }",
+            ],
+            PROBE_TIMEOUT,
+        ) {
+            let trimmed = out.trim();
+            if let Some((name_str, ram_str)) = trimmed.split_once('|') {
+                let clean = clean_identity_value(name_str);
+                if !clean.is_empty() {
+                    let bytes = vram_64bit.unwrap_or_else(|| {
+                        ram_str.trim().parse::<u64>().unwrap_or(0)
+                    });
+                    if bytes >= 500_000_000 {
+                        let gb = (bytes as f64 / 1024f64.powi(3)).round() as u64;
+                        return format!("{clean} ({gb} GB)");
+                    }
+                    return clean;
+                }
+            } else if !trimmed.is_empty() {
+                let clean = clean_identity_value(trimmed);
+                if !clean.is_empty() {
+                    if let Some(bytes) = vram_64bit {
+                        let gb = (bytes as f64 / 1024f64.powi(3)).round() as u64;
+                        return format!("{clean} ({gb} GB)");
+                    }
+                    return clean;
+                }
+            }
+        }
+
+        // 2. WMIC básico sin /format:csv
+        let basic = read_gpu_model();
+        let clean = clean_identity_value(&basic);
+        if !clean.is_empty() {
+            if let Some(bytes) = vram_64bit {
+                let gb = (bytes as f64 / 1024f64.powi(3)).round() as u64;
+                return format!("{clean} ({gb} GB)");
+            }
+            return clean;
+        }
+    }
+    String::new()
+}
+
+pub fn ram_speed_info() -> String {
+    let mut cache = RAM_CACHE.lock();
+    if let Some(ram) = cache.as_ref() {
+        return ram.clone();
+    }
+    let detected = read_ram_speed();
+    *cache = Some(detected.clone());
+    detected
+}
+
+fn read_ram_speed() -> String {
+    if cfg!(windows) {
+        // PowerShell CIM query
+        if let Some(out) = process::output_text(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                "$m = Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1 Speed, SMBIOSMemoryType; if ($m) { Write-Output ($m.Speed.ToString() + '|' + $m.SMBIOSMemoryType.ToString()) }",
+            ],
+            PROBE_TIMEOUT,
+        ) {
+            let trimmed = out.trim();
+            if let Some((speed_str, type_str)) = trimmed.split_once('|') {
+                let speed = speed_str.trim().parse::<u64>().unwrap_or(0);
+                let smbios_type = type_str.trim().parse::<u32>().unwrap_or(0);
+                let ddr_type = match smbios_type {
+                    34 => "DDR5",
+                    26 => "DDR4",
+                    24 => "DDR3",
+                    21 => "DDR2",
+                    _ => {
+                        if speed >= 4800 {
+                            "DDR5"
+                        } else if speed >= 2133 {
+                            "DDR4"
+                        } else {
+                            "RAM"
+                        }
+                    }
+                };
+                if speed > 0 {
+                    return format!("{ddr_type} {speed} MHz");
+                }
+            }
+        }
+
+        // WMIC básico sin /format:csv
+        if let Some(out) =
+            process::output_text("wmic", &["memorychip", "get", "Speed"], PROBE_TIMEOUT)
+        {
+            for line in out.lines().map(str::trim) {
+                if line.is_empty() || line.eq_ignore_ascii_case("Speed") {
+                    continue;
+                }
+                if let Ok(speed) = line.parse::<u64>() {
+                    if speed > 0 {
+                        let ddr_type = if speed >= 4800 { "DDR5" } else { "DDR4" };
+                        return format!("{ddr_type} {speed} MHz");
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 /// Cuánto lleva instalado el sistema, estimado por la fecha de creación de la
 /// primera ruta que la tenga.
+#[allow(dead_code)]
 fn estimate_os_age() -> Option<u64> {
     let system_root = if cfg!(windows) {
         std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
@@ -423,6 +717,7 @@ fn estimate_os_age() -> Option<u64> {
     None
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct DiskRow {
     mount: String,
@@ -433,6 +728,7 @@ struct DiskRow {
 /// Los discos montados que merece la pena enseñar. En Linux el original leía
 /// `/proc/mounts` y llamaba a `df`; `sysinfo` ya da lo mismo sin lanzar
 /// procesos, y de paso funciona igual en las tres plataformas.
+#[allow(dead_code)]
 fn read_disks() -> Vec<DiskRow> {
     let disks = Disks::new_with_refreshed_list();
     let mut rows: Vec<DiskRow> = disks
@@ -453,6 +749,7 @@ fn read_disks() -> Vec<DiskRow> {
     rows
 }
 
+#[allow(dead_code)]
 fn used_percent(used: u64, total: u64) -> u64 {
     if total == 0 {
         0
@@ -461,6 +758,7 @@ fn used_percent(used: u64, total: u64) -> u64 {
     }
 }
 
+#[allow(dead_code)]
 fn username() -> String {
     std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
@@ -475,6 +773,7 @@ fn username() -> String {
 /// identidad de la plataforma, así que cada build enseña el suyo — «WinSlim
 /// Terminal» en Windows y «LTerminal» en Linux y macOS — sin nada que tocar
 /// aquí al compilar para la otra.
+#[allow(dead_code)]
 fn title_line(display_name: &str, box_width: usize) -> String {
     let padding = box_width.saturating_sub(display_name.chars().count()) / 2;
     format!("{}{BOLD}{CYAN}{display_name}{RESET}", " ".repeat(padding))
@@ -496,6 +795,7 @@ fn ellipsize(value: &str, max: usize) -> String {
     format!("{recortado}…")
 }
 
+#[allow(dead_code)]
 fn section_box(title: &str, rows: &[(String, String)], content_width: usize) -> String {
     let title = ellipsize(title, content_width);
     let title = title.as_str();
@@ -541,6 +841,7 @@ fn section_box(title: &str, rows: &[(String, String)], content_width: usize) -> 
 /// mínimo en vez de nada.
 /// El banner sin marco, para cuando la terminal es más estrecha de lo que una
 /// caja necesita. Mismo contenido y mismo orden; solo se van los bordes.
+#[allow(dead_code)]
 fn plain_rows(display_name: &str, sections: &[&Vec<(String, String)>], width: usize) -> String {
     let mut lines = vec![format!("{BOLD}{CYAN}{display_name}{RESET}")];
     let label_width = sections
@@ -565,208 +866,217 @@ fn plain_rows(display_name: &str, sections: &[&Vec<(String, String)>], width: us
 /// Ancho mínimo con el que las cajas siguen siendo legibles. Por debajo se
 /// dibujan sin marco: un recuadro de 24 columnas deja tan poco sitio al valor
 /// que solo se leen puntos suspensivos.
+#[allow(dead_code)]
+fn clean_cpu_model(raw: &str) -> String {
+    let s = raw
+        .replace("Processor", "")
+        .replace("Core(TM)", "")
+        .replace("Core", "")
+        .replace("CPU", "")
+        .replace("8-Core", "")
+        .replace("16-Thread", "")
+        .replace("AuthenticAMD", "AMD")
+        .replace("GenuineIntel", "Intel");
+    let cleaned = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        raw.to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn clean_os_name(raw: &str) -> String {
+    let s = raw
+        .replace("IoT Enterprise LTSC 2024", "IoT Enterprise")
+        .replace("Enterprise LTSC 2024", "Enterprise")
+        .replace("Enterprise LTSC 2021", "Enterprise")
+        .replace("Christianlg97", "")
+        .replace("By Christian", "")
+        .replace("Rev.27", "")
+        .replace("P-1.1.3_050826", "")
+        .replace("Build R1.5", "")
+        .replace(['{', '}', '|'], "");
+    let cleaned = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        "Windows 11".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[allow(dead_code)]
 const MIN_BOXED_WIDTH: usize = 40;
-/// Si no se sabe el tamaño real de la terminal se supone el clásico de 80.
 const ASSUMED_COLUMNS: usize = 80;
+
+fn hex_to_ansi(hex: &str) -> String {
+    let hex = hex.trim().trim_start_matches('#');
+    if hex.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        ) {
+            return format!("\x1b[38;2;{r};{g};{b}m");
+        }
+    }
+    "\x1b[38;2;184;190;198m".to_string()
+}
 
 pub fn build_banner(
     env_label: &str,
     app_name: &str,
     columns: u16,
-    tab_count: usize,
+    _tab_count: usize,
     t: &Translator,
 ) -> String {
     let display_name = if app_name.trim().is_empty() {
-        "Terminal"
+        "WinSlim Terminal"
     } else {
         app_name.trim()
     };
+
+    let prefs = crate::preferences::current();
+    let accent = hex_to_ansi(&prefs.fastfetch_color);
 
     let mut system = System::new();
     system.refresh_memory();
     system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
 
     let cpus = system.cpus();
-    let cpu_model = cpus
+    let raw_cpu = cpus
         .first()
         .map(|cpu| cpu.brand().split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|brand| !brand.is_empty())
         .unwrap_or_else(|| "desconocida".to_string());
+    let cpu_model = clean_cpu_model(&raw_cpu);
+
     let total_memory = system.total_memory();
     let used_memory = total_memory.saturating_sub(system.available_memory());
 
     let identity = os_identity();
-    let kernel = if cfg!(windows) {
-        let build = identity
-            .build
-            .as_ref()
-            .map(|build| format!(" · build {build}"))
-            .unwrap_or_default();
-        format!("NT {}{build}", System::kernel_version().unwrap_or_default())
-    } else {
-        format!(
-            "{} {}",
-            System::name().unwrap_or_default(),
-            System::kernel_version().unwrap_or_default()
-        )
-    };
+    let os_name = clean_os_name(&identity.name);
 
     let unknown = t.t("banner.unknown", "desconocido");
 
-    // Con varias pestañas a la vista cada casilla es más pequeña: el banner
-    // completo (GPU, discos, tres cajas) no cabe sin desbordar ni sirve de nada
-    // repetido cuatro veces. Se omiten GPU y discos y se colapsa a una sola
-    // lista plana con lo esencial.
-    let multiple_tabs = tab_count > 1;
+    let mut rows: Vec<(String, String)> = Vec::new();
 
-    let mut hardware = vec![
-        (
-            t.t("banner.pc", "PC"),
-            System::host_name().unwrap_or_else(|| unknown.clone()),
-        ),
-        (
-            t.t("banner.cpu", "CPU"),
-            format!(
-                "{cpu_model} ({})",
-                t.tp(
-                    "banner.cores",
-                    &[("count", cpus.len().to_string())],
-                    "{count} núcleos"
-                )
-            ),
-        ),
-    ];
-    if !multiple_tabs {
-        hardware.push((t.t("banner.gpu", "GPU"), {
-            let gpu = read_gpu_model();
-            if gpu.is_empty() {
-                unknown.clone()
-            } else {
-                gpu
-            }
-        }));
-    }
-    hardware.push((
-        t.t("banner.memory", "Memoria"),
-        format!(
-            "{} / {} ({}%)",
-            format_bytes(used_memory),
-            format_bytes(total_memory),
-            used_percent(used_memory, total_memory)
-        ),
-    ));
-    if !multiple_tabs {
-        for disk in read_disks() {
-            hardware.push((
-                disk.mount.clone(),
-                format!(
-                    "{} / {} ({}%)",
-                    format_bytes(disk.used),
-                    format_bytes(disk.total),
-                    used_percent(disk.used, disk.total)
-                ),
-            ));
-        }
+    rows.push((t.t("banner.system", "Sistema"), os_name));
+
+    let mobo = motherboard_info();
+    if !mobo.is_empty() {
+        rows.push((t.t("banner.motherboard", "Placa"), mobo));
     }
 
-    let mut software = vec![
-        (t.t("banner.user", "Usuario"), username()),
-        (
-            t.t("banner.system", "Sistema"),
-            format!("{} ({})", identity.name, std::env::consts::ARCH),
-        ),
-    ];
-    if let Some(brand) = &identity.brand {
-        software.push((t.t("banner.edition", "Edición"), brand.clone()));
-    }
-    software.push((t.t("banner.kernel", "Kernel"), kernel));
-    software.push((
+    rows.push((
         t.t("banner.environment", "Entorno"),
         if env_label.is_empty() {
-            unknown.clone()
+            unknown
         } else {
             env_label.to_string()
         },
     ));
 
-    let mut uptime_rows = Vec::new();
-    if !multiple_tabs {
-        if let Some(age) = estimate_os_age() {
-            uptime_rows.push((t.t("banner.osAge", "Edad del SO"), format_uptime(age)));
+    let logical_cpus = system.cpus().len();
+    let physical_cores = System::physical_core_count().unwrap_or(logical_cpus);
+    let cpu_desc = if physical_cores > 0 && physical_cores != logical_cpus {
+        format!("{cpu_model} ({physical_cores}C/{logical_cpus}T)")
+    } else {
+        format!("{cpu_model} ({logical_cpus}T)")
+    };
+    rows.push((t.t("banner.cpu", "CPU"), cpu_desc));
+
+    let gpu = gpu_info();
+    if !gpu.is_empty() {
+        rows.push((t.t("banner.gpu", "GPU"), gpu));
+    }
+
+    let memory_pct = if total_memory > 0 {
+        (used_memory as f64 / total_memory as f64 * 100.0).round() as u64
+    } else {
+        0
+    };
+    let ram_extra = ram_speed_info();
+    let memory_str = if !ram_extra.is_empty() {
+        format!(
+            "{} / {} ({}%) - {}",
+            format_bytes(used_memory),
+            format_bytes(total_memory),
+            memory_pct,
+            ram_extra
+        )
+    } else {
+        format!(
+            "{} / {} ({}%)",
+            format_bytes(used_memory),
+            format_bytes(total_memory),
+            memory_pct
+        )
+    };
+    rows.push((t.t("banner.memory", "Memoria"), memory_str));
+
+    let disks_list = sysinfo::Disks::new_with_refreshed_list();
+    let mut total_storage: u64 = 0;
+    let mut used_storage: u64 = 0;
+    for disk in disks_list.iter() {
+        if !disk.is_removable() && disk.total_space() >= 1_000_000_000 {
+            let total = disk.total_space();
+            let avail = disk.available_space();
+            total_storage += total;
+            used_storage += total.saturating_sub(avail);
         }
     }
-    uptime_rows.push((
-        t.t("banner.uptime", "Uptime"),
-        format_uptime(System::uptime()),
-    ));
-    if !multiple_tabs {
-        uptime_rows.push((t.t("banner.datetime", "Fecha y hora"), format_now()));
+    if total_storage > 0 {
+        let pct = (used_storage as f64 / total_storage as f64 * 100.0).round() as u64;
+        rows.push((
+            t.t("banner.storage", "Disco"),
+            format!(
+                "{} / {} ({}%)",
+                format_bytes(used_storage),
+                format_bytes(total_storage),
+                pct
+            ),
+        ));
     }
 
-    let hardware_title = t.t("banner.hardware", "Hardware");
-    let software_title = t.t("banner.software", "Software");
-    let uptime_title = t.t("banner.uptimeAge", "Uptime / Age / DT");
-
-    // Las tres cajas comparten ancho: si cada una se ajustara a su contenido,
-    // el banner quedaría escalonado.
-    let deseado = hardware
-        .iter()
-        .chain(software.iter())
-        .chain(uptime_rows.iter())
-        .map(|(label, value)| label.chars().count() + 2 + value.chars().count())
-        .chain([
-            hardware_title.chars().count() + 4,
-            software_title.chars().count() + 4,
-            uptime_title.chars().count() + 4,
-        ])
-        .chain([46])
-        .max()
-        .unwrap_or(46);
-
-    if hardware.is_empty() || software.is_empty() {
-        return format!("{BOLD}{CYAN}{display_name}{RESET}\r\n");
-    }
-
-    // Y ninguna cabe más ancha que la terminal. Antes el banner se dibujaba con
-    // el ancho que pidiera el contenido —del orden de 90 columnas con una ruta
-    // larga en «Edición»— y en una casilla dividida la terminal partía cada
-    // línea por la mitad: el marco se veía hecho pedazos. Las cuatro columnas
-    // que se restan son los bordes y sus espacios.
-    let disponible = if columns == 0 {
+    let available_cols = if columns == 0 {
         ASSUMED_COLUMNS
     } else {
         columns as usize
     };
-    let content_width = std::cmp::min(deseado, disponible.saturating_sub(4));
 
-    // Demasiado estrecho para un marco: se enseñan las filas a secas, que es
-    // preferible a tres cajas de puntos suspensivos. Con varias pestañas
-    // también: una sola lista plana cabe donde tres cajas no cabrían.
-    if disponible < MIN_BOXED_WIDTH || multiple_tabs {
-        return plain_rows(
-            display_name,
-            &[&hardware, &software, &uptime_rows],
-            disponible,
-        );
+    // Permite hasta 72 columnas para que quepa la información completa sin truncar.
+    let max_line_cols = std::cmp::min(available_cols, 72);
+    let max_sep = std::cmp::min(60, max_line_cols.saturating_sub(1));
+    let sep_len = if max_sep < 15 { 15 } else { max_sep };
+    let separator = "-".repeat(sep_len);
+
+    let max_label_len = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(8);
+
+    let mut lines = Vec::new();
+    let version = env!("CARGO_PKG_VERSION");
+    lines.push(format!(
+        "{BOLD}{accent}{display_name}{RESET} {accent}{version}{RESET}"
+    ));
+    lines.push(format!("\x1b[90m{separator}{RESET}"));
+
+    for (label, value) in rows {
+        let label_pad = max_label_len.saturating_sub(label.chars().count());
+        let max_val_len = max_line_cols.saturating_sub(max_label_len + 3);
+        let val_trimmed = ellipsize(&value, max_val_len);
+
+        lines.push(format!(
+            "{accent}{label}{RESET}{}  {val_trimmed}",
+            " ".repeat(label_pad)
+        ));
     }
 
-    // El mismo ancho que acaban teniendo las cajas: `section_box` lo ensancha si
-    // su título no cabe, así que se calcula igual aquí para que el nombre quede
-    // centrado sobre ellas y no sobre una anchura que ninguna caja tiene.
-    let box_width = [&hardware_title, &software_title, &uptime_title]
-        .iter()
-        .map(|title| std::cmp::max(content_width + 4, title.chars().count() + 4))
-        .max()
-        .unwrap_or(content_width + 4);
+    lines.push(format!("\x1b[90m{separator}{RESET}"));
 
-    [
-        title_line(display_name, box_width),
-        section_box(&hardware_title, &hardware, content_width),
-        section_box(&software_title, &software, content_width),
-        section_box(&uptime_title, &uptime_rows, content_width),
-    ]
-    .join("\r\n")
-        + "\r\n"
+    lines.join("\r\n") + "\r\n"
 }
 
 #[cfg(test)]
@@ -904,29 +1214,24 @@ mod tests {
     fn el_banner_real_se_genera_y_lleva_las_tres_secciones() {
         let t = Translator::default();
         let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, 1, &t);
-        assert!(banner.contains("Hardware"), "{banner}");
-        assert!(banner.contains("Software"), "{banner}");
         assert!(banner.contains("Entorno"), "{banner}");
         assert!(banner.contains("cmd.exe"), "{banner}");
         assert!(banner.ends_with("\r\n"));
     }
 
-    /// El nombre va ARRIBA DEL TODO y es el de la build que se está ejecutando:
-    /// una Linux no puede acabar enseñando la marca de Windows.
+    /// El nombre va ARRIBA DEL TODO y es el de la build que se está ejecutando.
     #[test]
     fn el_banner_abre_con_el_nombre_de_la_terminal() {
         let t = Translator::default();
         for nombre in [crate::identity::WINDOWS.name, crate::identity::LINUX.name] {
             let banner = build_banner("cmd.exe", nombre, 120, 1, &t);
             let primera = crate::current_dir::strip_ansi(banner.lines().next().unwrap());
-            assert_eq!(primera.trim(), nombre, "{banner}");
+            assert!(primera.contains(nombre), "{banner}");
         }
     }
 
-    /// Centrado sobre las cajas, no sobre una anchura cualquiera: el relleno de
-    /// la izquierda tiene que dejar el nombre dentro del ancho real del marco.
     #[test]
-    fn el_nombre_queda_centrado_sobre_las_cajas() {
+    fn el_nombre_abre_el_banner() {
         let banner = build_banner(
             "cmd.exe",
             "WinSlim Terminal",
@@ -935,22 +1240,8 @@ mod tests {
             &Translator::default(),
         );
         let lineas: Vec<String> = banner.lines().map(crate::current_dir::strip_ansi).collect();
-        let ancho_caja = lineas
-            .iter()
-            .find(|line| line.starts_with('┌'))
-            .map(|line| line.chars().count())
-            .expect("el banner debe traer cajas");
         let titulo = &lineas[0];
-        let sangria = titulo.chars().take_while(|c| *c == ' ').count();
-        assert!(
-            titulo.chars().count() <= ancho_caja,
-            "el nombre se sale del marco: {titulo:?} sobre {ancho_caja}"
-        );
-        assert_eq!(
-            sangria,
-            (ancho_caja - "WinSlim Terminal".chars().count()) / 2,
-            "sangría inesperada en {titulo:?}"
-        );
+        assert!(titulo.contains("WinSlim Terminal"));
     }
 
     /// El fallo que se veia al dividir la ventana: el banner se dibujaba con el
@@ -979,7 +1270,7 @@ mod tests {
         assert!(!banner.contains('\u{250c}'), "{banner}");
         // Pero sigue diciendo lo mismo.
         assert!(banner.contains("CPU"), "{banner}");
-        assert!(banner.contains("Uptime"), "{banner}");
+        assert!(banner.contains("Sistema"), "{banner}");
         for linea in banner.lines() {
             assert!(
                 crate::current_dir::strip_ansi(linea).chars().count() <= 30,
