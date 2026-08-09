@@ -6,6 +6,13 @@ Android disponibles en la máquina y los ofrece como entornos intercambiables
 dentro de la misma ventana. Funciona además como hub local de proyectos GitHub
 y como lanzador de scripts.
 
+--
+
+<img width="1226" height="833" alt="image" src="https://github.com/user-attachments/assets/ff5f6674-d2ce-4aaa-859d-2644b392f930" />
+
+
+--
+
 La aplicación se llama **WinSlim Terminal** en Windows y **LTerminal** en
 Linux y macOS. No es una marca distinta: es la misma base con identidad,
 identificador y rutas de datos propias por plataforma (`src-tauri/src/identity.rs`).
