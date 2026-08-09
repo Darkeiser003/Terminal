@@ -73,14 +73,14 @@ test('el banner se traduce sin tocar los datos del sistema', () => {
     // Los rótulos van pegados a una secuencia de color, así que se buscan tal
     // cual y no con límites de palabra.
     const enIngles = buildBanner('bash', 'LTerminal', createTranslator('en'));
-    ['User', 'System', 'Kernel', 'Environment', 'Memory', 'Uptime', 'cores'].forEach((rotulo) => {
+    ['User', 'System', 'Kernel', 'Environment', 'Memory', 'Uptime', 'cores', 'Hardware', 'Software', 'Uptime / Age / DT', 'CPU', 'GPU', 'DateTime'].forEach((rotulo) => {
         assert.ok(enIngles.includes(rotulo), `falta "${rotulo}" en el banner en inglés`);
     });
     assert.ok(!enIngles.includes('Usuario'));
 
     // Sin traductor sigue saliendo en el idioma de referencia.
     const enEspanol = buildBanner('bash', 'LTerminal');
-    ['Usuario', 'Sistema', 'Entorno', 'Memoria', 'núcleos'].forEach((rotulo) => {
+    ['Usuario', 'Sistema', 'Entorno', 'Memoria', 'núcleos', 'Edad del SO', 'Fecha y hora'].forEach((rotulo) => {
         assert.ok(enEspanol.includes(rotulo), `falta "${rotulo}" en el banner en español`);
     });
 

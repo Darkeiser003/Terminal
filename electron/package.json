@@ -1,6 +1,6 @@
 {
   "name": "winslim-terminal",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "WinSlim Terminal - terminal y hub de proyectos de WinSlim Project",
   "main": "main.js",
   "author": "WinSlim Project",

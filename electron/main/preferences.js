@@ -63,6 +63,9 @@ const FONT_FAMILIES = Object.freeze([
     Object.freeze({ id: 'system-mono', label: 'Cascadia / Consolas', css: "'Cascadia Code', Consolas, 'Courier New', monospace" }),
     Object.freeze({ id: 'jetbrains', label: 'JetBrains Mono', css: "'JetBrains Mono', 'Cascadia Code', Consolas, monospace" }),
     Object.freeze({ id: 'fira', label: 'Fira Code', css: "'Fira Code', 'Cascadia Code', Consolas, monospace" }),
+    Object.freeze({ id: 'hack', label: 'Hack', css: "'Hack', 'Fira Code', 'Cascadia Code', Consolas, monospace" }),
+    Object.freeze({ id: 'source-code-pro', label: 'Source Code Pro', css: "'Source Code Pro', 'Fira Code', 'Cascadia Code', Consolas, monospace" }),
+    Object.freeze({ id: 'ibm-plex-mono', label: 'IBM Plex Mono', css: "'IBM Plex Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace" }),
     Object.freeze({ id: 'monospace', label: 'Monoespaciada del sistema', css: 'monospace' })
 ]);
 
@@ -165,7 +168,7 @@ function sanitizePreferences(raw) {
         terminalFontSize: integerInRange(source.terminalFontSize, 10, 24, DEFAULT_PREFERENCES.terminalFontSize),
         terminalLineHeight: numberInRange(source.terminalLineHeight, 0.9, 1.8, DEFAULT_PREFERENCES.terminalLineHeight, 2),
         terminalLetterSpacing: numberInRange(source.terminalLetterSpacing, -1, 3, DEFAULT_PREFERENCES.terminalLetterSpacing, 1),
-        terminalCursorStyle: oneOf(source.terminalCursorStyle, ['block', 'underline', 'bar'], DEFAULT_PREFERENCES.terminalCursorStyle),
+        terminalCursorStyle: oneOf(source.terminalCursorStyle, ['block', 'underline', 'bar', 'beam', 'underline-thick'], DEFAULT_PREFERENCES.terminalCursorStyle),
         terminalFontWeight: oneOf(source.terminalFontWeight, ['normal', 'bold'], DEFAULT_PREFERENCES.terminalFontWeight),
         terminalPadding: integerInRange(source.terminalPadding, 4, 24, DEFAULT_PREFERENCES.terminalPadding),
         terminalScrollback: integerInRange(source.terminalScrollback, 1000, 100000, DEFAULT_PREFERENCES.terminalScrollback),

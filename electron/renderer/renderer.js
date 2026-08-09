@@ -801,10 +801,36 @@
     });
 
     /* ================= Eventos del pty, enrutados por tabId ================= */
+    function isAtBottom(term) {
+        var buffer = term.buffer.active;
+        return buffer && typeof buffer.ydisp === 'number' && typeof buffer.ybase === 'number'
+            ? buffer.ydisp >= buffer.ybase
+            : buffer && typeof buffer.viewportY === 'number' && typeof buffer.baseY === 'number'
+                ? buffer.viewportY >= buffer.baseY
+                : true;
+    }
+
+    function keepTerminalCentered(term) {
+        var buffer = term.buffer.active;
+        if (!buffer || typeof buffer.ybase !== 'number' || typeof buffer.y !== 'number') return;
+        var rows = term.rows || 24;
+        var cursorLine = buffer.ybase + buffer.y;
+        var target = cursorLine - Math.floor(rows / 2);
+        if (target < 0) target = 0;
+        if (typeof term.scrollToLine === 'function') {
+            term.scrollToLine(target);
+        } else if (typeof term.scrollLines === 'function') {
+            var top = typeof buffer.ydisp === 'number' ? buffer.ydisp : (typeof buffer.viewportY === 'number' ? buffer.viewportY : 0);
+            term.scrollLines(target - top);
+        }
+    }
+
     window.terminalAPI.onData(function (tabId, data) {
         var tab = tabs[tabId];
         if (!tab) return;
+        var wasAtBottom = isAtBottom(tab.term);
         tab.term.write(data);
+        if (wasAtBottom) keepTerminalCentered(tab.term);
         notePaneOutput(tabId, false);
     });
 

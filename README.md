@@ -1,25 +1,23 @@
 # WinSlim Terminal · LTerminal
 
-Terminal multipestaña de escritorio construida sobre Electron, `node-pty` y
-xterm.js. Detecta las shells, distribuciones WSL, contenedores Docker y
-dispositivos Android disponibles en la máquina y los ofrece como entornos
-intercambiables dentro de la misma ventana. Desde la versión 1.3 funciona
-además como hub local de proyectos GitHub y como lanzador de scripts.
+Terminal multipestaña de escritorio construida sobre Tauri 2, Rust y xterm.js.
+Detecta las shells, distribuciones WSL, contenedores Docker y dispositivos
+Android disponibles en la máquina y los ofrece como entornos intercambiables
+dentro de la misma ventana. Funciona además como hub local de proyectos GitHub
+y como lanzador de scripts.
 
 La aplicación se llama **WinSlim Terminal** en Windows y **LTerminal** en
 Linux y macOS. No es una marca distinta: es la misma base con identidad,
-`appId` y rutas de datos propias por plataforma (`main/appIdentity.js`).
+identificador y rutas de datos propias por plataforma (`src-tauri/src/identity.rs`).
 
 | | |
 |---|---|
-| Versión | 1.4.1 |
+| Versión | 1.4.2 |
 | Plataformas | Windows 10/11, Linux (x64), macOS (parcial) |
-| Runtime | Electron 43 · Node.js ≥ 22.12.0 |
+| Runtime | Tauri 2 · Rust 1.77+ · Node.js ≥ 22.12.0 (solo para compilar) |
 | Licencia | UNLICENSED (privado) |
 | Repositorio | https://github.com/Darkeiser003/Terminal |
 | Idiomas | Español, inglés |
-
----
 
 ## Índice
 
@@ -50,320 +48,184 @@ Linux y macOS. No es una marca distinta: es la misma base con identidad,
 
 ## Requisitos
 
-**Para compilar:**
+**Para usar la aplicación** no hace falta nada: el paquete trae todo lo que
+necesita. En Windows, WebView2 viene con el sistema desde Windows 10; en Linux,
+el AppImage necesita las bibliotecas de escritorio habituales (WebKitGTK), que
+cualquier entorno gráfico ya tiene.
 
-- Node.js `>=22.12.0` y npm.
-- Git (para clonar).
-- `node-pty` distribuye binarios precompilados; Python y las herramientas
-  C/C++ solo hacen falta si npm informa de que debe compilar el módulo nativo
-  en esa plataforma concreta.
-- El paquete **no** incluye `node_modules/node-pty/prebuilds`: sería una
-  segunda copia de los mismos binarios, porque node-pty carga primero desde
-  `build/Release`, que es donde `electron-builder install-app-deps` deja el
-  módulo recompilado contra el ABI de Electron. Por eso `beforePack` aborta si
-  `build/Release/pty.node` no existe, en vez de producir un ejecutable que
-  arranca y solo falla al abrir la primera pestaña.
+**Para compilarla**:
 
-**Para ejecutar:** nada más. WSL, Docker, ADB, Git, PowerShell 7, los
-intérpretes de lenguajes y los visores de archivos **no forman parte del
-build**: se detectan en tiempo de ejecución y, si faltan, el panel de
-dependencias ofrece el comando de instalación que corresponde a ese sistema.
+- **Node.js ≥ 22.12** — solo construye el frontend; la app final no lleva Node.
+- **Rust ≥ 1.77** (`rustup`). Es la MSRV declarada: no se usan APIs más nuevas.
+- **Linux**: las bibliotecas de desarrollo de WebKitGTK. `linux/build.sh` las
+  comprueba antes de compilar y dice el comando de instalación de apt, dnf y
+  pacman si falta alguna.
+- **Windows**: nada más. El toolchain MSVC lo instala `rustup`.
 
----
+### conpty.dll
+
+En Windows la app **necesita** `conpty.dll` y `OpenConsole.exe` junto al
+ejecutable, y van vendorizados en `src-tauri/vendor/conpty/`. El ConPTY del
+sistema falla en algunos Windows recortados con `STATUS_DLL_INIT_FAILED`, y el
+error tarda más de dos minutos en aparecer: las pestañas se quedan en blanco sin
+decir por qué. `build.rs` las copia en cada compilación y `windows/build.ps1`
+aborta si no están. El detalle completo, en `src-tauri/vendor/conpty/README.md`.
 
 ## Instalación para usar la aplicación
 
-### Windows
+**Windows.** Se distribuye como carpeta desempaquetada: se descomprime donde se
+quiera y se ejecuta `winslim-terminal.exe`. No hay instalador, no toca el
+registro y no crea accesos directos. Los tres archivos de la carpeta
+(`winslim-terminal.exe`, `conpty.dll`, `OpenConsole.exe`) tienen que ir juntos.
 
-Descomprimir `WinSlimTerminal-Unpacked-<versión>.zip` y ejecutar
-`WinSlim Terminal.exe`. No hay instalador ni escritura en el registro.
+**Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
 
-### Linux
-
-```bash
-chmod +x LTerminal-<versión>-x86_64.AppImage
-./LTerminal-<versión>-x86_64.AppImage
-```
-
-El AppImage usa runtime estático, así que no requiere FUSE 2. Sí necesita las
-bibliotecas gráficas base de un escritorio Linux, como cualquier aplicación
-Electron; el script de build las detecta y ofrece instalarlas si faltan.
-
----
+La aplicación se actualiza sola. Al arrancar comprueba si hay una versión más
+reciente publicada y, si la hay, la descarga **donde ya está instalada**, la
+aplica y se reinicia. También se puede buscar a mano desde
+**Ajustes › Información**. El porqué de cada paso está en
+`src-tauri/src/self_update.rs`.
 
 ## Entorno de desarrollo
 
 ```bash
 git clone https://github.com/Darkeiser003/Terminal.git
-cd Terminal/electron
+cd Terminal
 npm ci
-npm run check
 npm start
 ```
 
-`npm ci` dispara el `postinstall`, que reconstruye `node-pty` contra el ABI de
-Electron (`electron-builder install-app-deps`) y deja la DLL de ConPTY junto al
-módulo (`scripts/prepare-node-pty.js`).
+`npm start` levanta Vite y compila el backend con `cargo`, y abre la ventana con
+recarga en caliente del frontend. La primera compilación de Rust tarda varios
+minutos; las siguientes son incrementales.
 
-Las pruebas puras no necesitan Electron y se pueden ejecutar en Linux sin
-instalar dependencias en el host, con el código en solo lectura:
-
-```bash
-docker run --rm -v "${PWD}:/workspace:ro" -w /workspace/electron node:22-bookworm npm test
-```
-
----
+El puerto de Vite es fijo (1420) y `strictPort` está activo a propósito:
+`tauri.conf.json` apunta a esa URL, y que Vite se moviera solo a otro puerto
+dejaría la ventana en blanco sin decir por qué. Si queda ocupado de una
+ejecución anterior, hay que liberarlo antes.
 
 ## Scripts npm
 
-Todos se ejecutan desde `electron/`.
+Todos se ejecutan desde la raíz del repositorio.
 
 | Script | Qué hace |
 |---|---|
-| `npm start` | Arranca la aplicación en desarrollo (`electron .`). |
-| `npm test` | Pruebas unitarias con el runner de Node (`node --test`). No necesita Electron. |
-| `npm run check` | Ciclo completo de verificación: pruebas, sintaxis, traducciones, metadatos de release y configuración de build. **Es lo que hay que pasar antes de compilar.** |
-| `npm run test:integration` | Arranque real de Electron sin ventana visible; comprueba que preload, renderer y PTY se inicializan y que se puede crear una segunda pestaña con otro entorno. |
-| `npm run dist:win` | Empaqueta la versión desempaquetada de Windows. |
-| `npm run dist:linux` | Empaqueta el AppImage de Linux. |
-| `npm run postinstall` | Automático tras `npm install`/`npm ci`. |
+| `npm start` | Arranca la aplicación en desarrollo (Vite + `cargo run`). |
+| `npm run check` | Ciclo completo de verificación: `svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y `cargo test`. **Es lo que hay que pasar antes de compilar.** |
+| `npm run build` | Solo el frontend (`svelte-check` + `vite build`). |
+| `npm run dist:win` | Compila la versión de Windows sin empaquetar. |
+| `npm run dist:linux` | Compila el AppImage. |
 
-### Qué comprueba `npm run check`
-
-| Paso | Script | Comprueba |
-|---|---|---|
-| 1 | `node --test` | Las 131 pruebas unitarias. |
-| 2 | `scripts/check-syntax.js` | Que todos los `.js` del proyecto parsean. |
-| 3 | `scripts/validate-i18n.js` | Que no hay claves de traducción sin traducir, sobrantes, ni con parámetros descuadrados. |
-| 4 | `scripts/validate-release-metadata.js` | Que los archivos publicados no filtran rutas de perfiles de Windows ni correos personales, y que la marca Linux es coherente. |
-| 5 | `scripts/validate-build-config.js` | Que la configuración de empaquetado no se desvía: locales, runtime AppImage, exclusiones de `node-pty`, identidad Linux y un solo formato de salida por sistema. |
-
----
+Para una build completa y verificada, con sus comprobaciones previas y su
+release comprimida, usar los scripts de `windows/` y `linux/` en vez de estos.
 
 ## Compilación y distribución
 
-Un formato por sistema: **carpeta desempaquetada en Windows**, **AppImage en
-Linux**. El portable de Windows y el `linux-unpacked` publicado se retiraron
-porque duplicaban cada release sin aportar nada, y el portable bloqueaba la
-carpeta de salida mientras estuviera en ejecución.
-
-### Windows
-
 ```powershell
-npm run dist:win
+windows\build.ps1          # o build.bat, para doble clic
 ```
-
-Genera en `electron/dist/`:
-
-- `win-unpacked/WinSlim Terminal.exe`
-- ZIP versionado en `dist/release/`
-- `SHA256SUMS.txt`
-
-El script `windows\build.bat -Yes -NoRun` envuelve el proceso completo:
-comprueba dependencias, ejecuta `npm run check`, empaqueta, valida la
-aplicación empaquetada con un arranque invisible, genera los ZIP y las huellas,
-y crea los accesos directos.
-
-> **Antes de compilar, cerrar las instancias abiertas desde
-> `electron\dist\win-unpacked`**: electron-builder reemplaza esa carpeta y no
-> puede sobrescribir un ejecutable en uso.
-
-### Linux
 
 ```bash
-./linux/build.sh --yes --no-run
+linux/build.sh
 ```
 
-Genera el AppImage, su release `.tar.gz`, las huellas SHA-256 y el acceso
-`.desktop`. Ejecuta las pruebas antes de empaquetar y hace un arranque de
-integración cuando dispone de servidor gráfico o `xvfb-run`. `linux-unpacked`
-sigue existiendo como directorio intermedio de electron-builder y el script lo
-usa para ese arranque, pero no se distribuye.
+Argumentos: `-Clean`/`--clean` borra `node_modules` y `target` antes,
+`-SkipChecks`/`--skip-checks` salta las comprobaciones, `-NoRun`/`--no-run` no
+lanza la app al terminar.
 
-Compilar el AppImage desde Windows requiere una copia nativa dentro de WSL,
-nunca sobre `/mnt/c`: `linux/build.sh` hace `npm ci` sobre `electron/`, lo que
-reemplazaría el `node_modules` compilado para Windows.
+Cada script comprueba los requisitos, instala dependencias, pasa `npm run check`,
+compila, monta el artefacto, hace una comprobación de humo (abre la app y mira
+que no se cierre sola) y publica la release con su SHA-256 en `release/`.
 
-### Garantías que aplican los dos scripts
+### Qué produce cada build
 
-Ambos comparten las mismas reglas, y cada una aborta el build si no se cumple:
-
-| Regla | Por qué |
+| Plataforma | Artefacto |
 |---|---|
-| `npm run check` **antes** de empaquetar | Comprobar después no impide publicar una build rota; solo lo cuenta más tarde. |
-| Un solo formato por sistema | Si reaparece un `.exe`/`.msi` en Windows o un `.deb`/`.rpm`/`.snap` en Linux, el build falla en vez de publicarlo callando. |
-| Se retiran las releases de versiones anteriores | `SHA256SUMS.txt` conserva las líneas cuyo archivo sigue existiendo. Sin limpiar, acababa describiendo varias versiones a la vez. |
-| El AppImage se localiza **por versión** | Tras subir de versión, `dist/` conserva el anterior y el orden de `find` no está definido: se llegó a empaquetar el binario viejo. |
-| Las huellas se verifican tras escribirlas | Windows recalcula cada hash y Linux ejecuta `sha256sum -c --strict`, lo mismo que hará quien descargue la release. |
-| Compilar una plataforma **no borra** las huellas de la otra | Las dos publican en la misma `dist/release/`. Cada script conserva las líneas ajenas cuyo archivo sigue existiendo y solo regenera las propias. |
-| Se mide el peso y se compara con un tope | No es para adelgazar Electron (no se puede): detecta que una exclusión se caiga de `package.json` y el paquete recupere los `.pdb`, los prebuilds duplicados o `node_modules` entero. |
-| Se comprueba que Electron y `node-pty` están de verdad | npm puede dejar sin ejecutar los scripts de instalación de las dependencias. Con Electron sin binario, el fallo salía mucho después; ahora se detecta y se repone. |
-| `npm` se invoca sin que un aviso lo aborte | Windows PowerShell 5.1 convierte cada línea de *stderr* en error terminante cuando la salida se redirige. Un `npm warn deprecated` dejaba `node_modules` a medias; ahora decide el código de salida. |
+| Windows | Carpeta desempaquetada + `WinSlimTerminal-Unpacked-<versión>.zip` |
+| Linux | `LTerminal-<versión>-<arch>.AppImage` |
 
-`electron/test/buildScripts.test.js` comprueba que estas garantías siguen en
-los scripts, de modo que quitarlas rompe `npm run check`.
+Una sola cosa por plataforma, a propósito. **No** se genera instalador NSIS, ni
+MSI, ni portable, ni `.deb`, ni `.rpm`, ni accesos directos. El razonamiento
+está en `src-tauri/BUNDLE.md`.
 
-Windows y Linux publican en la **misma** carpeta `dist/release/`, y cada script
-solo reescribe sus propias líneas de `SHA256SUMS.txt`: compilar uno no borra las
-huellas del otro.
+El nombre del artefacto no es libre: es el que busca el actualizador de la
+propia app al elegir el adjunto de una release
+(`self_update::asset_for_platform`). Publicar con otro nombre deja la
+actualización automática sin nada que descargar.
 
----
+### Comprobaciones que hacen los scripts, y por qué
+
+| Comprobación | Por qué está |
+|---|---|
+| Nada en marcha (puerto 1420, proceso de la app) | Windows no deja borrar un archivo en uso y `npm ci` empieza vaciando `node_modules`: con un servidor de desarrollo abierto falla con un `EPERM` sobre `esbuild.exe` que no dice cuál es la causa. |
+| `conpty.dll` presente en `vendor/` | Sin ella la app compila igual y luego no abre ni una pestaña. |
+| WebKitGTK (Linux) | Su ausencia son cientos de líneas de error de enlazado a mitad de la compilación. |
+| Solo el artefacto esperado | Un `.deb` que se cuele acabaría publicado en una release sin que nadie lo haya probado. |
+| Comprobación de humo | Que compile no significa que arranque. |
 
 ## Arquitectura
 
-Dos procesos, como cualquier aplicación Electron, con una separación estricta:
-**todo lo privilegiado vive en el proceso principal** y el renderer solo recibe
-datos ya reducidos.
+Dos lados con una separación estricta: un backend en Rust que es el único que
+toca el sistema, y un frontend en Svelte que solo pinta.
 
 ```
-electron/
-├── main.js                  Ciclo de vida, pestañas/PTY, ~46 handlers IPC
-├── preload.js               contextBridge: única superficie renderer ↔ main
-├── main/                    Lógica del proceso principal (sin DOM)
-├── renderer/                Interfaz (xterm, paneles, ajustes)
-├── config/
-│   └── project-catalog.json Perfiles y repositorios anclados de fábrica
-├── scripts/                 Validadores y preparación de node-pty
-├── test/                    25 archivos de pruebas
-├── build/                   Iconos (icon.ico, icon.png)
-├── electron-builder.linux.js Identidad Linux, separada de la de Windows
-└── package.json
+src-tauri/src/
+├── lib.rs                   Arranque, ventana y registro de comandos
+├── commands*.rs             Los comandos que el frontend puede invocar
+├── tabs.rs · pty.rs         Pestañas y su pty (portable-pty)
+├── environments.rs          Detección de shells, WSL, Docker, ADB, lenguajes
+├── install_actions.rs       Catálogo de dependencias instalables
+├── scripts/ · file_explorer.rs · github.rs
+├── console_ui.rs            Cómo se ve en la terminal lo que ejecuta la app
+├── self_update.rs           Actualización de la propia aplicación
+└── locales/                 Catálogos de traducción
+
+src/
+├── lib/api.ts               Único punto que conoce los nombres de los comandos
+├── lib/appState.svelte.ts   Estado compartido de la interfaz
+└── components/              Terminal, barra, y los cinco paneles
 ```
 
-### Modelo de estado
+### Reglas que atraviesan todo el backend
 
-```
-windows: Map<windowId, WindowState>
-  WindowState = { win, tabs: Map<tabId, TabState>, activeTabId, envs,
-                  pkgManager, viewport, installActions,
-                  allowedFileItems, allowedGithubRepos, lastRelease }
-  TabState   = { id, ptyProcess, ptyGeneration, envId, label, cwd,
-                 outputBuffer, markerCarry, ready, pendingOutput,
-                 awaitingPause, explorerPinned }
-```
-
-Cada pestaña tiene su propio PTY, pero **todas comparten un único renderer**
-por ventana. Por eso casi todos los canales IPC llevan `tabId` como primer
-argumento.
-
-`ptyGeneration` resuelve las carreras al cambiar de entorno: el PTY anterior
-puede seguir emitiendo eventos después de que se le mate, así que cada callback
-comprueba que sigue siendo el actual antes de tocar nada.
-
-### Módulos del proceso principal
-
-| Módulo | Responsabilidad |
-|---|---|
-| `appIdentity.js` | Nombre, slug y rutas por plataforma. |
-| `userDataMigration.js` | Unifica datos de rutas antiguas al arrancar. |
-| `shellDetect.js` | Detección de shells, WSL, Docker, ADB, lenguajes y gestor de paquetes. |
-| `wslEnv.js` | Inventario de distribuciones WSL y sus shells. |
-| `dockerEnv.js` | Daemon, contenedores en ejecución e imágenes. |
-| `androidEnv.js` | Dispositivos ADB y su estado de autorización. |
-| `languageEnv.js` | REPL de los lenguajes instalados (Python, Node, Ruby, `jshell`, PHP, Lua, R, Groovy, Deno, Perl). |
-| `aliasProfiles.js` | Genera el archivo de inicialización de cada shell: alias, marcador de limpieza, banner. |
-| `packageAliases.js` | Traduce `install`/`update`/`upgrade`/`uninstall`/`remove` al gestor real. |
-| `installActions.js` | Catálogo de acciones del panel de dependencias por sistema. |
-| `commandNotFound.js` | Detecta «comando no encontrado» en la salida y propone la instalación. |
-| `scriptLauncher.js` | Escaneo de scripts, filtros por tipo y construcción del comando de lanzamiento. |
-| `fileExplorer.js` | Listado, creación, renombrado y pegado para el panel lateral. |
-| `fileViewers.js` | Visor recomendado por tipo de archivo y gestores de archivos por escritorio. |
-| `githubProjects.js` | API pública de GitHub, anclados, comandos git y releases. |
-| `currentDir.js` | Deduce el directorio actual de cada shell a partir del prompt. |
-| `spawnCwd.js` | Con qué directorio arranca cada pestaña. |
-| `pathEnv.js` | Resincroniza el `PATH` del proceso y cachea `which`/`where`. |
-| `systemInfo.js` | Banner de sesión estilo fastfetch, sin binarios externos. |
-| `preferences.js` | Valores por defecto, temas, fuentes y validación de preferencias. |
-| `settings.js` | Lectura y escritura de `settings.json`. |
-| `i18n.js` | Catálogo de traducciones y resolución de idioma. |
-| `logger.js` | Log rotativo a `logs/main.log`. |
-
-### Detalles de implementación que conviene conocer
-
-**El marcador de limpieza.** `cls` bajo ConPTY no emite ninguna secuencia de
-borrado: emite un repintado línea a línea que empuja lo anterior al historial
-de xterm en vez de tirarlo. Por eso la shell avisa de cada limpieza con un
-cambio de título OSC 0 con sufijo aleatorio, que viaja fuera del contenido de
-la pantalla y sí llega siempre. `main.js` lo intercepta, lo saca del flujo y
-ordena al renderer vaciar pantalla e historial. Ver `CLEAR_MARKER` en
-`aliasProfiles.js` y `splitOnClearMarker()` en `main.js`.
-
-**Los archivos de sesión.** Los alias no se teclean en la shell: se escriben en
-`%TEMP%/<slug>/<pid>/` y la shell los carga con una sola línea (`call`,
-dot-source o `source`). Así no se ve la parrafada de alias al abrir la pestaña,
-no queda un comando gigante en el historial y no hay límite práctico de
-longitud. En cmd.exe el banner se reduce a ASCII porque la consola lo lee en su
-página de códigos OEM, donde un UTF-8 se vería como galimatías.
-
-**El tamaño inicial.** El PTY nace con el tamaño real de la ventana, no con el
-80×24 de manual, y la salida pendiente no se entrega al renderer hasta que el
-xterm ha medido de verdad. Sin esto, el banner y el primer prompt se escribían
-con un ancho que no era el suyo y había que reflujarlos, que era de donde
-salían las líneas partidas y el prompt colgado a media pantalla.
-
----
+- **El frontend nunca manda una ruta que el backend no le haya dado antes.** Lo
+  que se ejecuta, se abre o se borra tiene que estar en la lista blanca del
+  último escaneo. Una ruta suelta se rechaza.
+- **Nada se ejecuta a escondidas.** Lo que un panel «hace» es escribir un
+  comando en la terminal visible, con su cabecera y su resultado. El usuario lo
+  lee entero antes de que pase nada y puede cancelarlo con Ctrl+C.
+- **Los comandos lentos no bloquean la ventana.** En Tauri un comando síncrono
+  se ejecuta en el hilo principal, que es el que pinta. Los 40 que tocan disco,
+  red o lanzan procesos llevan `#[tauri::command(async)]`. Se quedan en el hilo
+  principal los rápidos y **`pty_input`**, que además tiene que conservar el
+  orden de las pulsaciones.
 
 ## Contrato IPC
 
-El renderer **nunca** habla con Node directamente: `preload.js` expone
-`window.terminalAPI` como única superficie. `test/ipcContract.test.js`
-comprueba que cada canal expuesto tiene su handler.
+`src/lib/api.ts` ocupa el sitio que tenía `preload.js`: es el único punto del
+frontend que conoce los nombres de los comandos y la forma de sus cargas. El
+resto de la interfaz no llama nunca a `invoke` ni a `listen` directamente.
 
-### Invocaciones renderer → main
-
-| Grupo | Canales |
-|---|---|
-| Pestañas | `tabs:list`, `tabs:create`, `tabs:close`, `tabs:activate`, `tabs:ready` |
-| PTY | `pty-input`, `pty-resize` |
-| Entornos | `env:list`, `env:refresh`, `env:switch` |
-| Dependencias | `install:list`, `install:run` |
-| Preferencias | `settings:get`, `settings:save`, `settings:reset` |
-| Proyectos | `projects:state`, `projects:lookup`, `projects:pin`, `projects:chooseFolder`, `projects:openGithub`, `projects:run`, `projects:release`, `projects:downloadRelease` |
-| Scripts | `scripts:list`, `scripts:listHere`, `scripts:chooseFolder`, `scripts:chooseHereFolder`, `scripts:run`, `scripts:cd`, `scripts:open`, `scripts:pickTarget` |
-| Explorador | `explorer:list`, `explorer:follow`, `explorer:create`, `explorer:open`, `explorer:openDirectory`, `explorer:openDirectoryWith`, `explorer:rename`, `explorer:clip`, `explorer:paste`, `explorer:trash`, `explorer:cd` |
-| Otros | `clipboard:read`, `clipboard:write`, `log:renderer-error`, `log:open-folder`, `app:renderer-ready` |
-
-### Eventos main → renderer
-
-| Canal | Cuándo |
-|---|---|
-| `pty-data` | Salida del PTY de una pestaña. |
-| `pty-clear` | La shell ha ejecutado `clear`/`cls`. |
-| `pty-exit` | El proceso terminó y la pestaña **no** se cierra (fallo temprano). |
-| `tab-closed` | Una pestaña se cerró; incluye cuál pasa a estar activa. |
-| `env-changed` | La pestaña cambió de entorno. Se emite **antes** de arrancar la sesión nueva. |
-| `envs-updated` | La lista de entornos creció (Docker terminó de arrancar, se conectó un móvil). |
-| `command-not-found` | La shell no encontró una herramienta conocida. |
-
----
+Ese acuerdo es por convención de nombres, no por tipos, así que hay **dos
+pruebas en `lib.rs`** que leen el bloque `generate_handler!` y `api.ts` y los
+cotejan en las dos direcciones: un comando registrado sin función que lo llame,
+o una función que invoque un comando inexistente, rompen la suite. Sin ellas, el
+fallo no se vería hasta escribir el panel que lo necesitaba.
 
 ## Seguridad
 
-- `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`.
-- Fuses de Electron: `runAsNode: false`, `onlyLoadAppFromAsar`,
-  `enableCookieEncryption`, sin `NODE_OPTIONS` ni argumentos de inspección.
-- Navegación bloqueada salvo a la URL exacta del renderer; ventanas nuevas
-  denegadas; `webview` denegado.
-- Todos los permisos de Chromium denegados por política explícita.
-- `stateFromEvent()` exige que el emisor sea el frame principal con la URL
-  exacta antes de conceder cualquier privilegio: un iframe inyectado dentro de
-  la misma ventana no hereda IPC.
-- **El renderer nunca envía rutas de origen.** Las operaciones destructivas del
-  explorador (renombrar, mover, borrar) parten de un identificador que el
-  proceso principal valida contra el listado real de la carpeta que se está
-  mostrando ahora mismo.
-- Los scripts solo se pueden lanzar si pertenecen al último escaneo visible de
-  esa ventana.
-- Nada se ejecuta oculto: cada acción del panel **escribe su comando en la
-  terminal visible**, donde el usuario lo ve y puede cancelarlo con Ctrl+C.
-- Sin tokens ni credenciales. La exploración de GitHub usa la API pública
-  anónima y queda sujeta a su límite de consultas.
-- Las descargas de release solo aceptan `https` de una lista cerrada de hosts
-  de GitHub; una redirección fuera de ellos aborta la descarga.
-- Borrar va siempre a la papelera del sistema (`shell.trashItem`), nunca a un
-  borrado directo, y aun así pide confirmación.
-
----
+- **Sin `withGlobalTauri`.** El frontend no tiene acceso global al puente: solo
+  a los comandos que `api.ts` importa explícitamente.
+- **CSP estricta**: `default-src 'none'`, sin `connect-src` a nada que no sea el
+  propio IPC. El frontend no puede hacer peticiones de red por su cuenta.
+- **`dragDropEnabled: false`**: arrastrar un archivo sobre la ventana no
+  reemplaza la interfaz por él.
+- **`freezePrototype` desactivado a propósito.** Congelar `Object.prototype`
+  deja la ventana en negro: el frontend no llega a montarse.
+- **Descargas acotadas.** Solo se descargan adjuntos de una release que se acaba
+  de consultar, comprobando cada redirección contra los hosts de GitHub, con
+  tope de tamaño aplicado mientras se escribe.
+- **Sin tokens.** La integración con GitHub usa solo la API pública.
 
 ## Entornos y shells
 
@@ -444,8 +306,10 @@ ejecutarse, para que no se consuma como respuesta.
 ## Proyectos y GitHub
 
 **Anclados** combina el catálogo fijo de la build con los perfiles y
-repositorios que cada usuario ancle. `Christianlg97` y `Darkeiser003` figuran
-como perfiles fijos y no se pueden desanclar; los anclados personales sí. Los
+repositorios que cada usuario ancle. En Windows (WinSlim Terminal) figuran como
+perfiles fijos `Darkeiser003`, `Christianlg97` y `tiranosaurio73`; en Linux y
+macOS (LTerminal) solo `Darkeiser003`. Los fijos no se pueden desanclar; los
+anclados personales sí. Los
 créditos de **Ajustes › Información** salen de una lista distinta
 (`developers`), de modo que un perfil puede seguir anclado con sus
 repositorios sin aparecer en los créditos.
@@ -492,7 +356,7 @@ El botón **Release** consulta la última versión publicada y lista sus archivo
 con tamaño, para elegir uno a mano. Descargar uno no requiere clonar ni
 compilar nada.
 
-- La descarga la hace la aplicación con el `net` de Electron (es tráfico de
+- La descarga la hace la aplicación con `reqwest` (es tráfico de
   red, no un comando) y respeta el proxy del sistema.
 - Destino: `<carpeta>/_releases/<propietario>/<repositorio>/<etiqueta>/`,
   separado de los clones para no mezclar un árbol de git con un ZIP
@@ -540,7 +404,7 @@ Al ejecutar un script, la aplicación reutiliza una pestaña compatible o abre
 una nueva (PowerShell para `.ps1`, cmd/PowerShell para `.cmd`, la shell
 correspondiente para Bash, zsh o fish). Las rutas se traducen para Git Bash,
 WSL y los montajes Docker. HTML y multimedia se abren con la aplicación externa
-predeterminada y nunca dentro del renderer de Electron.
+predeterminada y nunca dentro de la ventana de la aplicación.
 
 ---
 
@@ -712,106 +576,60 @@ abiertas a la vez no se pisan ni se borran los archivos al salir.
 
 ## Pruebas
 
-131 pruebas en 25 archivos, todas con el runner de Node. Ninguna necesita
-Electron ni red.
-
-| Archivo | Cubre |
-|---|---|
-| `appIdentity.test.js` | Identidad y rutas por plataforma. |
-| `buildScripts.test.js` | Que los scripts de build siguen aplicando sus garantías: un formato por sistema, huellas verificadas y pruebas antes de empaquetar. |
-| `clearMarker.test.js` | Marcador de limpieza y su detección. |
-| `currentDir.test.js` | Deducción del cwd desde el prompt. |
-| `dockerEnv.test.js` | Parseo de contenedores e imágenes. |
-| `fileExplorer.test.js` | Listado, creación, renombrado, pegado y validación de nombres. |
-| `fileViewers.test.js` | Visores por tipo y gestores de archivos por escritorio. |
-| `githubProjects.test.js` | Validación de URLs, perfiles y comandos git. |
-| `i18n.test.js` | Resolución de idioma, parámetros, banner y traducción de acciones. |
-| `installActions.test.js` | Catálogo por sistema, orden de apartados y vías de PowerShell. |
-| `integrationLogic.test.js` | Alias, traducción de rutas y lanzamiento de scripts. |
-| `ipcContract.test.js` | Que cada canal expuesto en preload tiene handler. |
-| `languageEnv.test.js` | Detección de REPL. |
-| `packageAliases.test.js` | Traducción de `install`/`update`/`search`/… por gestor, y el texto de `ayuda`. |
-| `pathEnv.test.js` | Resincronización del PATH. |
-| `pendingPause.test.js` | Que un comando de panel cierra la pausa pendiente. |
-| `preferences.test.js` | Validación y recorte de preferencias, y que cada tema trae la paleta completa. |
-| `releases.test.js` | Saneado de releases, hosts permitidos y comandos de extracción. |
-| `rendererStability.test.js` | Menú contextual, acordeones, aviso de carga y ajustes visuales. |
-| `scriptScanner.test.js` | Escaneo, filtros opt-in y profundidad. |
-| `sessionBanner.test.js` | Que el banner llega también a Docker, ADB y Wine. |
-| `spawnCwd.test.js` | Herencia de directorio y sus excepciones. |
-| `tabLifecycle.test.js` | Cierre por `exit`, fallo temprano y tamaño inicial. |
-| `userDataMigration.test.js` | Fusión de datos de rutas antiguas. |
-
-Ejecutar un archivo suelto:
-
 ```bash
-node --test test/releases.test.js
+npm run check
 ```
 
----
+Pasa `svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y los tests
+de Rust. Es lo que tiene que estar en verde antes de compilar.
+
+Los tests viven junto al módulo que prueban, en su `mod tests`. Están escritos
+en español y sus nombres son frases que dicen qué garantiza cada uno, no qué
+función llaman:
+
+```rust
+fn instalar_y_actualizar_nunca_se_ofrecen_a_la_vez_para_la_misma_herramienta()
+fn el_archivo_descargado_no_puede_acabar_junto_al_ejecutable()
+fn con_hipervisor_en_marcha_no_se_manda_a_nadie_a_la_bios()
+```
+
+Varios documentan un fallo real que se encontró probando contra el sistema, para
+que no vuelva. No dependen de lo que haya instalado en la máquina: lo que
+consulta al sistema se inyecta para poder simularlo.
 
 ## Convenciones del código
 
-- **JavaScript sin transpilar ni bundler.** El renderer usa `var` y `function`
-  porque se carga directamente en el navegador de Electron sin paso de build.
-- **Saltos de línea LF** en todo el proyecto, incluidos los `.ps1`. Un `.sh`
-  con CRLF no arranca en Linux: el shebang se lee como `bash\r`. Lo garantiza
-  `.gitattributes` con `* text=auto eol=lf`, que también fuerza LF al hacer
-  checkout: sin él, un clon en Windows con `core.autocrlf=true` convertía
-  `linux/build.sh` a CRLF y dejaba de compilar el AppImage desde WSL.
-- **Comentarios en español y explicando el porqué**, no el qué. Los comentarios
-  largos del código documentan decisiones no evidentes (por qué el marcador de
-  limpieza viaja como título, por qué el AUR no se invoca con sudo, por qué el
-  aviso de cambio de entorno va antes de arrancar la sesión).
-- **Sin dependencias de runtime más allá de xterm y node-pty.** Todo lo demás
-  se resuelve con el módulo estándar de Node o con herramientas del sistema.
-- **Nada se ejecuta a espaldas del usuario.** Si una acción toca el sistema, su
-  comando se escribe en la terminal visible.
-- Antes de dar por buena una tarea: `npm run check`.
-
----
+- **Comentarios y nombres de test en español**, y explican el *porqué*, no el
+  qué. Un comentario que repite lo que hace la línea siguiente sobra.
+- **Cada módulo de Rust abre diciendo de dónde viene.** Los `//! Port de
+  electron/main/<archivo>.js` se refieren al árbol de Electron que se retiró al
+  cerrar la migración; sigue estando en el historial de git.
+- **Tablas de datos alineadas** con `#[rustfmt::skip]`: son datos, y se leen
+  mejor en columnas.
+- **El frontend no llama a `invoke` directamente**: todo pasa por `api.ts`.
+- **Sin dependencias de runtime más allá de las imprescindibles.** Tres crates
+  sustituyen algo que Node traía de serie: `sysinfo`, `reqwest` y
+  `portable-pty`.
 
 ## Problemas conocidos
 
-**El binario de Electron no se descarga.** Si `npm start` o
-`npm run test:integration` fallan con «electron no se reconoce como un
-comando», falta el binario en `node_modules/electron/dist`. Las versiones
-recientes de npm dejan los scripts de instalación de las dependencias tras una
-aprobación explícita (`packages have install scripts not yet covered by
-allowScripts`), y cuando eso le toca a Electron `node_modules` parece completo
-pero no hay binario. Los scripts de build lo detectan y lo reponen solos; a
-mano:
+**Las pestañas se quedan en blanco en Windows.** Falta `conpty.dll` junto al
+ejecutable. El ConPTY del sistema falla en algunos Windows recortados y tarda
+más de dos minutos en devolver el error. Los tres archivos de la carpeta
+desempaquetada tienen que ir juntos.
 
-```bash
-node node_modules/electron/install.js
-```
+**El inventario de WSL sale incompleto.** Sondear cada distro tiene un plazo de
+3 segundos, y en algunas máquinas `wsl.exe -d <distro> -- printenv SHELL` tarda
+más. La distro aparece igualmente en el selector, con la etiqueta «(sin
+comprobar)» y su shell por defecto, y se abre con normalidad.
 
-**Compilar node-pty falla con «no se reconoce como un comando interno o
-externo».** El paso gyp de winpty ejecuta `cmd /c "cd shared &&
-GetCommitHash.bat"`, que necesita encontrar ejecutables en el directorio
-actual. Si el proceso hereda `NoDefaultCurrentDirectoryInExePath=1`, ese paso
-falla y deja `node_modules/node-pty` sin `build/Release`.
+**El panel de dependencias tarda un par de segundos en abrir.** Refleja el
+estado actual del sistema, no el del arranque: consulta el PATH y comprueba unas
+treinta herramientas. La detección de virtualización y el inventario de WSL sí
+están cacheados.
 
-`windows\build.ps1` ya neutraliza esa variable en los procesos que lanza, así
-que el build automático no se topa con esto. Haciendo `npm ci` a mano sí, y la
-solución es la misma:
-
-```powershell
-$env:NoDefaultCurrentDirectoryInExePath = $null; npm install
-```
-
-Si node-pty ya quedó roto, borrar `node_modules\node-pty` (saliendo antes de
-esa carpeta, o dará EBUSY) y reinstalar.
-
-**electron-builder se queda esperando con «output file is locked for
-writing».** Hay una instancia de la aplicación en ejecución desde
-`electron\dist\win-unpacked`. Cerrarla y repetir.
-
-**Wine no aparece como entorno en Arch.** El paquete está en el repositorio
-`multilib`, desactivado en una instalación estándar. Descomentar la sección
-`[multilib]` de `/etc/pacman.conf`, ejecutar `sudo pacman -Sy` y reintentar.
-
----
+**El primer arranque tras compilar puede tardar.** El antivirus inspecciona un
+ejecutable recién creado.
 
 ## Créditos
 

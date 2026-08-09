@@ -1,0 +1,71 @@
+/* Estilos globales. Los valores de las variables los reescribe theme.ts a
+   partir de las preferencias; los de aquí son los del tema "silver", que es el
+   de fábrica, para que la ventana no parpadee en blanco antes de cargarlas. */
+
+@import '@xterm/xterm/css/xterm.css';
+
+:root {
+    --app-bg: #080808;
+    --surface: #191919;
+    --surface-alt: #111111;
+    --surface-hover: #292b2e;
+    --border: #3b3d40;
+    --text: #d7d7d7;
+    --muted: #8b8e92;
+    --accent: #b8bec6;
+    --accent-soft: #34383d;
+    --terminal-bg: #080808;
+    --terminal-fg: #d7d7d7;
+    --terminal-padding: 10px;
+    --terminal-font: 'Cascadia Code', Consolas, 'Courier New', monospace;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html,
+body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--app-bg);
+    color: var(--text);
+    font-family: var(--terminal-font);
+    /* La app no es una página web: seleccionar texto de la interfaz con el
+       ratón solo estorba. Dentro del xterm sí se puede, ver más abajo. */
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.xterm,
+.xterm * {
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* La ventana no navega ni abre contenido externo: arrastrar un archivo encima
+   no debe reemplazar la interfaz por él. `dragDropEnabled: false` lo bloquea en
+   el lado nativo; esto cubre el caso de la propia página. */
+body {
+    -webkit-user-drag: none;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--surface-alt);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
+}

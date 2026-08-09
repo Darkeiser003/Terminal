@@ -1,433 +1,351 @@
 #!/usr/bin/env bash
-# linux/build.sh - LTerminal
-# Equivalente a windows/build.ps1 para usuarios de WSL/Linux nativo:
-# comprueba dependencias, instala lo que falte (con confirmación), compila
-# y genera un AppImage distribuible (npm run dist:linux), y lo lanza.
 #
-# Uso:
-#   ./linux/build.sh              # pide confirmación antes de instalar algo
-#   ./linux/build.sh --yes        # responde "sí" automáticamente a todo
-#   ./linux/build.sh --no-run     # no lanza el AppImage al terminar
-#   ./linux/build.sh --reinstall  # borra node_modules y reinstala desde cero
+# Build de LTerminal (Tauri 2 + Rust) para Linux.
+#
+# Produce UNA sola cosa: el AppImage. Sin .deb, sin .rpm, sin carpeta
+# desempaquetada y sin accesos directos; el porqué está en src-tauri/BUNDLE.md.
+#
+# Requisitos: Node.js >= 22.12, el toolchain de Rust y las bibliotecas de
+# desarrollo de WebKitGTK. Los nombres de los paquetes cambian según la
+# distribución, así que si falta algo se dice cuál es y cómo se llama aquí.
+#
+# Antes de dar por ausente una herramienta se busca donde la deja su instalador
+# (rustup en ~/.cargo, nvm/fnm/volta/asdf para node): "no está en el PATH" y "no
+# está instalado" son cosas distintas, y la primera se arregla sola.
 
-set -euo pipefail
+# El script usa `${BASH_SOURCE[0]}`, arrays y `set -o pipefail`: con `sh
+# build.sh` (dash en Debian/Ubuntu) muere con un error de sintaxis que no dice
+# que el problema sea el intérprete. Mejor decirlo.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "ERROR: este script necesita bash. Ejecútalo como ./build.sh o bash build.sh." >&2
+    exit 1
+fi
 
-YES=0
+# -E propaga el trap ERR a las funciones: sin él, un fallo dentro de una de
+# ellas cortaba el script sin pasar por el aviso de qué paso se rompió.
+set -Eeuo pipefail
+
+CLEAN=0
 NO_RUN=0
-REINSTALL=0
+SKIP_CHECKS=0
 for arg in "$@"; do
     case "$arg" in
-        --yes|-y) YES=1 ;;
-        --no-run) NO_RUN=1 ;;
-        --reinstall) REINSTALL=1 ;;
-        *) echo "Argumento desconocido: $arg" >&2; exit 1 ;;
+        --clean)       CLEAN=1 ;;
+        --no-run)      NO_RUN=1 ;;
+        --skip-checks) SKIP_CHECKS=1 ;;
+        -h|--help)
+            echo "Uso: $0 [--clean] [--skip-checks] [--no-run]"
+            exit 0
+            ;;
+        *)
+            echo "Argumento desconocido: $arg" >&2
+            exit 2
+            ;;
     esac
 done
 
-step() { echo; echo -e "\033[36m==> $*\033[0m"; }
-ok()   { echo -e "    \033[32mOK:\033[0m $*"; }
-warn() { echo -e "    \033[33mAVISO:\033[0m $*"; }
-err()  { echo -e "    \033[31mERROR:\033[0m $*" >&2; }
+step() { CURRENT_STEP="$1"; printf '\n\033[36m==> %s\033[0m\n' "$1"; }
+ok()   { printf '    \033[32mOK:\033[0m %s\n' "$1"; }
+warn() { printf '    \033[33mAVISO:\033[0m %s\n' "$1"; }
+err()  { printf '    \033[31mERROR:\033[0m %s\n' "$1" >&2; }
 
-# Pide confirmacion antes de instalar algo (salvo --yes). Nunca se instala
-# nada de forma silenciosa: el usuario ve el comando y decide, igual que
-# windows/build.ps1 y el resto de la app.
-confirm() {
-    if [ "$YES" -eq 1 ]; then return 0; fi
-    read -r -p "    $1 (s/N) " resp
-    case "$resp" in
-        [sSyY]*) return 0 ;;
-        *) return 1 ;;
+# Con `set -e` un fallo a mitad corta el script sin decir nada más, y en una
+# build de varios minutos no queda claro qué paso se quedó a medias. El
+# equivalente del "La build fallo con codigo N" de build.bat.
+CURRENT_STEP="inicio"
+on_error() {
+    local code=$?
+    printf '\n\033[31mLa build falló en: %s (código %s)\033[0m\n' "$CURRENT_STEP" "$code" >&2
+    echo "Revisa los mensajes de arriba." >&2
+}
+trap on_error ERR
+
+# rustup, nvm y compañía instalan en el HOME y dejan el PATH preparado en un
+# perfil de shell. Eso no sirve en una terminal que ya estaba abierta antes de
+# instalarlos, ni en un script lanzado desde el gestor de archivos: el comando
+# está en el disco pero `command -v` no lo ve. Antes de dar por ausente una
+# herramienta se mira donde su instalador la deja.
+add_to_path() {
+    local dir="$1"
+    case ":$PATH:" in
+        *":$dir:"*) return 0 ;;
     esac
+    [ -d "$dir" ] || return 1
+    PATH="$dir:$PATH"
+    export PATH
+}
+
+recover_tool() {
+    local tool="$1"
+    shift
+    command -v "$tool" >/dev/null 2>&1 && return 0
+    local dir
+    for dir in "$@"; do
+        if [ -x "$dir/$tool" ] && add_to_path "$dir"; then
+            warn "$tool no estaba en el PATH; se ha añadido $dir."
+            return 0
+        fi
+    done
+    return 1
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-ELECTRON_DIR="$PROJECT_ROOT/electron"
+TAURI_DIR="$PROJECT_ROOT/src-tauri"
+BUNDLE_DIR="$TAURI_DIR/target/release/bundle/appimage"
 
-echo "=================================================="
-echo "  LTerminal - build automatico (AppImage)"
-echo "=================================================="
+cd "$PROJECT_ROOT"
 
-if [ ! -d "$ELECTRON_DIR" ]; then
-    err "No se encontro la carpeta 'electron' en: $ELECTRON_DIR"
+# ---------------------------------------------------------------------------
+# 1. Requisitos
+# ---------------------------------------------------------------------------
+step "Comprobando requisitos"
+
+# nvm es una función de shell, no un binario: en un script no existe salvo que se
+# cargue a mano. fnm, volta y asdf sí dejan binarios, pero en rutas del HOME.
+if ! command -v node >/dev/null 2>&1; then
+    NVM_SCRIPT="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+    if [ -s "$NVM_SCRIPT" ]; then
+        # shellcheck disable=SC1090
+        . "$NVM_SCRIPT" >/dev/null 2>&1 || true
+        nvm use --silent default >/dev/null 2>&1 || true
+        command -v node >/dev/null 2>&1 && warn "node no estaba en el PATH; se ha cargado el de nvm."
+    fi
+fi
+recover_tool node \
+    "$HOME/.volta/bin" \
+    "$HOME/.local/share/fnm/aliases/default/bin" \
+    "$HOME/.asdf/shims" \
+    /usr/local/bin \
+    /usr/local/node/bin || {
+    err "Falta Node.js. Instálalo desde el gestor de tu distribución o desde https://nodejs.org (>= 22.12)."
+    exit 1
+}
+NODE_VERSION="$(node -p 'process.versions.node')"
+NODE_MAJOR="${NODE_VERSION%%.*}"
+NODE_MINOR="$(echo "$NODE_VERSION" | cut -d. -f2)"
+if [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 12 ]; }; then
+    err "Node.js $NODE_VERSION es demasiado antiguo; hace falta 22.12 o superior."
     exit 1
 fi
-ok "Proyecto: $PROJECT_ROOT"
-ok "App Electron: $ELECTRON_DIR"
+ok "Node.js $NODE_VERSION"
 
-if grep -qi microsoft /proc/version 2>/dev/null; then
-    warn "Detectado WSL. El AppImage resultante es una app grafica (Electron):"
-    warn "necesitaras WSLg (Windows 11 / WSL con soporte GUI) o un servidor X para poder EJECUTARLA, no solo compilarla."
-fi
-
-# ------------------------------------------------------------------
-# 0. Detectar gestor de paquetes
-# ------------------------------------------------------------------
-PKG_MANAGER=""
-for candidate in apt dnf pacman zypper; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        PKG_MANAGER="$candidate"
-        break
-    fi
-done
-
-if [ -z "$PKG_MANAGER" ]; then
-    warn "No se detecto un gestor de paquetes conocido (apt/dnf/pacman/zypper)."
-    warn "Este script no podra instalar nada automaticamente; instala Node.js/build tools a mano si faltan."
-fi
-
-pkg_install() {
-    case "$PKG_MANAGER" in
-        apt) sudo apt update && sudo apt install -y "$@" ;;
-        dnf) sudo dnf install -y "$@" ;;
-        pacman) sudo pacman -S --noconfirm "$@" ;;
-        zypper) sudo zypper install -y "$@" ;;
-        *) return 1 ;;
-    esac
-}
-
-install_electron_runtime() {
-    case "$PKG_MANAGER" in
-        apt)
-            local gtk_pkg="libgtk-3-0"
-            local asound_pkg="libasound2"
-            apt-cache show libgtk-3-0t64 >/dev/null 2>&1 && gtk_pkg="libgtk-3-0t64"
-            apt-cache show libasound2t64 >/dev/null 2>&1 && asound_pkg="libasound2t64"
-            pkg_install libnspr4 libnss3 "$gtk_pkg" "$asound_pkg" libxss1 libgbm1 libdrm2 libxkbcommon0 libatspi2.0-0
-            ;;
-        dnf) pkg_install nspr nss gtk3 alsa-lib libXScrnSaver mesa-libgbm libdrm libxkbcommon at-spi2-core ;;
-        pacman) pkg_install nspr nss gtk3 alsa-lib libxss mesa libdrm libxkbcommon at-spi2-core ;;
-        zypper) pkg_install mozilla-nspr mozilla-nss libgtk-3-0 libasound2 libXss1 libgbm1 libdrm2 libxkbcommon0 at-spi2-core ;;
-        *) return 1 ;;
-    esac
-}
-
-missing_runtime_libraries() {
-    local executable="$1"
-    if ! command -v ldd >/dev/null 2>&1; then return 0; fi
-    ldd "$executable" 2>/dev/null | awk '/not found/{print $1}' | sort -u
-}
-
-# ------------------------------------------------------------------
-# 1. Node.js / npm
-# ------------------------------------------------------------------
-step "Comprobando Node.js y npm"
-
-if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    warn "No se encontro Node.js/npm en el PATH."
-    if [ -n "$PKG_MANAGER" ] && confirm "Instalar Node.js ahora con $PKG_MANAGER?"; then
-        step "Instalando Node.js ($PKG_MANAGER)"
-        case "$PKG_MANAGER" in
-            apt) pkg_install nodejs npm ;;
-            dnf) pkg_install nodejs ;;
-            pacman) pkg_install nodejs npm ;;
-            zypper) pkg_install nodejs npm ;;
-        esac
-        if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-            err "Node.js se intento instalar pero sigue sin detectarse. Instalalo manualmente (considera nvm/NodeSource si tu distro trae una version muy antigua)."
-            exit 1
-        fi
-        ok "Node.js instalado correctamente"
-    else
-        err "Node.js/npm son necesarios para continuar."
-        echo "    Instalalo manualmente, o vuelve a ejecutar este script con --yes."
-        exit 1
+# Este es el caso que más veces se da: rustup recién instalado y la terminal sin
+# reabrir. `~/.cargo/env` es justo el archivo que rustup pide cargar, así que se
+# usa el suyo antes de inventar rutas.
+if ! command -v cargo >/dev/null 2>&1; then
+    CARGO_ENV="${CARGO_HOME:-$HOME/.cargo}/env"
+    if [ -s "$CARGO_ENV" ]; then
+        # shellcheck disable=SC1090
+        . "$CARGO_ENV" >/dev/null 2>&1 || true
+        command -v cargo >/dev/null 2>&1 && warn "cargo no estaba en el PATH; se ha cargado $CARGO_ENV."
     fi
 fi
-MIN_NODE_VERSION="22.12.0"
-node_version_supported() {
-    node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); process.exit(a>22 || (a===22 && (b>12 || (b===12 && c>=0))) ? 0 : 1)' >/dev/null 2>&1
+recover_tool cargo \
+    "${CARGO_HOME:-$HOME/.cargo}/bin" \
+    "$HOME/.cargo/bin" \
+    /usr/local/cargo/bin \
+    /opt/rust/bin || {
+    err "Falta el toolchain de Rust. Instálalo desde https://rustup.rs y reabre la terminal."
+    err "Si ya lo tienes instalado, carga su entorno con: source \"\$HOME/.cargo/env\""
+    exit 1
 }
+ok "$(cargo --version)"
 
-if ! node_version_supported; then
-    warn "Node.js $(node -v) es demasiado antiguo; Electron 43 requiere Node.js >= $MIN_NODE_VERSION para compilar."
-    if [ -n "$PKG_MANAGER" ] && confirm "Intentar actualizar Node.js con $PKG_MANAGER?"; then
-        case "$PKG_MANAGER" in
-            apt) pkg_install nodejs npm ;;
-            dnf) pkg_install nodejs ;;
-            pacman) pkg_install nodejs npm ;;
-            zypper) pkg_install nodejs npm ;;
-        esac
-    fi
-fi
-
-if ! node_version_supported; then
-    err "Se necesita Node.js >= $MIN_NODE_VERSION y se detectó $(node -v)."
-    echo "    Actualiza Node.js con el método oficial de tu distribución y vuelve a ejecutar build.sh."
+# El enlazador no lo trae cargo. Sin él la compilación llega hasta el final y
+# muere en el último paso con "linker `cc` not found", que es el peor momento
+# posible para descubrirlo.
+if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+    err "Falta un compilador de C (cc/gcc), que es lo que Rust usa como enlazador."
+    echo "    Debian/Ubuntu: sudo apt install build-essential" >&2
+    echo "    Fedora:        sudo dnf groupinstall 'Development Tools'" >&2
+    echo "    Arch:          sudo pacman -S base-devel" >&2
     exit 1
 fi
-ok "Node.js $(node -v) / npm $(npm -v)"
 
-# ------------------------------------------------------------------
-# 2. Instalar dependencias y generar el AppImage
-# node-pty incluye prebuilds Linux; las herramientas C++ solo se ofrecen si
-# npm comunica que no puede usar el binario y cae a node-gyp.
-# ------------------------------------------------------------------
-cd "$ELECTRON_DIR"
-
-if [ "$REINSTALL" -eq 1 ] && [ -d node_modules ]; then
-    step "Reinstalacion limpia solicitada: borrando node_modules"
-    rm -rf node_modules
-fi
-
-step "Instalando dependencias reproducibles (npm ci)"
-NPM_LOG="${TMPDIR:-/tmp}/lterminal-npm-install.log"
-if ! npm ci 2>&1 | tee "$NPM_LOG"; then
-    if grep -Eqi 'node-gyp|gyp ERR|prebuild|Python|make:|g\+\+' "$NPM_LOG"; then
-        warn "node-pty no pudo usar su binario precompilado; esta plataforma necesita compilacion nativa."
-        if [ -n "$PKG_MANAGER" ] && confirm "Instalar solo ahora Python y las herramientas C/C++ con $PKG_MANAGER?"; then
-            case "$PKG_MANAGER" in
-                apt) pkg_install build-essential python3 ;;
-                dnf) pkg_install gcc gcc-c++ make python3 ;;
-                pacman) pkg_install base-devel python ;;
-                zypper) pkg_install gcc gcc-c++ make python3 ;;
-            esac
-            npm ci
-        else
-            err "Faltan los requisitos de compilacion nativa; instalalos y vuelve a intentarlo."
-            exit 1
-        fi
-    else
-        err "npm ci termino con errores no relacionados con compilacion nativa."
+# WebKitGTK es lo que Tauri usa como motor en Linux, y su ausencia se
+# manifiesta como un error de enlazado de cientos de líneas a mitad de la
+# compilación. Comprobarlo antes ahorra ese rato.
+if command -v pkg-config >/dev/null 2>&1; then
+    MISSING_LIBS=""
+    for lib in webkit2gtk-4.1 javascriptcoregtk-4.1 libsoup-3.0; do
+        pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS="$MISSING_LIBS $lib"
+    done
+    if [ -n "$MISSING_LIBS" ]; then
+        err "Faltan bibliotecas de desarrollo:$MISSING_LIBS"
+        echo "    Debian/Ubuntu: sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev build-essential curl file libssl-dev libayatana-appindicator3-dev librsvg2-dev" >&2
+        echo "    Fedora:        sudo dnf install webkit2gtk4.1-devel libsoup3-devel openssl-devel curl wget file libappindicator-gtk3-devel librsvg2-devel" >&2
+        echo "    Arch:          sudo pacman -S webkit2gtk-4.1 libsoup3 base-devel curl wget file openssl libappindicator-gtk3 librsvg" >&2
         exit 1
     fi
+    ok "WebKitGTK y sus dependencias presentes"
+else
+    warn "Sin pkg-config no se pueden comprobar las bibliotecas de WebKitGTK; se sigue igualmente."
+fi
+
+VERSION="$(node -p "require('./package.json').version")"
+ok "Versión a compilar: $VERSION"
+
+# ---------------------------------------------------------------------------
+# 2. Nada en marcha que estorbe
+# ---------------------------------------------------------------------------
+# El equivalente del bloque de build.ps1. En Linux borrar un archivo en uso sí
+# se puede, así que no es fatal, pero las dos situaciones siguen dando
+# resultados raros: `npm ci` vacía node_modules debajo de un Vite en marcha, y
+# la comprobación de humo del final no distingue su propia ventana de una que ya
+# estaba abierta.
+step "Comprobando que no haya nada en marcha"
+
+# Sin ss ni lsof: bash abre el socket él mismo. Un timeout corto para que un
+# puerto filtrado no cuelgue la build.
+if timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/1420' 2>/dev/null; then
+    warn "Hay algo escuchando en el puerto 1420 (¿npm start / npm run dev?)."
+    warn "npm ci vaciará node_modules debajo de ese proceso; ciérralo si la build falla raro."
+else
+    ok "El puerto 1420 está libre"
+fi
+
+if pgrep -x lterminal >/dev/null 2>&1 || pgrep -f 'LTerminal-.*\.AppImage' >/dev/null 2>&1; then
+    warn "LTerminal está abierto. La comprobación de humo del final puede confundirse con esa ventana."
+    warn "Ciérralo para que el resultado sea fiable."
+else
+    ok "Nada bloqueando los archivos"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Dependencias
+# ---------------------------------------------------------------------------
+if [ "$CLEAN" -eq 1 ]; then
+    step "Limpiando (node_modules y target)"
+    rm -rf "$PROJECT_ROOT/node_modules"
+    cargo clean --manifest-path "$TAURI_DIR/Cargo.toml" || warn "cargo clean falló; se sigue igualmente."
+fi
+
+step "Instalando dependencias del frontend (npm ci)"
+# `npm ci` exige un package-lock.json coherente con package.json y aborta si no
+# lo es. Es lo que se quiere en una release —instala exactamente lo fijado— pero
+# no es motivo para no poder compilar: se avisa y se cae a `npm install`, que
+# resuelve y actualiza el lock.
+if [ ! -f "$PROJECT_ROOT/package-lock.json" ]; then
+    warn "No hay package-lock.json; se usa npm install en vez de npm ci."
+    npm install
+elif ! npm ci; then
+    warn "npm ci falló (lock desincronizado o red). Se reintenta con npm install."
+    npm install
 fi
 ok "Dependencias instaladas"
 
-# npm puede dejar sin ejecutar los scripts de instalacion de las dependencias
-# (las versiones recientes los ponen tras una aprobacion explicita). Cuando eso
-# le toca a Electron, node_modules parece completo pero no hay binario, y el
-# fallo aparece mucho despues, al empaquetar o al arrancar.
-step "Comprobando el binario de Electron y el modulo node-pty"
-if [ ! -x "$ELECTRON_DIR/node_modules/electron/dist/electron" ]; then
-    warn "npm no dejo instalado el binario de Electron; se descarga ahora."
-    if [ ! -f "$ELECTRON_DIR/node_modules/electron/install.js" ]; then
-        err "Falta node_modules/electron: repite npm ci."
-        exit 1
-    fi
-    node "$ELECTRON_DIR/node_modules/electron/install.js"
-    if [ ! -x "$ELECTRON_DIR/node_modules/electron/dist/electron" ]; then
-        err "No se pudo descargar el binario de Electron. Revisa la conexion y repite el build."
-        exit 1
-    fi
-fi
-if [ ! -f "$ELECTRON_DIR/node_modules/node-pty/build/Release/pty.node" ]; then
-    err "Falta node_modules/node-pty/build/Release/pty.node: node-pty no llego a compilarse."
-    echo "    Borra node_modules/node-pty y repite el build." >&2
-    exit 1
-fi
-ok "Electron y node-pty listos"
-
-step "Ejecutando pruebas y comprobacion de sintaxis"
-npm run check
-
-step "Generando el AppImage (npm run dist:linux)"
-if ! npm run dist:linux; then
-    err "electron-builder termino con errores. Revisa los mensajes de arriba."
-    exit 1
-fi
-
-# ------------------------------------------------------------------
-# 4. Localizar el AppImage generado
-# ------------------------------------------------------------------
-step "Buscando el AppImage generado"
-
-VERSION="$(node -p "require('$ELECTRON_DIR/package.json').version")"
-
-# Se busca POR VERSION, no el primer .AppImage que aparezca. Tras subir de
-# version, dist/ conserva el AppImage anterior y el orden que devuelve find no
-# esta definido: se llego a empaquetar y firmar el binario viejo.
-APPIMAGE_MATCHES="$(find "$ELECTRON_DIR/dist" -maxdepth 1 -name "LTerminal-$VERSION-*.AppImage" | sort)"
-APPIMAGE_COUNT="$(printf '%s' "$APPIMAGE_MATCHES" | grep -c . || true)"
-
-if [ "$APPIMAGE_COUNT" -eq 0 ]; then
-    err "No se encontro LTerminal-$VERSION-*.AppImage en: $ELECTRON_DIR/dist"
-    echo "    Revisa los mensajes de 'electron-builder' mas arriba."
-    exit 1
-fi
-if [ "$APPIMAGE_COUNT" -gt 1 ]; then
-    err "Hay varios AppImage de la version $VERSION; no se puede decidir cual publicar:"
-    printf '    %s\n' $APPIMAGE_MATCHES >&2
-    exit 1
-fi
-APPIMAGE_PATH="$APPIMAGE_MATCHES"
-chmod +x "$APPIMAGE_PATH"
-ok "AppImage: $APPIMAGE_PATH"
-
-# Peso del AppImage. Tope generoso pero real: la mayor parte es el runtime de
-# Electron, que no se puede adelgazar. Lo que este check detecta es una
-# REGRESION: una exclusion que se cae de package.json y devuelve al paquete los
-# prebuilds duplicados, los .pdb o node_modules entero.
-MAX_APPIMAGE_MB=260
-step "Midiendo el peso del AppImage"
-APPIMAGE_MB="$(( $(stat -c%s "$APPIMAGE_PATH") / 1048576 ))"
-echo "    $(basename "$APPIMAGE_PATH"): ${APPIMAGE_MB} MB (tope ${MAX_APPIMAGE_MB} MB)"
-if [ "$APPIMAGE_MB" -gt "$MAX_APPIMAGE_MB" ]; then
-    err "El AppImage pesa ${APPIMAGE_MB} MB y el tope es ${MAX_APPIMAGE_MB} MB. Revisa build.files en package.json."
-    exit 1
-fi
-ok "Peso dentro del tope"
-
-# Un formato por sistema: si alguien reintroduce deb/rpm/snap en la
-# configuracion, aparece aqui y el build falla en vez de publicarlo callando.
-STRAY_PACKAGES="$(find "$ELECTRON_DIR/dist" -maxdepth 1 \( -name '*.deb' -o -name '*.rpm' -o -name '*.snap' -o -name '*.pacman' \) | sort)"
-if [ -n "$STRAY_PACKAGES" ]; then
-    err "La build de Linux solo debe producir el AppImage. Artefactos inesperados:"
-    printf '    %s\n' $STRAY_PACKAGES >&2
-    echo "    Revisa build.linux.target en package.json y electron-builder.linux.js." >&2
-    exit 1
-fi
-
-# linux-unpacked NO se publica: es el directorio intermedio que
-# electron-builder deja al construir el AppImage, y aqui solo se usa para
-# arrancar la app y comprobar que funciona. Lo que se distribuye es el
-# AppImage.
-UNPACKED_DIR="$ELECTRON_DIR/dist/linux-unpacked"
-if [ ! -d "$UNPACKED_DIR" ]; then
-    err "No se encontro el directorio intermedio de electron-builder en: $UNPACKED_DIR"
-    exit 1
-fi
-
-# Smoke test solo si existe un servidor gráfico o xvfb. No se instala ningún
-# entorno auxiliar únicamente para probar: en servidores headless se omite.
-UNPACKED_EXE="$UNPACKED_DIR/lterminal"
-if [ -x "$UNPACKED_EXE" ]; then
-    MISSING_RUNTIME_LIBS="$(missing_runtime_libraries "$UNPACKED_EXE")"
-    if [ -n "$MISSING_RUNTIME_LIBS" ]; then
-        warn "La build está completa, pero este Linux mínimo no puede ejecutarla todavía. Faltan: $(echo "$MISSING_RUNTIME_LIBS" | tr '\n' ' ')"
-        if [ "$NO_RUN" -eq 0 ] && [ -n "$PKG_MANAGER" ] && confirm "Instalar solo las bibliotecas gráficas que Electron necesita para ejecutar LTerminal aquí?"; then
-            install_electron_runtime
-            MISSING_RUNTIME_LIBS="$(missing_runtime_libraries "$UNPACKED_EXE")"
-        fi
-    fi
-
-    if [ -n "$MISSING_RUNTIME_LIBS" ]; then
-        warn "Se omite el smoke test local. El AppImage no necesita FUSE 2, pero Electron sí requiere las bibliotecas base de un escritorio Linux."
-    elif command -v xvfb-run >/dev/null 2>&1 && command -v xauth >/dev/null 2>&1; then
-        step "Validando la app empaquetada con xvfb"
-        xvfb-run -a "$UNPACKED_EXE" --smoke-test
-        ok "Electron, renderer y PTY arrancan correctamente"
-    elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
-        step "Validando la app empaquetada"
-        "$UNPACKED_EXE" --smoke-test
-        ok "Electron, renderer y PTY arrancan correctamente"
-    else
-        warn "Sin DISPLAY/WAYLAND o sin el par xvfb-run+xauth: se omite el smoke test gráfico."
-    fi
-fi
-
-# ------------------------------------------------------------------
-# 5. Releases versionadas (.tar.gz)
-# ------------------------------------------------------------------
-step "Creando releases TAR.GZ"
-RELEASE_DIR="$ELECTRON_DIR/dist/release"
-mkdir -p "$RELEASE_DIR"
-
-if command -v tar >/dev/null 2>&1; then
-    APPIMAGE_RELEASE="$RELEASE_DIR/LTerminal-AppImage-$VERSION-$(uname -m).tar.gz"
-    # Los .tar.gz de versiones anteriores seguian en release/ y, como el
-    # archivo existia, su huella sobrevivia a la fusion de mas abajo:
-    # SHA256SUMS.txt acababa describiendo varias versiones a la vez.
-    for stale in "$RELEASE_DIR"/LTerminal-AppImage-*.tar.gz; do
-        [ -f "$stale" ] || continue
-        [ "$stale" = "$APPIMAGE_RELEASE" ] && continue
-        rm -f "$stale"
-        warn "Release anterior retirada: $(basename "$stale")"
-    done
-    tar -czf "$APPIMAGE_RELEASE" -C "$ELECTRON_DIR/dist" "$(basename "$APPIMAGE_PATH")"
-    ok "Release AppImage: $APPIMAGE_RELEASE"
-    if command -v sha256sum >/dev/null 2>&1; then
-        # Linux y Windows publican en la MISMA carpeta release. Truncar el
-        # archivo borraba las huellas de la otra plataforma: se conservan las
-        # lineas ajenas cuyo archivo sigue existiendo y solo se regeneran las
-        # propias.
-        (
-            cd "$RELEASE_DIR"
-            own_appimage="$(basename "$APPIMAGE_RELEASE")"
-            merged="$(mktemp)"
-            if [ -f SHA256SUMS.txt ]; then
-                while IFS= read -r line; do
-                    [ -n "$line" ] || continue
-                    # "<hash> *nombre" (binario) o "<hash>  nombre" (texto).
-                    name="${line#* }"
-                    name="${name# }"
-                    name="${name#\*}"
-                    case "$name" in
-                        "$own_appimage") continue ;;
-                    esac
-                    if [ -f "$name" ]; then printf '%s\n' "$line"; fi
-                done < SHA256SUMS.txt > "$merged"
-            fi
-            sha256sum "$own_appimage" >> "$merged"
-            sort -k2 "$merged" > SHA256SUMS.txt
-            rm -f "$merged"
-        )
-        ok "Huellas SHA-256: $RELEASE_DIR/SHA256SUMS.txt"
-
-        # Publicar una huella sin comprobarla es publicar una promesa. Se
-        # verifica exactamente igual que hara quien descargue la release.
-        step "Verificando SHA256SUMS.txt contra los archivos publicados"
-        if ! (cd "$RELEASE_DIR" && sha256sum -c --strict SHA256SUMS.txt); then
-            err "Las huellas no coinciden con los archivos publicados."
-            exit 1
-        fi
-        ok "Huellas verificadas"
-    else
-        warn "No se encontró sha256sum; los TAR.GZ se crearon sin fichero de huellas."
-    fi
+# ---------------------------------------------------------------------------
+# 4. Comprobaciones
+# ---------------------------------------------------------------------------
+# Compilar una release que no pasa sus propias pruebas no tiene sentido: se
+# tarda más en descubrirlo después que en comprobarlo aquí.
+if [ "$SKIP_CHECKS" -eq 0 ]; then
+    step "Comprobando tipos, formato, clippy y pruebas"
+    npm run check
+    ok "Todo verde"
 else
-    warn "No se encontro tar; la app se genero, pero no se pudieron crear los archivos .tar.gz."
+    warn "Comprobaciones saltadas por petición (--skip-checks)"
 fi
 
-# ------------------------------------------------------------------
-# 6. Acceso directo al AppImage
-# ------------------------------------------------------------------
-create_desktop_entry() {
-    local target="$1"
-    local file="$2"
-    {
-        echo '[Desktop Entry]'
-        echo 'Type=Application'
-        echo 'Name=LTerminal'
-        echo 'GenericName=Terminal Emulator'
-        echo 'Comment=Terminal multipestaña y centro local de herramientas'
-        printf 'Exec="%s"\n' "$target"
-        printf 'TryExec=%s\n' "$target"
-        echo "Icon=$ELECTRON_DIR/build/icon.png"
-        echo 'Terminal=false'
-        echo 'Categories=Utility;TerminalEmulator;Development;'
-        echo 'StartupWMClass=lterminal'
-    } > "$file"
-    chmod +x "$file"
-}
+# ---------------------------------------------------------------------------
+# 5. Compilación
+# ---------------------------------------------------------------------------
+step "Compilando el AppImage"
+# El objetivo sale de tauri.linux.conf.json (`targets: ["appimage"]`), así que
+# no hace falta pasarlo aquí: la configuración es la que manda y así no pueden
+# discrepar.
+npm run tauri -- build
 
-step "Creando acceso directo"
-create_desktop_entry "$APPIMAGE_PATH" "$PROJECT_ROOT/LTerminal.desktop"
-
-DESKTOP_DIR=""
-if command -v xdg-user-dir >/dev/null 2>&1; then
-    DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
-elif [ -d "$HOME/Desktop" ]; then
-    DESKTOP_DIR="$HOME/Desktop"
+APPIMAGE="$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)"
+if [ -z "$APPIMAGE" ]; then
+    err "La compilación terminó pero no hay ningún AppImage en $BUNDLE_DIR."
+    exit 1
 fi
-if [ -n "$DESKTOP_DIR" ] && [ -d "$DESKTOP_DIR" ]; then
-    create_desktop_entry "$APPIMAGE_PATH" "$DESKTOP_DIR/LTerminal.desktop"
-fi
-ok "Acceso directo creado"
+chmod +x "$APPIMAGE"
+APPIMAGE_MB="$(( $(stat -c '%s' "$APPIMAGE") / 1024 / 1024 ))"
+ok "AppImage: $APPIMAGE (${APPIMAGE_MB} MB)"
 
-# ------------------------------------------------------------------
-# 7. Ejecutar la app
-# ------------------------------------------------------------------
-if [ "$NO_RUN" -eq 0 ]; then
-    if [ -n "${MISSING_RUNTIME_LIBS:-}" ]; then
-        warn "LTerminal no se inicia en este host porque aún faltan bibliotecas de escritorio; la distribución sí se generó correctamente."
+# Que la build produzca SOLO el AppImage no es un detalle estético: un .deb o un
+# .rpm que se cuelen acabarían publicados en la release sin que nadie los haya
+# pedido ni probado.
+UNEXPECTED="$(find "$TAURI_DIR/target/release/bundle" -maxdepth 2 \
+    \( -name '*.deb' -o -name '*.rpm' \) -print 2>/dev/null || true)"
+if [ -n "$UNEXPECTED" ]; then
+    err "La build ha generado artefactos que no debía:"
+    echo "$UNEXPECTED" >&2
+    echo "    Revisa bundle.targets en src-tauri/tauri.linux.conf.json." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Comprobación de humo
+# ---------------------------------------------------------------------------
+# Que compile no significa que arranque. Sin servidor gráfico no se puede
+# comprobar, y eso no es un fallo de la build: se avisa y se sigue.
+step "Comprobación de humo"
+
+# Un AppImage se monta con FUSE 2, que las distribuciones recientes ya no
+# instalan de serie. Sin él no arranca ni el «hola mundo», y el error
+# ("dlopen(): error loading libfuse.so.2") parece un fallo de la app cuando no
+# lo es. El propio runtime sabe descomprimirse en /tmp y ejecutarse desde ahí:
+# es lo mismo que hace `--appimage-extract-and-run`.
+if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1; then
+    warn "No hay FUSE instalado: el AppImage se ejecutará descomprimiéndose (APPIMAGE_EXTRACT_AND_RUN)."
+    warn "Quien lo descargue necesitará FUSE 2, o lanzarlo con --appimage-extract-and-run."
+    export APPIMAGE_EXTRACT_AND_RUN=1
+fi
+
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    warn "Sin servidor gráfico: no se puede comprobar que arranque. El AppImage sí se generó."
+else
+    SMOKE_LOG="$(mktemp)"
+    "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
+    SMOKE_PID=$!
+    sleep 6
+    if kill -0 "$SMOKE_PID" 2>/dev/null; then
+        kill "$SMOKE_PID" 2>/dev/null || true
+        ok "Arranca y se mantiene abierto"
+        rm -f "$SMOKE_LOG"
     else
-        step "Lanzando LTerminal"
-        "$APPIMAGE_PATH" >/dev/null 2>&1 &
-        disown
+        err "La aplicación se cerró sola. Revisa el log en ~/.config/lterminal/logs."
+        # Antes se mandaba su salida a /dev/null, así que la causa —que casi
+        # siempre viene impresa aquí— se perdía justo cuando hacía falta.
+        if [ -s "$SMOKE_LOG" ]; then
+            echo "    Salida de la aplicación:" >&2
+            sed 's/^/      /' "$SMOKE_LOG" >&2
+        fi
+        rm -f "$SMOKE_LOG"
+        exit 1
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Release
+# ---------------------------------------------------------------------------
+# El nombre importa: es el que busca el actualizador de la propia app al elegir
+# el adjunto de la release (ver self_update::asset_for_platform, que se queda
+# con el .AppImage que no mencione otra plataforma).
+step "Publicando la release y su huella"
+# NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build.
+RELEASE_DIR="$PROJECT_ROOT/release"
+mkdir -p "$RELEASE_DIR"
+RELEASE_NAME="LTerminal-$VERSION-$(uname -m).AppImage"
+# Los de versiones anteriores se quedaban y SHA256SUMS acababa listando varias.
+rm -f "$RELEASE_DIR"/LTerminal-*.AppImage
+cp "$APPIMAGE" "$RELEASE_DIR/$RELEASE_NAME"
+chmod +x "$RELEASE_DIR/$RELEASE_NAME"
+
+( cd "$RELEASE_DIR" && sha256sum "$RELEASE_NAME" > SHA256SUMS.txt )
+ok "Release: $RELEASE_DIR/$RELEASE_NAME"
+ok "SHA256: $(cut -d' ' -f1 < "$RELEASE_DIR/SHA256SUMS.txt")"
+
+if [ "$NO_RUN" -eq 0 ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+    step "Lanzando LTerminal"
+    "$RELEASE_DIR/$RELEASE_NAME" >/dev/null 2>&1 &
+    disown
 fi
 
 echo
-echo -e "\033[32mListo. LTerminal AppImage generado en: $APPIMAGE_PATH\033[0m"
+printf '\033[32mListo. LTerminal %s compilado y verificado.\033[0m\n' "$VERSION"
+echo "  AppImage: $RELEASE_DIR/$RELEASE_NAME"

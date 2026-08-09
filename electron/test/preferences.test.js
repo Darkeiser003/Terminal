@@ -34,10 +34,15 @@ test('limita números y descarta identificadores de entorno peligrosos', () => {
     assert.equal(preferences.terminalScrollback, 100000);
     assert.equal(preferences.accentColor, THEME_PRESETS[0].palette.accent);
     assert.equal(preferences.terminalBackground, '#abcdef');
-    assert.equal(preferences.terminalCursorStyle, DEFAULT_PREFERENCES.terminalCursorStyle);
+    assert.equal(preferences.terminalCursorStyle, 'beam');
     assert.equal(preferences.terminalFontFamily, FONT_FAMILIES[0].id);
     assert.equal(preferences.uiDensity, DEFAULT_PREFERENCES.uiDensity);
     assert.equal(preferences.defaultEnvironmentId, '');
+});
+
+test('acepta los nuevos estilos de cursor compatibles con xterm', () => {
+    assert.equal(sanitizePreferences({ terminalCursorStyle: 'beam' }).terminalCursorStyle, 'beam');
+    assert.equal(sanitizePreferences({ terminalCursorStyle: 'underline-thick' }).terminalCursorStyle, 'underline-thick');
 });
 
 test('cada tema y fuente expuestos producen preferencias válidas', () => {

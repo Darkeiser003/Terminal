@@ -24,6 +24,99 @@ function formatUptime(seconds) {
     return parts.join(' ');
 }
 
+function formatDateTime(date) {
+    const pad = (value) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function estimateOsAge() {
+    const candidates = [
+        process.platform === 'win32' ? process.env.SystemRoot || 'C:\\Windows' : '/',
+        '/etc/os-release',
+        '/var/log/installer',
+        '/var/log/pacman.log',
+        '/var/log/apt/history.log',
+        '/var/log/dpkg.log'
+    ];
+    for (const candidate of candidates) {
+        try {
+            const stat = fs.statSync(candidate);
+            const time = stat.birthtimeMs || stat.ctimeMs;
+            if (time && time > 0 && Date.now() > time) {
+                return Math.floor((Date.now() - time) / 1000);
+            }
+        } catch (e) {
+            continue;
+        }
+    }
+    return null;
+}
+
+function readGpuModel() {
+    try {
+        if (process.platform === 'win32') {
+            const output = execFileSync('wmic', ['path', 'win32_VideoController', 'get', 'name'], {
+                encoding: 'utf8', windowsHide: true, timeout: 3000, stdio: ['ignore', 'pipe', 'ignore']
+            });
+            const lines = output.split('\n').map((line) => line.trim()).filter(Boolean);
+            return lines.length > 1 ? lines[1] : lines[0] || '';
+        }
+
+        if (process.platform === 'darwin') {
+            const output = execFileSync('system_profiler', ['SPDisplaysDataType'], {
+                encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore']
+            });
+            const match = output.match(/Chipset Model:\s*(.+)/i) || output.match(/Graphics:\s*(.+)/i);
+            return match ? match[1].trim() : '';
+        }
+
+        const output = execFileSync('sh', ['-c', 'command -v lspci >/dev/null 2>&1 && lspci -mm | grep -Ei "vga|3d|display" | head -n 1'], {
+            encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        if (!output) return '';
+        const parts = output.split('\t').slice(2);
+        return parts.join(' ').trim() || output.replace(/.*?:\s*/, '').replace(/\s*\[.*\]$/, '').trim();
+    } catch (e) {
+        return '';
+    }
+}
+
+function readLinuxDisks() {
+    try {
+        const mounts = new Set(['/']);
+        const entries = fs.readFileSync('/proc/mounts', 'utf8').split('\n');
+        for (const line of entries) {
+            const parts = line.split(' ');
+            if (parts.length < 3) continue;
+            const mount = parts[1];
+            const type = parts[2];
+            if (!/^ext|^xfs|^btrfs|^vfat|^ntfs|^fuse|^zfs/.test(type)) continue;
+            if (mount === '/' || mount.startsWith('/mnt') || mount.startsWith('/run/media')) {
+                mounts.add(mount);
+                if (mounts.size >= 4) break;
+            }
+        }
+        const paths = Array.from(mounts);
+        if (!paths.length) return [];
+        const output = execFileSync('df', ['-k', '-x', 'tmpfs', '-x', 'devtmpfs', ...paths], {
+            encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore']
+        });
+        return output.split('\n').slice(1).map((line) => {
+            const match = line.match(/^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+%)\s+(.+)$/);
+            if (!match) return null;
+            const [, , totalKb, usedKb, availKb, usedPct, mount] = match;
+            return {
+                mount,
+                used: Number(usedKb) * 1024,
+                total: Number(totalKb) * 1024,
+                usedPct
+            };
+        }).filter(Boolean);
+    } catch (e) {
+        return [];
+    }
+}
+
 const C = { reset: '\x1b[0m', cyan: '\x1b[36m', bold: '\x1b[1m', dim: '\x1b[2m' };
 
 // ---- Identidad real del sistema ----
@@ -194,27 +287,66 @@ function buildBanner(envLabel, appName, t) {
             ? `NT ${os.release()}${identity.build ? ' · build ' + identity.build : ''}`
             : `${os.type()} ${os.release()}`;
 
-        const rows = [
-            [tr('banner.user', null, 'Usuario'), `${username}@${os.hostname()}`],
+        const gpuModel = readGpuModel();
+        const diskRows = process.platform === 'linux' ? readLinuxDisks() : [];
+        const diskLines = diskRows.length
+            ? diskRows.map((disk) => [`${disk.mount}`, `${formatBytes(disk.used)} / ${formatBytes(disk.total)} (${disk.usedPct})`])
+            : [];
+
+        const softwareRows = [
+            [tr('banner.user', null, 'Usuario'), username],
             [tr('banner.system', null, 'Sistema'), `${identity.name} (${os.arch()})`]
         ];
-        if (identity.brand) rows.push([tr('banner.edition', null, 'Edición'), identity.brand]);
-        rows.push(
+        if (identity.brand) softwareRows.push([tr('banner.edition', null, 'Edición'), identity.brand]);
+        softwareRows.push(
             [tr('banner.kernel', null, 'Kernel'), kernel],
-            [tr('banner.environment', null, 'Entorno'), envLabel || tr('banner.unknown', null, 'desconocido')],
-            ['CPU', `${cpuModel} (${tr('banner.cores', { count: cpus.length || '?' }, '{count} núcleos')})`],
-            [tr('banner.memory', null, 'Memoria'), `${formatBytes(totalMem - freeMem)} / ${formatBytes(totalMem)}`],
-            [tr('banner.uptime', null, 'Uptime'), formatUptime(os.uptime())],
-            [displayName, appVersion()]
+            [tr('banner.environment', null, 'Entorno'), envLabel || tr('banner.unknown', null, 'desconocido')]
         );
 
-        const labelWidth = Math.max(...rows.map(([label]) => label.length));
-        const divider = C.dim + '─'.repeat(46) + C.reset;
-        const lines = rows.map(([label, value]) => `${C.cyan}${label.padEnd(labelWidth)}${C.reset}  ${value}`);
+        const hardwareRows = [
+            [tr('banner.pc', null, 'PC'), os.hostname()],
+            [tr('banner.cpu', null, 'CPU'), `${cpuModel} (${tr('banner.cores', { count: cpus.length || '?' }, '{count} núcleos')})`],
+            [tr('banner.gpu', null, 'GPU'), gpuModel || tr('banner.unknown', null, 'desconocido')],
+            [tr('banner.memory', null, 'Memoria'), `${formatBytes(totalMem - freeMem)} / ${formatBytes(totalMem)} (${Math.round(((totalMem - freeMem) / totalMem) * 100)}%)`]
+        ];
+        if (diskLines.length) hardwareRows.push(...diskLines);
 
-        return `${C.bold}${C.cyan}${displayName}${C.reset}\r\n${divider}\r\n` +
-            lines.join('\r\n') + `\r\n${divider}\r\n`;
+        const uptimeRows = [];
+        const osAge = estimateOsAge();
+        if (osAge !== null) uptimeRows.push([tr('banner.osAge', null, 'Edad del SO'), formatUptime(osAge)]);
+        uptimeRows.push([tr('banner.uptime', null, 'Uptime'), formatUptime(os.uptime())]);
+        uptimeRows.push([tr('banner.datetime', null, 'Fecha y hora'), formatDateTime(new Date())]);
+
+        const allRows = [...hardwareRows, ...softwareRows, ...uptimeRows];
+        const contentWidth = Math.max(
+            46,
+            ...allRows.map(([label, value]) => label.length + 2 + value.length),
+            tr('banner.hardware', null, 'Hardware').length + 4,
+            tr('banner.software', null, 'Software').length + 4,
+            tr('banner.uptimeAge', null, 'Uptime / Age / DT').length + 4
+        );
+
+        function sectionBox(title, rows) {
+            const titleText = ` ${title} `;
+            const totalWidth = Math.max(contentWidth + 4, titleText.length + 2);
+            const top = '┌' + '─'.repeat(totalWidth - titleText.length - 2) + titleText + '┐';
+            const bottom = '└' + '─'.repeat(totalWidth - 2) + '┘';
+            const labelWidth = Math.max(...rows.map(([label]) => label.length));
+            const lines = rows.map(([label, value]) => {
+                const padded = `${C.cyan}${label.padEnd(labelWidth)}${C.reset}  ${value}`;
+                const rawLength = label.length + 2 + value.length;
+                return '│ ' + padded + ' '.repeat(totalWidth - rawLength - 4) + ' │';
+            });
+            return [top, ...lines, bottom].join('\r\n');
+        }
+
+        return [
+            sectionBox(tr('banner.hardware', null, 'Hardware'), hardwareRows),
+            sectionBox(tr('banner.software', null, 'Software'), softwareRows),
+            sectionBox(tr('banner.uptimeAge', null, 'Uptime / Age / DT'), uptimeRows)
+        ].join('\r\n') + '\r\n';
     } catch (e) {
+        console.error('buildBanner error:', e && e.stack ? e.stack : e);
         return `${C.bold}${C.cyan}${displayName}${C.reset}\r\n`;
     }
 }

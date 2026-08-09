@@ -11,6 +11,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { validateBuildConfig } = require('../scripts/validate-build-config');
+const { version } = require('../package.json');
 
 const projectRoot = path.join(__dirname, '..', '..');
 const windowsBuild = fs.readFileSync(path.join(projectRoot, 'windows', 'build.ps1'), 'utf8');
@@ -139,8 +140,8 @@ test('compilar una plataforma no borra las huellas de la otra', (t) => {
         fs.writeFileSync(sumsPath, merged.join('\n') + '\n');
     };
 
-    const winZip = 'WinSlimTerminal-Unpacked-1.4.1.zip';
-    const linuxTar = 'LTerminal-AppImage-1.4.1-x86_64.tar.gz';
+    const winZip = `WinSlimTerminal-Unpacked-${version}.zip`;
+    const linuxTar = `LTerminal-AppImage-${version}-x86_64.tar.gz`;
     fs.writeFileSync(path.join(releaseDir, winZip), 'contenido windows');
     publish(winZip);
     assert.deepEqual(fs.readFileSync(sumsPath, 'utf8').trim().split('\n').length, 1);

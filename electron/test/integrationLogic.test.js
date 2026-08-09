@@ -2,7 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { clearCommand, buildInitScript } = require('../main/aliasProfiles');
 const { buildLaunchCommand, buildCdCommand, environmentKindsForScript, SCRIPT_TYPES } = require('../main/scriptLauncher');
-const { parseInstalledDistros, parseOnlineDistros } = require('../main/wslEnv');
+const { parseInstalledDistros, parseOnlineDistros, getWslContext, resetWslStateForTests, setTestPlatform } = require('../main/wslEnv');
+const childProcess = require('child_process');
 const { resolveToolSuggestion } = require('../main/commandNotFound');
 const { getInstallActions } = require('../main/installActions');
 const { isGitBashPath } = require('../main/shellDetect');
@@ -141,4 +142,31 @@ test('las sugerencias WSL apuntan a acciones de instalación existentes', () => 
         assert.ok(suggestion, `debe reconocer ${tool}`);
         assert.ok(ids.has(suggestion.actionId), `${suggestion.actionId} debe existir`);
     });
+});
+
+test('falla la detección WSL fría y reintenta arrancar WSL', async () => {
+    const originalExecFileSync = childProcess.execFileSync;
+    resetWslStateForTests();
+    setTestPlatform('win32');
+
+    let listCalls = 0;
+    childProcess.execFileSync = (file, args, options) => {
+        if (file === 'wsl.exe' && args[0] === '--list' && args[1] === '--quiet') {
+            listCalls += 1;
+            if (listCalls === 1) throw new Error('WSL cold');
+            return Buffer.from('Ubuntu\n');
+        }
+        if (file === 'wsl.exe' && args[0] === '--status') {
+            return Buffer.from('Running\n');
+        }
+        return originalExecFileSync(file, args, options);
+    };
+
+    const context = getWslContext();
+    assert.equal(context.available, true);
+    assert.equal(context.installed.length, 1);
+    assert.equal(listCalls, 2);
+
+    childProcess.execFileSync = originalExecFileSync;
+    resetWslStateForTests();
 });

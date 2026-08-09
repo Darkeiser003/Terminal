@@ -12,14 +12,14 @@ const {
 // descarta lo demás, en vez de pasárselo entero al renderer.
 test('una release se reduce a campos explícitos', () => {
     const release = sanitizeRelease({
-        tag_name: 'v1.4.1',
-        name: 'LTerminal 1.4.1',
+        tag_name: 'v1.4.2',
+        name: 'LTerminal 1.4.2',
         published_at: '2026-08-06T10:00:00Z',
-        html_url: 'https://github.com/owner/repo/releases/tag/v1.4.1',
+        html_url: 'https://github.com/owner/repo/releases/tag/v1.4.2',
         prerelease: false,
-        zipball_url: 'https://api.github.com/repos/owner/repo/zipball/v1.4.1',
+        zipball_url: 'https://api.github.com/repos/owner/repo/zipball/v1.4.2',
         assets: [
-            { name: 'app-x64.tar.gz', browser_download_url: 'https://github.com/owner/repo/releases/download/v1.4.1/app-x64.tar.gz', size: 1024, download_count: 7 },
+            { name: 'app-x64.tar.gz', browser_download_url: 'https://github.com/owner/repo/releases/download/v1.4.2/app-x64.tar.gz', size: 1024, download_count: 7 },
             { name: 'app.exe', browser_download_url: 'https://objects.githubusercontent.com/x/app.exe', size: 2048 }
         ],
         // Campos que no se piden y no deben viajar al renderer.
@@ -27,7 +27,7 @@ test('una release se reduce a campos explícitos', () => {
         upload_url: 'https://uploads.github.com/...'
     });
 
-    assert.equal(release.tag, 'v1.4.1');
+    assert.equal(release.tag, 'v1.4.2');
     assert.equal(release.assets.length, 2);
     assert.equal(release.assets[0].archive, 'tar');
     assert.equal(release.assets[0].downloads, 7);

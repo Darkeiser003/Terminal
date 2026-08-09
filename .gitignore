@@ -1,1 +1,9 @@
-.git
+# Dependencias y salidas de compilación
+node_modules/
+dist/
+release/
+*.log
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/

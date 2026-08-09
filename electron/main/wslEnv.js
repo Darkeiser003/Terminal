@@ -3,10 +3,11 @@
 // instalación: distros instaladas, catálogo online, shell predeterminada,
 // gestor de paquetes y herramientas ya presentes dentro de cada distro.
 
-const { execFile, execFileSync } = require('child_process');
+const childProcess = require('child_process');
 
 const INTERNAL_DISTROS = new Set(['docker-desktop', 'docker-desktop-data']);
 const KNOWN_SHELLS = new Set(['bash', 'zsh', 'fish', 'sh']);
+let testPlatform = null;
 const FALLBACK_ONLINE = [
     { name: 'Ubuntu', friendlyName: 'Ubuntu' },
     { name: 'Debian', friendlyName: 'Debian GNU/Linux' },
@@ -29,7 +30,7 @@ function decodeWslOutput(buffer) {
 
 function runWsl(args, timeout) {
     try {
-        const output = execFileSync('wsl.exe', args, {
+        const output = childProcess.execFileSync('wsl.exe', args, {
             stdio: ['ignore', 'pipe', 'ignore'],
             windowsHide: true,
             timeout: timeout || 5000
@@ -42,7 +43,7 @@ function runWsl(args, timeout) {
 
 function runWslAsync(args, timeout) {
     return new Promise((resolve) => {
-        execFile('wsl.exe', args, {
+        childProcess.execFile('wsl.exe', args, {
             stdio: ['ignore', 'pipe', 'ignore'],
             windowsHide: true,
             timeout: timeout || 5000,
@@ -52,6 +53,22 @@ function runWslAsync(args, timeout) {
             resolve(decodeWslOutput(stdout).trim());
         });
     });
+}
+
+function isWindowsPlatform() {
+    return (testPlatform !== null ? testPlatform : process.platform) === 'win32';
+}
+
+function warmWsl(timeout) {
+    if (!isWindowsPlatform()) return false;
+    if (runWsl(['--status'], timeout || 8000) !== null) return true;
+    return runWsl(['--list', '--quiet'], timeout || 8000) !== null;
+}
+
+async function warmWslAsync(timeout) {
+    if (!isWindowsPlatform()) return false;
+    if (await runWslAsync(['--status'], timeout || 8000) !== null) return true;
+    return (await runWslAsync(['--list', '--quiet'], timeout || 8000)) !== null;
 }
 
 function parseInstalledDistros(output) {
@@ -167,7 +184,7 @@ async function probeDistroAsync(name, detailed) {
 }
 
 function getWslContext(options) {
-    if (process.platform !== 'win32') return { available: false, installed: [], online: [] };
+    if (!isWindowsPlatform()) return { available: false, installed: [], online: [] };
     const now = Date.now();
     const needsDetails = !(options && options.details === false);
     // Una sonda fallida es un estado transitorio, no información útil para
@@ -184,7 +201,12 @@ function getWslContext(options) {
         ({ available, installed } = installedCache);
     } else {
         const previousCache = installedCache;
-        const installedOutput = runWsl(['--list', '--quiet'], 5000);
+        let installedOutput = runWsl(['--list', '--quiet'], 5000);
+        if (installedOutput === null) {
+            if (warmWsl(8000)) {
+                installedOutput = runWsl(['--list', '--quiet'], 5000);
+            }
+        }
         if (installedOutput === null) return { available: false, installed: [], online: [] };
         const names = parseInstalledDistros(installedOutput);
         available = true;
@@ -229,7 +251,7 @@ function getWslContext(options) {
 }
 
 async function buildWslContextAsync(options) {
-    if (process.platform !== 'win32') return { available: false, installed: [], online: [] };
+    if (!isWindowsPlatform()) return { available: false, installed: [], online: [] };
     const now = Date.now();
     const needsDetails = !(options && options.details === false);
     const cacheHasProbeErrors = installedCache
@@ -244,7 +266,12 @@ async function buildWslContextAsync(options) {
         ({ available, installed } = installedCache);
     } else {
         const previousCache = installedCache;
-        const installedOutput = await runWslAsync(['--list', '--quiet'], 5000);
+        let installedOutput = await runWslAsync(['--list', '--quiet'], 5000);
+        if (installedOutput === null) {
+            if (await warmWslAsync(8000)) {
+                installedOutput = await runWslAsync(['--list', '--quiet'], 5000);
+            }
+        }
         if (installedOutput === null) return { available: false, installed: [], online: [] };
         const names = parseInstalledDistros(installedOutput);
         available = true;
@@ -271,7 +298,10 @@ async function buildWslContextAsync(options) {
         if (onlineCache && now - onlineCache.at < ONLINE_CACHE_MS) {
             online = onlineCache.online;
         } else {
-            const onlineOutput = await runWslAsync(['--list', '--online'], 8000);
+            let onlineOutput = await runWslAsync(['--list', '--online'], 8000);
+            if (onlineOutput === null && await warmWslAsync(8000)) {
+                onlineOutput = await runWslAsync(['--list', '--online'], 8000);
+            }
             online = parseOnlineDistros(onlineOutput);
             if (!online.length) online = FALLBACK_ONLINE;
             onlineCache = { at: now, online };
@@ -305,5 +335,15 @@ module.exports = {
     getWslContext,
     getWslContextAsync,
     runWslAsync,
-    KNOWN_SHELLS
+    KNOWN_SHELLS,
+    resetWslStateForTests: () => {
+        installedCache = null;
+        onlineCache = null;
+        pendingContexts.clear();
+        contextQueue = Promise.resolve();
+        testPlatform = null;
+    },
+    setTestPlatform: (platform) => {
+        testPlatform = platform;
+    }
 };
