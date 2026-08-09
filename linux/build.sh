@@ -212,67 +212,108 @@ else
     ok "appimagetool presente"
 fi
 
-# --- 1.5.2 Iconos y .desktop (comprobaciones no bloqueantes) ---
+# --- 1.5.2 Verificar todas las rutas de configuración ---
 TAURI_CONF="$TAURI_DIR/tauri.conf.json"
 LINUX_CONF="$TAURI_DIR/tauri.linux.conf.json"
 
-# Función para extraer un valor JSON usando node
+# Función para extraer valores JSON con node
 get_json_value() {
     local file="$1"
     local key="$2"
     node -p "try { require('$file').$key } catch(e) { '' }" 2>/dev/null || echo ""
 }
 
-if [ -f "$TAURI_CONF" ]; then
-    # Carpeta de iconos
-    ICON_DIR="$(get_json_value "$TAURI_CONF" 'tauri.bundle.icon')"
-    if [ -z "$ICON_DIR" ] || [ "$ICON_DIR" = "''" ]; then
-        ICON_DIR="icons"  # valor por defecto en Tauri
-    fi
-    if [[ "$ICON_DIR" != /* ]]; then
-        ICON_DIR="$PROJECT_ROOT/$ICON_DIR"
-    fi
-
-    if [ -d "$ICON_DIR" ]; then
-        PNG_COUNT=$(find "$ICON_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)
-        if [ "$PNG_COUNT" -gt 0 ]; then
-            ok "Iconos encontrados en $ICON_DIR ($PNG_COUNT PNGs)"
-        else
-            warn "No se encontraron iconos PNG en $ICON_DIR. Tauri usará el icono por defecto."
-        fi
-    else
-        warn "La carpeta de iconos '$ICON_DIR' no existe. Tauri usará el icono por defecto."
-        # Intentar generarlos si existe app-icon.png en la raíz
-        if [ -f "$PROJECT_ROOT/app-icon.png" ]; then
-            warn "Se detecta app-icon.png. Ejecutando 'npm run tauri icon' para generar los iconos..."
-            npm run tauri -- icon "$PROJECT_ROOT/app-icon.png" || warn "Fallo al generar iconos; se continúa."
-        fi
-    fi
-
-    # Archivo .desktop (solo aviso si falta)
-    DESKTOP_FILE=""
-    if [ -f "$LINUX_CONF" ]; then
-        DESKTOP_FILE="$(get_json_value "$LINUX_CONF" 'tauri.bundle.linux.desktop')"
-    fi
-    if [ -z "$DESKTOP_FILE" ] || [ "$DESKTOP_FILE" = "''" ]; then
-        DESKTOP_FILE="$(get_json_value "$TAURI_CONF" 'tauri.bundle.linux.desktop')"
-    fi
-    if [ -z "$DESKTOP_FILE" ] || [ "$DESKTOP_FILE" = "''" ]; then
-        warn "No se especifica archivo .desktop; Tauri lo generará automáticamente."
-    else
-        if [[ "$DESKTOP_FILE" != /* ]]; then
-            DESKTOP_FILE="$PROJECT_ROOT/$DESKTOP_FILE"
-        fi
-        if [ -f "$DESKTOP_FILE" ]; then
-            ok "Archivo .desktop encontrado: $DESKTOP_FILE"
-        else
-            warn "El archivo .desktop especificado no existe: $DESKTOP_FILE. Tauri lo generará por defecto."
-        fi
-    fi
-else
+if [ ! -f "$TAURI_CONF" ]; then
     err "No se encontró $TAURI_CONF"
     exit 1
 fi
+
+# Función para verificar que una ruta (relativa o absoluta) existe
+check_path() {
+    local path="$1"
+    local desc="$2"
+    if [[ "$path" != /* ]]; then
+        path="$PROJECT_ROOT/$path"
+    fi
+    if [ -e "$path" ]; then
+        ok "$desc: $path"
+        return 0
+    else
+        warn "$desc: $path no existe"
+        return 1
+    fi
+}
+
+# --- Iconos ---
+ICON_DIR="$(get_json_value "$TAURI_CONF" 'tauri.bundle.icon')"
+if [ -z "$ICON_DIR" ] || [ "$ICON_DIR" = "''" ]; then
+    ICON_DIR="icons"
+fi
+if [[ "$ICON_DIR" != /* ]]; then
+    ICON_DIR="$PROJECT_ROOT/$ICON_DIR"
+fi
+if [ -d "$ICON_DIR" ]; then
+    PNG_COUNT=$(find "$ICON_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)
+    if [ "$PNG_COUNT" -gt 0 ]; then
+        ok "Iconos encontrados en $ICON_DIR ($PNG_COUNT PNGs)"
+    else
+        warn "No hay iconos PNG en $ICON_DIR. Se generará un icono por defecto."
+        mkdir -p "$ICON_DIR"
+        # Crear un icono simple de 128x128 usando convert si está disponible, o fallar con un aviso
+        if command -v convert >/dev/null 2>&1; then
+            convert -size 128x128 xc:red "$ICON_DIR/icon-128x128@2x.png" 2>/dev/null || true
+        fi
+    fi
+else
+    warn "La carpeta de iconos '$ICON_DIR' no existe. Se creará y se pondrá un icono genérico."
+    mkdir -p "$ICON_DIR"
+    if command -v convert >/dev/null 2>&1; then
+        convert -size 128x128 xc:red "$ICON_DIR/icon-128x128@2x.png" 2>/dev/null || true
+    fi
+fi
+
+# --- Archivo .desktop ---
+DESKTOP_FILE=""
+if [ -f "$LINUX_CONF" ]; then
+    DESKTOP_FILE="$(get_json_value "$LINUX_CONF" 'tauri.bundle.linux.desktop')"
+fi
+if [ -z "$DESKTOP_FILE" ] || [ "$DESKTOP_FILE" = "''" ]; then
+    DESKTOP_FILE="$(get_json_value "$TAURI_CONF" 'tauri.bundle.linux.desktop')"
+fi
+if [ -z "$DESKTOP_FILE" ] || [ "$DESKTOP_FILE" = "''" ]; then
+    warn "No se especifica archivo .desktop; Tauri lo generará automáticamente."
+else
+    if [[ "$DESKTOP_FILE" != /* ]]; then
+        DESKTOP_FILE="$PROJECT_ROOT/$DESKTOP_FILE"
+    fi
+    if [ -f "$DESKTOP_FILE" ]; then
+        ok "Archivo .desktop encontrado: $DESKTOP_FILE"
+    else
+        warn "El archivo .desktop especificado no existe: $DESKTOP_FILE. Tauri lo generará por defecto."
+    fi
+fi
+
+# --- Otras rutas (appimage, etc.) ---
+# No hay muchas más rutas en la configuración estándar, pero podemos buscar cualquier otra referencia a archivos en tauri.bundle
+# Por ejemplo, si hay "appimage" con "template" o "bundle" con "resources"
+# Nos limitamos a las más comunes.
+
+# --- Verificar permisos y existencia del directorio de salida ---
+BUNDLE_OUTPUT="$TAURI_DIR/target/release/bundle"
+mkdir -p "$BUNDLE_OUTPUT" 2>/dev/null || true
+if [ -d "$BUNDLE_OUTPUT" ]; then
+    ok "Directorio de salida del bundle: $BUNDLE_OUTPUT"
+    # Limpiar para evitar residuos de builds anteriores
+    if [ -d "$BUNDLE_OUTPUT/appimage" ]; then
+        warn "Eliminando restos de bundling anterior..."
+        rm -rf "$BUNDLE_OUTPUT/appimage"
+    fi
+else
+    err "No se puede crear el directorio $BUNDLE_OUTPUT. Revisa permisos."
+    exit 1
+fi
+
+# --- Aseguramos que el binario compilado (aún no existe) será ejecutable, pero eso lo hará Tauri ---
 
 # ---------------------------------------------------------------------------
 # 2. Nada en marcha que estorbe
@@ -340,10 +381,9 @@ fi
 # 5. Compilación
 # ---------------------------------------------------------------------------
 step "Compilando el AppImage"
-# El objetivo sale de tauri.linux.conf.json (`targets: ["appimage"]`), así que
-# no hace falta pasarlo aquí: la configuración es la que manda y así no pueden
-# discrepar.
-npm run tauri -- build
+# npm run tauri -- build
+# Reemplázala por:
+npm run tauri -- build --verbose
 
 APPIMAGE="$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)"
 if [ -z "$APPIMAGE" ]; then
