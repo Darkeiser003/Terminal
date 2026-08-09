@@ -187,6 +187,94 @@ VERSION="$(node -p "require('./package.json').version")"
 ok "Versión a compilar: $VERSION"
 
 # ---------------------------------------------------------------------------
+# 1.5 Recursos para el AppImage
+# ---------------------------------------------------------------------------
+step "Comprobando recursos para el AppImage"
+
+# --- 1.5.1 appimagetool ---
+APPIMAGETOOL="appimagetool"
+if ! command -v "$APPIMAGETOOL" >/dev/null 2>&1; then
+    warn "$APPIMAGETOOL no está en el PATH. Se intenta descargar automáticamente..."
+    mkdir -p "$HOME/.local/bin"
+    DOWNLOAD_URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+    TARGET="$HOME/.local/bin/appimagetool"
+    if curl -L --fail --progress-bar "$DOWNLOAD_URL" -o "$TARGET" && chmod +x "$TARGET"; then
+        add_to_path "$HOME/.local/bin"
+        ok "appimagetool descargado en $TARGET"
+    else
+        err "No se pudo descargar appimagetool automáticamente."
+        echo "    Descárgalo manualmente desde:" >&2
+        echo "    $DOWNLOAD_URL" >&2
+        echo "    y ponlo en una carpeta del PATH (por ejemplo, /usr/local/bin)." >&2
+        exit 1
+    fi
+else
+    ok "appimagetool presente"
+fi
+
+# --- 1.5.2 Iconos y .desktop (comprobaciones no bloqueantes) ---
+TAURI_CONF="$TAURI_DIR/tauri.conf.json"
+LINUX_CONF="$TAURI_DIR/tauri.linux.conf.json"
+
+# Función para extraer un valor JSON usando node
+get_json_value() {
+    local file="$1"
+    local key="$2"
+    node -p "try { require('$file').$key } catch(e) { '' }" 2>/dev/null || echo ""
+}
+
+if [ -f "$TAURI_CONF" ]; then
+    # Carpeta de iconos
+    ICON_DIR="$(get_json_value "$TAURI_CONF" 'tauri.bundle.icon')"
+    if [ -z "$ICON_DIR" ] || [ "$ICON_DIR" = "''" ]; then
+        ICON_DIR="icons"  # valor por defecto en Tauri
+    fi
+    if [[ "$ICON_DIR" != /* ]]; then
+        ICON_DIR="$PROJECT_ROOT/$ICON_DIR"
+    fi
+
+    if [ -d "$ICON_DIR" ]; then
+        PNG_COUNT=$(find "$ICON_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)
+        if [ "$PNG_COUNT" -gt 0 ]; then
+            ok "Iconos encontrados en $ICON_DIR ($PNG_COUNT PNGs)"
+        else
+            warn "No se encontraron iconos PNG en $ICON_DIR. Tauri usará el icono por defecto."
+        fi
+    else
+        warn "La carpeta de iconos '$ICON_DIR' no existe. Tauri usará el icono por defecto."
+        # Intentar generarlos si existe app-icon.png en la raíz
+        if [ -f "$PROJECT_ROOT/app-icon.png" ]; then
+            warn "Se detecta app-icon.png. Ejecutando 'npm run tauri icon' para generar los iconos..."
+            npm run tauri -- icon "$PROJECT_ROOT/app-icon.png" || warn "Fallo al generar iconos; se continúa."
+        fi
+    fi
+
+    # Archivo .desktop (solo aviso si falta)
+    DESKTOP_FILE=""
+    if [ -f "$LINUX_CONF" ]; then
+        DESKTOP_FILE="$(get_json_value "$LINUX_CONF" 'tauri.bundle.linux.desktop')"
+    fi
+    if [ -z "$DESKTOP_FILE" ] || [ "$DESKTOP_FILE" = "''" ]; then
+        DESKTOP_FILE="$(get_json_value "$TAURI_CONF" 'tauri.bundle.linux.desktop')"
+    fi
+    if [ -z "$DESKTOP_FILE" ] || [ "$DESKTOP_FILE" = "''" ]; then
+        warn "No se especifica archivo .desktop; Tauri lo generará automáticamente."
+    else
+        if [[ "$DESKTOP_FILE" != /* ]]; then
+            DESKTOP_FILE="$PROJECT_ROOT/$DESKTOP_FILE"
+        fi
+        if [ -f "$DESKTOP_FILE" ]; then
+            ok "Archivo .desktop encontrado: $DESKTOP_FILE"
+        else
+            warn "El archivo .desktop especificado no existe: $DESKTOP_FILE. Tauri lo generará por defecto."
+        fi
+    fi
+else
+    err "No se encontró $TAURI_CONF"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Nada en marcha que estorbe
 # ---------------------------------------------------------------------------
 # El equivalente del bloque de build.ps1. En Linux borrar un archivo en uso sí

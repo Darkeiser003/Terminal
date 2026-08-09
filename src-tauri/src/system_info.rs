@@ -190,12 +190,15 @@ fn parse_os_release(content: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+#[allow(dead_code)]
 const WIN_NT_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+#[allow(dead_code)]
 const WIN_OEM_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation";
 
 /// Lee los valores de una clave del registro con `reg query`, que viene siempre
 /// con Windows y no necesita ningún módulo nativo. Los REG_DWORD llegan como
 /// "0x1cf9" y se dejan tal cual; quien los quiera como número los convierte.
+#[allow(dead_code)]
 fn reg_values(key: &str) -> Vec<(String, String)> {
     let Some(output) = process::output_text("reg", &["query", key], PROBE_TIMEOUT) else {
         return Vec::new();
@@ -203,6 +206,7 @@ fn reg_values(key: &str) -> Vec<(String, String)> {
     parse_reg_query(&output)
 }
 
+#[allow(dead_code)]
 fn parse_reg_query(output: &str) -> Vec<(String, String)> {
     output
         .lines()
@@ -223,6 +227,7 @@ fn parse_reg_query(output: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn reg_number(value: &str) -> Option<u64> {
     match value
         .strip_prefix("0x")
@@ -564,7 +569,13 @@ const MIN_BOXED_WIDTH: usize = 40;
 /// Si no se sabe el tamaño real de la terminal se supone el clásico de 80.
 const ASSUMED_COLUMNS: usize = 80;
 
-pub fn build_banner(env_label: &str, app_name: &str, columns: u16, t: &Translator) -> String {
+pub fn build_banner(
+    env_label: &str,
+    app_name: &str,
+    columns: u16,
+    tab_count: usize,
+    t: &Translator,
+) -> String {
     let display_name = if app_name.trim().is_empty() {
         "Terminal"
     } else {
@@ -602,6 +613,12 @@ pub fn build_banner(env_label: &str, app_name: &str, columns: u16, t: &Translato
 
     let unknown = t.t("banner.unknown", "desconocido");
 
+    // Con varias pestañas a la vista cada casilla es más pequeña: el banner
+    // completo (GPU, discos, tres cajas) no cabe sin desbordar ni sirve de nada
+    // repetido cuatro veces. Se omiten GPU y discos y se colapsa a una sola
+    // lista plana con lo esencial.
+    let multiple_tabs = tab_count > 1;
+
     let mut hardware = vec![
         (
             t.t("banner.pc", "PC"),
@@ -618,34 +635,38 @@ pub fn build_banner(env_label: &str, app_name: &str, columns: u16, t: &Translato
                 )
             ),
         ),
-        (t.t("banner.gpu", "GPU"), {
+    ];
+    if !multiple_tabs {
+        hardware.push((t.t("banner.gpu", "GPU"), {
             let gpu = read_gpu_model();
             if gpu.is_empty() {
                 unknown.clone()
             } else {
                 gpu
             }
-        }),
-        (
-            t.t("banner.memory", "Memoria"),
-            format!(
-                "{} / {} ({}%)",
-                format_bytes(used_memory),
-                format_bytes(total_memory),
-                used_percent(used_memory, total_memory)
-            ),
+        }));
+    }
+    hardware.push((
+        t.t("banner.memory", "Memoria"),
+        format!(
+            "{} / {} ({}%)",
+            format_bytes(used_memory),
+            format_bytes(total_memory),
+            used_percent(used_memory, total_memory)
         ),
-    ];
-    for disk in read_disks() {
-        hardware.push((
-            disk.mount.clone(),
-            format!(
-                "{} / {} ({}%)",
-                format_bytes(disk.used),
-                format_bytes(disk.total),
-                used_percent(disk.used, disk.total)
-            ),
-        ));
+    ));
+    if !multiple_tabs {
+        for disk in read_disks() {
+            hardware.push((
+                disk.mount.clone(),
+                format!(
+                    "{} / {} ({}%)",
+                    format_bytes(disk.used),
+                    format_bytes(disk.total),
+                    used_percent(disk.used, disk.total)
+                ),
+            ));
+        }
     }
 
     let mut software = vec![
@@ -669,14 +690,18 @@ pub fn build_banner(env_label: &str, app_name: &str, columns: u16, t: &Translato
     ));
 
     let mut uptime_rows = Vec::new();
-    if let Some(age) = estimate_os_age() {
-        uptime_rows.push((t.t("banner.osAge", "Edad del SO"), format_uptime(age)));
+    if !multiple_tabs {
+        if let Some(age) = estimate_os_age() {
+            uptime_rows.push((t.t("banner.osAge", "Edad del SO"), format_uptime(age)));
+        }
     }
     uptime_rows.push((
         t.t("banner.uptime", "Uptime"),
         format_uptime(System::uptime()),
     ));
-    uptime_rows.push((t.t("banner.datetime", "Fecha y hora"), format_now()));
+    if !multiple_tabs {
+        uptime_rows.push((t.t("banner.datetime", "Fecha y hora"), format_now()));
+    }
 
     let hardware_title = t.t("banner.hardware", "Hardware");
     let software_title = t.t("banner.software", "Software");
@@ -715,8 +740,9 @@ pub fn build_banner(env_label: &str, app_name: &str, columns: u16, t: &Translato
     let content_width = std::cmp::min(deseado, disponible.saturating_sub(4));
 
     // Demasiado estrecho para un marco: se enseñan las filas a secas, que es
-    // preferible a tres cajas de puntos suspensivos.
-    if disponible < MIN_BOXED_WIDTH {
+    // preferible a tres cajas de puntos suspensivos. Con varias pestañas
+    // también: una sola lista plana cabe donde tres cajas no cabrían.
+    if disponible < MIN_BOXED_WIDTH || multiple_tabs {
         return plain_rows(
             display_name,
             &[&hardware, &software, &uptime_rows],
@@ -877,7 +903,7 @@ mod tests {
     #[test]
     fn el_banner_real_se_genera_y_lleva_las_tres_secciones() {
         let t = Translator::default();
-        let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, &t);
+        let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, 1, &t);
         assert!(banner.contains("Hardware"), "{banner}");
         assert!(banner.contains("Software"), "{banner}");
         assert!(banner.contains("Entorno"), "{banner}");
@@ -891,7 +917,7 @@ mod tests {
     fn el_banner_abre_con_el_nombre_de_la_terminal() {
         let t = Translator::default();
         for nombre in [crate::identity::WINDOWS.name, crate::identity::LINUX.name] {
-            let banner = build_banner("cmd.exe", nombre, 120, &t);
+            let banner = build_banner("cmd.exe", nombre, 120, 1, &t);
             let primera = crate::current_dir::strip_ansi(banner.lines().next().unwrap());
             assert_eq!(primera.trim(), nombre, "{banner}");
         }
@@ -901,7 +927,13 @@ mod tests {
     /// la izquierda tiene que dejar el nombre dentro del ancho real del marco.
     #[test]
     fn el_nombre_queda_centrado_sobre_las_cajas() {
-        let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, &Translator::default());
+        let banner = build_banner(
+            "cmd.exe",
+            "WinSlim Terminal",
+            120,
+            1,
+            &Translator::default(),
+        );
         let lineas: Vec<String> = banner.lines().map(crate::current_dir::strip_ansi).collect();
         let ancho_caja = lineas
             .iter()
@@ -928,7 +960,7 @@ mod tests {
     fn ninguna_linea_del_banner_pasa_del_ancho_de_la_terminal() {
         let t = Translator::default();
         for columnas in [40u16, 55, 60, 80, 120, 200] {
-            let banner = build_banner("cmd.exe", "WinSlim Terminal", columnas, &t);
+            let banner = build_banner("cmd.exe", "WinSlim Terminal", columnas, 1, &t);
             for linea in banner.lines() {
                 let ancho = crate::current_dir::strip_ansi(linea).chars().count();
                 assert!(
@@ -943,7 +975,7 @@ mod tests {
     /// suspensivos no las lee nadie.
     #[test]
     fn en_una_casilla_muy_estrecha_el_banner_pierde_el_marco() {
-        let banner = build_banner("cmd.exe", "WinSlim Terminal", 30, &Translator::default());
+        let banner = build_banner("cmd.exe", "WinSlim Terminal", 30, 1, &Translator::default());
         assert!(!banner.contains('\u{250c}'), "{banner}");
         // Pero sigue diciendo lo mismo.
         assert!(banner.contains("CPU"), "{banner}");
@@ -960,7 +992,7 @@ mod tests {
     /// cualquiera que volviera a romper el marco.
     #[test]
     fn sin_saber_el_ancho_se_supone_una_terminal_de_ochenta() {
-        let banner = build_banner("cmd.exe", "WinSlim Terminal", 0, &Translator::default());
+        let banner = build_banner("cmd.exe", "WinSlim Terminal", 0, 1, &Translator::default());
         for linea in banner.lines() {
             assert!(
                 crate::current_dir::strip_ansi(linea).chars().count() <= 80,
@@ -980,7 +1012,7 @@ mod tests {
 
     #[test]
     fn el_banner_traducido_usa_las_etiquetas_del_catalogo() {
-        let banner = build_banner("bash", "App", 120, &Translator::new("en"));
+        let banner = build_banner("bash", "App", 120, 1, &Translator::new("en"));
         assert!(banner.contains("Memory"), "{banner}");
         assert!(banner.contains("Environment"), "{banner}");
     }

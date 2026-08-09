@@ -557,8 +557,12 @@ mod tests {
 
     #[test]
     fn el_entorno_por_defecto_cae_al_primero_si_no_encuentra_el_suyo() {
-        let envs = vec![fake("zsh"), fake("fish")];
-        assert_eq!(default_env_id(&envs), Some("zsh".to_string()));
+        // IDs que no coinciden con ningún $SHELL razonable ni con "bash": así
+        // default_env_id no encuentra su shell y cae al primero de la lista.
+        // Usar los ids reales ("zsh", "fish") haría depender el test del SHELL
+        // del sistema y del orden de ejecución de otros tests que lo cambian.
+        let envs = vec![fake("entorno-a"), fake("entorno-b")];
+        assert_eq!(default_env_id(&envs), Some("entorno-a".to_string()));
     }
 
     #[cfg(not(windows))]

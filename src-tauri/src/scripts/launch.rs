@@ -784,65 +784,124 @@ mod tests {
         assert_eq!(q_unix("no'obvio"), "'no'\\''obvio'");
     }
 
-    // ---- PowerShell ----
+    // ---- PowerShell · solo Windows ----
+    // Los .ps1 y la elevación con Start-Process son propios de Windows. En Linux
+    // el equivalente es lanzar un .sh con bash y elevar con sudo.
 
-    #[test]
-    fn un_ps1_se_lanza_saltandose_la_politica_de_ejecucion() {
-        let s = script("a.ps1", ScriptType::Powershell, "C:\\s\\a.ps1");
-        let cmd = build_launch_command(&s, ShellKind::Powershell, false, "", &native()).unwrap();
-        assert_eq!(
-            cmd,
-            "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\s\\a.ps1\""
-        );
+    #[cfg(windows)]
+    mod windows_only {
+        use super::*;
+
+        #[test]
+        fn un_ps1_se_lanza_saltandose_la_politica_de_ejecucion() {
+            let s = script("a.ps1", ScriptType::Powershell, "C:\\s\\a.ps1");
+            let cmd =
+                build_launch_command(&s, ShellKind::Powershell, false, "", &native()).unwrap();
+            assert_eq!(
+                cmd,
+                "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\s\\a.ps1\""
+            );
+        }
+
+        #[test]
+        fn como_administrador_se_usa_start_process_con_runas() {
+            let s = script("a.ps1", ScriptType::Powershell, "C:\\s\\a.ps1");
+            let cmd = build_launch_command(&s, ShellKind::Powershell, true, "", &native()).unwrap();
+            assert!(cmd.starts_with("Start-Process powershell -Verb RunAs"));
+            assert!(cmd.contains("'C:\\s\\a.ps1'"));
+        }
+
+        #[test]
+        fn desde_cmd_la_elevacion_se_envuelve_en_un_command() {
+            let s = script("a.ps1", ScriptType::Powershell, "C:\\s\\a.ps1");
+            let cmd = build_launch_command(&s, ShellKind::Cmd, true, "", &native()).unwrap();
+            assert!(cmd.starts_with("powershell -Command \""));
+            assert!(cmd.ends_with('"'));
+        }
+
+        #[test]
+        fn un_bat_usa_call_en_cmd_y_el_operador_de_llamada_en_powershell() {
+            let s = script("a.bat", ScriptType::Batch, "C:\\s\\a.bat");
+            assert_eq!(
+                build_launch_command(&s, ShellKind::Cmd, false, "", &native()).unwrap(),
+                "call \"C:\\s\\a.bat\""
+            );
+            assert_eq!(
+                build_launch_command(&s, ShellKind::Powershell, false, "", &native()).unwrap(),
+                "& \"C:\\s\\a.bat\""
+            );
+        }
+
+        #[test]
+        fn desde_una_shell_unix_un_bat_se_delega_a_cmd_exe() {
+            let s = script("a.bat", ScriptType::Batch, "C:\\s\\a.bat");
+            let cmd = build_launch_command(&s, ShellKind::Bash, false, "", &native()).unwrap();
+            assert_eq!(cmd, "cmd.exe /c \"C:\\s\\a.bat\"");
+        }
+
+        #[test]
+        fn dentro_de_wsl_los_binarios_de_windows_llevan_exe() {
+            let s = script("a.bat", ScriptType::Batch, "C:\\s\\a.bat");
+            let context = LaunchContext {
+                transport: Some(Transport::Wsl),
+                ..Default::default()
+            };
+            let cmd = build_launch_command(&s, ShellKind::Bash, false, "", &context).unwrap();
+            assert!(cmd.starts_with("cmd.exe /c "));
+        }
     }
 
-    #[test]
-    fn como_administrador_se_usa_start_process_con_runas() {
-        let s = script("a.ps1", ScriptType::Powershell, "C:\\s\\a.ps1");
-        let cmd = build_launch_command(&s, ShellKind::Powershell, true, "", &native()).unwrap();
-        assert!(cmd.starts_with("Start-Process powershell -Verb RunAs"));
-        assert!(cmd.contains("'C:\\s\\a.ps1'"));
-    }
+    // ---- Equivalentes Linux ----
+    // Las mismas responsabilidades (lanzar script, elevar, wrapper de shell)
+    // pero con las herramientas de Linux: bash, sudo y rutas POSIX.
 
-    #[test]
-    fn desde_cmd_la_elevacion_se_envuelve_en_un_command() {
-        let s = script("a.ps1", ScriptType::Powershell, "C:\\s\\a.ps1");
-        let cmd = build_launch_command(&s, ShellKind::Cmd, true, "", &native()).unwrap();
-        assert!(cmd.starts_with("powershell -Command \""));
-        assert!(cmd.ends_with('"'));
-    }
+    #[cfg(not(windows))]
+    mod linux_equivalent {
+        use super::*;
 
-    // ---- Batch ----
+        #[test]
+        fn un_sh_se_lanza_con_bash() {
+            let s = script("a.sh", ScriptType::Shell, "/home/ana/a.sh");
+            let cmd = build_launch_command(&s, ShellKind::Bash, false, "", &native()).unwrap();
+            assert_eq!(cmd, "bash '/home/ana/a.sh'");
+        }
 
-    #[test]
-    fn un_bat_usa_call_en_cmd_y_el_operador_de_llamada_en_powershell() {
-        let s = script("a.bat", ScriptType::Batch, "C:\\s\\a.bat");
-        assert_eq!(
-            build_launch_command(&s, ShellKind::Cmd, false, "", &native()).unwrap(),
-            "call \"C:\\s\\a.bat\""
-        );
-        assert_eq!(
-            build_launch_command(&s, ShellKind::Powershell, false, "", &native()).unwrap(),
-            "& \"C:\\s\\a.bat\""
-        );
-    }
+        #[test]
+        fn como_administrador_se_usa_sudo() {
+            let s = script("a.sh", ScriptType::Shell, "/home/ana/a.sh");
+            let cmd = build_launch_command(&s, ShellKind::Bash, true, "", &native()).unwrap();
+            assert_eq!(cmd, "sudo bash '/home/ana/a.sh'");
+        }
 
-    #[test]
-    fn desde_una_shell_unix_un_bat_se_delega_a_cmd_exe() {
-        let s = script("a.bat", ScriptType::Batch, "C:\\s\\a.bat");
-        let cmd = build_launch_command(&s, ShellKind::Bash, false, "", &native()).unwrap();
-        assert_eq!(cmd, "cmd.exe /c \"C:\\s\\a.bat\"");
-    }
+        #[test]
+        fn como_administrador_en_fish_se_usa_sudo() {
+            let s = script("a.fish", ScriptType::Fish, "/home/ana/a.fish");
+            let cmd = build_launch_command(&s, ShellKind::Fish, true, "", &native()).unwrap();
+            assert_eq!(cmd, "sudo fish '/home/ana/a.fish'");
+        }
 
-    #[test]
-    fn dentro_de_wsl_los_binarios_de_windows_llevan_exe() {
-        let s = script("a.bat", ScriptType::Batch, "C:\\s\\a.bat");
-        let context = LaunchContext {
-            transport: Some(Transport::Wsl),
-            ..Default::default()
-        };
-        let cmd = build_launch_command(&s, ShellKind::Bash, false, "", &context).unwrap();
-        assert!(cmd.starts_with("cmd.exe /c "));
+        #[test]
+        fn un_sh_desde_bash_y_desde_fish_usa_bash() {
+            // Un .sh se lanza con bash tanto desde bash como desde fish: el
+            // intérpreto lo marca el tipo de script, no la shell que lo invoca.
+            let s = script("a.sh", ScriptType::Shell, "/home/ana/a.sh");
+            assert_eq!(
+                build_launch_command(&s, ShellKind::Bash, false, "", &native()).unwrap(),
+                "bash '/home/ana/a.sh'"
+            );
+            assert_eq!(
+                build_launch_command(&s, ShellKind::Fish, false, "", &native()).unwrap(),
+                "bash '/home/ana/a.sh'"
+            );
+        }
+
+        #[test]
+        fn en_ruta_unix_no_hay_exe_de_windows() {
+            let s = script("a.sh", ScriptType::Shell, "/home/ana/a.sh");
+            let cmd = build_launch_command(&s, ShellKind::Bash, false, "", &native()).unwrap();
+            assert!(!cmd.contains("cmd.exe"), "{cmd}");
+            assert!(cmd.contains("/home/ana/a.sh"), "{cmd}");
+        }
     }
 
     // ---- Shell ----

@@ -594,6 +594,7 @@ impl TabManager {
                             &env.label,
                             crate::identity::current().name,
                             viewport.cols,
+                            self.list().tabs.len(),
                             &t,
                         ),
                     },

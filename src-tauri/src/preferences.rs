@@ -166,6 +166,10 @@ pub struct Preferences {
     /// banner y su prompt a 80x24 y tener que reflujarlo todo al medir.
     pub viewport_cols: i64,
     pub viewport_rows: i64,
+    /// Entorno preferido para ejecutar scripts shell (bash, sh, zsh...). Vacío =
+    /// automático: prefiere WSL sobre Git Bash. Solo afecta a Windows, donde
+    /// Git Bash sería la opción por defecto; así una distro WSL lo adelanta.
+    pub default_script_environment_id: String,
 }
 
 impl Default for Preferences {
@@ -197,6 +201,7 @@ impl Default for Preferences {
             file_manager_id: String::new(),
             viewport_cols: 80,
             viewport_rows: 24,
+            default_script_environment_id: String::new(),
         }
     }
 }
@@ -401,6 +406,7 @@ pub fn sanitize_preferences(raw: &Value) -> Preferences {
         copy_on_select: default_false(get("copyOnSelect")),
         ui_density: one_of(get("uiDensity"), &UI_DENSITIES, &defaults.ui_density),
         default_environment_id: safe_environment_id(get("defaultEnvironmentId")),
+        default_script_environment_id: safe_environment_id(get("defaultScriptEnvironmentId")),
         file_manager_id: safe_identifier(get("fileManagerId")),
         viewport_cols: integer_in_range(get("viewportCols"), 20, 1000, defaults.viewport_cols),
         viewport_rows: integer_in_range(get("viewportRows"), 5, 500, defaults.viewport_rows),

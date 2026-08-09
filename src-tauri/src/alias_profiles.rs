@@ -261,9 +261,11 @@ fn nsudo_alias_line(
     ))
 }
 
-/// "sysinfo": si el sistema ya tiene fastfetch/neofetch, se usan (son mucho más
-/// completos que lo que podríamos generar nosotros); si no, se cae al banner
-/// propio de la app, que ya está en un archivo listo para imprimir.
+/// "sysinfo": imprime el banner del sistema que ya generó la app para esta
+/// pestaña. Se evita fastfetch/neofetch: su salida es enorme y no escala cuando
+/// hay varias pestañas a la vez (repite logo y ocupa más de lo que la casilla
+/// admite). Si no hay banner (temporal no escribible), se cae a un comando
+/// nativo mínimo.
 fn sysinfo_alias_line(kind: ShellKind, banner_path: Option<&str>, transport: Transport) -> String {
     // Sin archivo de banner (temporal no escribible) se cae al comando nativo
     // del sistema, que es lo que había antes de tener banner propio.
@@ -289,15 +291,9 @@ fn sysinfo_alias_line(kind: ShellKind, banner_path: Option<&str>, transport: Tra
         None => "uname -a".to_string(),
     };
     if kind == ShellKind::Fish {
-        return format!(
-            "function sysinfo; if command -v fastfetch >/dev/null; fastfetch; \
-             else if command -v neofetch >/dev/null; neofetch; else; {fallback}; end; end"
-        );
+        return format!("function sysinfo; {fallback}; end");
     }
-    format!(
-        "sysinfo() {{ if command -v fastfetch >/dev/null 2>&1; then fastfetch; \
-         elif command -v neofetch >/dev/null 2>&1; then neofetch; else {fallback}; fi; }}"
-    )
+    format!("sysinfo() {{ {fallback}; }}")
 }
 
 // ---- Texto de "ayuda" ----
@@ -897,11 +893,11 @@ mod tests {
     }
 
     #[test]
-    fn sysinfo_prefiere_fastfetch_si_existe() {
+    fn sysinfo_no_usa_fastfetch_ni_neofetch() {
         let line = sysinfo_alias_line(ShellKind::Bash, None, Transport::Native);
-        let fastfetch = line.find("fastfetch").unwrap();
-        let neofetch = line.find("neofetch").unwrap();
-        assert!(fastfetch < neofetch);
+        assert!(!line.contains("fastfetch"), "{line}");
+        assert!(!line.contains("neofetch"), "{line}");
+        assert!(line.contains("uname -a"), "{line}");
     }
 
     // ---- Scripts ----

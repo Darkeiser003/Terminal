@@ -123,6 +123,7 @@ export interface Preferences {
     fileManagerId: string;
     viewportCols: number;
     viewportRows: number;
+    defaultScriptEnvironmentId: string;
 }
 
 export interface TranslationCatalog {

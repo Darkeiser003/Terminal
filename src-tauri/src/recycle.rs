@@ -23,6 +23,7 @@ use crate::process;
 const TRASH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Escapa una ruta para meterla en una cadena literal de PowerShell.
+#[allow(dead_code)]
 fn ps_literal(path: &str) -> String {
     format!("'{}'", path.replace('\'', "''"))
 }

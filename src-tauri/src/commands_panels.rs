@@ -14,9 +14,10 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::environments::{Environment, ShellKind};
+use crate::environments::{Environment, ShellKind, Transport};
 use crate::file_explorer::{self, EntryKind};
 use crate::file_viewers;
+use crate::preferences;
 use crate::scripts::{self, FileCategory, LaunchContext, ScanOptions, Scope, ScriptEntry};
 use crate::state::AppState;
 
@@ -486,6 +487,52 @@ fn environment_for_kinds(state: &AppState, kinds: &[ShellKind]) -> Option<Enviro
     })
 }
 
+/// Entorno preferido para ejecutar un script shell cuando hay que abrir una
+/// pestaña nueva. Si el usuario eligió uno en Ajustes, se respeta. Si no, y el
+/// script pide una familia unix (bash/sh/zsh), se prefieren las distribuciones
+/// WSL sobre Git Bash (Msys): así Git Bash no es el por defecto en Windows y el
+/// usuario trabaja en la distro que usa de verdad. Wine queda excluido: su
+/// aislamiento de filesystem lo hace inadecuado como opción por defecto.
+fn preferred_script_environment(state: &AppState, kinds: &[ShellKind]) -> Option<Environment> {
+    let envs = state.environments();
+
+    let preference = preferences::current().default_script_environment_id;
+    if !preference.is_empty() {
+        if let Some(env) = envs
+            .iter()
+            .find(|env| env.id == preference && env.available && !env.repl)
+        {
+            return Some(env.clone());
+        }
+    }
+
+    let is_unix_family = |kind: &ShellKind| {
+        matches!(
+            kind,
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh | ShellKind::Fish
+        )
+    };
+
+    if kinds.iter().all(is_unix_family) {
+        for transport in [Transport::Wsl, Transport::Native, Transport::Msys] {
+            for kind in kinds {
+                if let Some(env) = envs.iter().find(|env| {
+                    env.kind == *kind
+                        && env.transport == transport
+                        && env.available
+                        && !env.no_auto_select
+                        && !env.repl
+                }) {
+                    return Some(env.clone());
+                }
+            }
+        }
+        return None;
+    }
+
+    environment_for_kinds(state, kinds)
+}
+
 /// `scripts:run`
 #[tauri::command(async)]
 pub fn scripts_run(
@@ -552,6 +599,8 @@ pub fn scripts_run(
 
     // El script pide una familia concreta (PowerShell para .ps1, cmd para
     // .bat): si la pestaña actual no la habla, se busca o se abre una que sí.
+    // Para shells unix, preferred_script_environment evita que Git Bash sea el
+    // por defecto en Windows y prefiere WSL si hay una disponible.
     if !preferred.is_empty() && !preferred.contains(&env.kind) {
         match tab_for_kinds(&state, &preferred) {
             Some((found_tab, found_env)) => {
@@ -559,7 +608,7 @@ pub fn scripts_run(
                 env = found_env;
             }
             None => {
-                let Some(shell_env) = environment_for_kinds(&state, &preferred) else {
+                let Some(shell_env) = preferred_script_environment(&state, &preferred) else {
                     return ActionResult::failed(format!(
                         "Este script necesita una shell que no está disponible en este sistema ({:?}).",
                         preferred[0]

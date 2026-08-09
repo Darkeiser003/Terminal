@@ -403,6 +403,19 @@
                     </label>
 
                     <label class="field wide">
+                        <span>{app.t('settings.scriptEnv', 'Terminal para scripts shell')}</span>
+                        <select bind:value={draft.defaultScriptEnvironmentId}>
+                            <option value="">{app.t('settings.scriptEnvAuto', 'Automático (WSL preferido sobre Git Bash)')}</option>
+                            {#each app.environments.filter((env) => env.available && !env.repl) as env (env.id)}
+                                <option value={env.id}>{env.label}</option>
+                            {/each}
+                        </select>
+                    </label>
+                    <div class="field-hint">
+                        {app.t('settings.scriptEnvHint', 'Entorno con el que se abren los scripts .sh, .bash, .zsh, etc. si no hay una pestaña compatible ya abierta. Automático prefiere WSL sobre Git Bash.')}
+                    </div>
+
+                    <label class="field wide">
                         <span>{app.t('settings.hereDepth', 'Profundidad de «Aquí»')}</span>
                         <input type="number" min="0" max="10" step="1" bind:value={draft.scriptsHereDepth} />
                     </label>
