@@ -985,7 +985,7 @@ fn wsl_package_update(distro: &str, pkg_manager: &str) -> Option<String> {
 /// plegable. Antes cada bloque era un apartado de primer nivel y en un Windows
 /// con dos o tres distros el panel se convertía en una lista interminable de
 /// cabeceras "WSL · ...".
-fn wsl_actions(wsl: Option<&WslContext>) -> Vec<InstallAction> {
+fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
     let Some(wsl) = wsl.filter(|context| context.available) else {
         return vec![InstallAction::new(
             "wsl-install-base",
@@ -1044,20 +1044,26 @@ fn wsl_actions(wsl: Option<&WslContext>) -> Vec<InstallAction> {
         } else {
             &distro.friendly_name
         };
+        let install_label = t.tp(
+            "action.wslDistroInstall",
+            &[("distro", nombre.to_string())],
+            "Instalar {distro}",
+        );
         actions.push(
             InstallAction::new(
                 format!("wsl-distro-{}", safe_id(&distro.name)),
-                format!("Instalar {nombre}"),
+                &install_label,
                 format!("wsl.exe --install -d {}", ps_single(&distro.name)),
             )
-            .short(format!("Instalar {nombre}"))
+            .short(install_label)
             .powershell()
             .group(WSL_GROUP)
             .subgroup("Distribuciones disponibles")
             .installed(false)
-            .hint(format!(
-                "Nombre WSL: {}. Windows puede pedir reinicio o la creación del usuario Linux.",
-                distro.name
+            .hint(t.tp(
+                "action.wslDistroInstall.hint",
+                &[("name", distro.name.clone())],
+                "Nombre WSL: {name}. Windows puede pedir reinicio o la creación del usuario Linux.",
             )),
         );
     }
@@ -1097,22 +1103,42 @@ fn wsl_actions(wsl: Option<&WslContext>) -> Vec<InstallAction> {
             let Some(command) = wsl_package_install(&distro.name, pkg_manager, package) else {
                 continue;
             };
+            let tool = if label == "Node.js + npm" {
+                t.t("tool.nodeNpm", label)
+            } else {
+                label.to_string()
+            };
             let hint = if shell_hint {
-                format!(
-                    "Se instala solo dentro de {}. Para convertirlo en shell predeterminada usa \
-                     chsh -s $(command -v {key}).",
-                    distro.name
+                t.tp(
+                    "action.wslInsideInstall.shellHint",
+                    &[
+                        ("distro", distro.name.clone()),
+                        ("command", key.to_string()),
+                    ],
+                    "Se instala solo dentro de {distro}. Para convertirlo en shell predeterminada usa chsh -s $(command -v {command}).",
                 )
             } else {
-                format!("Se instala solo dentro de {}.", distro.name)
+                t.tp(
+                    "action.wslInsideInstall.hint",
+                    &[("distro", distro.name.clone())],
+                    "Se instala solo dentro de {distro}.",
+                )
             };
             actions.push(
                 InstallAction::new(
                     format!("wsl-{}-{key}", safe_id(&distro.name)),
-                    format!("Instalar {label} en {}", distro.name),
+                    t.tp(
+                        "action.wslInsideInstall",
+                        &[("tool", tool.clone()), ("distro", distro.name.clone())],
+                        "Instalar {tool} en {distro}",
+                    ),
                     command,
                 )
-                .short(format!("Instalar {label}"))
+                .short(t.tp(
+                    "action.wslInsideInstallShort",
+                    &[("tool", tool)],
+                    "Instalar {tool}",
+                ))
                 .powershell()
                 .group(WSL_GROUP)
                 .subgroup(&subgroup)
@@ -1125,10 +1151,17 @@ fn wsl_actions(wsl: Option<&WslContext>) -> Vec<InstallAction> {
             actions.push(
                 InstallAction::new(
                     format!("wsl-{}-update", safe_id(&distro.name)),
-                    format!("Actualizar paquetes de {}", distro.name),
+                    t.tp(
+                        "action.wslDistroUpdate",
+                        &[("distro", distro.name.clone())],
+                        "Actualizar paquetes de {distro}",
+                    ),
                     command,
                 )
-                .short("Actualizar paquetes de la distro")
+                .short(t.t(
+                    "action.wslDistroUpdateShort",
+                    "Actualizar paquetes de la distro",
+                ))
                 .powershell()
                 .group(WSL_GROUP)
                 .subgroup(&subgroup)
@@ -1293,7 +1326,7 @@ fn windows_actions(
         .verb("Actualizar"),
     );
     actions.push(git_pull_projects_action(projects_folder));
-    actions.extend(wsl_actions(wsl));
+    actions.extend(wsl_actions(wsl, t));
     actions
 }
 
@@ -2782,6 +2815,63 @@ mod tests {
         assert_eq!(adb.label, "Show connected ADB devices");
         assert_eq!(adb.verb.as_deref(), Some("View"));
         assert_eq!(adb.group_key, Some("group.android"));
+    }
+
+    #[test]
+    fn las_cabeceras_plegables_de_wsl_no_se_quedan_en_espanol() {
+        for (raw, expected) in [
+            ("WSL (plataforma)", "WSL (platform)"),
+            ("Distribuciones disponibles", "Available distributions"),
+        ] {
+            let action = InstallAction::new("wsl-test", "Acción", "comando")
+                .group(WSL_GROUP)
+                .subgroup(raw)
+                .translated("en");
+            assert_eq!(action.subgroup.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn las_etiquetas_y_ayudas_dinamicas_del_panel_se_traducen() {
+        let french = Translator::new("fr");
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![distro("Ubuntu", "apt")],
+                online: vec![OnlineDistro {
+                    name: "Debian".to_string(),
+                    friendly_name: "Debian GNU/Linux".to_string(),
+                }],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context, &french);
+
+        let online = buscar(&actions, "wsl-distro-debian");
+        assert_eq!(online.label, "Installer Debian GNU/Linux");
+        assert!(online
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.starts_with("Nom WSL : Debian.")));
+
+        let inside = buscar(&actions, "wsl-ubuntu-node");
+        assert_eq!(inside.label, "Installer Node.js et npm dans Ubuntu");
+        assert_eq!(
+            inside.hint.as_deref(),
+            Some("Installé uniquement dans Ubuntu.")
+        );
+
+        let adb = buscar(&actions, "adb-authorize").translated("fr");
+        assert!(adb
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.starts_with("Pour un appareil")));
+
+        let docker = buscar(&actions, "winget-docker").translated("fr");
+        assert!(docker
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.starts_with("Nécessite WSL2")));
     }
 
     #[test]

@@ -406,6 +406,22 @@ mod tests {
     }
 
     #[test]
+    fn todos_los_idiomas_tienen_las_mismas_claves_que_el_espanol() {
+        let spanish = CATALOGS.get(FALLBACK_LANGUAGE).expect("catálogo español");
+        let mut expected: Vec<&str> = spanish.keys().map(String::as_str).collect();
+        expected.sort_unstable();
+
+        for (language, catalog) in CATALOGS.iter() {
+            let mut actual: Vec<&str> = catalog.keys().map(String::as_str).collect();
+            actual.sort_unstable();
+            assert_eq!(
+                actual, expected,
+                "el catálogo '{language}' no tiene exactamente las claves del español"
+            );
+        }
+    }
+
+    #[test]
     fn los_verbos_de_las_acciones_son_un_vocabulario_cerrado() {
         assert_eq!(verb_key_for("Desinstalar"), Some("verb.uninstall"));
         assert_eq!(
