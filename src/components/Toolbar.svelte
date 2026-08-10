@@ -155,7 +155,11 @@
                 }}
             >
                 <span class="env-current">{currentEnvironmentLabel}</span>
-                <span class="env-chevron" aria-hidden="true">⌄</span>
+                <span class="env-chevron" aria-hidden="true">
+                    <svg viewBox="0 0 12 12" width="12" height="12">
+                        <path d="M2.25 4.25 6 8l3.75-3.75" />
+                    </svg>
+                </span>
             </button>
 
             {#if envMenuOpen}
@@ -398,11 +402,26 @@
     }
 
     .env-chevron {
+        display: grid;
+        width: 16px;
+        height: 16px;
         flex: 0 0 auto;
+        place-items: center;
         color: var(--muted);
-        font-size: 13px;
-        line-height: 1;
         transition: transform 0.15s ease;
+    }
+
+    .env-chevron svg {
+        display: block;
+        overflow: visible;
+    }
+
+    .env-chevron path {
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 1.4;
     }
 
     .env-select.open .env-chevron {
