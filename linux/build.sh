@@ -381,6 +381,9 @@ fi
 # 5. Compilación
 # ---------------------------------------------------------------------------
 step "Compilando el AppImage"
+# linuxdeploy's embedded strip can fail on newer ELF sections such as .relr.dyn.
+# Disable its internal binary stripping and keep the AppImage build compatible.
+export NO_STRIP=1
 # npm run tauri -- build
 # Reemplázala por:
 npm run tauri -- build --verbose
