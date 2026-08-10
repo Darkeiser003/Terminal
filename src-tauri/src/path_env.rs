@@ -21,6 +21,11 @@ use parking_lot::Mutex;
 
 use crate::process;
 
+#[cfg(windows)]
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+#[cfg(windows)]
+use winreg::RegKey;
+
 const WHICH_CACHE_MS: Duration = Duration::from_millis(5000);
 
 struct CacheEntry {
@@ -176,18 +181,31 @@ const REGISTRY_PATH_KEYS: [&str; 2] = [
     r"HKCU\Environment",
 ];
 
-/// Lee el valor "Path" de una clave del registro. `reg query` no traduce los
-/// nombres de valor ni los tipos, así que el parseo vale en cualquier idioma de
-/// Windows.
+/// Lee el valor "Path" directamente del Registro. No depende del idioma del
+/// sistema y no abre un proceso `reg.exe` durante la detección completa.
 fn query_registry_path(key: &str) -> Option<String> {
-    let out = process::output_text(
-        "reg",
-        &["query", key, "/v", "Path"],
-        Duration::from_millis(1500),
-    )?;
-    parse_registry_path(&out)
+    #[cfg(windows)]
+    {
+        let (root, relative) = if let Some(relative) = key.strip_prefix("HKLM\\") {
+            (RegKey::predef(HKEY_LOCAL_MACHINE), relative)
+        } else {
+            let relative = key.strip_prefix("HKCU\\")?;
+            (RegKey::predef(HKEY_CURRENT_USER), relative)
+        };
+        let subkey = root
+            .open_subkey_with_flags(relative, KEY_READ | KEY_WOW64_64KEY)
+            .ok()?;
+        subkey.get_value::<String, _>("Path").ok()
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = key;
+        None
+    }
 }
 
+#[allow(dead_code)]
 fn parse_registry_path(output: &str) -> Option<String> {
     for line in output.lines() {
         let trimmed = line.trim();

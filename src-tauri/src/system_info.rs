@@ -6,12 +6,25 @@
 //! GPU, discos) sigue leyéndose igual: del registro en Windows, de
 //! `/etc/os-release` en Linux y de `sw_vers` en macOS.
 
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
+
+#[cfg(windows)]
+use winreg::enums::{
+    HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, REG_DWORD, REG_EXPAND_SZ, REG_QWORD, REG_SZ,
+};
+#[cfg(windows)]
+use winreg::types::FromRegValue;
+#[cfg(windows)]
+use winreg::{RegKey, RegValue};
 
 use crate::i18n::Translator;
 use crate::process;
@@ -197,15 +210,48 @@ const WIN_NT_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 #[allow(dead_code)]
 const WIN_OEM_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation";
 
-/// Lee los valores de una clave del registro con `reg query`, que viene siempre
-/// con Windows y no necesita ningún módulo nativo. Los REG_DWORD llegan como
-/// "0x1cf9" y se dejan tal cual; quien los quiera como número los convierte.
+/// Lee una clave directamente mediante la API del Registro. La versión
+/// anterior lanzaba un `reg.exe` por clave; la GPU por sí sola podía abrir diez
+/// procesos antes incluso de que Tauri mostrara la ventana.
 #[allow(dead_code)]
 fn reg_values(key: &str) -> Vec<(String, String)> {
-    let Some(output) = process::output_text("reg", &["query", key], PROBE_TIMEOUT) else {
-        return Vec::new();
-    };
-    parse_reg_query(&output)
+    #[cfg(windows)]
+    {
+        let relative = key
+            .strip_prefix("HKLM\\")
+            .or_else(|| key.strip_prefix("HKEY_LOCAL_MACHINE\\"))
+            .unwrap_or(key);
+        let Ok(subkey) = RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey_with_flags(relative, KEY_READ | KEY_WOW64_64KEY)
+        else {
+            return Vec::new();
+        };
+        subkey
+            .enum_values()
+            .filter_map(Result::ok)
+            .filter_map(|(name, value)| registry_value_text(&value).map(|text| (name, text)))
+            .collect()
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = key;
+        Vec::new()
+    }
+}
+
+#[cfg(windows)]
+fn registry_value_text(value: &RegValue) -> Option<String> {
+    match value.vtype {
+        REG_SZ | REG_EXPAND_SZ => String::from_reg_value(value).ok(),
+        REG_DWORD => u32::from_reg_value(value)
+            .ok()
+            .map(|number| number.to_string()),
+        REG_QWORD => u64::from_reg_value(value)
+            .ok()
+            .map(|number| number.to_string()),
+        _ => None,
+    }
 }
 
 #[allow(dead_code)]
@@ -398,33 +444,209 @@ fn parse_lspci_gpu(output: &str) -> String {
     }
 }
 
-static MOBO_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
-static GPU_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
-static RAM_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+const HARDWARE_CACHE_SCHEMA: u32 = 1;
 
-/// Precarga en segundo plano al arrancar la app para que la primera pestaña
-/// abra al instante (< 1ms) sin esperar a las consultas de hardware.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct StaticHardware {
+    schema: u32,
+    fingerprint: String,
+    cpu_model: String,
+    motherboard: String,
+    gpu: String,
+    ram: String,
+}
+
+static STATIC_HARDWARE: OnceLock<StaticHardware> = OnceLock::new();
+
+fn hardware_cache_path() -> PathBuf {
+    crate::paths::user_data_dir().join("hardware-cache.json")
+}
+
+fn fingerprint_source() -> String {
+    #[cfg(windows)]
+    {
+        let machine_guid = reg_values(r"HKLM\SOFTWARE\Microsoft\Cryptography")
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("MachineGuid"))
+            .map(|(_, value)| value)
+            .unwrap_or_default();
+        let bios = reg_values(r"HKLM\HARDWARE\DESCRIPTION\System\BIOS");
+        let product = bios
+            .iter()
+            .find(|(name, _)| name == "SystemProductName")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_default();
+        format!(
+            "windows|{}|{machine_guid}|{product}",
+            std::env::consts::ARCH
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let host = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_default();
+        format!(
+            "macos|{}|{}|{}",
+            std::env::consts::ARCH,
+            host,
+            crate::paths::home_dir().to_string_lossy()
+        )
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let machine = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+            .into_iter()
+            .find_map(|file| std::fs::read_to_string(file).ok())
+            .unwrap_or_default();
+        let product = std::fs::read_to_string("/sys/class/dmi/id/product_uuid").unwrap_or_default();
+        format!(
+            "{}|{}|{}|{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            machine.trim(),
+            product.trim()
+        )
+    }
+}
+
+fn machine_fingerprint() -> String {
+    // La fuente nunca sale de la máquina: se guarda únicamente su hash para
+    // invalidar la caché al copiarla a otro equipo.
+    let mut hasher = DefaultHasher::new();
+    fingerprint_source().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn valid_hardware_cache(value: StaticHardware, fingerprint: &str) -> Option<StaticHardware> {
+    (value.schema == HARDWARE_CACHE_SCHEMA && value.fingerprint == fingerprint).then_some(value)
+}
+
+fn load_hardware_cache(path: &Path, fingerprint: &str) -> Option<StaticHardware> {
+    let text = std::fs::read_to_string(path).ok()?;
+    valid_hardware_cache(serde_json::from_str(&text).ok()?, fingerprint)
+}
+
+fn save_hardware_cache(path: &Path, value: &StaticHardware) {
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let Ok(text) = serde_json::to_string_pretty(value) else {
+        return;
+    };
+    if std::fs::write(&temp, text).is_ok() {
+        // Windows no permite renombrar encima de un archivo existente.
+        let _ = std::fs::remove_file(path);
+        if std::fs::rename(&temp, path).is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+    }
+}
+
+fn detect_cpu_model() -> String {
+    let mut system = System::new();
+    system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+    system
+        .cpus()
+        .first()
+        .map(|cpu| clean_cpu_model(&cpu.brand().split_whitespace().collect::<Vec<_>>().join(" ")))
+        .unwrap_or_else(|| "desconocida".to_string())
+}
+
+fn detect_static_hardware(fingerprint: String) -> StaticHardware {
+    // Las cuatro sondas son independientes. En Windows las tres que necesitan
+    // WMI comparten además un único OnceLock (ver `windows_cim_snapshot`).
+    let (cpu_model, motherboard, gpu, ram) = std::thread::scope(|scope| {
+        let cpu = scope.spawn(detect_cpu_model);
+        let motherboard = scope.spawn(read_motherboard);
+        let gpu = scope.spawn(read_full_gpu);
+        let ram = scope.spawn(read_ram_speed);
+        (
+            cpu.join().unwrap_or_else(|_| "desconocida".to_string()),
+            motherboard.join().unwrap_or_default(),
+            gpu.join().unwrap_or_default(),
+            ram.join().unwrap_or_default(),
+        )
+    });
+    StaticHardware {
+        schema: HARDWARE_CACHE_SCHEMA,
+        fingerprint,
+        cpu_model,
+        motherboard,
+        gpu,
+        ram,
+    }
+}
+
+fn static_hardware() -> &'static StaticHardware {
+    STATIC_HARDWARE.get_or_init(|| {
+        let fingerprint = machine_fingerprint();
+        if !cfg!(test) {
+            if let Some(cached) = load_hardware_cache(&hardware_cache_path(), &fingerprint) {
+                return cached;
+            }
+        }
+        let detected = detect_static_hardware(fingerprint);
+        if !cfg!(test) {
+            save_hardware_cache(&hardware_cache_path(), &detected);
+        }
+        detected
+    })
+}
+
+/// Precarga el snapshot estático en segundo plano. Con una caché válida es una
+/// lectura local mínima; en el primer arranque las sondas se ejecutan en
+/// paralelo y el hilo que construya el banner comparte ese mismo resultado.
 pub fn prewarm_hardware_info() {
     std::thread::spawn(|| {
         let _ = os_identity();
-        let _ = motherboard_info();
-        let _ = gpu_info();
-        let _ = ram_speed_info();
+        let _ = static_hardware();
     });
 }
 
 pub fn motherboard_info() -> String {
-    let mut cache = MOBO_CACHE.lock();
-    if let Some(mobo) = cache.as_ref() {
-        return mobo.clone();
-    }
-    let detected = read_motherboard();
-    *cache = Some(detected.clone());
-    detected
+    static_hardware().motherboard.clone()
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsCimSnapshot {
+    motherboard: String,
+    socket: String,
+    gpu_name: String,
+    gpu_vram: Option<u64>,
+    ram_speed: Option<u64>,
+    ram_type: Option<u32>,
+}
+
+#[cfg(windows)]
+static WINDOWS_CIM: OnceLock<WindowsCimSnapshot> = OnceLock::new();
+
+#[cfg(windows)]
+fn windows_cim_snapshot() -> &'static WindowsCimSnapshot {
+    WINDOWS_CIM.get_or_init(|| {
+        // Un único host de PowerShell y una única serialización sustituyen las
+        // consultas separadas de placa, socket, GPU y RAM.
+        const QUERY: &str = "$b=Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue|Select-Object -First 1;$c=Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue|Select-Object -First 1;$g=Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue|Select-Object -First 1;$m=Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue|Select-Object -First 1;[pscustomobject]@{motherboard=(($b.Manufacturer+' '+$b.Product).Trim());socket=[string]$c.SocketDesignation;gpuName=[string]$g.Name;gpuVram=if($g.AdapterRAM){[uint64]$g.AdapterRAM}else{$null};ramSpeed=if($m.Speed){[uint64]$m.Speed}else{$null};ramType=if($m.SMBIOSMemoryType){[uint32]$m.SMBIOSMemoryType}else{$null}}|ConvertTo-Json -Compress";
+        process::output_text(
+            "powershell",
+            &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", QUERY],
+            PROBE_TIMEOUT,
+        )
+        .and_then(|output| serde_json::from_str(output.trim()).ok())
+        .unwrap_or_default()
+    })
 }
 
 fn read_motherboard() -> String {
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         let mut mobo_name = String::new();
 
         // 1. Lectura ultra-rápida desde el Registro de Windows (0ms)
@@ -449,61 +671,15 @@ fn read_motherboard() -> String {
             }
         }
 
-        // 2. WMIC estándar como respaldo para el nombre de la placa
+        let cim = windows_cim_snapshot();
+
+        // La consulta agrupada es el único respaldo si el Registro no declara
+        // el modelo de placa.
         if mobo_name.is_empty() {
-            if let Some(out) = process::output_text(
-                "wmic",
-                &["baseboard", "get", "Manufacturer,Product"],
-                PROBE_TIMEOUT,
-            ) {
-                for line in out.lines().map(str::trim) {
-                    if line.is_empty()
-                        || line.eq_ignore_ascii_case("Manufacturer  Product")
-                        || line.starts_with("Manufacturer")
-                    {
-                        continue;
-                    }
-                    let clean = clean_identity_value(line);
-                    if !clean.is_empty() {
-                        mobo_name = clean;
-                        break;
-                    }
-                }
-            }
+            mobo_name = clean_identity_value(&cim.motherboard);
         }
 
-        // 3. Detección del Socket del procesador
-        let mut socket_name = String::new();
-        if let Some(out) =
-            process::output_text("wmic", &["cpu", "get", "SocketDesignation"], PROBE_TIMEOUT)
-        {
-            for line in out.lines().map(str::trim) {
-                if line.is_empty() || line.eq_ignore_ascii_case("SocketDesignation") {
-                    continue;
-                }
-                let clean_sock = line.replace("Socket", "").trim().to_string();
-                if !clean_sock.is_empty() {
-                    socket_name = clean_sock;
-                    break;
-                }
-            }
-        }
-        if socket_name.is_empty() {
-            if let Some(out) = process::output_text(
-                "powershell",
-                &[
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-CimInstance Win32_Processor).SocketDesignation",
-                ],
-                PROBE_TIMEOUT,
-            ) {
-                let clean_sock = out.trim().replace("Socket", "").trim().to_string();
-                if !clean_sock.is_empty() {
-                    socket_name = clean_sock;
-                }
-            }
-        }
+        let socket_name = cim.socket.trim().replace("Socket", "").trim().to_string();
 
         if !mobo_name.is_empty() {
             if !socket_name.is_empty() {
@@ -513,101 +689,79 @@ fn read_motherboard() -> String {
             }
         }
     }
-    String::new()
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let vendor = std::fs::read_to_string("/sys/class/dmi/id/board_vendor").unwrap_or_default();
+        let product = std::fs::read_to_string("/sys/class/dmi/id/board_name").unwrap_or_default();
+        clean_identity_value(&format!("{} {}", vendor.trim(), product.trim()))
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        String::new()
+    }
 }
 
 pub fn gpu_info() -> String {
-    let mut cache = GPU_CACHE.lock();
-    if let Some(gpu) = cache.as_ref() {
-        return gpu.clone();
-    }
-    let detected = read_full_gpu();
-    *cache = Some(detected.clone());
-    detected
+    static_hardware().gpu.clone()
 }
 
+#[cfg(windows)]
 fn read_gpu_vram_bytes() -> Option<u64> {
-    if cfg!(windows) {
-        // Prioridad 1: Buscar `HardwareInformation.qwMemorySize` en subclaves 0000..0010 del Registro de Windows.
-        // Se descarta expresamente 4_294_967_295 (0xFFFFFFFF) por ser el límite máximo de 32 bits de WMI.
-        for i in 0..10 {
-            let key = format!(
-                r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{i:04}"
-            );
-            let vals = reg_values(&key);
-            for (name, val) in &vals {
-                if name.eq_ignore_ascii_case("HardwareInformation.qwMemorySize") {
-                    if let Some(num) = reg_number(val) {
-                        if num > 4_294_967_295 {
-                            return Some(num);
-                        }
+    // Prioridad 1: Buscar `HardwareInformation.qwMemorySize` en subclaves 0000..0010 del Registro de Windows.
+    // Se descarta expresamente 4_294_967_295 (0xFFFFFFFF) por ser el límite máximo de 32 bits de WMI.
+    for i in 0..=10 {
+        let key = format!(
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{i:04}"
+        );
+        let vals = reg_values(&key);
+        for (name, val) in &vals {
+            if name.eq_ignore_ascii_case("HardwareInformation.qwMemorySize") {
+                if let Some(num) = reg_number(val) {
+                    if num > 4_294_967_295 {
+                        return Some(num);
                     }
                 }
             }
         }
+    }
+    windows_cim_snapshot().gpu_vram
+}
 
-        // Prioridad 2: Buscar en PowerShell el valor QWORD de 64 bits > 4GB
-        if let Some(out) = process::output_text(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\*' -ErrorAction SilentlyContinue | ForEach-Object { $_.'HardwareInformation.qwMemorySize' } | Where-Object { $_ -and $_ -gt 4294967295 } | Select-Object -First 1",
-            ],
-            PROBE_TIMEOUT,
-        ) {
-            if let Ok(bytes) = out.trim().parse::<u64>() {
-                if bytes > 4_294_967_295 {
-                    return Some(bytes);
+#[cfg(windows)]
+fn registry_gpu_name() -> String {
+    for i in 0..=10 {
+        let key = format!(
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{i:04}"
+        );
+        let values = reg_values(&key);
+        for candidate in ["DriverDesc", "HardwareInformation.AdapterString"] {
+            if let Some((_, value)) = values
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(candidate))
+            {
+                let clean = clean_identity_value(value);
+                if !clean.is_empty() {
+                    return clean;
                 }
             }
         }
     }
-    None
+    String::new()
 }
 
 fn read_full_gpu() -> String {
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         let vram_64bit = read_gpu_vram_bytes();
-
-        // 1. PowerShell CIM query combinada con lectura de QWORD >4GB
-        if let Some(out) = process::output_text(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "$g = Get-CimInstance Win32_VideoController | Select-Object -First 1 Name, AdapterRAM; $qw = Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\*' -ErrorAction SilentlyContinue | ForEach-Object { $_.'HardwareInformation.qwMemorySize' } | Where-Object { $_ -and $_ -gt 4294967295 } | Select-Object -First 1; $v = if ($qw) { $qw } else { $g.AdapterRAM }; if ($g) { Write-Output ($g.Name + '|' + $v) }",
-            ],
-            PROBE_TIMEOUT,
-        ) {
-            let trimmed = out.trim();
-            if let Some((name_str, ram_str)) = trimmed.split_once('|') {
-                let clean = clean_identity_value(name_str);
-                if !clean.is_empty() {
-                    let bytes = vram_64bit.unwrap_or_else(|| {
-                        ram_str.trim().parse::<u64>().unwrap_or(0)
-                    });
-                    if bytes >= 500_000_000 {
-                        let gb = (bytes as f64 / 1024f64.powi(3)).round() as u64;
-                        return format!("{clean} ({gb} GB)");
-                    }
-                    return clean;
-                }
-            } else if !trimmed.is_empty() {
-                let clean = clean_identity_value(trimmed);
-                if !clean.is_empty() {
-                    if let Some(bytes) = vram_64bit {
-                        let gb = (bytes as f64 / 1024f64.powi(3)).round() as u64;
-                        return format!("{clean} ({gb} GB)");
-                    }
-                    return clean;
-                }
-            }
-        }
-
-        // 2. WMIC básico sin /format:csv
-        let basic = read_gpu_model();
-        let clean = clean_identity_value(&basic);
+        let cim = windows_cim_snapshot();
+        let from_registry = registry_gpu_name();
+        let clean = clean_identity_value(if cim.gpu_name.trim().is_empty() {
+            &from_registry
+        } else {
+            &cim.gpu_name
+        });
         if !clean.is_empty() {
             if let Some(bytes) = vram_64bit {
                 let gb = (bytes as f64 / 1024f64.powi(3)).round() as u64;
@@ -616,71 +770,38 @@ fn read_full_gpu() -> String {
             return clean;
         }
     }
-    String::new()
+
+    #[cfg(not(windows))]
+    {
+        clean_identity_value(&read_gpu_model())
+    }
+
+    #[cfg(windows)]
+    {
+        String::new()
+    }
 }
 
 pub fn ram_speed_info() -> String {
-    let mut cache = RAM_CACHE.lock();
-    if let Some(ram) = cache.as_ref() {
-        return ram.clone();
-    }
-    let detected = read_ram_speed();
-    *cache = Some(detected.clone());
-    detected
+    static_hardware().ram.clone()
 }
 
 fn read_ram_speed() -> String {
-    if cfg!(windows) {
-        // PowerShell CIM query
-        if let Some(out) = process::output_text(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "$m = Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1 Speed, SMBIOSMemoryType; if ($m) { Write-Output ($m.Speed.ToString() + '|' + $m.SMBIOSMemoryType.ToString()) }",
-            ],
-            PROBE_TIMEOUT,
-        ) {
-            let trimmed = out.trim();
-            if let Some((speed_str, type_str)) = trimmed.split_once('|') {
-                let speed = speed_str.trim().parse::<u64>().unwrap_or(0);
-                let smbios_type = type_str.trim().parse::<u32>().unwrap_or(0);
-                let ddr_type = match smbios_type {
-                    34 => "DDR5",
-                    26 => "DDR4",
-                    24 => "DDR3",
-                    21 => "DDR2",
-                    _ => {
-                        if speed >= 4800 {
-                            "DDR5"
-                        } else if speed >= 2133 {
-                            "DDR4"
-                        } else {
-                            "RAM"
-                        }
-                    }
-                };
-                if speed > 0 {
-                    return format!("{ddr_type} {speed} MHz");
-                }
-            }
-        }
-
-        // WMIC básico sin /format:csv
-        if let Some(out) =
-            process::output_text("wmic", &["memorychip", "get", "Speed"], PROBE_TIMEOUT)
-        {
-            for line in out.lines().map(str::trim) {
-                if line.is_empty() || line.eq_ignore_ascii_case("Speed") {
-                    continue;
-                }
-                if let Ok(speed) = line.parse::<u64>() {
-                    if speed > 0 {
-                        let ddr_type = if speed >= 4800 { "DDR5" } else { "DDR4" };
-                        return format!("{ddr_type} {speed} MHz");
-                    }
-                }
-            }
+    #[cfg(windows)]
+    {
+        let cim = windows_cim_snapshot();
+        let speed = cim.ram_speed.unwrap_or(0);
+        let ddr_type = match cim.ram_type.unwrap_or(0) {
+            34 => "DDR5",
+            26 => "DDR4",
+            24 => "DDR3",
+            21 => "DDR2",
+            _ if speed >= 4800 => "DDR5",
+            _ if speed >= 2133 => "DDR4",
+            _ => "RAM",
+        };
+        if speed > 0 {
+            return format!("{ddr_type} {speed} MHz");
         }
     }
     String::new()
@@ -937,18 +1058,13 @@ pub fn build_banner(
 
     let prefs = crate::preferences::current();
     let accent = hex_to_ansi(&prefs.fastfetch_color);
+    let hardware = static_hardware();
 
     let mut system = System::new();
     system.refresh_memory();
     system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
 
-    let cpus = system.cpus();
-    let raw_cpu = cpus
-        .first()
-        .map(|cpu| cpu.brand().split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|brand| !brand.is_empty())
-        .unwrap_or_else(|| "desconocida".to_string());
-    let cpu_model = clean_cpu_model(&raw_cpu);
+    let cpu_model = &hardware.cpu_model;
 
     let total_memory = system.total_memory();
     let used_memory = total_memory.saturating_sub(system.available_memory());
@@ -960,7 +1076,7 @@ pub fn build_banner(
 
     rows.push((t.t("banner.system", "Sistema"), os_name));
 
-    let mobo = motherboard_info();
+    let mobo = hardware.motherboard.clone();
     if !mobo.is_empty() {
         rows.push((t.t("banner.motherboard", "Placa"), mobo));
     }
@@ -974,7 +1090,7 @@ pub fn build_banner(
     };
     rows.push((t.t("banner.cpu", "CPU"), cpu_desc));
 
-    let gpu = gpu_info();
+    let gpu = hardware.gpu.clone();
     if !gpu.is_empty() {
         rows.push((t.t("banner.gpu", "GPU"), gpu));
     }
@@ -984,7 +1100,7 @@ pub fn build_banner(
     } else {
         0
     };
-    let ram_extra = ram_speed_info();
+    let ram_extra = hardware.ram.clone();
     let memory_str = if !ram_extra.is_empty() {
         format!(
             "{} / {} ({}%) - {}",
@@ -1072,6 +1188,35 @@ pub fn build_banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cached_hardware(fingerprint: &str) -> StaticHardware {
+        StaticHardware {
+            schema: HARDWARE_CACHE_SCHEMA,
+            fingerprint: fingerprint.to_string(),
+            cpu_model: "CPU de prueba".to_string(),
+            motherboard: "Placa de prueba".to_string(),
+            gpu: "GPU de prueba (8 GB)".to_string(),
+            ram: "DDR5 6000 MHz".to_string(),
+        }
+    }
+
+    #[test]
+    fn la_cache_de_hardware_exige_esquema_y_maquina_correctos() {
+        assert!(valid_hardware_cache(cached_hardware("equipo-a"), "equipo-a").is_some());
+        assert!(valid_hardware_cache(cached_hardware("equipo-a"), "equipo-b").is_none());
+        let mut antigua = cached_hardware("equipo-a");
+        antigua.schema = HARDWARE_CACHE_SCHEMA + 1;
+        assert!(valid_hardware_cache(antigua, "equipo-a").is_none());
+    }
+
+    #[test]
+    fn la_cache_de_hardware_se_reabre_sin_perder_campos() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hardware-cache.json");
+        let expected = cached_hardware("equipo-a");
+        save_hardware_cache(&file, &expected);
+        assert_eq!(load_hardware_cache(&file, "equipo-a"), Some(expected));
+    }
 
     #[test]
     fn los_emojis_y_adornos_desaparecen_del_nombre() {

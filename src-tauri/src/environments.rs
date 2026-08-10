@@ -212,6 +212,11 @@ pub fn find_git_bash() -> Option<PathBuf> {
 
 fn detect_windows_shells() -> Vec<Environment> {
     let mut envs = Vec::new();
+    // El inicializador de cada pestaña se escribe en un .ps1 temporal. Una
+    // política local "Restricted" impediría cargarlo si PowerShell heredase
+    // la política del usuario. Este argumento solo afecta al proceso de la
+    // pestaña: no modifica la política del sistema ni la del perfil.
+    const POWERSHELL_ARGS: &[&str] = &["-NoLogo", "-ExecutionPolicy", "Bypass"];
 
     let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
     envs.push(Environment::new(
@@ -228,7 +233,7 @@ fn detect_windows_shells() -> Vec<Environment> {
             "Windows PowerShell",
             ShellKind::Powershell,
             &ps5.to_string_lossy(),
-            &["-NoLogo"],
+            POWERSHELL_ARGS,
         ));
     }
 
@@ -238,7 +243,7 @@ fn detect_windows_shells() -> Vec<Environment> {
             "PowerShell 7",
             ShellKind::Powershell,
             &ps7.to_string_lossy(),
-            &["-NoLogo"],
+            POWERSHELL_ARGS,
         ));
     }
 
@@ -583,6 +588,22 @@ mod tests {
     fn en_windows_manda_cmd() {
         let envs = vec![fake("pwsh"), fake("cmd"), fake("gitbash")];
         assert_eq!(default_env_id(&envs), Some("cmd".to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_permita_el_inicializador_solo_en_su_proceso() {
+        let envs = detect_windows_shells();
+        for id in ["powershell", "pwsh"] {
+            let Some(env) = envs.iter().find(|env| env.id == id) else {
+                continue;
+            };
+            assert_eq!(
+                env.args,
+                vec!["-NoLogo", "-ExecutionPolicy", "Bypass"],
+                "{id} debe poder cargar el inicializador temporal sin cambiar la política global"
+            );
+        }
     }
 
     #[test]

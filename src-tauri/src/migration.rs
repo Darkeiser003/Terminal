@@ -11,6 +11,8 @@ use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
+const MIGRATION_MARKER: &str = ".migration-v1-complete";
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationReport {
     pub migrated: bool,
@@ -112,17 +114,27 @@ pub fn migrate_user_data(legacy_dir: &Path, canonical_dir: &Path) -> MigrationRe
     {
         return MigrationReport::default();
     }
+    // La migración es de una versión antigua a la ruta canónica, no una
+    // sincronización permanente. El marcador evita recorrer recursivamente la
+    // biblioteca heredada en cada apertura de la terminal.
+    if !legacy_dir.exists() || canonical_dir.join(MIGRATION_MARKER).is_file() {
+        return MigrationReport::default();
+    }
     if std::fs::create_dir_all(canonical_dir).is_err() {
         return MigrationReport::default();
     }
     let settings_merged = merge_settings(legacy_dir, canonical_dir);
     let scripts_copied =
         merge_script_directory(&legacy_dir.join("scripts"), &canonical_dir.join("scripts"));
-    MigrationReport {
+    let report = MigrationReport {
         migrated: settings_merged || scripts_copied > 0,
         settings_merged,
         scripts_copied,
-    }
+    };
+    // Aunque no hubiera nada que copiar, el origen ya se inspeccionó entero.
+    // Un fallo de escritura deja el marcador ausente y permite reintentarlo.
+    let _ = std::fs::write(canonical_dir.join(MIGRATION_MARKER), b"1\n");
+    report
 }
 
 #[cfg(test)]
@@ -193,5 +205,21 @@ mod tests {
             .join("sub")
             .join("dos.sh")
             .exists());
+    }
+
+    #[test]
+    fn una_migracion_completada_no_vuelve_a_recorrer_el_origen() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let canonical = root.path().join("canonical");
+        write_json(&legacy.join("scripts"), "uno.ps1", "primero");
+
+        assert_eq!(migrate_user_data(&legacy, &canonical).scripts_copied, 1);
+        write_json(&legacy.join("scripts"), "dos.ps1", "posterior");
+        assert_eq!(
+            migrate_user_data(&legacy, &canonical),
+            MigrationReport::default()
+        );
+        assert!(!canonical.join("scripts").join("dos.ps1").exists());
     }
 }

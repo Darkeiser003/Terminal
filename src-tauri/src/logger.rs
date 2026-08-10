@@ -5,7 +5,7 @@
 //! para que los logs de la versión Electron y los de esta se puedan leer con
 //! las mismas herramientas.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -76,47 +76,70 @@ fn to_base36(mut value: u64) -> String {
     String::from_utf8(out).expect("base36 es ascii")
 }
 
-// El archivo se resuelve una vez y se protege con un mutex: varias pestañas
-// escriben a la vez desde el hilo lector de su pty.
-static LOG_FILE: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
+// La ruta y el handle se resuelven una vez. Abrir y cerrar main.log en cada
+// línea hacía que el antivirus participara varias veces en el arranque.
+#[derive(Default)]
+struct LogState {
+    path: Option<PathBuf>,
+    handle: Option<File>,
+    len: u64,
+}
 
-fn resolve_log_file(slot: &mut Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(existing) = slot {
+static LOG_STATE: Lazy<Mutex<LogState>> = Lazy::new(|| Mutex::new(LogState::default()));
+
+fn resolve_log_file(state: &mut LogState) -> Option<PathBuf> {
+    if let Some(existing) = &state.path {
         return Some(existing.clone());
     }
     let dir = paths::user_data_dir().join("logs");
     fs::create_dir_all(&dir).ok()?;
     let file = dir.join("main.log");
-    *slot = Some(file.clone());
+    state.path = Some(file.clone());
     Some(file)
 }
 
 pub fn log_dir() -> Option<PathBuf> {
-    let mut slot = LOG_FILE.lock();
-    resolve_log_file(&mut slot).and_then(|file| file.parent().map(PathBuf::from))
+    let mut state = LOG_STATE.lock();
+    resolve_log_file(&mut state).and_then(|file| file.parent().map(PathBuf::from))
 }
 
-fn rotate_if_needed(file: &PathBuf) {
-    let Ok(meta) = fs::metadata(file) else {
-        // El archivo aún no existe la primera vez: no hay nada que rotar.
-        return;
-    };
-    if meta.len() > MAX_LOG_BYTES {
+fn open_log(state: &mut LogState, file: &PathBuf) -> Option<()> {
+    if state.handle.is_some() {
+        return Some(());
+    }
+    state.len = fs::metadata(file).map(|meta| meta.len()).unwrap_or(0);
+    state.handle = OpenOptions::new().create(true).append(true).open(file).ok();
+    state.handle.as_ref().map(|_| ())
+}
+
+fn rotate_if_needed(state: &mut LogState, file: &PathBuf) {
+    if state.len > MAX_LOG_BYTES {
+        // Hay que soltar el handle antes del rename, especialmente en Windows.
+        state.handle = None;
         let rotated = file.with_extension("log.1");
         let _ = fs::remove_file(&rotated);
         let _ = fs::rename(file, &rotated);
+        state.len = 0;
     }
 }
 
 fn append(line: &str) {
-    let mut slot = LOG_FILE.lock();
-    let Some(file) = resolve_log_file(&mut slot) else {
+    let mut state = LOG_STATE.lock();
+    let Some(file) = resolve_log_file(&mut state) else {
         return;
     };
-    rotate_if_needed(&file);
+    if open_log(&mut state, &file).is_none() {
+        return;
+    }
+    rotate_if_needed(&mut state, &file);
+    if open_log(&mut state, &file).is_none() {
+        return;
+    }
     // Si el disco falla, el logging no debe tumbar la app; se ignora.
-    if let Ok(mut handle) = OpenOptions::new().create(true).append(true).open(&file) {
-        let _ = handle.write_all(line.as_bytes());
+    if let Some(handle) = &mut state.handle {
+        if handle.write_all(line.as_bytes()).is_ok() {
+            state.len = state.len.saturating_add(line.len() as u64);
+        }
     }
 }
 

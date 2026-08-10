@@ -6,10 +6,37 @@
 //! versión Electron arranca con su configuración intacta.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
 use crate::paths;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileSignature {
+    len: u64,
+    modified: SystemTime,
+}
+
+#[derive(Default)]
+struct SettingsCache {
+    initialized: bool,
+    signature: Option<FileSignature>,
+    value: Map<String, Value>,
+}
+
+static SETTINGS_CACHE: Lazy<Mutex<SettingsCache>> =
+    Lazy::new(|| Mutex::new(SettingsCache::default()));
+
+fn file_signature(file: &Path) -> Option<FileSignature> {
+    let metadata = std::fs::metadata(file).ok()?;
+    Some(FileSignature {
+        len: metadata.len(),
+        modified: metadata.modified().ok()?,
+    })
+}
 
 pub fn settings_path() -> PathBuf {
     paths::user_data_dir().join("settings.json")
@@ -27,23 +54,45 @@ fn read_object(file: &Path) -> Option<Map<String, Value>> {
 /// y devuelve un objeto vacío; uno corrupto intenta primero la copia `.bak`.
 pub fn load_settings() -> Map<String, Value> {
     let target = settings_path();
+    let signature = file_signature(&target);
+    {
+        let cache = SETTINGS_CACHE.lock();
+        if cache.initialized && cache.signature == signature {
+            return cache.value.clone();
+        }
+    }
+
     if !target.exists() {
-        return Map::new();
+        let value = Map::new();
+        *SETTINGS_CACHE.lock() = SettingsCache {
+            initialized: true,
+            signature: None,
+            value: value.clone(),
+        };
+        return value;
     }
-    if let Some(map) = read_object(&target) {
-        return map;
-    }
-    log_warn!("No se pudo leer settings.json; se intentará la copia de respaldo");
-    match read_object(&backup_path(&target)) {
-        Some(recovered) => {
-            log_info!("Configuración recuperada desde settings.json.bak");
-            recovered
-        }
+    let value = match read_object(&target) {
+        Some(map) => map,
         None => {
-            log_warn!("No hay una copia de configuración recuperable");
-            Map::new()
+            log_warn!("No se pudo leer settings.json; se intentará la copia de respaldo");
+            match read_object(&backup_path(&target)) {
+                Some(recovered) => {
+                    log_info!("Configuración recuperada desde settings.json.bak");
+                    recovered
+                }
+                None => {
+                    log_warn!("No hay una copia de configuración recuperable");
+                    Map::new()
+                }
+            }
         }
-    }
+    };
+    *SETTINGS_CACHE.lock() = SettingsCache {
+        initialized: true,
+        signature,
+        value: value.clone(),
+    };
+    value
 }
 
 fn backup_path(target: &Path) -> PathBuf {
@@ -121,6 +170,13 @@ fn write_merged(
     let verified = std::fs::read_to_string(target)?;
     serde_json::from_str::<Value>(&verified)?;
     let _ = std::fs::remove_file(backup);
+    if target == settings_path() {
+        *SETTINGS_CACHE.lock() = SettingsCache {
+            initialized: true,
+            signature: file_signature(target),
+            value: next.clone(),
+        };
+    }
     Ok(next)
 }
 

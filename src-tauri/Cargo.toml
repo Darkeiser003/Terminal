@@ -37,6 +37,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system", "disk"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
+[target.'cfg(windows)'.dependencies]
+# Lectura directa del Registro: evita arrancar `reg.exe` decenas de veces al
+# construir por primera vez el banner del sistema.
+winreg = "0.55"
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -5589,6 +5589,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
+ "winreg 0.55.0",
 ]
 
 [[package]]
