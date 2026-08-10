@@ -32,11 +32,21 @@
 
     function fitAndReport(): void {
         if (!term || !fitAddon || !active) return;
+        // Proteger contra accesos cuando el nodo host ya no exista.
+        if (!host) {
+            console.debug('[TerminalPane] fitAndReport: host is null, skipping');
+            return;
+        }
         // Un panel oculto mide 0: ajustarlo ahí daría un tamaño absurdo que
         // luego habría que deshacer.
         if (host.clientWidth === 0 || host.clientHeight === 0) return;
-        fitAddon.fit();
-        term.scrollToBottom();
+        try {
+            fitAddon.fit();
+            term.scrollToBottom();
+        } catch (err) {
+            console.error('[TerminalPane] fitAndReport error', err);
+            return;
+        }
         if (term.cols === lastSize.cols && term.rows === lastSize.rows) return;
         lastSize = { cols: term.cols, rows: term.rows };
         void api.resize(tabId, term.cols, term.rows);
@@ -177,6 +187,7 @@
      *  Ctrl+Shift+C, la selección no se limpia: sigue marcada para que se vea
      *  qué se copió. */
     function handleMouseUp(): void {
+        console.debug('[TerminalPane] handleMouseUp', { tabId, hasSelection: term?.hasSelection() });
         if (!app.preferences?.copyOnSelect || !term?.hasSelection()) return;
         const selection = term.getSelection();
         if (selection) void api.writeClipboard(selection);
@@ -187,6 +198,7 @@
      *  los paneles: sin esto se escribía en una casilla y «Ejecutar script» iba
      *  a parar a otra. */
     function tomarElFoco(): void {
+        console.debug('[TerminalPane] tomarElFoco', { tabId, appActive: app.activeTabId });
         if (app.activeTabId !== tabId) void app.activateTab(tabId);
     }
 
