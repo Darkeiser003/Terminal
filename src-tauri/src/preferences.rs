@@ -462,7 +462,7 @@ mod tests {
             "themeId": "no-existe",
             "terminalFontFamily": "comic-sans",
             "uiDensity": "gigante",
-            "language": "fr"
+            "language": "xx"
         }));
         assert_eq!(prefs.theme_id, "silver");
         assert_eq!(prefs.terminal_font_family, "system-mono");

@@ -923,7 +923,7 @@ fn hex_to_ansi(hex: &str) -> String {
 }
 
 pub fn build_banner(
-    env_label: &str,
+    _env_label: &str,
     app_name: &str,
     columns: u16,
     _tab_count: usize,
@@ -956,8 +956,6 @@ pub fn build_banner(
     let identity = os_identity();
     let os_name = clean_os_name(&identity.name);
 
-    let unknown = t.t("banner.unknown", "desconocido");
-
     let mut rows: Vec<(String, String)> = Vec::new();
 
     rows.push((t.t("banner.system", "Sistema"), os_name));
@@ -966,15 +964,6 @@ pub fn build_banner(
     if !mobo.is_empty() {
         rows.push((t.t("banner.motherboard", "Placa"), mobo));
     }
-
-    rows.push((
-        t.t("banner.environment", "Entorno"),
-        if env_label.is_empty() {
-            unknown
-        } else {
-            env_label.to_string()
-        },
-    ));
 
     let logical_cpus = system.cpus().len();
     let physical_cores = System::physical_core_count().unwrap_or(logical_cpus);
@@ -1215,8 +1204,8 @@ mod tests {
     fn el_banner_real_se_genera_y_lleva_las_tres_secciones() {
         let t = Translator::default();
         let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, 1, &t);
-        assert!(banner.contains("Entorno"), "{banner}");
-        assert!(banner.contains("cmd.exe"), "{banner}");
+        assert!(banner.contains("CPU"), "{banner}");
+        assert!(banner.contains("Windows"), "{banner}");
         assert!(banner.ends_with("\r\n"));
     }
 
@@ -1306,7 +1295,6 @@ mod tests {
     fn el_banner_traducido_usa_las_etiquetas_del_catalogo() {
         let banner = build_banner("bash", "App", 120, 1, &Translator::new("en"));
         assert!(banner.contains("Memory"), "{banner}");
-        assert!(banner.contains("Environment"), "{banner}");
     }
 
     #[test]

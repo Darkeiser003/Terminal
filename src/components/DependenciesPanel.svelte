@@ -51,14 +51,45 @@
         return a.name.localeCompare(b.name, 'es', { sensitivity: 'base' });
     }
 
+    function translateGroupTitle(rawGroup: string, groupKey?: string | null): string {
+        if (groupKey) return app.t(groupKey, rawGroup);
+        if (rawGroup === 'Actualizaciones') return app.t('group.updates', 'Actualizaciones');
+        if (rawGroup === 'Shells') return app.t('group.shells', 'Shells');
+        if (rawGroup === 'Sistema y herramientas') return app.t('group.tools', 'Sistema y herramientas');
+        if (rawGroup === 'Lenguajes') return app.t('group.languagesShort', 'Lenguajes');
+        if (rawGroup === 'Visores de archivos') return app.t('group.viewers', 'Visores de archivos');
+        if (rawGroup === 'WSL') return app.t('group.wslShort', 'WSL');
+        if (rawGroup === 'Docker') return app.t('group.dockerShort', 'Docker');
+        if (rawGroup === 'Android · ADB') return app.t('group.androidShort', 'Android · ADB');
+        return rawGroup;
+    }
+
+    function translateComponentLabel(label: string): string {
+        if (label === 'Virtualización') return app.t('group.virt', 'Virtualización');
+        if (label === 'Lenguajes') return app.t('group.languagesShort', 'Lenguajes');
+        if (label === 'Sistema y herramientas') return app.t('group.tools', 'Sistema y herramientas');
+        return label;
+    }
+
+    function translateComponentValue(val: string): string {
+        return val
+            .replace('No instalado', app.t('deps.notInstalled', 'No instalado'))
+            .replace('No instalada', app.t('deps.notInstalled', 'No instalada'))
+            .replace('Listo', app.t('deps.ready', 'Listo'))
+            .replace('Desactivada en Windows', app.t('deps.disabledWin', 'Desactivada en Windows'))
+            .replace(/(\d+)\s+dispositivos/, (_, n) => app.t('deps.devices', '{count} dispositivos').replace('{count}', n))
+            .replace(/1\s+distro/, app.t('deps.distro', '1 distro'))
+            .replace(/(\d+)\s+distros/, (_, n) => app.t('deps.distros', '{count} distros').replace('{count}', n))
+            .replace(/1\s+REPL/, app.t('deps.repl', '1 REPL'))
+            .replace(/(\d+)\s+REPLs/, (_, n) => app.t('deps.repls', '{count} REPLs').replace('{count}', n));
+    }
+
     const groups = $derived.by(() => {
         const byGroup = new Map<string, InstallAction[]>();
         for (const action of actions) {
             // El backend manda el apartado en español y su clave; se traduce
             // aquí, que es donde está el catálogo del idioma activo.
-            const name = action.groupKey
-                ? app.t(action.groupKey, action.group)
-                : action.group;
+            const name = translateGroupTitle(action.group, action.groupKey);
             const list = byGroup.get(name);
             if (list) list.push(action);
             else byGroup.set(name, [action]);
@@ -241,8 +272,8 @@
         <div class="summary">
             {#each components as component (component.label)}
                 <div class="chip">
-                    <span>{component.label}</span>
-                    <strong>{component.value}</strong>
+                    <span>{translateComponentLabel(component.label)}</span>
+                    <strong>{translateComponentValue(component.value)}</strong>
                 </div>
             {/each}
         </div>

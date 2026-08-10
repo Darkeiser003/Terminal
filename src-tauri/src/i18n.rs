@@ -37,8 +37,21 @@ pub struct Language {
 pub static LANGUAGES: Lazy<Vec<Language>> = Lazy::new(|| {
     vec![
         Language { id: "auto", label: "Automático (sistema)", english_label: "Automatic (system)" },
-        Language { id: "es", label: "Español", english_label: "Spanish" },
         Language { id: "en", label: "English", english_label: "English" },
+        Language { id: "es", label: "Español", english_label: "Spanish" },
+        Language { id: "fr", label: "Français", english_label: "French" },
+        Language { id: "de", label: "Deutsch", english_label: "German" },
+        Language { id: "it", label: "Italiano", english_label: "Italian" },
+        Language { id: "pt", label: "Português", english_label: "Portuguese" },
+        Language { id: "ru", label: "Русский", english_label: "Russian" },
+        Language { id: "zh", label: "中文", english_label: "Chinese" },
+        Language { id: "ja", label: "日本語", english_label: "Japanese" },
+        Language { id: "ko", label: "한국어", english_label: "Korean" },
+        Language { id: "uk", label: "Українська", english_label: "Ukrainian" },
+        Language { id: "pl", label: "Polski", english_label: "Polish" },
+        Language { id: "ro", label: "Română", english_label: "Romanian" },
+        Language { id: "ar", label: "العربية", english_label: "Arabic" },
+        Language { id: "hi", label: "हिन्दी", english_label: "Hindi" },
     ]
 });
 
@@ -46,6 +59,19 @@ pub static LANGUAGES: Lazy<Vec<Language>> = Lazy::new(|| {
 // datos, cambian sin tocar lógica, y así se pueden validar con un script.
 const ES_CATALOG: &str = include_str!("../locales/es.json");
 const EN_CATALOG: &str = include_str!("../locales/en.json");
+const FR_CATALOG: &str = include_str!("../locales/fr.json");
+const DE_CATALOG: &str = include_str!("../locales/de.json");
+const IT_CATALOG: &str = include_str!("../locales/it.json");
+const PT_CATALOG: &str = include_str!("../locales/pt.json");
+const RU_CATALOG: &str = include_str!("../locales/ru.json");
+const ZH_CATALOG: &str = include_str!("../locales/zh.json");
+const JA_CATALOG: &str = include_str!("../locales/ja.json");
+const KO_CATALOG: &str = include_str!("../locales/ko.json");
+const UK_CATALOG: &str = include_str!("../locales/uk.json");
+const PL_CATALOG: &str = include_str!("../locales/pl.json");
+const RO_CATALOG: &str = include_str!("../locales/ro.json");
+const AR_CATALOG: &str = include_str!("../locales/ar.json");
+const HI_CATALOG: &str = include_str!("../locales/hi.json");
 
 type Catalog = HashMap<String, String>;
 
@@ -53,6 +79,19 @@ static CATALOGS: Lazy<HashMap<&'static str, Catalog>> = Lazy::new(|| {
     let mut catalogs = HashMap::new();
     catalogs.insert("es", parse_catalog("es", ES_CATALOG));
     catalogs.insert("en", parse_catalog("en", EN_CATALOG));
+    catalogs.insert("fr", parse_catalog("fr", FR_CATALOG));
+    catalogs.insert("de", parse_catalog("de", DE_CATALOG));
+    catalogs.insert("it", parse_catalog("it", IT_CATALOG));
+    catalogs.insert("pt", parse_catalog("pt", PT_CATALOG));
+    catalogs.insert("ru", parse_catalog("ru", RU_CATALOG));
+    catalogs.insert("zh", parse_catalog("zh", ZH_CATALOG));
+    catalogs.insert("ja", parse_catalog("ja", JA_CATALOG));
+    catalogs.insert("ko", parse_catalog("ko", KO_CATALOG));
+    catalogs.insert("uk", parse_catalog("uk", UK_CATALOG));
+    catalogs.insert("pl", parse_catalog("pl", PL_CATALOG));
+    catalogs.insert("ro", parse_catalog("ro", RO_CATALOG));
+    catalogs.insert("ar", parse_catalog("ar", AR_CATALOG));
+    catalogs.insert("hi", parse_catalog("hi", HI_CATALOG));
     catalogs
 });
 
@@ -232,7 +271,14 @@ pub fn catalog_for(language: &str) -> CatalogPayload {
     } else {
         FALLBACK_LANGUAGE.to_string()
     };
-    let strings = CATALOGS.get(resolved.as_str()).cloned().unwrap_or_default();
+    let mut strings = CATALOGS.get(FALLBACK_LANGUAGE).cloned().unwrap_or_default();
+    if resolved != FALLBACK_LANGUAGE {
+        if let Some(target) = CATALOGS.get(resolved.as_str()) {
+            for (k, v) in target {
+                strings.insert(k.clone(), v.clone());
+            }
+        }
+    }
     CatalogPayload {
         language: resolved,
         strings,
@@ -282,8 +328,8 @@ mod tests {
 
     #[test]
     fn un_idioma_sin_catalogo_cae_al_espanol() {
-        assert_eq!(resolve_language("fr", "fr-FR"), "es");
-        assert_eq!(resolve_language("auto", "ja-JP"), "es");
+        assert_eq!(resolve_language("xx", "xx-XX"), "es");
+        assert_eq!(resolve_language("auto", "sw-KE"), "es");
         assert_eq!(resolve_language("auto", ""), "es");
     }
 
@@ -323,13 +369,13 @@ mod tests {
 
     #[test]
     fn el_traductor_normaliza_un_idioma_desconocido() {
-        assert_eq!(Translator::new("fr").language, "es");
+        assert_eq!(Translator::new("xx").language, "es");
         assert_eq!(Translator::new("en").language, "en");
     }
 
     #[test]
     fn el_catalogo_del_frontend_solo_lleva_el_idioma_activo() {
-        let payload = catalog_for("fr");
+        let payload = catalog_for("xx");
         assert_eq!(payload.language, "es");
     }
 

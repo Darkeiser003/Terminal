@@ -32,6 +32,60 @@
      *  se decía por qué. */
     let logsError = $state('');
 
+    let langMenuOpen = $state(false);
+
+    const flags: Record<string, string> = {
+        auto: '🌐',
+        en: '🇺🇸',
+        es: '🇪🇸',
+        fr: '🇫🇷',
+        de: '🇩🇪',
+        it: '🇮🇹',
+        pt: '🇵🇹',
+        ru: '🇷🇺',
+        zh: '🇨🇳',
+        ja: '🇯🇵',
+        ko: '🇰🇷',
+        uk: '🇺🇦',
+        pl: '🇵🇱',
+        ro: '🇷🇴',
+        ar: '🇸🇦',
+        hi: '🇮🇳'
+    };
+
+    const currentLang = $derived(app.preferences?.language ?? 'en');
+
+    const languageOptions = $derived.by(() => {
+        const available = app.languages.length > 0 ? app.languages : [
+            { id: 'auto', label: 'Automático (sistema)', englishLabel: 'Automatic' },
+            { id: 'en', label: 'English', englishLabel: 'English' },
+            { id: 'es', label: 'Español', englishLabel: 'Spanish' },
+            { id: 'fr', label: 'Français', englishLabel: 'French' },
+            { id: 'de', label: 'Deutsch', englishLabel: 'German' },
+            { id: 'it', label: 'Italiano', englishLabel: 'Italian' },
+            { id: 'pt', label: 'Português', englishLabel: 'Portuguese' },
+            { id: 'ru', label: 'Русский', englishLabel: 'Russian' },
+            { id: 'zh', label: '中文', englishLabel: 'Chinese' },
+            { id: 'ja', label: '日本語', englishLabel: 'Japanese' },
+            { id: 'ko', label: '한국어', englishLabel: 'Korean' },
+            { id: 'uk', label: 'Українська', englishLabel: 'Ukrainian' },
+            { id: 'pl', label: 'Polski', englishLabel: 'Polish' },
+            { id: 'ro', label: 'Română', englishLabel: 'Romanian' },
+            { id: 'ar', label: 'العربية', englishLabel: 'Arabic' },
+            { id: 'hi', label: 'हिन्दी', englishLabel: 'Hindi' }
+        ];
+        return available.map((item) => ({
+            ...item,
+            label: item.id === 'auto' ? app.t('settings.languageAuto', 'Automático (sistema)') : item.label,
+            flag: flags[item.id] ?? '🌐'
+        }));
+    });
+
+    async function selectLanguage(langId: string): Promise<void> {
+        langMenuOpen = false;
+        await app.savePreferences({ language: langId });
+    }
+
     /** Los entornos agrupados como los pinta el desplegable: un `<optgroup>`
      *  por apartado, en el orden en que llegaron del backend. */
     const grouped = $derived.by(() => {
@@ -43,6 +97,21 @@
         }
         return [...groups.entries()];
     });
+
+    function translateGroup(group: string): string {
+        if (group === 'Shells del sistema' || group === 'Shells') return app.t('group.system', 'Shells del sistema');
+        if (group.startsWith('Lenguajes')) return app.t('group.languages', 'Lenguajes · intérprete interactivo');
+        if (group.startsWith('WSL')) return app.t('group.wsl', 'WSL · distribuciones Linux');
+        if (group.startsWith('Docker')) return app.t('group.docker', 'Docker · contenedores e imágenes');
+        if (group.startsWith('Android')) return app.t('group.android', 'Android · dispositivos ADB');
+        return group;
+    }
+
+    function translateLabel(label: string): string {
+        return label
+            .replace('(sin comprobar)', app.t('env.unverified', '(sin comprobar)'))
+            .replace('(no instalada)', app.t('env.notInstalled', '(no instalada)'));
+    }
 
     async function changeEnvironment(event: Event): Promise<void> {
         const select = event.currentTarget as HTMLSelectElement;
@@ -69,12 +138,12 @@
                 <option value="">{app.t('env.detecting', 'Detectando entornos…')}</option>
             {/if}
             {#each grouped as [group, envs] (group)}
-                <optgroup label={group}>
+                <optgroup label={translateGroup(group)}>
                     {#each envs as env (env.id)}
                         <!-- Un entorno no disponible se ve pero no se elige: el
                              porqué está en su `note`. -->
-                        <option value={env.id} disabled={!env.available} title={env.note ?? env.label}>
-                            {env.label}
+                        <option value={env.id} disabled={!env.available} title={translateLabel(env.note ?? env.label)}>
+                            {translateLabel(env.label)}
                         </option>
                     {/each}
                 </optgroup>
@@ -153,6 +222,52 @@
         >
             {app.t('toolbar.logs', 'Logs')}
         </button>
+
+        <!-- Selector rápido de idioma -->
+        <div class="lang-container">
+            <button
+                type="button"
+                class="icon lang-btn"
+                class:active={langMenuOpen}
+                title={app.t('toolbar.language', 'Cambiar idioma')}
+                onclick={(e) => {
+                    e.stopPropagation();
+                    langMenuOpen = !langMenuOpen;
+                }}
+            >
+                <svg viewBox="0 0 16 16" aria-hidden="true" width="15" height="15">
+                    <path
+                        d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM2.5 8a5.48 5.48 0 0 1 1.05-3.25h8.9a5.48 5.48 0 0 1 1.05 3.25 5.48 5.48 0 0 1-1.05 3.25h-8.9A5.48 5.48 0 0 1 2.5 8zM8 2.6c1.1 1.45 1.75 3.4 1.75 5.4S9.1 11.95 8 13.4C6.9 11.95 6.25 10 6.25 8S6.9 3.4 8 2.6z"
+                        fill="currentColor"
+                    />
+                </svg>
+            </button>
+
+            {#if langMenuOpen}
+                <div
+                    class="lang-backdrop"
+                    onmousedown={() => (langMenuOpen = false)}
+                    role="presentation"
+                ></div>
+                <div class="lang-menu" role="menu">
+                    {#each languageOptions as item (item.id)}
+                        <button
+                            type="button"
+                            role="menuitem"
+                            class="lang-item"
+                            class:selected={currentLang === item.id}
+                            onclick={() => void selectLanguage(item.id)}
+                        >
+                            <span class="flag-icon">{item.flag}</span>
+                            <span class="lang-label">{item.label}</span>
+                            {#if currentLang === item.id}
+                                <span class="check-mark">✓</span>
+                            {/if}
+                        </button>
+                    {/each}
+                </div>
+            {/if}
+        </div>
     </div>
 </div>
 
@@ -229,5 +344,78 @@
     .notice {
         color: #e06c75;
         font-size: 11px;
+    }
+
+    .lang-container {
+        position: relative;
+        display: inline-flex;
+    }
+
+    .lang-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 4px 6px;
+    }
+
+    .lang-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+    }
+
+    .lang-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        z-index: 61;
+        display: flex;
+        flex-direction: column;
+        min-width: 175px;
+        padding: 4px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: var(--surface);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+
+    .lang-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border: none;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 12px;
+        text-align: left;
+        cursor: pointer;
+        transition: background 0.15s ease;
+    }
+
+    .lang-item:hover {
+        background: var(--surface-hover);
+    }
+
+    .lang-item.selected {
+        background: var(--accent-soft);
+        font-weight: 600;
+        color: var(--text);
+    }
+
+    .flag-icon {
+        font-size: 14px;
+        line-height: 1;
+    }
+
+    .lang-label {
+        flex: 1 1 auto;
+    }
+
+    .check-mark {
+        font-size: 12px;
+        color: var(--accent);
     }
 </style>

@@ -58,6 +58,23 @@
         draft.terminalForeground = theme.palette.terminalForeground;
     }
 
+    function translateThemeLabel(theme: ThemePreset): string {
+        if (theme.id === "silver") return app.t("theme.silver", theme.label);
+        if (theme.id === "winslim") return app.t("theme.techCyan", theme.label);
+        if (theme.id === "ocean") return app.t("theme.ocean", theme.label);
+        if (theme.id === "forest") return app.t("theme.forest", theme.label);
+        if (theme.id === "amber") return app.t("theme.amber", theme.label);
+        if (theme.id === "violet") return app.t("theme.violet", theme.label);
+        if (theme.id === "nordic") return app.t("theme.nordic", theme.label);
+        if (theme.id === "crimson") return app.t("theme.crimson", theme.label);
+        if (theme.id === "green-phosphor") return app.t("theme.greenPhosphor", theme.label);
+        if (theme.id === "high-contrast") return app.t("theme.highContrast", theme.label);
+        if (theme.id === "slate") return app.t("theme.slate", theme.label);
+        if (theme.id === "plum") return app.t("theme.plum", theme.label);
+        if (theme.id === "teal") return app.t("theme.turquoise", theme.label);
+        return theme.label;
+    }
+
     async function save(event: SubmitEvent): Promise<void> {
         event.preventDefault();
         if (!draft || saving) return;
@@ -242,7 +259,7 @@
                                         .palette.background} 0 64%, {theme
                                         .palette.accent} 64%)"
                                 ></span>
-                                <strong>{theme.label}</strong>
+                                <strong>{translateThemeLabel(theme)}</strong>
                             </label>
                         {/each}
                     </div>

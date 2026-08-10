@@ -128,10 +128,23 @@ impl InstallAction {
             let actual = actual.as_deref()?;
             let clave = format!("action.{}.{nombre}", self.id);
             let texto = crate::i18n::translate(language, &clave, &[], actual);
-            // Un texto con parámetros sin resolver ({source}, {distro}...) es
-            // de los que el catálogo ya tradujo al generarlo, que es donde
-            // existen esos datos. Volver a traducirlo aquí, sin ellos, dejaría
-            // el hueco a la vista.
+            if !tiene_hueco(&texto) && texto != actual {
+                return Some(texto);
+            }
+            if nombre == "hint" {
+                if self.id.contains("git-pull") {
+                    let fb = crate::i18n::translate(language, "action.gitPull.hint", &[], actual);
+                    if fb != actual {
+                        return Some(fb);
+                    }
+                }
+                if self.id.ends_with("-uninstall") || self.id.ends_with("-remove") {
+                    let fb = crate::i18n::translate(language, "action.uninstall.hint", &[], actual);
+                    if fb != actual {
+                        return Some(fb);
+                    }
+                }
+            }
             Some(if tiene_hueco(&texto) {
                 actual.to_string()
             } else {
