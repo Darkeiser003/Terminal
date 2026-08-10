@@ -1044,9 +1044,10 @@ pub fn build_banner(
         columns as usize
     };
 
-    // Permite hasta 72 columnas para que quepa la información completa sin truncar.
-    let max_line_cols = std::cmp::min(available_cols, 72);
-    let max_sep = std::cmp::min(60, max_line_cols.saturating_sub(1));
+    // Se limita el ancho a 48 columnas para garantizar que ninguna línea del banner
+    // ni el separador hagan salto de línea en la vista de ventanas divididas (multiventana).
+    let max_line_cols = std::cmp::min(available_cols, 48);
+    let max_sep = std::cmp::min(46, max_line_cols.saturating_sub(2));
     let sep_len = if max_sep < 15 { 15 } else { max_sep };
     let separator = "-".repeat(sep_len);
 

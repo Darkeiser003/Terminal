@@ -148,13 +148,22 @@ class AppStore {
         // recién creada se colaría delante de aquella en la que se estaba.
         const primera = this.activeTabId;
         const entorno = this.activeTab?.envId ?? undefined;
-        // Las que falten se abren ANTES de repartir las casillas: si no, la
-        // rejilla se quedaría con huecos hasta que el backend contestara.
         const faltan = siguiente - this.tabs.length;
+        // Establecer el diseño de rejilla antes de abrir pestañas faltantes
+        // para que las nuevas nazcan directamente con la medida dividida.
+        const ordenInicial = [...(primera ? [primera] : []), ...this.tabs.map((tab) => tab.id)];
+        const unicasIniciales: string[] = [];
+        for (const id of ordenInicial) {
+            if (!unicasIniciales.includes(id)) unicasIniciales.push(id);
+        }
+        if (unicasIniciales.length >= 2) {
+            this.panes = unicasIniciales.slice(0, siguiente);
+        }
+
         for (let i = 0; i < faltan; i++) {
             await this.createTab(entorno);
         }
-        if (primera) this.activeTabId = primera;
+        if (primera) await this.activateTab(primera);
         const orden = [...(primera ? [primera] : []), ...this.tabs.map((tab) => tab.id)];
         const unicas: string[] = [];
         for (const id of orden) {

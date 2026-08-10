@@ -243,6 +243,23 @@
         term.options.theme = terminalTheme(preferences, app.themes);
         fitAndReport();
     });
+    // Interceptamos eventos en fase de captura directamente en el nodo host:
+    // xterm.js consume los eventos de ratón en su propio canvas con stopPropagation,
+    // por lo que los manejadores de burbujeo normales nunca llegaban a ejecutarse.
+    $effect(() => {
+        if (!host) return;
+        const activate = () => tomarElFoco();
+        host.addEventListener('pointerdown', activate, { capture: true });
+        host.addEventListener('mousedown', activate, { capture: true });
+        host.addEventListener('focusin', activate, { capture: true });
+        host.addEventListener('contextmenu', onContextMenu, { capture: true });
+        return () => {
+            host.removeEventListener('pointerdown', activate, { capture: true });
+            host.removeEventListener('mousedown', activate, { capture: true });
+            host.removeEventListener('focusin', activate, { capture: true });
+            host.removeEventListener('contextmenu', onContextMenu, { capture: true });
+        };
+    });
 </script>
 
 <div
@@ -250,11 +267,6 @@
     class:hidden={!active}
     bind:this={host}
     onmouseup={handleMouseUp}
-    oncontextmenucapture={onContextMenu}
-    onfocusincapture={tomarElFoco}
-    onmousedowncapture={tomarElFoco}
-    onpointerdowncapture={tomarElFoco}
-    onpointerdown={tomarElFoco}
     role="presentation"
 ></div>
 

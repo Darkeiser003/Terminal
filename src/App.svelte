@@ -2,22 +2,22 @@
     // Raíz de la interfaz. Aquí se cargan el estado inicial y las suscripciones
     // a los eventos del pty: una sola vez para toda la app, no una por pestaña.
 
-    import { onMount } from 'svelte';
-    import type { UnlistenFn } from '@tauri-apps/api/event';
-    import type { UpdateStatus } from './lib/types';
+    import { onMount } from "svelte";
+    import type { UnlistenFn } from "@tauri-apps/api/event";
+    import type { UpdateStatus } from "./lib/types";
 
-    import * as api from './lib/api';
-    import { app } from './lib/appState.svelte';
-    import { panels } from './lib/panels.svelte';
-    import { getTerminal } from './lib/terminalRegistry';
-    import DependenciesPanel from './components/DependenciesPanel.svelte';
-    import ExplorerSidebar from './components/ExplorerSidebar.svelte';
-    import ProjectsPanel from './components/ProjectsPanel.svelte';
-    import ScriptsPanel from './components/ScriptsPanel.svelte';
-    import SettingsPanel from './components/SettingsPanel.svelte';
-    import TabBar from './components/TabBar.svelte';
-    import TerminalPane from './components/TerminalPane.svelte';
-    import Toolbar from './components/Toolbar.svelte';
+    import * as api from "./lib/api";
+    import { app } from "./lib/appState.svelte";
+    import { panels } from "./lib/panels.svelte";
+    import { getTerminal } from "./lib/terminalRegistry";
+    import DependenciesPanel from "./components/DependenciesPanel.svelte";
+    import ExplorerSidebar from "./components/ExplorerSidebar.svelte";
+    import ProjectsPanel from "./components/ProjectsPanel.svelte";
+    import ScriptsPanel from "./components/ScriptsPanel.svelte";
+    import SettingsPanel from "./components/SettingsPanel.svelte";
+    import TabBar from "./components/TabBar.svelte";
+    import TerminalPane from "./components/TerminalPane.svelte";
+    import Toolbar from "./components/Toolbar.svelte";
 
     let ready = $state(false);
     let deps = $state<DependenciesPanel | null>(null);
@@ -28,7 +28,7 @@
      *  arrancar. Null mientras no haya nada que ofrecer. */
     let update = $state<UpdateStatus | null>(null);
     let updating = $state(false);
-    let updateError = $state('');
+    let updateError = $state("");
 
     /** Atajos globales. Son los de la versión Electron, y se eligieron para no
      *  chocar con la edición de línea de las shells: Ctrl+W, por ejemplo, borra
@@ -44,14 +44,20 @@
         // entrada, así que sin esta condición el foco normal de la terminal
         // contaba como "escribiendo en un formulario" y ningún atajo llegaba a
         // dispararse nunca.
-        const dentroDeTerminal = target?.closest('.workspace') !== null && target !== null;
+        const dentroDeTerminal =
+            target?.closest(".workspace") !== null && target !== null;
         const enFormulario =
             !dentroDeTerminal &&
-            (target?.closest('input, textarea, select') != null || target?.isContentEditable === true);
-        const esNavegacion = event.ctrlKey && event.key === 'Tab';
+            (target?.closest("input, textarea, select") != null ||
+                target?.isContentEditable === true);
+        const esNavegacion = event.ctrlKey && event.key === "Tab";
         if (enFormulario && !esNavegacion) return;
 
-        if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 't') {
+        if (
+            event.ctrlKey &&
+            event.shiftKey &&
+            event.key.toLowerCase() === "t"
+        ) {
             event.preventDefault();
             void app.createTab(app.activeTab?.envId ?? undefined);
             return;
@@ -59,38 +65,55 @@
         if (esNavegacion) {
             event.preventDefault();
             if (app.tabs.length < 2) return;
-            const actual = app.tabs.findIndex((tab) => tab.id === app.activeTabId);
+            const actual = app.tabs.findIndex(
+                (tab) => tab.id === app.activeTabId,
+            );
             // Shift invierte el sentido; el módulo hace que dé la vuelta por los
             // dos extremos sin casos especiales.
             const salto = event.shiftKey ? -1 : 1;
-            const siguiente = (actual + salto + app.tabs.length) % app.tabs.length;
+            const siguiente =
+                (actual + salto + app.tabs.length) % app.tabs.length;
             void app.activateTab(app.tabs[siguiente].id);
             return;
         }
         // Ctrl+Shift+\ rota entre 1, 2, 3 y 4 terminales a la vista.
-        if (event.ctrlKey && event.shiftKey && event.key === '\\') {
+        if (event.ctrlKey && event.shiftKey && event.key === "\\") {
             event.preventDefault();
             app.cyclePanes();
             return;
         }
         // Ctrl + Flechas o Alt + Flechas: mover el foco de la terminal en la vista dividida
-        if ((event.ctrlKey || event.altKey) && !event.shiftKey && app.panes.length >= 2) {
+        if (
+            (event.ctrlKey || event.altKey) &&
+            !event.shiftKey &&
+            app.panes.length >= 2
+        ) {
             const key = event.key;
-            if (key === 'ArrowLeft' || key === 'ArrowRight' || key === 'ArrowUp' || key === 'ArrowDown') {
+            if (
+                key === "ArrowLeft" ||
+                key === "ArrowRight" ||
+                key === "ArrowUp" ||
+                key === "ArrowDown"
+            ) {
                 event.preventDefault();
                 event.stopPropagation();
-                const dirMap: Record<string, 'left' | 'right' | 'up' | 'down'> = {
-                    ArrowLeft: 'left',
-                    ArrowRight: 'right',
-                    ArrowUp: 'up',
-                    ArrowDown: 'down'
-                };
+                const dirMap: Record<string, "left" | "right" | "up" | "down"> =
+                    {
+                        ArrowLeft: "left",
+                        ArrowRight: "right",
+                        ArrowUp: "up",
+                        ArrowDown: "down",
+                    };
                 app.navigatePaneDirection(dirMap[key]);
                 return;
             }
         }
 
-        if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'e') {
+        if (
+            event.ctrlKey &&
+            event.shiftKey &&
+            event.key.toLowerCase() === "e"
+        ) {
             event.preventDefault();
             app.explorerVisible = !app.explorerVisible;
         }
@@ -110,12 +133,17 @@
                 const term = getTerminal(tabId);
                 term?.writeln(
                     `\r\n\x1b[33m${app
-                        .t('tabs.exited', '[Proceso finalizado con código {code}]')
-                        .replace('{code}', String(code))}\x1b[0m`
+                        .t(
+                            "tabs.exited",
+                            "[Proceso finalizado con código {code}]",
+                        )
+                        .replace("{code}", String(code))}\x1b[0m`,
                 );
             }),
 
-            api.onTabClosed((tabId, activeTabId) => app.handleTabClosed(tabId, activeTabId)),
+            api.onTabClosed((tabId, activeTabId) =>
+                app.handleTabClosed(tabId, activeTabId),
+            ),
 
             api.onEnvironmentChanged((event) => {
                 // La sesión anterior ya no existe: su historial no tiene nada
@@ -125,13 +153,17 @@
                 app.applyEnvironmentChange(event);
             }),
 
-            api.onEnvironmentsUpdated((inventory) => app.applyInventory(inventory)),
+            api.onEnvironmentsUpdated((inventory) =>
+                app.applyInventory(inventory),
+            ),
 
-            api.onCommandNotFound((event) => app.noteSuggestion(event.tabId, event.suggestion)),
+            api.onCommandNotFound((event) =>
+                app.noteSuggestion(event.tabId, event.suggestion),
+            ),
 
             api.onUpdateAvailable((status) => {
                 update = status;
-            })
+            }),
         ];
 
         void app.load().then(() => {
@@ -145,18 +177,19 @@
                 message: event.message,
                 source: event.filename,
                 line: event.lineno,
-                stack: event.error?.stack
+                stack: event.error?.stack,
             });
         const onRejection = (event: PromiseRejectionEvent) =>
             api.reportFrontendError({ message: String(event.reason) });
 
-        window.addEventListener('error', onError);
-        window.addEventListener('unhandledrejection', onRejection);
+        window.addEventListener("error", onError);
+        window.addEventListener("unhandledrejection", onRejection);
 
         return () => {
-            window.removeEventListener('error', onError);
-            window.removeEventListener('unhandledrejection', onRejection);
-            for (const pending of unlisteners) void pending.then((stop) => stop());
+            window.removeEventListener("error", onError);
+            window.removeEventListener("unhandledrejection", onRejection);
+            for (const pending of unlisteners)
+                void pending.then((stop) => stop());
         };
     });
 </script>
@@ -179,16 +212,20 @@
              vista dividida. Los paneles NO se destruyen al ocultarse — cada uno
              guarda su xterm con su historial —, así que lo que cambia es solo
              cuál se ve y en qué casilla. -->
-        <div class="grid" style="--panes: {app.panes.length < 2 ? 1 : app.panes.length}">
+        <div
+            class="grid"
+            style="--panes: {app.panes.length < 2 ? 1 : app.panes.length}"
+        >
             {#if ready}
                 {#each app.tabs as tab (tab.id)}
                     {@const pane = app.visibleTabs.indexOf(tab.id)}
                     <div
                         class="cell"
                         class:hidden={pane === -1}
-                        class:focused={app.panes.length > 1 && tab.id === app.activeTabId}
+                        class:focused={app.panes.length > 1 &&
+                            tab.id === app.activeTabId}
                         style="order: {pane}"
-                        onpointerdown={() => { console.debug('[App] cell pointerdown', { tabId: tab.id, pane }); void app.activateTab(tab.id); }}
+                        onpointerdown={() => void app.activateTab(tab.id)}
                         role="presentation"
                     >
                         <TerminalPane tabId={tab.id} active={pane !== -1} />
@@ -203,8 +240,8 @@
         <div class="suggestion" role="status">
             <span>
                 {app
-                    .t('suggestion.missing', '{tool} no está instalado.')
-                    .replace('{tool}', suggestion.label)}
+                    .t("suggestion.missing", "{tool} no está instalado.")
+                    .replace("{tool}", suggestion.label)}
             </span>
             <div class="suggestion-actions">
                 <!-- Sin `actionId` se reconoce la herramienta pero no hay nada
@@ -214,15 +251,18 @@
                         type="button"
                         onclick={() => {
                             app.dismissSuggestion(app.activeTabId!);
-                            panels.show('deps');
+                            panels.show("deps");
                             void deps?.load();
                         }}
                     >
-                        {app.t('suggestion.install', 'Instalar')}
+                        {app.t("suggestion.install", "Instalar")}
                     </button>
                 {/if}
-                <button type="button" onclick={() => app.dismissSuggestion(app.activeTabId!)}>
-                    {app.t('suggestion.dismiss', 'Descartar')}
+                <button
+                    type="button"
+                    onclick={() => app.dismissSuggestion(app.activeTabId!)}
+                >
+                    {app.t("suggestion.dismiss", "Descartar")}
                 </button>
             </div>
         </div>
@@ -234,15 +274,18 @@
         <div class="update" role="status">
             <span>
                 {app
-                    .t('update.available', 'Hay una versión más reciente: {version}.')
-                    .replace('{version}', update.latestVersion ?? '')}
+                    .t(
+                        "update.available",
+                        "Hay una versión más reciente: {version}.",
+                    )
+                    .replace("{version}", update.latestVersion ?? "")}
                 {#if updateError}
                     <strong class="update-error">{updateError}</strong>
                 {:else if update.installPath}
                     <small>
                         {app
-                            .t('update.into', 'Se instalará en {path}')
-                            .replace('{path}', update.installPath)}
+                            .t("update.into", "Se instalará en {path}")
+                            .replace("{path}", update.installPath)}
                     </small>
                 {/if}
             </span>
@@ -253,14 +296,17 @@
                     disabled={updating}
                     onclick={async () => {
                         updating = true;
-                        updateError = '';
+                        updateError = "";
                         try {
                             // Si va bien, el proceso muere durante esta llamada
                             // y no vuelve: lo que sigue solo corre si ha fallado.
                             const result = await api.installUpdate();
                             updateError =
                                 result.error ??
-                                app.t('update.failed', 'No se pudo actualizar.');
+                                app.t(
+                                    "update.failed",
+                                    "No se pudo actualizar.",
+                                );
                         } catch (cause) {
                             updateError = String(cause);
                         } finally {
@@ -269,11 +315,11 @@
                     }}
                 >
                     {updating
-                        ? app.t('update.installing', 'Actualizando…')
-                        : app.t('update.install', 'Actualizar y reiniciar')}
+                        ? app.t("update.installing", "Actualizando…")
+                        : app.t("update.install", "Actualizar y reiniciar")}
                 </button>
                 <button type="button" onclick={() => (update = null)}>
-                    {app.t('update.later', 'Ahora no')}
+                    {app.t("update.later", "Ahora no")}
                 </button>
             </div>
         </div>
@@ -322,7 +368,9 @@
         border: 1px solid #282c34;
         border-radius: 4px;
         overflow: hidden;
-        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        transition:
+            border-color 0.15s ease,
+            box-shadow 0.15s ease;
     }
 
     /* Cuál recibe lo que se teclea. */

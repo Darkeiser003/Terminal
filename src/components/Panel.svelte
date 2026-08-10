@@ -178,10 +178,15 @@
     function onWindowResize(): void {
         viewport = { width: window.innerWidth, height: window.innerHeight };
     }
+
+    $effect(() => {
+        const handleMouseDown = (e: MouseEvent) => onPointerDown(e);
+        window.addEventListener('mousedown', handleMouseDown, { capture: true });
+        return () => window.removeEventListener('mousedown', handleMouseDown, { capture: true });
+    });
 </script>
 
 <svelte:window
-    onmousedowncapture={onPointerDown}
     onkeydown={onKeyDown}
     onresize={onWindowResize}
 />
