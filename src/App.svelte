@@ -188,7 +188,7 @@
                         class:hidden={pane === -1}
                         class:focused={app.panes.length > 1 && tab.id === app.activeTabId}
                         style="order: {pane}"
-                        onpointerdown={() => app.activateTab(tab.id)}
+                        onpointerdown={() => { console.debug('[App] cell pointerdown', { tabId: tab.id, pane }); void app.activateTab(tab.id); }}
                         role="presentation"
                     >
                         <TerminalPane tabId={tab.id} active={pane !== -1} />
