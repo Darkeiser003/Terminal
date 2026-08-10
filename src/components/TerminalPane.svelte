@@ -41,7 +41,25 @@
         // luego habría que deshacer.
         if (host.clientWidth === 0 || host.clientHeight === 0) return;
         try {
-            fitAddon.fit();
+            const dims = fitAddon.proposeDimensions();
+            if (dims) {
+                // Verificar que el alto total ocupado por las filas no sobrepase la caja
+                // usable del host para evitar que la última línea de comandos se solape con el borde.
+                const core = (term as any)._core;
+                const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
+                if (cellHeight && cellHeight > 0) {
+                    const style = window.getComputedStyle(host);
+                    const paddingTop = parseFloat(style.paddingTop) || 0;
+                    const paddingBottom = parseFloat(style.paddingBottom) || 0;
+                    const availableHeight = host.clientHeight - paddingTop - paddingBottom;
+                    if (dims.rows * cellHeight > availableHeight && dims.rows > 1) {
+                        dims.rows -= 1;
+                    }
+                }
+                term.resize(dims.cols, dims.rows);
+            } else {
+                fitAddon.fit();
+            }
             term.scrollToBottom();
         } catch (err) {
             console.error('[TerminalPane] fitAndReport error', err);
@@ -265,6 +283,7 @@
 <div
     class="tab-pane"
     class:hidden={!active}
+    class:multiventana={app.panes.length > 1}
     bind:this={host}
     onmouseup={handleMouseUp}
     role="presentation"
@@ -312,6 +331,10 @@
         padding: var(--terminal-padding);
         background: var(--terminal-bg);
         overflow: hidden;
+    }
+
+    .tab-pane.multiventana {
+        padding: 6px 8px;
     }
 
     .menu-backdrop {

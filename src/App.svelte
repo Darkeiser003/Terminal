@@ -121,7 +121,14 @@
 
     onMount(() => {
         const unlisteners: Promise<UnlistenFn>[] = [
-            api.onData((tabId, data) => getTerminal(tabId)?.write(data)),
+            api.onData((tabId, data) => {
+                const term = getTerminal(tabId);
+                if (term) {
+                    term.write(data, () => {
+                        term.scrollToBottom();
+                    });
+                }
+            }),
 
             // clear / cls: el backend entrega el marcador ANTES del repintado de
             // la shell. Se resetean pantalla e historial y, acto seguido, llegan
@@ -356,6 +363,7 @@
         flex: 1 1 auto;
         min-width: 0;
         grid-template-columns: repeat(min(var(--panes), 2), minmax(0, 1fr));
+        grid-auto-rows: minmax(0, 1fr);
         gap: 6px;
         background: var(--app-bg);
     }
