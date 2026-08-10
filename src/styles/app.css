@@ -5,6 +5,9 @@
 @import '@xterm/xterm/css/xterm.css';
 
 :root {
+    /* WebKitGTK, usado por Tauri en Linux, elige de aquí los colores de los
+       controles nativos (incluidos los botones de los campos numéricos). */
+    color-scheme: dark;
     --app-bg: #080808;
     --surface: #191919;
     --surface-alt: #111111;
@@ -18,6 +21,35 @@
     --terminal-fg: #d7d7d7;
     --terminal-padding: 10px;
     --terminal-font: 'Cascadia Code', Consolas, 'Courier New', monospace;
+}
+
+/* En WebKitGTK la apariencia nativa de los <select> ignora el fondo declarado
+   por cada componente y acaba mostrando cajas blancas. La clase se aplica solo
+   a la build Linux, de modo que los controles de Windows conservan su aspecto. */
+.platform-linux select {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 24px !important;
+    background-color: var(--surface-alt) !important;
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+        linear-gradient(135deg, var(--muted) 50%, transparent 50%) !important;
+    background-position:
+        calc(100% - 10px) 50%,
+        calc(100% - 6px) 50% !important;
+    background-repeat: no-repeat !important;
+    background-size: 4px 4px !important;
+    color: var(--text) !important;
+}
+
+.platform-linux select option,
+.platform-linux select optgroup {
+    background: var(--surface);
+    color: var(--text);
+}
+
+.platform-linux input[type='number'] {
+    color-scheme: dark;
 }
 
 * {

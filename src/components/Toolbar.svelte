@@ -32,6 +32,7 @@
      *  se decía por qué. */
     let logsError = $state('');
 
+    let envMenuOpen = $state(false);
     let langMenuOpen = $state(false);
 
     const flags: Record<string, string> = {
@@ -86,8 +87,10 @@
         await app.savePreferences({ language: langId });
     }
 
-    /** Los entornos agrupados como los pinta el desplegable: un `<optgroup>`
-     *  por apartado, en el orden en que llegaron del backend. */
+    /** Los entornos agrupados como los pinta el desplegable, en el orden en
+     *  que llegaron del backend. No usamos el `<select>` nativo: WebKitGTK
+     *  abre su lista a todo el ancho de la ventana y no permite darle una
+     *  apariencia coherente con el resto de la aplicación. */
     const grouped = $derived.by(() => {
         const groups = new Map<string, Environment[]>();
         for (const env of app.environments) {
@@ -113,42 +116,94 @@
             .replace('(no instalada)', app.t('env.notInstalled', '(no instalada)'));
     }
 
-    async function changeEnvironment(event: Event): Promise<void> {
-        const select = event.currentTarget as HTMLSelectElement;
-        const envId = select.value;
+    const currentEnvironment = $derived(
+        app.environments.find((environment) => environment.id === app.activeTab?.envId)
+    );
+
+    const currentEnvironmentLabel = $derived(
+        !app.environmentsLoaded
+            ? app.t('env.detecting', 'Detectando entornos…')
+            : translateLabel(currentEnvironment?.label ?? app.activeTab?.label ?? '')
+    );
+
+    async function selectEnvironment(environment: Environment): Promise<void> {
         const tabId = app.activeTabId;
-        if (!tabId || !envId) return;
-        const ok = await app.switchEnvironment(tabId, envId);
-        // Si el backend lo rechaza, el desplegable vuelve al entorno real de la
-        // pestaña en vez de quedarse mostrando uno que no se abrió.
-        if (!ok) select.value = app.activeTab?.envId ?? '';
+        if (!tabId || !environment.available) return;
+        envMenuOpen = false;
+        await app.switchEnvironment(tabId, environment.id);
     }
 </script>
 
 <div class="toolbar">
     <div class="toolbar-group grow">
-        <select
-            class="env-select"
-            value={app.activeTab?.envId ?? ''}
-            disabled={!app.environmentsLoaded || !app.activeTabId}
-            onchange={changeEnvironment}
-            title={app.t('toolbar.environment', 'Entorno de la pestaña activa')}
-        >
-            {#if !app.environmentsLoaded}
-                <option value="">{app.t('env.detecting', 'Detectando entornos…')}</option>
-            {/if}
-            {#each grouped as [group, envs] (group)}
-                <optgroup label={translateGroup(group)}>
-                    {#each envs as env (env.id)}
-                        <!-- Un entorno no disponible se ve pero no se elige: el
-                             porqué está en su `note`. -->
-                        <option value={env.id} disabled={!env.available} title={translateLabel(env.note ?? env.label)}>
-                            {translateLabel(env.label)}
-                        </option>
+        <div class="env-container">
+            <button
+                type="button"
+                class="env-select"
+                class:open={envMenuOpen}
+                disabled={!app.environmentsLoaded || !app.activeTabId}
+                aria-haspopup="listbox"
+                aria-expanded={envMenuOpen}
+                title={app.t('toolbar.environment', 'Entorno de la pestaña activa')}
+                onkeydown={(event) => {
+                    if (event.key === 'Escape') envMenuOpen = false;
+                }}
+                onclick={(event) => {
+                    event.stopPropagation();
+                    langMenuOpen = false;
+                    envMenuOpen = !envMenuOpen;
+                }}
+            >
+                <span class="env-current">{currentEnvironmentLabel}</span>
+                <span class="env-chevron" aria-hidden="true">⌄</span>
+            </button>
+
+            {#if envMenuOpen}
+                <div
+                    class="env-backdrop"
+                    onmousedown={() => (envMenuOpen = false)}
+                    role="presentation"
+                ></div>
+                <div
+                    class="env-menu"
+                    role="listbox"
+                    aria-label={app.t('toolbar.environment', 'Entorno de la pestaña activa')}
+                >
+                    {#each grouped as [group, envs] (group)}
+                        <section class="env-group">
+                            <div class="env-group-title">{translateGroup(group)}</div>
+                            {#each envs as environment (environment.id)}
+                                <button
+                                    type="button"
+                                    role="option"
+                                    class="env-item"
+                                    class:selected={environment.id === app.activeTab?.envId}
+                                    disabled={!environment.available}
+                                    aria-selected={environment.id === app.activeTab?.envId}
+                                    title={translateLabel(environment.note ?? environment.label)}
+                                    onclick={() => void selectEnvironment(environment)}
+                                >
+                                    <span
+                                        class="env-status"
+                                        class:available={environment.available}
+                                        aria-hidden="true"
+                                    ></span>
+                                    <span class="env-copy">
+                                        <strong>{translateLabel(environment.label)}</strong>
+                                        {#if environment.note && !environment.available}
+                                            <small>{translateLabel(environment.note)}</small>
+                                        {/if}
+                                    </span>
+                                    {#if environment.id === app.activeTab?.envId}
+                                        <span class="env-check" aria-hidden="true">✓</span>
+                                    {/if}
+                                </button>
+                            {/each}
+                        </section>
                     {/each}
-                </optgroup>
-            {/each}
-        </select>
+                </div>
+            {/if}
+        </div>
 
         <button
             type="button"
@@ -232,6 +287,7 @@
                 title={app.t('toolbar.language', 'Cambiar idioma')}
                 onclick={(e) => {
                     e.stopPropagation();
+                    envMenuOpen = false;
                     langMenuOpen = !langMenuOpen;
                 }}
             >
@@ -304,12 +360,19 @@
     .toolbar-group.grow {
         flex: 1 1 0;
         min-width: 0;
-        overflow: hidden;
+        /* El texto ya se recorta dentro de `.env-current`; dejar visible el
+           desbordamiento permite que la lista flotante salga bajo la barra. */
+        overflow: visible;
     }
 
     .env-select {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         flex: 1 1 0;
+        width: 100%;
         min-width: 40px;
+        gap: 8px;
         padding: 4px 6px;
         border: 1px solid var(--border);
         border-radius: 3px;
@@ -317,6 +380,142 @@
         color: var(--text);
         font: inherit;
         font-size: 12px;
+        text-align: left;
+    }
+
+    .env-container {
+        position: relative;
+        display: flex;
+        flex: 1 1 0;
+        min-width: 0;
+    }
+
+    .env-current {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .env-chevron {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1;
+        transition: transform 0.15s ease;
+    }
+
+    .env-select.open .env-chevron {
+        transform: rotate(180deg);
+    }
+
+    .env-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+    }
+
+    .env-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        z-index: 61;
+        width: clamp(300px, 42vw, 480px);
+        max-width: calc(100vw - 20px);
+        max-height: min(70vh, 480px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        padding: 5px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+    }
+
+    .env-group + .env-group {
+        margin-top: 4px;
+        padding-top: 4px;
+        border-top: 1px solid var(--border);
+    }
+
+    .env-group-title {
+        padding: 5px 8px 4px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.035em;
+        text-transform: uppercase;
+    }
+
+    .env-item {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        gap: 8px;
+        padding: 6px 8px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        text-align: left;
+    }
+
+    .env-item:hover:not(:disabled) {
+        border-color: var(--border);
+        background: var(--surface-hover);
+    }
+
+    .env-item.selected {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+    }
+
+    .env-item:disabled {
+        cursor: not-allowed;
+        opacity: 0.58;
+    }
+
+    .env-status {
+        width: 6px;
+        height: 6px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: var(--muted);
+    }
+
+    .env-status.available {
+        background: #54d6b0;
+        box-shadow: 0 0 0 2px rgba(84, 214, 176, 0.1);
+    }
+
+    .env-copy {
+        display: flex;
+        min-width: 0;
+        flex: 1 1 auto;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .env-copy strong,
+    .env-copy small {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .env-copy strong {
+        font-size: 11px;
+        font-weight: 600;
+    }
+
+    .env-copy small {
+        color: var(--muted);
+        font-size: 9px;
+    }
+
+    .env-check {
+        flex: 0 0 auto;
+        color: var(--accent);
+        font-weight: 700;
     }
 
     button {

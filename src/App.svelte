@@ -203,7 +203,7 @@
 
 <svelte:window onkeydown={onShortcut} />
 
-<main>
+<main class:platform-linux={app.appInfo?.platform === "linux"}>
     <Toolbar
         onOpenDeps={() => deps?.load()}
         onOpenSettings={() => settings?.load()}

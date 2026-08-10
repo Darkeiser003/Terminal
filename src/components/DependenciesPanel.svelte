@@ -390,7 +390,8 @@
             {:else}
                 {app
                     .t('deps.upToDate', 'Estás en la última versión ({version}).')
-                    .replace('{version}', self.currentVersion)}
+                    .replace('{version}', self.currentVersion)
+                    .replace('{app}', app.appInfo?.name ?? 'la terminal')}
             {/if}
         </div>
         </div>

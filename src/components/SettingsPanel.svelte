@@ -771,10 +771,15 @@
                                         update.latestVersion ?? "",
                                     )}
                             {:else if update}
-                                {app.t(
-                                    "update.upToDate",
-                                    "Estás en la versión más reciente.",
-                                )}
+                                {app
+                                    .t(
+                                        "update.upToDate",
+                                        "{app} está en la versión más reciente.",
+                                    )
+                                    .replace(
+                                        "{app}",
+                                        app.appInfo?.name ?? "La terminal",
+                                    )}
                             {/if}
                         </span>
                     </div>
