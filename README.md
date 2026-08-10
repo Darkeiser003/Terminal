@@ -1,4 +1,4 @@
-# WinSlim Terminal · LTerminal
+# WinSlim Terminal / WS-LTerminal (1.4.2)
 
 ---
 
