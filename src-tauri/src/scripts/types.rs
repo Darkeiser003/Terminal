@@ -22,6 +22,9 @@ pub enum ScriptType {
     Lua,
     Rscript,
     Groovy,
+    Autohotkey,
+    Registry,
+    LinuxPackage,
     Java,
     Program,
     Html,
@@ -43,6 +46,9 @@ pub enum FileCategory {
     Node,
     Vbscript,
     OtherScript,
+    Autohotkey,
+    Registry,
+    LinuxPackage,
     Program,
     Html,
     Image,
@@ -61,6 +67,9 @@ impl FileCategory {
             FileCategory::Node => "node",
             FileCategory::Vbscript => "vbscript",
             FileCategory::OtherScript => "other-script",
+            FileCategory::Autohotkey => "autohotkey",
+            FileCategory::Registry => "registry",
+            FileCategory::LinuxPackage => "linux-package",
             FileCategory::Program => "program",
             FileCategory::Html => "html",
             FileCategory::Image => "image",
@@ -95,7 +104,10 @@ pub static FILE_FILTERS: &[FileFilter] = &[
     FileFilter { id: FileCategory::Node,        label: "Node.js",                     default: true },
     FileFilter { id: FileCategory::Vbscript,    label: "VBScript",                    default: true },
     FileFilter { id: FileCategory::OtherScript, label: "Ruby / PHP / Perl / Lua / R", default: true },
-    FileFilter { id: FileCategory::Program,     label: "Programas",                   default: false },
+    FileFilter { id: FileCategory::Autohotkey,  label: "AutoHotkey (.ahk)",            default: false },
+    FileFilter { id: FileCategory::Registry,    label: "Registro (.reg)",              default: false },
+    FileFilter { id: FileCategory::LinuxPackage,label: "Paquetes Linux",               default: false },
+    FileFilter { id: FileCategory::Program,     label: "Programas (.exe)",             default: false },
     FileFilter { id: FileCategory::Html,        label: "HTML",                        default: false },
     FileFilter { id: FileCategory::Image,       label: "Imágenes",                    default: false },
     FileFilter { id: FileCategory::Audio,       label: "Audio",                       default: false },
@@ -161,6 +173,7 @@ pub static SCRIPT_TYPES: &[(&str, ScriptType)] = &[
     (".lua", ScriptType::Lua),
     (".r", ScriptType::Rscript),
     (".groovy", ScriptType::Groovy),
+    (".ahk", ScriptType::Autohotkey),
 ];
 
 /// Extensión -> intérprete por defecto, cuando el archivo no trae shebang.
@@ -202,6 +215,9 @@ impl ScriptType {
             | ScriptType::Lua
             | ScriptType::Rscript
             | ScriptType::Groovy => FileCategory::OtherScript,
+            ScriptType::Autohotkey => FileCategory::Autohotkey,
+            ScriptType::Registry => FileCategory::Registry,
+            ScriptType::LinuxPackage => FileCategory::LinuxPackage,
             ScriptType::Program | ScriptType::Java => FileCategory::Program,
             ScriptType::Html => FileCategory::Html,
             ScriptType::Image => FileCategory::Image,
@@ -226,6 +242,9 @@ impl ScriptType {
             ScriptType::Lua => "Requiere Lua.",
             ScriptType::Rscript => "Requiere Rscript.",
             ScriptType::Groovy => "Requiere Groovy.",
+            ScriptType::Autohotkey => "Se abre con AutoHotkey si está instalado.",
+            ScriptType::Registry => "Se abre con el editor del Registro del sistema.",
+            ScriptType::LinuxPackage => "Se abre con el gestor de paquetes asociado del sistema.",
             ScriptType::Java => "Requiere Java; se ejecuta con java -jar.",
             ScriptType::Program => "Se ejecuta en la terminal activa.",
             ScriptType::Html => "Se abre con el navegador predeterminado.",
@@ -239,7 +258,13 @@ impl ScriptType {
     pub fn runnable(self) -> bool {
         !matches!(
             self,
-            ScriptType::Html | ScriptType::Image | ScriptType::Audio | ScriptType::Video
+            ScriptType::Autohotkey
+                | ScriptType::Registry
+                | ScriptType::LinuxPackage
+                | ScriptType::Html
+                | ScriptType::Image
+                | ScriptType::Audio
+                | ScriptType::Video
         )
     }
 
@@ -253,7 +278,17 @@ impl ScriptType {
 /// contenido que el sistema sabe abrir.
 #[rustfmt::skip]
 pub static RESOURCE_TYPES: &[(&str, ScriptType)] = &[
-    (".exe", ScriptType::Program), (".com", ScriptType::Program), (".appimage", ScriptType::Program),
+    (".exe", ScriptType::Program), (".com", ScriptType::Program),
+    (".reg", ScriptType::Registry),
+    (".deb", ScriptType::LinuxPackage), (".udeb", ScriptType::LinuxPackage),
+    (".rpm", ScriptType::LinuxPackage), (".appimage", ScriptType::LinuxPackage),
+    (".flatpak", ScriptType::LinuxPackage), (".flatpakref", ScriptType::LinuxPackage),
+    (".flatpakrepo", ScriptType::LinuxPackage), (".snap", ScriptType::LinuxPackage),
+    (".apk", ScriptType::LinuxPackage), (".xbps", ScriptType::LinuxPackage),
+    (".txz", ScriptType::LinuxPackage), (".eopkg", ScriptType::LinuxPackage),
+    (".ebuild", ScriptType::LinuxPackage), (".pet", ScriptType::LinuxPackage),
+    (".sfs", ScriptType::LinuxPackage), (".run", ScriptType::LinuxPackage),
+    (".pkg.tar.zst", ScriptType::LinuxPackage), (".pkg.tar.xz", ScriptType::LinuxPackage),
     (".jar", ScriptType::Java),
     (".html", ScriptType::Html), (".htm", ScriptType::Html),
     (".png", ScriptType::Image), (".jpg", ScriptType::Image), (".jpeg", ScriptType::Image),
@@ -283,6 +318,7 @@ mod tests {
         assert_eq!(script_type_for_ext(".ps1"), Some(ScriptType::Powershell));
         assert_eq!(script_type_for_ext(".cmd"), Some(ScriptType::Batch));
         assert_eq!(script_type_for_ext(".mjs"), Some(ScriptType::Node));
+        assert_eq!(script_type_for_ext(".ahk"), Some(ScriptType::Autohotkey));
         assert_eq!(script_type_for_ext(".txt"), None);
     }
 
@@ -306,6 +342,8 @@ mod tests {
         assert!(!ScriptType::Powershell.openable());
         assert!(ScriptType::Image.openable());
         assert!(!ScriptType::Image.runnable());
+        assert!(ScriptType::Registry.openable());
+        assert!(ScriptType::LinuxPackage.openable());
     }
 
     #[test]
@@ -313,6 +351,15 @@ mod tests {
         assert_eq!(resource_type_for_ext(".exe"), Some(ScriptType::Program));
         assert_eq!(resource_type_for_ext(".jar"), Some(ScriptType::Java));
         assert_eq!(resource_type_for_ext(".mkv"), Some(ScriptType::Video));
+        assert_eq!(resource_type_for_ext(".reg"), Some(ScriptType::Registry));
+        assert_eq!(
+            resource_type_for_ext(".flatpakref"),
+            Some(ScriptType::LinuxPackage)
+        );
+        assert_eq!(
+            resource_type_for_ext(".pkg.tar.zst"),
+            Some(ScriptType::LinuxPackage)
+        );
         assert_eq!(resource_type_for_ext(".rs"), None);
     }
 

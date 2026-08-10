@@ -88,9 +88,9 @@ pub struct ScriptsPanel {
     pub scan: Option<scripts::scan::ScanInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Los scripts anclados, con su carpeta y su tipo. Van aparte de `scripts`
-    /// porque se ven SIEMPRE: no dependen del modo del panel ni de los filtros
-    /// activos, que es justo lo que hace útil anclar.
+    /// Los scripts anclados, con su carpeta y su tipo. En Ruta actual se usan
+    /// para marcar correctamente las estrellas; su lista solo se renderiza en
+    /// Favoritos.
     pub pinned: Vec<ScriptEntry>,
 }
 
@@ -455,7 +455,7 @@ pub fn scripts_pin(
     state: State<'_, Arc<AppState>>,
     item_path: String,
     pinned: bool,
-) -> ScriptsPanel {
+) -> Vec<ScriptEntry> {
     let guardados = scripts::pins::load(&crate::settings::load_settings());
     let permitido = !pinned || state.visible_item(&item_path).is_some();
     if permitido {
@@ -466,9 +466,9 @@ pub fn scripts_pin(
             serde_json::json!({ "anclado": pinned, "total": lista.len() })
         );
     }
-    // Se devuelve la biblioteca ya recalculada para que el panel se repinte con
-    // una sola llamada, igual que hace `projects_pin`.
-    library_panel(&state, &scripts::types::default_categories())
+    // Solo cambia la colección de anclados. Devolver un ScriptsPanel completo
+    // reconstruía la Biblioteca y pisaba falsamente una vista de Ruta actual.
+    pinned_scripts(&state)
 }
 
 /// Busca una pestaña abierta con una shell de una de las familias pedidas, o

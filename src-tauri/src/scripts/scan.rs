@@ -353,6 +353,12 @@ fn relative_segments(root: &Path, dir: &Path) -> Vec<String> {
 }
 
 fn extension_of(name: &str) -> String {
+    let lower = name.to_lowercase();
+    for compound in [".pkg.tar.zst", ".pkg.tar.xz"] {
+        if lower.ends_with(compound) {
+            return compound.to_string();
+        }
+    }
     match name.rfind('.') {
         // Un archivo que empieza por punto (.gitignore) no tiene extensión.
         Some(0) | None => String::new(),
@@ -916,6 +922,7 @@ mod tests {
     fn los_archivos_ocultos_no_se_toman_por_extension() {
         assert_eq!(extension_of(".gitignore"), "");
         assert_eq!(extension_of("script.SH"), ".sh");
+        assert_eq!(extension_of("editor.pkg.tar.zst"), ".pkg.tar.zst");
         assert_eq!(extension_of("sin_punto"), "");
     }
 }

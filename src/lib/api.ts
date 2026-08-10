@@ -34,6 +34,7 @@ import type {
     Preferences,
     ProjectsState,
     ReleaseResult,
+    ScriptEntry,
     ScriptsPanel,
     TabClosedEvent,
     TabIdEvent,
@@ -114,11 +115,10 @@ export const openScript = (itemPath: string) =>
 export const cdToScript = (tabId: string, itemPath: string) =>
     invoke<void>('scripts_cd', { tabId, itemPath });
 
-/** Ancla o desancla un script. Los anclados se ven siempre, en cualquier modo
- *  del panel y con cualquier filtro: es lo que hace útil anclarlos. Devuelve la
- *  biblioteca ya recalculada, para repintar con una sola llamada. */
+/** Ancla o desancla un archivo y devuelve únicamente la colección actualizada
+ *  de favoritos. Así no se reemplaza accidentalmente la vista Ruta actual. */
 export const pinScript = (itemPath: string, pinned: boolean) =>
-    invoke<ScriptsPanel>('scripts_pin', { itemPath, pinned });
+    invoke<ScriptEntry[]>('scripts_pin', { itemPath, pinned });
 
 /** Lanza el script en la terminal. Si la pestaña activa no habla la familia que
  *  necesita (PowerShell para .ps1, cmd para .bat), el backend busca o abre una

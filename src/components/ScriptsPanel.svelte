@@ -81,7 +81,9 @@
     }
 
     const visible = $derived((data?.scripts ?? []).filter(matches));
-    const pinned = $derived((data?.pinned ?? []).filter(matches));
+    // Los anclados forman la vista Favoritos. En Ruta actual solo deben verse
+    // los resultados de esa carpeta para no mezclar dos ámbitos distintos.
+    const pinned = $derived(mode === 'library' ? (data?.pinned ?? []).filter(matches) : []);
     const pinnedPaths = $derived(new Set((data?.pinned ?? []).map((s) => s.path)));
 
     /** Agrupado por origen y carpeta, y dentro de cada grupo por extensión y
@@ -89,7 +91,11 @@
     function grouped(list: ScriptEntry[]): { name: string; scripts: ScriptEntry[] }[] {
         const groups = new Map<string, ScriptEntry[]>();
         for (const script of list) {
-            const name = script.relDir ? `${script.source} / ${script.relDir}` : script.source;
+            const source =
+                data?.mode === 'here' && script.source === 'Aquí'
+                    ? app.t('scripts.currentPath', 'Ruta actual')
+                    : script.source;
+            const name = script.relDir ? `${source} / ${script.relDir}` : source;
             const bucket = groups.get(name);
             if (bucket) bucket.push(script);
             else groups.set(name, [script]);
@@ -170,7 +176,7 @@
 
 <Panel
     id="scripts"
-    title={app.t('toolbar.scripts', 'Scripts')}
+    title={app.t('toolbar.scripts', 'Biblioteca')}
     subtitle={statusError ? status : loading ? app.t('scripts.scanning', 'Buscando…') : scopeNote}
     error={statusError}
     count={visible.length}
@@ -186,7 +192,7 @@
                 title={app.t('scripts.libraryTitle', 'Carpeta de scripts persistente y utilidades del sistema')}
                 onclick={() => load('library')}
             >
-                {app.t('scripts.library', 'Biblioteca')}
+                {app.t('scripts.library', 'Favoritos')}
             </button>
             <button
                 type="button"
@@ -196,7 +202,7 @@
                 title={app.t('scripts.hereTitle', 'Buscar en el directorio actual de la pestaña y sus subdirectorios')}
                 onclick={() => load('here')}
             >
-                {app.t('scripts.here', 'Aquí')}
+                {app.t('scripts.here', 'Ruta actual')}
             </button>
         </div>
     {/snippet}
@@ -253,7 +259,7 @@
             autocomplete="off"
             spellcheck="false"
             bind:value={query}
-            placeholder={app.t('scripts.filterPlaceholder', 'Filtrar por nombre, carpeta o extensión')}
+            placeholder={app.t('scripts.filterPlaceholder', 'Filtrar archivos por nombre, carpeta o extensión')}
         />
         {#if query}
             <button type="button" class="icon" title={app.t('common.clearFilter', 'Limpiar filtro')} onclick={() => (query = '')}>✕</button>
@@ -285,7 +291,7 @@
                             checked={(selected ?? []).includes(filter.id)}
                             onchange={(event) => toggleType(filter.id, event.currentTarget.checked)}
                         />
-                        <span>{filter.label}</span>
+                        <span>{app.t(`scripts.filter.${filter.id}`, filter.label)}</span>
                     </label>
                 {/each}
             </div>
@@ -308,8 +314,7 @@
         </div>
     {/if}
 
-    <!-- Los anclados van arriba y fuera del ámbito: se ven igual en Biblioteca
-         que en «Aquí», que es justo lo que se busca al anclarlos. -->
+    <!-- Los anclados pertenecen exclusivamente a Favoritos. -->
     {#if pinned.length}
         <details class="group pinned" open>
             <summary class="group-title">
@@ -349,9 +354,15 @@
                     class:on={pinnedPaths.has(script.path)}
                     title={pinnedPaths.has(script.path)
                         ? app.t('scripts.unpin', 'Desanclar')
-                        : app.t('scripts.pin', 'Anclar: se verá siempre, en los dos ámbitos')}
+                        : app.t('scripts.pin', 'Añadir a Favoritos')}
                     onclick={async () => {
-                        data = await api.pinScript(script.path, !pinnedPaths.has(script.path));
+                        const nextPinned = await api.pinScript(
+                            script.path,
+                            !pinnedPaths.has(script.path)
+                        );
+                        // Conservar el ámbito visible, su ruta, filtros y
+                        // resultados; anclar solo modifica Favoritos.
+                        if (data) data = { ...data, pinned: nextPinned };
                     }}
                 >★</button>
                 <button
@@ -487,8 +498,13 @@
         flex: 1 1 auto;
         min-width: 0;
         overflow: hidden;
-        color: var(--muted);
-        font-size: 10px;
+        padding: 3px 7px;
+        border-left: 2px solid var(--accent);
+        border-radius: 3px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font-size: 11px;
+        font-weight: 600;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
@@ -544,8 +560,8 @@
 
     .types-options {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 2px 10px;
+        grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+        gap: 7px 16px;
         padding: 0 8px 8px;
     }
 
@@ -553,8 +569,15 @@
         display: flex;
         align-items: center;
         gap: 6px;
+        min-width: 0;
+        min-height: 18px;
         font-size: 11px;
         cursor: pointer;
+    }
+
+    .types-options input {
+        flex: 0 0 auto;
+        margin: 0;
     }
 
     .group {

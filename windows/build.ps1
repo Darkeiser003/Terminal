@@ -93,9 +93,12 @@ if (-not (Test-MSVCLinker)) {
         $wingetCode = Invoke-Native 'winget' @(
             'install',
             '--id', 'Microsoft.VisualStudio.2022.BuildTools',
+            '--exact',
+            '--source', 'winget',
             '--override', '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended',
             '--accept-source-agreements',
-            '--accept-package-agreements'
+            '--accept-package-agreements',
+            '--disable-interactivity'
         )
         # Esperar si el instalador de Visual Studio esta ejecutandose en segundo plano
         $vsSetup = Get-Process -Name 'setup' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*Microsoft Visual Studio*' }

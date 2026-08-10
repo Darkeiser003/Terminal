@@ -161,13 +161,15 @@ export interface AppInfo {
 export type ScriptType =
     | 'powershell' | 'batch' | 'shell' | 'fish' | 'python' | 'node'
     | 'vbscript' | 'ruby' | 'php' | 'perl' | 'lua' | 'rscript'
+    | 'autohotkey' | 'registry' | 'linuxpackage'
     | 'program' | 'html' | 'image' | 'audio' | 'video' | 'other';
 
 /** El grupo con el que el panel filtra. Varios tipos comparten categoría: Ruby,
  *  PHP, Perl, Lua y R caben todos en "otros scripts". */
 export type FileCategory =
     | 'batch' | 'powershell' | 'shell' | 'fish' | 'python' | 'node'
-    | 'vbscript' | 'other-script' | 'program' | 'html' | 'image' | 'audio' | 'video';
+    | 'vbscript' | 'other-script' | 'autohotkey' | 'registry' | 'linux-package'
+    | 'program' | 'html' | 'image' | 'audio' | 'video';
 
 export interface ScriptEntry {
     name: string;
@@ -217,8 +219,8 @@ export interface ScriptsPanel {
     maxDepth: number;
     scan?: ScanInfo;
     error?: string;
-    /** Los anclados, con su carpeta y su tipo. Van aparte porque se ven
-     *  siempre: no dependen del modo del panel ni de los filtros activos. */
+    /** Los anclados, con su carpeta y su tipo. En Ruta actual permiten marcar
+     *  las estrellas; la sección completa solo se muestra en Favoritos. */
     pinned: ScriptEntry[];
 }
 

@@ -270,6 +270,12 @@ fn cmd_echo(line: &Line) -> String {
     let texto = line
         .text
         .replace('^', "^^")
+        // Una previsualización recortada puede conservar la comilla de
+        // apertura de una ruta y perder la de cierre. En una línea enlazada
+        // con `&`, cmd consideraría entonces todos los separadores siguientes
+        // parte de esa comilla y se limitaría a imprimir el comando real. El
+        // caret muestra la comilla sin dejar que participe en el análisis.
+        .replace('"', "^\"")
         .replace('&', "^&")
         .replace('|', "^|")
         .replace('<', "^<")
@@ -502,6 +508,27 @@ mod tests {
         let notice = Notice::new("Ver", "a & b | c > d", "echo x");
         let salida = decorate("echo x", &notice, ShellKind::Cmd, false, &t());
         assert!(salida.contains("a ^& b ^| c ^> d"));
+    }
+
+    #[test]
+    fn cmd_no_deja_una_comilla_abierta_al_recortar_una_ruta_larga() {
+        let comando = concat!(
+            "git clone -- \"https://github.com/owner/project.git\" ",
+            "\"C:\\Users\\Usuario\\Documents\\Una carpeta de proyectos muy larga\\project\""
+        );
+        let notice = Notice::new("Clonar", "owner/project", comando);
+        let salida = decorate(comando, &notice, ShellKind::Cmd, false, &t());
+        let cabecera = salida
+            .split_once(comando)
+            .map(|(header, _)| header)
+            .expect("el comando real sigue intacto tras la cabecera");
+
+        assert!(cabecera.contains('…'), "la ruta de prueba no se recortó");
+        assert!(cabecera.contains("^\""), "la comilla visible no se escapó");
+        assert!(
+            !cabecera.replace("^\"", "").contains('"'),
+            "queda una comilla capaz de absorber los separadores de cmd"
+        );
     }
 
     #[test]

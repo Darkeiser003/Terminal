@@ -153,9 +153,14 @@
 <style>
     .tab-strip {
         display: flex;
+        /* La tira no debe ceder altura ante el contenido del workspace. El
+           desplazamiento horizontal de pestañas sigue funcionando, pero los
+           controles de explorador, división y nueva pestaña conservan 28px. */
+        flex: 0 0 40px;
         align-items: center;
         gap: 6px;
         height: 40px;
+        min-height: 40px;
         padding: 0 8px;
         background: var(--surface-alt);
         border-bottom: 1px solid var(--border);

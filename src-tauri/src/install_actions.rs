@@ -451,6 +451,41 @@ static WINDOWS_VIEWERS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     WindowsTool { label_key: Some("tool.viewerCode"), ..win("viewer-code", "Visual Studio Code (código y texto)", "code", "Microsoft.VisualStudioCode", Some("code --version"), VIEWER_GROUP) },
 ]);
 
+const WINGET_INSTALL_FLAGS: &str = "-e --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity";
+const WINGET_QUERY_FLAGS: &str =
+    "-e --source winget --accept-source-agreements --disable-interactivity";
+
+fn winget_install_command(pkg: &str) -> String {
+    format!("winget install --id {pkg} {WINGET_INSTALL_FLAGS}")
+}
+
+/// `winget upgrade` solo reconoce instalaciones que puede asociar con su
+/// catálogo. Una herramienta presente en PATH (Git instalado desde su web,
+/// por ejemplo) puede no estar registrada y el comando respondería que no hay
+/// ningún paquete coincidente. Se consulta primero sin mostrar esa salida:
+/// si winget no la conoce, `install` hace la adopción/actualización; si ya está
+/// al día, se informa sin convertir ese estado normal en un error.
+fn winget_update_command(pkg: &str) -> String {
+    let install = winget_install_command(pkg);
+    format!(
+        "$wingetInstalled = winget list --id {pkg} {WINGET_QUERY_FLAGS} | Out-String; \
+         if ($wingetInstalled -notmatch [regex]::Escape('{pkg}')) {{ {install} }} else {{ \
+         $wingetUpdate = winget list --id {pkg} {WINGET_QUERY_FLAGS} --upgrade-available \
+         --include-unknown | Out-String; if ($wingetUpdate -match [regex]::Escape('{pkg}')) {{ \
+         winget upgrade --id {pkg} {WINGET_INSTALL_FLAGS} --include-unknown }} else {{ \
+         Write-Host '{pkg}: no hay actualizaciones disponibles.' }} }}"
+    )
+}
+
+fn winget_uninstall_command(pkg: &str) -> String {
+    format!(
+        "$wingetInstalled = winget list --id {pkg} {WINGET_QUERY_FLAGS} | Out-String; \
+         if ($wingetInstalled -match [regex]::Escape('{pkg}')) {{ winget uninstall --id {pkg} \
+         -e --source winget --disable-interactivity }} else {{ Write-Host \
+         '{pkg}: no está registrado en winget; no se ha desinstalado.' }}"
+    )
+}
+
 /// Las cuatro acciones de una herramienta de Windows: instalar (solo si
 /// falta), y actualizar, desinstalar y ver versión (solo si ya está).
 fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction> {
@@ -478,7 +513,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
                 &[("tool", label.clone()), ("source", "winget".to_string())],
                 "Instalar {tool} ({source})",
             ),
-            format!("winget install --id {} -e", tool.pkg),
+            winget_install_command(tool.pkg),
         )
         .short(t.tp(
             "action.installShort",
@@ -496,7 +531,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
                 &[("tool", label.clone())],
                 "Actualizar {tool}",
             ),
-            format!("winget upgrade --id {} -e", tool.pkg),
+            winget_update_command(tool.pkg),
         )
         .short(t.t("action.updateShort", "Actualizar a la última versión"))
         .subgroup(&subgroup)
@@ -511,7 +546,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
                 &[("tool", label.clone())],
                 "Desinstalar {tool}",
             ),
-            format!("winget uninstall --id {} -e", tool.pkg),
+            winget_uninstall_command(tool.pkg),
         )
         .short(t.t("action.uninstallShort", "Desinstalar del sistema"))
         .subgroup(&subgroup)
@@ -530,7 +565,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
 
     let verify = tool.verify.map(str::to_string).or_else(|| {
         tool.no_detect
-            .then(|| format!("winget list --id {} -e", tool.pkg))
+            .then(|| format!("winget list --id {} {WINGET_QUERY_FLAGS}", tool.pkg))
     });
     if let Some(verify) = verify {
         let (label_key, label_fallback, short_key, short_fallback, verb) = if tool.no_detect {
@@ -1320,7 +1355,7 @@ fn windows_actions(
         InstallAction::new(
             "winget-upgrade",
             "Actualizar todo con winget",
-            "winget upgrade --all --include-unknown",
+            "winget upgrade --all --include-unknown --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity",
         )
         .powershell()
         .verb("Actualizar"),
@@ -2238,9 +2273,31 @@ mod tests {
         let version = buscar(&actions, "viewer-image-version");
         assert_eq!(
             version.command,
-            "winget list --id DuongDieuPhap.ImageGlass -e"
+            "winget list --id DuongDieuPhap.ImageGlass -e --source winget --accept-source-agreements --disable-interactivity"
         );
         assert_eq!(version.verb.as_deref(), Some("Comprobar"));
+    }
+
+    #[test]
+    fn actualizar_con_winget_adopta_instalaciones_ajenas_y_no_falla_si_esta_al_dia() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let command = &buscar(&actions, "winget-git-update").command;
+        assert!(command.contains("winget list --id Git.Git"));
+        assert!(command.contains("winget install --id Git.Git"));
+        assert!(command.contains("winget upgrade --id Git.Git"));
+        assert!(command.contains("no hay actualizaciones disponibles"));
+        assert!(command.contains("--source winget"));
+        assert!(command.contains("--disable-interactivity"));
+    }
+
+    #[test]
+    fn instalar_con_winget_acepta_contratos_y_fija_el_origen() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let command = &buscar(&actions, "winget-git").command;
+        assert!(command.contains("--accept-source-agreements"));
+        assert!(command.contains("--accept-package-agreements"));
+        assert!(command.contains("--source winget"));
+        assert!(command.contains("--disable-interactivity"));
     }
 
     #[test]

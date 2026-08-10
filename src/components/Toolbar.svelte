@@ -178,7 +178,7 @@
                 if (panels.toggle('scripts')) onOpenScripts();
             }}
         >
-            {app.t('toolbar.scripts', 'Scripts')}
+            {app.t('toolbar.scripts', 'Biblioteca')}
         </button>
 
         <button
@@ -274,9 +274,14 @@
 <style>
     .toolbar {
         display: flex;
+        /* Es una fila estructural del layout, no contenido flexible. Con el
+           `flex-shrink: 1` implícito, abrir un explorador con mucho contenido
+           podía quitarle altura y recortar los botones por arriba y abajo. */
+        flex: 0 0 40px;
         align-items: center;
         gap: 8px;
         height: 40px;
+        min-height: 40px;
         padding: 0 10px;
         background: var(--surface-alt);
         border-bottom: 1px solid var(--border);

@@ -228,23 +228,27 @@
             title="Arrastra para redimensionar · doble clic para restablecer"
         ></div>
 
-        <div class="panel-header">
-            <div class="panel-heading">
-                <div class="panel-title">{title}</div>
-                {#if subtitle}
-                    <div class="panel-subtitle" class:error>{subtitle}</div>
+        <!-- Solo este hijo se desplaza. Las asas son hermanas suyas y se
+             quedan ancladas al marco exterior aunque la lista haga scroll. -->
+        <div class="panel-scroll">
+            <div class="panel-header">
+                <div class="panel-heading">
+                    <div class="panel-title">{title}</div>
+                    {#if subtitle}
+                        <div class="panel-subtitle" class:error>{subtitle}</div>
+                    {/if}
+                </div>
+                {#if count !== undefined}
+                    <span class="panel-count">{count}</span>
                 {/if}
             </div>
-            {#if count !== undefined}
-                <span class="panel-count">{count}</span>
+
+            {#if header}
+                {@render header()}
             {/if}
+
+            {@render children()}
         </div>
-
-        {#if header}
-            {@render header()}
-        {/if}
-
-        {@render children()}
     </div>
 {/if}
 
@@ -254,12 +258,11 @@
         top: 44px;
         right: 8px;
         z-index: 50;
+        display: flex;
+        flex-direction: column;
         max-width: calc(100vw - 16px);
         max-height: calc(100vh - 60px);
-        overflow-y: auto;
-        /* El margen inferior deja sitio al asa: sin él, el último elemento de
-           la lista queda debajo de la zona de arrastre y no se puede pulsar. */
-        padding: 6px 6px 14px;
+        overflow: hidden;
         border: 1px solid var(--border);
         border-radius: 6px;
         background: var(--surface);
@@ -268,6 +271,19 @@
         /* Referencia para las consultas de contenedor de los paneles: lo que
            decide si algo cabe es el ancho del PANEL, no el de la ventana. */
         container-type: inline-size;
+    }
+
+    /* El scroll vive dentro del marco redimensionable. `min-height: 0` permite
+       que este hijo flex se encoja cuando el panel alcanza su `max-height`, en
+       vez de hacer crecer el marco y desplazar el asa inferior con la lista. */
+    .panel-scroll {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        /* Deja sitio al asa inferior para que la última acción siga siendo
+           pulsable incluso con el scroll completamente abajo. */
+        padding: 6px 6px 14px;
     }
 
     /* Mientras se arrastra no se selecciona texto ni se disparan estados de
