@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
@@ -18,6 +19,9 @@ use crate::tabs::TabManager;
 
 pub struct AppState {
     pub tabs: Arc<TabManager>,
+    /// Base monotónica para medir el camino hasta la primera terminal sin
+    /// consultar relojes del sistema ni afectar al comportamiento.
+    startup_started: Instant,
     inventory: Mutex<Option<Inventory>>,
     /// Ya se lanzó la detección completa. Solo hace falta una vez por arranque:
     /// las siguientes las pide el usuario con el botón de refrescar.
@@ -68,6 +72,7 @@ impl AppState {
         };
         AppState {
             tabs: Arc::new(TabManager::new(viewport)),
+            startup_started: Instant::now(),
             inventory: Mutex::new(None),
             full_detection_started: Mutex::new(false),
             allowed_items: Mutex::new(HashMap::new()),
@@ -201,11 +206,18 @@ impl AppState {
             }
             *started = true;
         }
+        log_info!(
+            "Primera terminal preparada; comienza el inventario completo",
+            serde_json::json!({
+                "afterStateMs": self.startup_started.elapsed().as_millis(),
+            })
+        );
         let state = Arc::clone(self);
         let app = app.clone();
         std::thread::Builder::new()
             .name("env-detect".into())
             .spawn(move || {
+                let started = Instant::now();
                 let inventory = state.refresh_environments();
                 log_info!(
                     "Inventario de entornos completo",
@@ -213,6 +225,7 @@ impl AppState {
                         "envs": inventory.envs.len(),
                         "dockerReady": inventory.docker_daemon_ready,
                         "androidDevices": inventory.android_device_count,
+                        "durationMs": started.elapsed().as_millis(),
                     })
                 );
                 let _ = app.emit("envs-updated", inventory);

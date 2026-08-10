@@ -2,7 +2,7 @@
     // Raíz de la interfaz. Aquí se cargan el estado inicial y las suscripciones
     // a los eventos del pty: una sola vez para toda la app, no una por pestaña.
 
-    import { onMount } from "svelte";
+    import { onMount, tick } from "svelte";
     import type { UnlistenFn } from "@tauri-apps/api/event";
     import type { UpdateStatus } from "./lib/types";
 
@@ -24,11 +24,42 @@
     let settings = $state<SettingsPanel | null>(null);
     let scripts = $state<ScriptsPanel | null>(null);
     let projects = $state<ProjectsPanel | null>(null);
+    // Los paneles conservan su estado una vez abiertos, pero no construyen sus
+    // árboles DOM durante el arranque. `tick()` garantiza que la referencia ya
+    // existe antes de pedirle su carga, también en la primera apertura.
+    let depsMounted = $state(false);
+    let settingsMounted = $state(false);
+    let scriptsMounted = $state(false);
+    let projectsMounted = $state(false);
     /** La versión publicada, cuando el backend encuentra una más nueva al
      *  arrancar. Null mientras no haya nada que ofrecer. */
     let update = $state<UpdateStatus | null>(null);
     let updating = $state(false);
     let updateError = $state("");
+
+    async function loadDeps(): Promise<void> {
+        depsMounted = true;
+        await tick();
+        await deps?.load();
+    }
+
+    async function loadSettings(): Promise<void> {
+        settingsMounted = true;
+        await tick();
+        await settings?.load();
+    }
+
+    async function loadScripts(): Promise<void> {
+        scriptsMounted = true;
+        await tick();
+        await scripts?.load();
+    }
+
+    async function loadProjects(): Promise<void> {
+        projectsMounted = true;
+        await tick();
+        await projects?.load();
+    }
 
     /** Atajos globales. Son los de la versión Electron, y se eligieron para no
      *  chocar con la edición de línea de las shells: Ctrl+W, por ejemplo, borra
@@ -205,10 +236,10 @@
 
 <main class:platform-linux={app.appInfo?.platform === "linux"}>
     <Toolbar
-        onOpenDeps={() => deps?.load()}
-        onOpenSettings={() => settings?.load()}
-        onOpenScripts={() => scripts?.load()}
-        onOpenProjects={() => projects?.load()}
+        onOpenDeps={() => void loadDeps()}
+        onOpenSettings={() => void loadSettings()}
+        onOpenScripts={() => void loadScripts()}
+        onOpenProjects={() => void loadProjects()}
     />
     <TabBar />
 
@@ -259,7 +290,7 @@
                         onclick={() => {
                             app.dismissSuggestion(app.activeTabId!);
                             panels.show("deps");
-                            void deps?.load();
+                            void loadDeps();
                         }}
                     >
                         {app.t("suggestion.install", "Instalar")}
@@ -332,10 +363,18 @@
         </div>
     {/if}
 
-    <DependenciesPanel bind:this={deps} />
-    <ProjectsPanel bind:this={projects} />
-    <ScriptsPanel bind:this={scripts} />
-    <SettingsPanel bind:this={settings} />
+    {#if depsMounted}
+        <DependenciesPanel bind:this={deps} />
+    {/if}
+    {#if projectsMounted}
+        <ProjectsPanel bind:this={projects} />
+    {/if}
+    {#if scriptsMounted}
+        <ScriptsPanel bind:this={scripts} />
+    {/if}
+    {#if settingsMounted}
+        <SettingsPanel bind:this={settings} />
+    {/if}
 </main>
 
 <style>

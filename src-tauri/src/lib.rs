@@ -48,6 +48,8 @@ pub mod tabs;
 pub mod virtualization;
 pub mod wsl_env;
 
+use std::time::Instant;
+
 use tauri::{Manager, RunEvent, WindowEvent};
 
 use crate::state::AppState;
@@ -71,7 +73,10 @@ fn migrate_local_data() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let startup_started = Instant::now();
+    let migration_started = Instant::now();
     migrate_local_data();
+    let migration_ms = migration_started.elapsed().as_millis();
     system_info::prewarm_hardware_info();
 
     let identity = identity::current();
@@ -83,6 +88,7 @@ pub fn run() {
             "arch": std::env::consts::ARCH,
             "userData": paths::USER_DATA_DIR.to_string_lossy(),
             "conpty": conpty.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "migrationMs": migration_ms,
         })),
     );
     if cfg!(windows) && conpty.is_none() {
@@ -95,11 +101,21 @@ pub fn run() {
         );
     }
 
+    let state_started = Instant::now();
+    let app_state = std::sync::Arc::new(AppState::new());
+    log_info!(
+        "Estado inicial preparado",
+        serde_json::json!({
+            "durationMs": state_started.elapsed().as_millis(),
+            "startupMs": startup_started.elapsed().as_millis(),
+        })
+    );
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(std::sync::Arc::new(AppState::new()))
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::tabs_list,
             commands::tabs_create,
@@ -153,18 +169,21 @@ pub fn run() {
             commands_update::update_check,
             commands_update::update_install,
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            let setup_started = Instant::now();
             let state = app.state::<std::sync::Arc<AppState>>();
 
             // La primera pestaña se crea antes de mostrar la ventana: su shell
             // ya está escribiendo el banner mientras el frontend monta el
             // xterm, y la salida se le entrega en cuanto avisa con `tabs_ready`.
+            let tab_started = Instant::now();
             match state.default_environment() {
                 Some(env) => {
                     state.tabs.create_tab(&app.handle().clone(), &env, None);
                 }
                 None => log_error!("No se detectó ninguna shell en el sistema"),
             }
+            let first_tab_ms = tab_started.elapsed().as_millis();
 
             // Restos de una actualización anterior y, en segundo plano, si hay
             // una nueva publicada.
@@ -173,6 +192,14 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(identity::current().name)?;
                 window.show()?;
+                log_info!(
+                    "Ventana inicial mostrada",
+                    serde_json::json!({
+                        "firstTabMs": first_tab_ms,
+                        "setupMs": setup_started.elapsed().as_millis(),
+                        "startupMs": startup_started.elapsed().as_millis(),
+                    })
+                );
                 // En depuración las herramientas de desarrollo se abren solas:
                 // sin ellas, un fallo del frontend se ve como una ventana en
                 // negro y sin ninguna pista de por qué.

@@ -59,6 +59,11 @@ pub fn tabs_activate(state: State<'_, Arc<AppState>>, tab_id: String) {
 #[tauri::command]
 pub fn tabs_ready(app: AppHandle, state: State<'_, Arc<AppState>>, tab_id: String) {
     state.tabs.mark_ready(&app, &tab_id);
+    // La detección completa habla con WSL, Docker y adb. Se inicia únicamente
+    // cuando xterm ya puede recibir y pintar la salida de la primera pestaña,
+    // para que esas sondas no compitan con el camino crítico del arranque.
+    // `AppState` garantiza que las pestañas siguientes no la repitan.
+    state.start_full_detection(&app);
 }
 
 // ---- pty (`pty-*`) ----
@@ -91,17 +96,12 @@ pub struct EnvironmentList {
     pub active_env_id: Option<String>,
 }
 
-/// `env:list`. Devuelve lo que haya detectado hasta ahora; si aún no se ha
-/// hecho la detección completa, la lanza en segundo plano y su resultado llega
-/// después por `envs-updated`.
+/// `env:list`. Devuelve inmediatamente lo detectado hasta ahora. La detección
+/// completa empieza desde `tabs:ready`, cuando la primera terminal ya puede
+/// pintar, y su resultado llega después por `envs-updated`.
 #[tauri::command(async)]
-pub fn env_list(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    tab_id: Option<String>,
-) -> EnvironmentList {
+pub fn env_list(state: State<'_, Arc<AppState>>, tab_id: Option<String>) -> EnvironmentList {
     let envs = state.environments();
-    state.start_full_detection(&app);
     EnvironmentList {
         active_env_id: active_env_id(&state, tab_id.as_deref()),
         envs,

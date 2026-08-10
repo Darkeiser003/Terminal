@@ -446,31 +446,35 @@ pub fn detect_environments(quick: bool) -> Inventory {
         };
     }
 
-    if cfg!(windows) {
-        envs.extend(detect_wsl_environments(wsl_env::ContextOptions {
-            online: false,
-            details: false,
-            probe: true,
-        }));
-    }
-
-    // Intérpretes interactivos de los lenguajes presentes en el sistema. Solo
-    // se comprueba la existencia del ejecutable, con la salvedad de Python que
-    // aplica `is_tool_installed`.
-    let languages = crate::language_env::detect_language_environments(
-        std::env::consts::OS,
-        &crate::language_env::Probe {
-            is_installed: &crate::path_env::is_tool_installed,
-            resolve_path: &|exe| which(exe).map(|path| path.to_string_lossy().to_string()),
-        },
-    );
-
     let docker_installed = which("docker").is_some();
 
-    // Las dos detecciones hablan con servicios externos (daemon de Docker,
-    // servidor de adb) y son independientes: en paralelo, el arranque tarda lo
-    // que la más lenta en vez de la suma de las dos.
-    let (docker, android) = std::thread::scope(|scope| {
+    // Todos estos proveedores son independientes. Mantenerlos en una única
+    // tanda paralela hace que la detección completa tarde lo que el proveedor
+    // más lento, no la suma de WSL + lenguajes + Docker + ADB. Los resultados
+    // se unen después en el mismo orden histórico para que la interfaz no
+    // cambie visualmente.
+    let (wsl, languages, docker, android, pkg_manager) = std::thread::scope(|scope| {
+        let wsl = scope.spawn(|| {
+            if cfg!(windows) {
+                detect_wsl_environments(wsl_env::ContextOptions {
+                    online: false,
+                    details: false,
+                    probe: true,
+                })
+            } else {
+                Vec::new()
+            }
+        });
+        // Intérpretes interactivos de los lenguajes presentes en el sistema.
+        let languages = scope.spawn(|| {
+            crate::language_env::detect_language_environments(
+                std::env::consts::OS,
+                &crate::language_env::Probe {
+                    is_installed: &crate::path_env::is_tool_installed,
+                    resolve_path: &|exe| which(exe).map(|path| path.to_string_lossy().to_string()),
+                },
+            )
+        });
         let docker = scope.spawn(move || {
             if docker_installed {
                 crate::docker_env::detect_docker_environments(crate::docker_env::DEFAULT_TIMEOUT)
@@ -479,13 +483,18 @@ pub fn detect_environments(quick: bool) -> Inventory {
             }
         });
         let android = scope.spawn(crate::android_env::detect_android_environments);
+        let pkg_manager = scope.spawn(detect_pkg_manager);
         (
+            wsl.join().unwrap_or_default(),
+            languages.join().unwrap_or_default(),
             docker.join().unwrap_or_default(),
             android.join().unwrap_or_default(),
+            pkg_manager.join().unwrap_or_default(),
         )
     });
 
     let language_count = languages.len();
+    envs.extend(wsl);
     envs.extend(languages);
     envs.extend(docker.envs);
     envs.extend(android.envs);
@@ -499,7 +508,7 @@ pub fn detect_environments(quick: bool) -> Inventory {
         docker_image_count: docker.image_count,
         android_installed: android.installed,
         android_device_count: android.device_count,
-        pkg_manager: detect_pkg_manager(),
+        pkg_manager,
     }
 }
 
