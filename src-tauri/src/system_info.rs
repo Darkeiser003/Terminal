@@ -1201,11 +1201,13 @@ mod tests {
     }
 
     #[test]
-    fn el_banner_real_se_genera_y_lleva_las_tres_secciones() {
+    fn el_banner_real_se_genera_con_los_datos_universales_del_sistema() {
         let t = Translator::default();
         let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, 1, &t);
+        assert!(banner.contains("Sistema"), "{banner}");
         assert!(banner.contains("CPU"), "{banner}");
-        assert!(banner.contains("Windows"), "{banner}");
+        assert!(banner.contains("Memoria"), "{banner}");
+        assert!(banner.contains("Disco"), "{banner}");
         assert!(banner.ends_with("\r\n"));
     }
 

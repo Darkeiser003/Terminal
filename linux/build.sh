@@ -28,13 +28,15 @@ set -Eeuo pipefail
 CLEAN=0
 NO_RUN=0
 SKIP_CHECKS=0
+AUTO_INSTALL=1
 for arg in "$@"; do
     case "$arg" in
         --clean)       CLEAN=1 ;;
         --no-run)      NO_RUN=1 ;;
         --skip-checks) SKIP_CHECKS=1 ;;
+        --no-install)  AUTO_INSTALL=0 ;;
         -h|--help)
-            echo "Uso: $0 [--clean] [--skip-checks] [--no-run]"
+            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install]"
             exit 0
             ;;
         *)
@@ -89,6 +91,160 @@ recover_tool() {
     return 1
 }
 
+run_as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        err "Hace falta permiso de administrador para instalar dependencias y no existe sudo."
+        return 1
+    fi
+}
+
+package_manager() {
+    local manager
+    for manager in apt-get dnf pacman zypper apk; do
+        command -v "$manager" >/dev/null 2>&1 && { echo "$manager"; return 0; }
+    done
+    return 1
+}
+
+install_system_dependencies() {
+    [ "$AUTO_INSTALL" -eq 1 ] || return 1
+    local manager
+    manager="$(package_manager)" || {
+        err "No se reconoce el gestor de paquetes de esta distribución."
+        return 1
+    }
+    warn "Faltan dependencias nativas; se instalarán automáticamente con $manager."
+    case "$manager" in
+        apt-get)
+            run_as_root apt-get update
+            run_as_root apt-get install -y --no-install-recommends \
+                build-essential curl wget file pkg-config ca-certificates xz-utils \
+                libwebkit2gtk-4.1-dev libsoup-3.0-dev libxdo-dev libssl-dev \
+                libayatana-appindicator3-dev librsvg2-dev
+            ;;
+        dnf)
+            run_as_root dnf install -y \
+                gcc gcc-c++ make curl wget file pkgconf-pkg-config ca-certificates xz \
+                webkit2gtk4.1-devel libsoup3-devel openssl-devel \
+                libappindicator-gtk3-devel librsvg2-devel libxdo-devel
+            ;;
+        pacman)
+            # Arch/CachyOS no admite actualizaciones parciales: sincronizar sin
+            # actualizar puede mezclar bibliotecas incompatibles.
+            run_as_root pacman -Syu --needed --noconfirm \
+                base-devel curl wget file pkgconf ca-certificates xz \
+                webkit2gtk-4.1 libsoup3 openssl appmenu-gtk-module \
+                libappindicator-gtk3 librsvg xdotool
+            ;;
+        zypper)
+            run_as_root zypper --non-interactive install -y \
+                -t pattern devel_basis
+            run_as_root zypper --non-interactive install -y \
+                curl wget file pkg-config ca-certificates xz \
+                webkit2gtk3-devel libopenssl-devel libappindicator3-1 librsvg-devel
+            ;;
+        apk)
+            run_as_root apk add \
+                build-base curl wget file pkgconf ca-certificates xz \
+                webkit2gtk-4.1-dev libsoup3-dev openssl-dev \
+                libayatana-appindicator-dev librsvg-dev xdotool-dev font-dejavu
+            ;;
+    esac
+    ok "Dependencias nativas instaladas"
+}
+
+ensure_download_tools() {
+    if command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 \
+        && command -v xz >/dev/null 2>&1; then
+        return 0
+    fi
+    install_system_dependencies
+}
+
+install_node_22() {
+    [ "$AUTO_INSTALL" -eq 1 ] || return 1
+    ensure_download_tools || return 1
+    local machine node_arch sums archive tmp install_root current
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64|amd64) node_arch="x64" ;;
+        aarch64|arm64) node_arch="arm64" ;;
+        armv7l) node_arch="armv7l" ;;
+        *) err "Node.js no ofrece un binario automático para la arquitectura $machine."; return 1 ;;
+    esac
+    warn "Se instalará Node.js 22 para el usuario actual desde nodejs.org."
+    tmp="$(mktemp -d)"
+    sums="$tmp/SHASUMS256.txt"
+    curl --proto '=https' --tlsv1.2 -fsSL \
+        https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o "$sums"
+    archive="$(awk -v suffix="linux-$node_arch.tar.xz" '$2 ~ suffix "$" { print $2; exit }' "$sums")"
+    if [ -z "$archive" ]; then
+        err "No se encontró el archivo de Node.js 22 para $node_arch."
+        return 1
+    fi
+    curl --proto '=https' --tlsv1.2 -fL --progress-bar \
+        "https://nodejs.org/dist/latest-v22.x/$archive" -o "$tmp/$archive"
+    (cd "$tmp" && grep "  $archive\$" SHASUMS256.txt | sha256sum -c -)
+    install_root="$HOME/.local/lib"
+    mkdir -p "$install_root" "$HOME/.local/bin"
+    tar -xJf "$tmp/$archive" -C "$install_root"
+    current="$install_root/${archive%.tar.xz}"
+    local tool
+    for tool in node npm npx corepack; do
+        ln -sfn "$current/bin/$tool" "$HOME/.local/bin/$tool"
+    done
+    rm -rf "$tmp"
+    # Debe quedar por delante de un Node del sistema que pueda ser demasiado
+    # antiguo, incluso si ~/.local/bin ya aparecía al final del PATH.
+    PATH="$HOME/.local/bin:$PATH"
+    export PATH
+    ok "Node.js instalado en $current"
+}
+
+install_rust_toolchain() {
+    [ "$AUTO_INSTALL" -eq 1 ] || return 1
+    command -v curl >/dev/null 2>&1 || install_system_dependencies || return 1
+    recover_tool rustup "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" || true
+    if command -v rustup >/dev/null 2>&1; then
+        warn "rustup existe pero falta Cargo; se instalará el toolchain estable."
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+    else
+        local installer
+        installer="$(mktemp)"
+        warn "Falta Rust; se descargará el instalador oficial rustup."
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$installer"
+        sh "$installer" -y --profile minimal --default-toolchain stable
+        rm -f "$installer"
+    fi
+    local cargo_env
+    cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+    if [ -s "$cargo_env" ]; then
+        # shellcheck disable=SC1090
+        . "$cargo_env"
+    fi
+    recover_tool cargo "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin"
+}
+
+ensure_rust_components() {
+    if cargo fmt --version >/dev/null 2>&1 && cargo clippy --version >/dev/null 2>&1; then
+        return 0
+    fi
+    [ "$AUTO_INSTALL" -eq 1 ] || {
+        err "Faltan rustfmt o clippy y la instalación automática está desactivada."
+        return 1
+    }
+    recover_tool rustup "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" || \
+        install_rust_toolchain || return 1
+    warn "Se instalarán los componentes rustfmt y clippy requeridos por npm run check."
+    rustup component add rustfmt clippy
+    cargo fmt --version >/dev/null 2>&1 && cargo clippy --version >/dev/null 2>&1
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 TAURI_DIR="$PROJECT_ROOT/src-tauri"
@@ -117,17 +273,25 @@ recover_tool node \
     "$HOME/.local/share/fnm/aliases/default/bin" \
     "$HOME/.asdf/shims" \
     /usr/local/bin \
-    /usr/local/node/bin || {
-    err "Falta Node.js. Instálalo desde el gestor de tu distribución o desde https://nodejs.org (>= 22.12)."
-    exit 1
-}
+    /usr/local/node/bin || install_node_22 || {
+        err "No se pudo instalar Node.js 22 automáticamente."
+        exit 1
+    }
 NODE_VERSION="$(node -p 'process.versions.node')"
 NODE_MAJOR="${NODE_VERSION%%.*}"
 NODE_MINOR="$(echo "$NODE_VERSION" | cut -d. -f2)"
 if [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 12 ]; }; then
-    err "Node.js $NODE_VERSION es demasiado antiguo; hace falta 22.12 o superior."
-    exit 1
+    warn "Node.js $NODE_VERSION es demasiado antiguo; se instalará una versión 22 compatible."
+    install_node_22 || {
+        err "No se pudo actualizar Node.js; hace falta 22.12 o superior."
+        exit 1
+    }
+    NODE_VERSION="$(node -p 'process.versions.node')"
 fi
+command -v npm >/dev/null 2>&1 || install_node_22 || {
+    err "Node.js está presente, pero falta npm y no se pudo instalar automáticamente."
+    exit 1
+}
 ok "Node.js $NODE_VERSION"
 
 # Este es el caso que más veces se da: rustup recién instalado y la terminal sin
@@ -141,46 +305,64 @@ if ! command -v cargo >/dev/null 2>&1; then
         command -v cargo >/dev/null 2>&1 && warn "cargo no estaba en el PATH; se ha cargado $CARGO_ENV."
     fi
 fi
-recover_tool cargo \
+if ! recover_tool cargo \
     "${CARGO_HOME:-$HOME/.cargo}/bin" \
     "$HOME/.cargo/bin" \
     /usr/local/cargo/bin \
-    /opt/rust/bin || {
-    err "Falta el toolchain de Rust. Instálalo desde https://rustup.rs y reabre la terminal."
-    err "Si ya lo tienes instalado, carga su entorno con: source \"\$HOME/.cargo/env\""
+    /opt/rust/bin || ! cargo --version >/dev/null 2>&1; then
+    install_rust_toolchain || {
+        err "No se pudo instalar automáticamente el toolchain estable de Rust."
+        err "Reinténtalo manualmente desde https://rustup.rs"
+        exit 1
+    }
+fi
+ok "$(cargo --version)"
+ensure_rust_components || {
+    err "No se pudieron instalar rustfmt y clippy para el toolchain activo."
     exit 1
 }
-ok "$(cargo --version)"
+ok "rustfmt y clippy presentes"
 
 # El enlazador no lo trae cargo. Sin él la compilación llega hasta el final y
 # muere en el último paso con "linker `cc` not found", que es el peor momento
 # posible para descubrirlo.
 if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
-    err "Falta un compilador de C (cc/gcc), que es lo que Rust usa como enlazador."
-    echo "    Debian/Ubuntu: sudo apt install build-essential" >&2
-    echo "    Fedora:        sudo dnf groupinstall 'Development Tools'" >&2
-    echo "    Arch:          sudo pacman -S base-devel" >&2
-    exit 1
+    install_system_dependencies || {
+        err "Falta un compilador de C (cc/gcc) y no se pudo instalar."
+        exit 1
+    }
 fi
 
 # WebKitGTK es lo que Tauri usa como motor en Linux, y su ausencia se
 # manifiesta como un error de enlazado de cientos de líneas a mitad de la
 # compilación. Comprobarlo antes ahorra ese rato.
+if ! command -v pkg-config >/dev/null 2>&1; then
+    install_system_dependencies || {
+        err "Falta pkg-config y no se pudo instalar automáticamente."
+        exit 1
+    }
+fi
 if command -v pkg-config >/dev/null 2>&1; then
     MISSING_LIBS=""
     for lib in webkit2gtk-4.1 javascriptcoregtk-4.1 libsoup-3.0; do
         pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS="$MISSING_LIBS $lib"
     done
     if [ -n "$MISSING_LIBS" ]; then
-        err "Faltan bibliotecas de desarrollo:$MISSING_LIBS"
-        echo "    Debian/Ubuntu: sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev build-essential curl file libssl-dev libayatana-appindicator3-dev librsvg2-dev" >&2
-        echo "    Fedora:        sudo dnf install webkit2gtk4.1-devel libsoup3-devel openssl-devel curl wget file libappindicator-gtk3-devel librsvg2-devel" >&2
-        echo "    Arch:          sudo pacman -S webkit2gtk-4.1 libsoup3 base-devel curl wget file openssl libappindicator-gtk3 librsvg" >&2
-        exit 1
+        warn "Faltan bibliotecas de desarrollo:$MISSING_LIBS"
+        install_system_dependencies || {
+            err "No se pudieron instalar las bibliotecas nativas de Tauri."
+            exit 1
+        }
+        MISSING_LIBS=""
+        for lib in webkit2gtk-4.1 javascriptcoregtk-4.1 libsoup-3.0; do
+            pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS="$MISSING_LIBS $lib"
+        done
+        if [ -n "$MISSING_LIBS" ]; then
+            err "Siguen faltando bibliotecas después de instalar:$MISSING_LIBS"
+            exit 1
+        fi
     fi
     ok "WebKitGTK y sus dependencias presentes"
-else
-    warn "Sin pkg-config no se pueden comprobar las bibliotecas de WebKitGTK; se sigue igualmente."
 fi
 
 VERSION="$(node -p "require('./package.json').version")"
@@ -195,8 +377,20 @@ step "Comprobando recursos para el AppImage"
 APPIMAGETOOL="appimagetool"
 if ! command -v "$APPIMAGETOOL" >/dev/null 2>&1; then
     warn "$APPIMAGETOOL no está en el PATH. Se intenta descargar automáticamente..."
+    command -v curl >/dev/null 2>&1 || install_system_dependencies || {
+        err "Hace falta curl para descargar appimagetool."
+        exit 1
+    }
     mkdir -p "$HOME/.local/bin"
-    DOWNLOAD_URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+    case "$(uname -m)" in
+        x86_64|amd64) APPIMAGE_ARCH="x86_64" ;;
+        aarch64|arm64) APPIMAGE_ARCH="aarch64" ;;
+        *)
+            err "No hay appimagetool automático para la arquitectura $(uname -m)."
+            exit 1
+            ;;
+    esac
+    DOWNLOAD_URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$APPIMAGE_ARCH.AppImage"
     TARGET="$HOME/.local/bin/appimagetool"
     if curl -L --fail --progress-bar "$DOWNLOAD_URL" -o "$TARGET" && chmod +x "$TARGET"; then
         add_to_path "$HOME/.local/bin"
@@ -384,6 +578,13 @@ step "Compilando el AppImage"
 # linuxdeploy's embedded strip can fail on newer ELF sections such as .relr.dyn.
 # Disable its internal binary stripping and keep the AppImage build compatible.
 export NO_STRIP=1
+# Las herramientas de AppImage también son AppImages. En WSL, contenedores y
+# sistemas sin FUSE deben poder ejecutarse mediante extracción desde el propio
+# paso de bundling, no solo durante la comprobación de humo posterior.
+if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1; then
+    export APPIMAGE_EXTRACT_AND_RUN=1
+    warn "Sin FUSE: las herramientas AppImage usarán extracción temporal durante el bundling."
+fi
 # npm run tauri -- build
 # Reemplázala por:
 npm run tauri -- build --verbose
@@ -422,7 +623,7 @@ step "Comprobación de humo"
 # lo es. El propio runtime sabe descomprimirse en /tmp y ejecutarse desde ahí:
 # es lo mismo que hace `--appimage-extract-and-run`.
 if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1; then
-    warn "No hay FUSE instalado: el AppImage se ejecutará descomprimiéndose (APPIMAGE_EXTRACT_AND_RUN)."
+    warn "No hay FUSE instalado: el AppImage se comprobará mediante extracción temporal."
     warn "Quien lo descargue necesitará FUSE 2, o lanzarlo con --appimage-extract-and-run."
     export APPIMAGE_EXTRACT_AND_RUN=1
 fi
