@@ -279,7 +279,13 @@ fn cmd_echo(line: &Line) -> String {
         .replace('&', "^&")
         .replace('|', "^|")
         .replace('<', "^<")
-        .replace('>', "^>");
+        .replace('>', "^>")
+        // Toda la decoración y el comando viajan en una sola línea. Si el
+        // cierre contiene `if (...)`, cmd analiza también los paréntesis de
+        // los textos impresos como sintaxis del bloque. Por ejemplo, el `)`
+        // de "Editor de código (VS Code)" cerraba el `if` antes de tiempo.
+        .replace('(', "^(")
+        .replace(')', "^)");
     format!(
         "echo %{CMD_ESC_VAR}%[{}m{texto}%{CMD_ESC_VAR}%[0m",
         line.tone.sgr()
@@ -470,6 +476,19 @@ mod tests {
         // todo lo que hay hasta el separador, espacio incluido.
         let salida = decorate("x", &aviso(), ShellKind::Cmd, false, &t());
         assert!(!salida.contains("%[0m & "), "queda un espacio antes del &");
+    }
+
+    #[test]
+    fn cmd_escapa_parentesis_de_los_textos_que_comparte_con_el_bloque_if() {
+        let aviso = Notice::new(
+            "Instalar",
+            "Editor de código (VS Code)",
+            "winget install --id Microsoft.VisualStudioCode -e",
+        );
+        let salida = decorate("winget install x", &aviso, ShellKind::Cmd, true, &t());
+
+        assert!(salida.contains("Editor de código ^(VS Code^)"));
+        assert!(!salida.contains("Editor de código (VS Code)"));
     }
 
     #[test]

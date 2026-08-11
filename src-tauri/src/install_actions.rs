@@ -424,7 +424,10 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
         hint: Some("Instala un JDK completo: incluye jshell, que es el REPL que aparece en el selector de entorno."),
         ..win("winget-java", "Java (JDK)", "java", "EclipseAdoptium.Temurin.21.JDK", Some("java -version"), LANGUAGES_GROUP)
     },
-    win("winget-php",    "PHP",             "php",    "PHP.PHP.8.3",                    Some("php -v"),                       LANGUAGES_GROUP),
+    // Las versiones antiguas desaparecen del directorio activo de descargas
+    // de PHP. El manifiesto 8.3.32 de winget conserva una URL sin `/archives/`
+    // y devuelve 404; la rama estable actual usa las URLs archivadas válidas.
+    win("winget-php",    "PHP",             "php",    "PHP.PHP.8.5",                    Some("php -v"),                       LANGUAGES_GROUP),
     win("winget-go",     "Go",              "go",     "GoLang.Go",                      Some("go version"),                   LANGUAGES_GROUP),
     win("winget-rust",   "Rust (rustup)",   "rustc",  "Rustlang.Rustup",                Some("rustc --version; cargo --version"), LANGUAGES_GROUP),
     win("winget-perl",   "Perl",            "perl",   "StrawberryPerl.StrawberryPerl",  Some("perl -v"),                      LANGUAGES_GROUP),
@@ -2298,6 +2301,15 @@ mod tests {
         assert!(command.contains("--accept-package-agreements"));
         assert!(command.contains("--source winget"));
         assert!(command.contains("--disable-interactivity"));
+    }
+
+    #[test]
+    fn php_usa_la_rama_estable_cuyo_manifiesto_apunta_al_archivo_vigente() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let command = &buscar(&actions, "winget-php").command;
+
+        assert!(command.contains("--id PHP.PHP.8.5 "));
+        assert!(!command.contains("PHP.PHP.8.3"));
     }
 
     #[test]
