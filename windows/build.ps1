@@ -63,15 +63,153 @@ Set-Location $ProjectRoot
 # ---------------------------------------------------------------------------
 Write-Step 'Comprobando requisitos'
 
-if (-not (Test-Command 'node')) { throw 'Falta Node.js. Instalalo desde https://nodejs.org (>= 22.12).' }
-$nodeVersion = & node -p 'process.versions.node'
-if ([version]$nodeVersion -lt [version]'22.12.0') {
-    throw "Node.js $nodeVersion es demasiado antiguo; hace falta 22.12 o superior."
+function Get-NodeVersion {
+    if (-not (Test-Command 'node')) { return $null }
+    try {
+        $verStr = & node -p 'process.versions.node' 2>$null
+        if ($verStr) { return [version]$verStr }
+    } catch {}
+    return $null
 }
-Write-Ok "Node.js $nodeVersion"
+
+function Refresh-EnvironmentPath {
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path    = "$machinePath;$userPath"
+
+    $commonDirs = @(
+        "${env:ProgramFiles}\nodejs",
+        "${env:ProgramFiles(x86)}\nodejs",
+        "$env:LocalAppData\Programs\node",
+        "$env:USERPROFILE\.cargo\bin"
+    )
+    foreach ($dir in $commonDirs) {
+        if ($dir -and (Test-Path $dir) -and ($env:Path -notlike "*$dir*")) {
+            $env:Path = "$dir;$env:Path"
+        }
+    }
+}
+
+$minNodeVersion = [version]'22.12.0'
+$currentNodeVersion = Get-NodeVersion
+
+if (-not $currentNodeVersion -or $currentNodeVersion -lt $minNodeVersion) {
+    if (-not $currentNodeVersion) {
+        Write-Warn 'No se encontro Node.js en el sistema.'
+    } else {
+        Write-Warn "Node.js $currentNodeVersion es inferior a la version requerida ($minNodeVersion)."
+    }
+
+    $installed = $false
+
+    if (Test-Command 'winget') {
+        Write-Step 'Instalando/actualizando Node.js (LTS) mediante winget...'
+        $wingetCode = Invoke-Native 'winget' @(
+            'install',
+            '--id', 'OpenJS.NodeJS.LTS',
+            '--exact',
+            '--source', 'winget',
+            '--accept-source-agreements',
+            '--accept-package-agreements',
+            '--disable-interactivity'
+        )
+        if ($wingetCode -ne 0) {
+            $wingetCode = Invoke-Native 'winget' @(
+                'upgrade',
+                '--id', 'OpenJS.NodeJS.LTS',
+                '--exact',
+                '--source', 'winget',
+                '--accept-source-agreements',
+                '--accept-package-agreements',
+                '--disable-interactivity'
+            )
+        }
+        Refresh-EnvironmentPath
+        $currentNodeVersion = Get-NodeVersion
+        if ($currentNodeVersion -and $currentNodeVersion -ge $minNodeVersion) {
+            Write-Ok "Node.js instalado correctamente mediante winget ($currentNodeVersion)"
+            $installed = $true
+        }
+    }
+
+    if (-not $installed) {
+        Write-Step 'Instalando Node.js (v22.14.0 LTS) mediante descarga directa (MSI)...'
+        try {
+            $msiUrl = 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi'
+            $msiPath = Join-Path $env:TEMP 'node-v22.14.0-x64.msi'
+            Write-Host "    Descargando $msiUrl ..." -ForegroundColor Yellow
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+
+            Write-Host '    Ejecutando instalador MSI de Node.js...' -ForegroundColor Yellow
+            $msiCode = Invoke-Native 'msiexec.exe' @('/i', $msiPath, '/qn', '/norestart')
+            Remove-Item $msiPath -Force -ErrorAction SilentlyContinue
+
+            Refresh-EnvironmentPath
+            $currentNodeVersion = Get-NodeVersion
+            if ($currentNodeVersion -and $currentNodeVersion -ge $minNodeVersion) {
+                Write-Ok "Node.js instalado correctamente mediante MSI ($currentNodeVersion)"
+                $installed = $true
+            }
+        } catch {
+            Write-Warn "Fallo la descarga o instalacion por MSI: $_"
+        }
+    }
+
+    if (-not $installed) {
+        throw "Falta Node.js (>= 22.12). Se intento la instalacion automatica pero no concluyo. Instalalo manualmente desde https://nodejs.org."
+    }
+} else {
+    Write-Ok "Node.js $currentNodeVersion"
+}
 
 if (-not (Test-Command 'cargo')) {
-    throw 'Falta el toolchain de Rust. Instalalo desde https://rustup.rs y reabre la terminal.'
+    Write-Warn 'No se encontro el toolchain de Rust (cargo).'
+
+    $rustInstalled = $false
+
+    if (Test-Command 'winget') {
+        Write-Step 'Instalando el toolchain de Rust mediante winget...'
+        $wingetCode = Invoke-Native 'winget' @(
+            'install',
+            '--id', 'Rustlang.Rustup',
+            '--exact',
+            '--source', 'winget',
+            '--accept-source-agreements',
+            '--accept-package-agreements',
+            '--disable-interactivity'
+        )
+        Refresh-EnvironmentPath
+        if (Test-Command 'cargo') {
+            $rustInstalled = $true
+        }
+    }
+
+    if (-not $rustInstalled) {
+        Write-Step 'Instalando Rust mediante descarga directa de rustup-init.exe...'
+        try {
+            $rustupUrl = 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe'
+            $rustupPath = Join-Path $env:TEMP 'rustup-init.exe'
+            Write-Host "    Descargando $rustupUrl ..." -ForegroundColor Yellow
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupPath -UseBasicParsing
+
+            Write-Host '    Ejecutando rustup-init.exe (-y)...' -ForegroundColor Yellow
+            $rustCode = Invoke-Native $rustupPath @('-y', '--default-toolchain', 'stable')
+            Remove-Item $rustupPath -Force -ErrorAction SilentlyContinue
+
+            Refresh-EnvironmentPath
+            if (Test-Command 'cargo') {
+                $rustInstalled = $true
+            }
+        } catch {
+            Write-Warn "Fallo la descarga o instalacion de rustup: $_"
+        }
+    }
+
+    if (-not (Test-Command 'cargo')) {
+        throw 'Falta el toolchain de Rust. Se intento la instalacion automatica pero no concluyo. Instalalo manualmente desde https://rustup.rs y reabre la terminal.'
+    }
 }
 $cargoVersion = (& cargo --version) -replace '^cargo\s+', ''
 Write-Ok "cargo $cargoVersion"
