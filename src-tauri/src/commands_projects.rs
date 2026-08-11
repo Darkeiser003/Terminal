@@ -97,6 +97,8 @@ pub struct Owner {
     pub official: bool,
     /// Desarrollador de la aplicación.
     pub developer: bool,
+    /// Creador de WinSlim y responsable de la dirección de proyectos.
+    pub project_lead: bool,
     /// No se puede desanclar: viene fijo con el catálogo.
     pub locked: bool,
 }
@@ -148,6 +150,7 @@ fn projects_state(state: &AppState) -> ProjectsState {
             .map(|login| Owner {
                 official: eq_ignore_case(&catalog.owners, login),
                 developer: eq_ignore_case(&catalog.developers, login),
+                project_lead: eq_ignore_case(&catalog.project_leads, login),
                 locked: eq_ignore_case(&catalog.fixed_profiles, login),
                 login: login.clone(),
             })
@@ -248,6 +251,7 @@ pub struct PublicProfile {
     pub pinned: bool,
     pub official: bool,
     pub developer: bool,
+    pub project_lead: bool,
     pub locked: bool,
 }
 
@@ -321,6 +325,7 @@ pub fn projects_lookup(state: State<'_, Arc<AppState>>, raw_target: String) -> L
             pinned: eq_ignore_case(&pins.owners, &profile.login),
             official: eq_ignore_case(&catalog.owners, &profile.login),
             developer: eq_ignore_case(&catalog.developers, &profile.login),
+            project_lead: eq_ignore_case(&catalog.project_leads, &profile.login),
             locked: eq_ignore_case(&catalog.fixed_profiles, &profile.login),
             profile,
         }),
@@ -1048,8 +1053,8 @@ mod tests {
     fn el_catalogo_de_fabrica_va_dentro_del_binario_y_se_lee_sin_disco() {
         let catalog = github::default_catalog();
         assert!(!catalog.brand.is_empty());
-        // Los desarrolladores fijos son los que no se pueden desanclar.
-        assert!(!catalog.fixed_profiles.is_empty());
+        assert!(!catalog.developers.is_empty());
+        assert!(!catalog.project_leads.is_empty());
     }
 
     #[test]
@@ -1096,14 +1101,11 @@ mod tests {
     }
 
     #[test]
-    fn los_anclados_del_catalogo_de_fabrica_no_se_pueden_quitar() {
+    fn los_creditos_no_se_inyectan_como_proyectos_anclados() {
         let catalog = github::default_catalog();
-        let Some(fijo) = catalog.fixed_profiles.first().cloned() else {
-            return;
-        };
-        assert!(eq_ignore_case(
-            &catalog.fixed_profiles,
-            &fijo.to_uppercase()
-        ));
+        assert!(catalog.fixed_profiles.is_empty());
+        assert!(catalog.repositories.is_empty());
+        assert!(catalog.developers.iter().any(|p| p == "tiranosaurio73"));
+        assert!(catalog.project_leads.iter().any(|p| p == "Christianlg97"));
     }
 }

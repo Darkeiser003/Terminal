@@ -202,12 +202,18 @@
     }
 
     .tab-label {
+        /* El título consume todo el espacio disponible. Así el cierre no sigue
+           al texto: permanece en el extremo derecho como en un navegador. */
+        flex: 1 1 auto;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
+        text-align: left;
     }
 
     .tab-close {
         flex: 0 0 auto;
+        margin-left: auto;
         padding: 0 3px;
         border-radius: 3px;
         color: var(--muted);

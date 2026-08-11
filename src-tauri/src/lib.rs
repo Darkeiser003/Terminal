@@ -185,10 +185,6 @@ pub fn run() {
             }
             let first_tab_ms = tab_started.elapsed().as_millis();
 
-            // Restos de una actualización anterior y, en segundo plano, si hay
-            // una nueva publicada.
-            commands_update::on_startup(&app.handle().clone());
-
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(identity::current().name)?;
                 window.show()?;
@@ -206,6 +202,14 @@ pub fn run() {
                 #[cfg(debug_assertions)]
                 window.open_devtools();
             }
+            // La limpieza de una actualización anterior toca disco y después
+            // se consulta GitHub. Ninguna de las dos cosas es necesaria para
+            // abrir la primera terminal, así que queda fuera del hilo de setup
+            // y empieza después de solicitar que se muestre la ventana.
+            let update_app = app.handle().clone();
+            let _ = std::thread::Builder::new()
+                .name("update-startup".into())
+                .spawn(move || commands_update::on_startup(&update_app));
             Ok(())
         })
         .on_window_event(|window, event| {

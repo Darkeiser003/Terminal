@@ -171,6 +171,15 @@
     /** Los perfiles oficiales del catálogo son además los dueños del proyecto,
      *  no solo colaboradores del código. */
     function roleOf(developer: string): string {
+        const projectLeads = (app.appInfo?.projectLeads ?? []).map((login) =>
+            login.toLowerCase(),
+        );
+        if (projectLeads.includes(developer.toLowerCase())) {
+            return app.t(
+                "projects.projectLeadCreator",
+                "Creador de WinSlim · Director de proyectos",
+            );
+        }
         const owners = (app.appInfo?.owners ?? []).map((login) =>
             login.toLowerCase(),
         );
@@ -832,7 +841,7 @@
                         >
                     </div>
                     <div class="developers">
-                        {#each app.appInfo?.developers ?? [] as developer (developer)}
+                        {#each Array.from(new Set([...(app.appInfo?.projectLeads ?? []), ...(app.appInfo?.developers ?? [])])) as developer (developer)}
                             <button
                                 type="button"
                                 class="developer"

@@ -65,10 +65,9 @@ const RUNTIME_SCRIPT_DIRS: &[&str] = &[
     "task", "tasks", "command", "commands", "cli", "hooks",
 ];
 
-/// Fuentes fijas de "comandos importados" además de la carpeta de scripts del
-/// usuario: las utilidades VBS del propio sistema WinSlim, si existen en esta
-/// máquina (son específicas del SO personalizado del autor, opcionales para
-/// cualquier otro usuario de la app).
+/// Rutas históricas de utilidades WinSlim. Ya no se importan automáticamente
+/// en la Biblioteca: solo se conservan para etiquetar correctamente una de
+/// estas herramientas si el usuario la ancla expresamente desde «Ruta actual».
 #[rustfmt::skip]
 pub const WINSLIM_VBS_SOURCES: &[(&str, &str)] = &[
     (r"C:\WSCore\Components\Hooks\WinSlimToolbox", "WinSlim Toolbox"),
@@ -631,11 +630,12 @@ fn source_for(path: &Path) -> String {
     "Scripts".to_string()
 }
 
-/// Junta la carpeta de scripts del usuario con las fuentes VBS de WinSlim (si
-/// existen en esta máquina). Cada entrada queda etiquetada con su `source` y,
-/// si es una de las sensibles conocidas, con un `hint` de aviso.
+/// Enumera exclusivamente la carpeta de Biblioteca elegida por el usuario. Las
+/// utilidades de `C:\WSCore` dejaron de ser accesos de fábrica en Windows: si
+/// interesan, se pueden localizar en «Ruta actual» y anclar como cualquier
+/// otro archivo.
 pub fn list_all_scripts(user_scripts_dir: &Path, categories: &[FileCategory]) -> Vec<ScriptEntry> {
-    let mut all = list_scripts(
+    list_scripts(
         user_scripts_dir,
         &ScanOptions {
             scope: Scope::Library,
@@ -644,25 +644,7 @@ pub fn list_all_scripts(user_scripts_dir: &Path, categories: &[FileCategory]) ->
             source: "scripts".to_string(),
         },
     )
-    .scripts;
-
-    if cfg!(windows) {
-        for (dir, source) in WINSLIM_VBS_SOURCES {
-            let found = list_scripts(
-                Path::new(dir),
-                &ScanOptions {
-                    scope: Scope::Library,
-                    categories,
-                    // Las utilidades de WinSlim están todas en la raíz de su
-                    // carpeta: no hay que bajar.
-                    max_depth: 0,
-                    source: source.to_string(),
-                },
-            );
-            all.extend(found.scripts);
-        }
-    }
-    all
+    .scripts
 }
 
 #[cfg(test)]
@@ -876,6 +858,17 @@ mod tests {
         let nombres: Vec<String> = library(dir.path()).iter().map(|s| s.name.clone()).collect();
         assert!(nombres.contains(&"empaquetar.sh".to_string()));
         assert!(nombres.contains(&"suelto.js".to_string()));
+    }
+
+    #[test]
+    fn la_biblioteca_total_solo_enumera_la_carpeta_elegida() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "personal.cmd", "@echo off\r\n");
+
+        let found = list_all_scripts(dir.path(), &super::super::types::default_categories());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "personal.cmd");
+        assert_eq!(found[0].source, "scripts");
     }
 
     #[test]

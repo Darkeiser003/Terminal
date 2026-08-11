@@ -104,9 +104,8 @@
             matches(`${repo.fullName} ${repo.description} ${repo.language}`)
         )
     );
-    /** Los perfiles anclados. Los de fábrica salen `locked` y los pone el
-     *  catálogo, que trae tres en Windows (WinSlim Terminal) y uno en Linux y
-     *  macOS (LTerminal); ver `platformOverrides` en `project-catalog.json`. */
+    /** Perfiles que el usuario ha anclado desde GitHub. Los créditos del
+     *  proyecto viven en Ajustes > Información y no ensucian esta lista. */
     const ownersVisible = $derived((projects?.owners ?? []).filter((owner) => matches(owner.login)));
     const downloadedVisible = $derived(
         downloaded.filter((repo) => matches(`${repo.fullName} ${repo.path}`))
@@ -275,7 +274,9 @@
                 <div class="item-row">
                     <span class="name">
                         <strong>{owner.login}</strong>
-                        {#if owner.developer}
+                        {#if owner.projectLead}
+                            <small class="tag">{app.t('projects.projectLeadCreator', 'Creador de WinSlim · Director de proyectos')}</small>
+                        {:else if owner.developer}
                             <small class="tag">{app.t('projects.developer', 'Desarrollador')}</small>
                         {:else if owner.official}
                             <small class="tag">{app.t('projects.official', 'Proyecto')}</small>
@@ -325,7 +326,7 @@
                 <div class="empty">
                     {app.t(
                         'projects.noPins',
-                        'Todavía no hay perfiles ni repositorios anclados. Añádelos desde Explorar GitHub.'
+                        'No hay proyectos anclados.'
                     )}
                 </div>
             {/if}

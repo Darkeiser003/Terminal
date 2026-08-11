@@ -377,7 +377,7 @@ fn read_gpu_model() -> String {
         "sh",
         &[
             "-c",
-            "command -v lspci >/dev/null 2>&1 && lspci -mm | grep -Ei \"vga|3d|display\" | head -n 1",
+            "command -v lspci >/dev/null 2>&1 && lspci -nn | grep -Ei \"vga|3d|display\" | head -n 1",
         ],
         PROBE_TIMEOUT,
     )
@@ -416,35 +416,52 @@ fn parse_wmic_gpu(output: &str) -> String {
     }
 }
 
-/// `lspci -mm` separa los campos por tabulador: los dos primeros son el bus y
-/// la clase, y el modelo empieza en el tercero.
+/// Extrae fabricante y modelo de la línea normal de `lspci -nn`. `-mm` no es
+/// uniforme entre versiones de pciutils: en algunas distribuciones separa por
+/// espacios y comillas, y el parser antiguo terminaba enseñando el bus y la
+/// clase en lugar de la GPU.
 #[allow(dead_code)]
 fn parse_lspci_gpu(output: &str) -> String {
     if output.is_empty() {
         return String::new();
     }
-    let joined = output.split('\t').skip(2).collect::<Vec<_>>().join(" ");
-    let joined = joined.trim();
-    if !joined.is_empty() {
-        return joined.to_string();
+    // Compatibilidad con una salida `-mm` real separada por tabuladores.
+    let fields: Vec<&str> = output.split('\t').collect();
+    if fields.len() >= 4 {
+        return fields[2..].join(" ").replace('"', "").trim().to_string();
     }
-    // Sin tabuladores (formato antiguo): se quita el prefijo hasta los dos
-    // puntos y el identificador entre corchetes del final.
-    let without_prefix = output
-        .split_once(": ")
-        .map(|(_, rest)| rest)
-        .unwrap_or(output)
+
+    // En la salida normal el último «: » separa la clase del fabricante. El
+    // primero pertenece al bus PCI (`01:00.0`) y no debe usarse.
+    let model = output
+        .rsplit_once(": ")
+        .map(|(_, value)| value)
+        .unwrap_or(output);
+    let model = model
+        .split_once(" (rev ")
+        .map(|(value, _)| value)
+        .unwrap_or(model)
         .trim();
-    match without_prefix
-        .strip_suffix(']')
-        .and_then(|rest| rest.rsplit_once('['))
-    {
-        Some((head, _)) => head.trim().to_string(),
-        None => without_prefix.to_string(),
+    // `-nn` añade al final `[vendor:device]`; se elimina únicamente ese bloque
+    // hexadecimal y se conservan nombres útiles como `[GeForce GTX 1660]`.
+    if let Some((head, tail)) = model.rsplit_once(" [") {
+        let id = tail.strip_suffix(']').unwrap_or(tail);
+        if id.len() == 9
+            && id.as_bytes().get(4) == Some(&b':')
+            && id
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| index == 4 && ch == ':' || index != 4 && ch.is_ascii_hexdigit())
+        {
+            return head.trim().to_string();
+        }
     }
+    model.trim_matches('"').trim().to_string()
 }
 
-const HARDWARE_CACHE_SCHEMA: u32 = 1;
+// El esquema 2 invalida los modelos de GPU mal interpretados por el parser
+// antiguo de `lspci -mm`.
+const HARDWARE_CACHE_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1319,8 +1336,18 @@ mod tests {
 
     #[test]
     fn lspci_se_queda_con_el_modelo() {
-        let salida = "01:00.0\t\"VGA compatible controller\"\t\"NVIDIA\"\t\"GA106 [RTX 3060]\"";
-        assert_eq!(parse_lspci_gpu(salida), "\"NVIDIA\" \"GA106 [RTX 3060]\"");
+        let salida = "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation TU116 [GeForce GTX 1660] [10de:2184] (rev a1)";
+        assert_eq!(
+            parse_lspci_gpu(salida),
+            "NVIDIA Corporation TU116 [GeForce GTX 1660]"
+        );
+        let amd = "05:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Picasso [Radeon Vega 8 Graphics] [1002:15d8] (rev c8)";
+        assert_eq!(
+            parse_lspci_gpu(amd),
+            "Advanced Micro Devices, Inc. [AMD/ATI] Picasso [Radeon Vega 8 Graphics]"
+        );
+        let mm = "01:00.0\t\"VGA compatible controller\"\t\"NVIDIA\"\t\"GA106 [RTX 3060]\"";
+        assert_eq!(parse_lspci_gpu(mm), "NVIDIA GA106 [RTX 3060]");
         assert_eq!(parse_lspci_gpu(""), "");
     }
 

@@ -3,36 +3,22 @@
   "owners": [
     "Christianlg97"
   ],
-  "fixedProfiles": [
+  "fixedProfiles": [],
+  "developers": [
     "Darkeiser003",
-    "Christianlg97",
     "tiranosaurio73"
   ],
-  "developers": [
-    "Darkeiser003"
+  "projectLeads": [
+    "Christianlg97"
   ],
-  "repositories": [
-    "Darkeiser003/Terminal"
-  ],
+  "repositories": [],
   "selfRepository": "Darkeiser003/Terminal",
   "platformOverrides": {
     "linux": {
-      "owners": [],
-      "fixedProfiles": [
-        "Darkeiser003"
-      ],
-      "developers": [
-        "Darkeiser003"
-      ]
+      "fixedProfiles": []
     },
     "darwin": {
-      "owners": [],
-      "fixedProfiles": [
-        "Darkeiser003"
-      ],
-      "developers": [
-        "Darkeiser003"
-      ]
+      "fixedProfiles": []
     }
   }
 }

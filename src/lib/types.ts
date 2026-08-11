@@ -150,6 +150,8 @@ export interface AppInfo {
     developers: string[];
     /** Perfiles oficiales del catálogo: dueños del proyecto. */
     owners: string[];
+    /** Creadores y responsables de la dirección del proyecto. */
+    projectLeads: string[];
     /** Dónde vive `settings.json`. */
     settingsPath: string;
 }
@@ -345,6 +347,7 @@ export interface PublicProfile extends Profile {
     pinned: boolean;
     official: boolean;
     developer: boolean;
+    projectLead: boolean;
     /** No se puede desanclar: viene fijo con el catálogo. */
     locked: boolean;
 }
@@ -353,6 +356,7 @@ export interface ProjectOwner {
     login: string;
     official: boolean;
     developer: boolean;
+    projectLead: boolean;
     locked: boolean;
 }
 

@@ -292,6 +292,160 @@ pub fn file_manager_for_desktop(
     is_installed(manager.cmd).then_some(manager)
 }
 
+/// Traduce el identificador XDG (`org.kde.dolphin.desktop`, etc.) a la tabla
+/// cerrada de gestores que la aplicación permite lanzar. Es deliberadamente
+/// una comparación de identificadores, nunca un ejecutable recibido del
+/// sistema.
+#[cfg(any(target_os = "linux", test))]
+fn manager_id_from_desktop_entry(entry: &str) -> Option<&'static str> {
+    let entry = entry.trim().to_ascii_lowercase();
+    [
+        ("dolphin", "dolphin"),
+        ("nautilus", "nautilus"),
+        ("thunar", "thunar"),
+        ("nemo", "nemo"),
+        ("caja", "caja"),
+        ("pcmanfm", "pcmanfm"),
+    ]
+    .into_iter()
+    .find_map(|(needle, id)| entry.contains(needle).then_some(id))
+}
+
+#[cfg(target_os = "linux")]
+fn xdg_default(mime: &str) -> Option<String> {
+    crate::process::output_text(
+        "xdg-mime",
+        &["query", "default", mime],
+        std::time::Duration::from_secs(1),
+    )
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
+/// Gestor de carpetas predeterminado de Linux. Primero se respeta la
+/// asociación XDG real (`inode/directory`) y solo después se usa el escritorio
+/// como respaldo. Así Hyprland puede abrir Dolphin aunque su nombre no sea KDE.
+#[cfg(target_os = "linux")]
+pub fn default_linux_file_manager() -> Option<&'static FileManager> {
+    let installed = |cmd: &str| crate::path_env::which(cmd).is_some();
+    if let Some(id) = xdg_default("inode/directory")
+        .as_deref()
+        .and_then(manager_id_from_desktop_entry)
+    {
+        if let Some(manager) = file_manager_by_id("linux", id).filter(|item| installed(item.cmd)) {
+            return Some(manager);
+        }
+    }
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    file_manager_for_desktop(&desktop, &installed)
+}
+
+#[cfg(target_os = "linux")]
+fn try_linux_launcher(program: &str, args: &[&str]) -> Result<(), String> {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let mut child = crate::process::hidden_command(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    // Los fallos de asociación de xdg-open/gio son inmediatos. Si el proceso
+    // sigue vivo tras este margen ya entregó la apertura a la aplicación o es
+    // la propia aplicación gráfica; no se espera a que el usuario la cierre.
+    std::thread::sleep(Duration::from_millis(80));
+    match child.try_wait() {
+        Ok(Some(status)) if !status.success() => {
+            Err(format!("{program} terminó con código {status}"))
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Abre cualquier ruta Linux respetando su asociación XDG. Los fallbacks son
+/// herramientas nativas de los escritorios; no se elige un editor concreto ni
+/// se altera la asociación predeterminada del usuario.
+#[cfg(target_os = "linux")]
+pub fn open_linux_associated_path(path: &str) -> Result<(), String> {
+    let mime = crate::process::output_text(
+        "xdg-mime",
+        &["query", "filetype", path],
+        std::time::Duration::from_secs(1),
+    )
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+    let desktop_entry = mime.as_deref().and_then(xdg_default);
+    let mut errors = Vec::new();
+
+    // Lanzar la entrada .desktop evita que una extensión como `.log` dependa
+    // de que el proceso Tauri conozca directamente el ejecutable del editor.
+    if let Some(entry) = desktop_entry.as_deref() {
+        if crate::path_env::which("gtk-launch").is_some() {
+            match try_linux_launcher("gtk-launch", &[entry, path]) {
+                Ok(()) => return Ok(()),
+                Err(error) => errors.push(error),
+            }
+        }
+    }
+
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let kde_association = desktop.contains("KDE")
+        || desktop.contains("PLASMA")
+        || desktop_entry
+            .as_deref()
+            .is_some_and(|entry| entry.to_ascii_lowercase().contains("org.kde"));
+    let launchers: &[(&str, &[&str])] = if kde_association {
+        &[
+            ("kioclient6", &["exec", path]),
+            ("kioclient5", &["exec", path]),
+            ("kioclient", &["exec", path]),
+            ("gio", &["open", path]),
+            ("xdg-open", &[path]),
+        ]
+    } else {
+        &[
+            ("gio", &["open", path]),
+            ("xdg-open", &[path]),
+            ("kioclient6", &["exec", path]),
+            ("kioclient5", &["exec", path]),
+            ("kioclient", &["exec", path]),
+        ]
+    };
+    for (program, args) in launchers {
+        if crate::path_env::which(program).is_none() {
+            continue;
+        }
+        match try_linux_launcher(program, args) {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(error),
+        }
+    }
+    Err(errors
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "No hay un abridor XDG disponible en Linux.".to_string()))
+}
+
+#[cfg(target_os = "linux")]
+pub fn open_linux_directory(directory: &str) -> Result<(), String> {
+    use std::process::Stdio;
+
+    if let Some(manager) = default_linux_file_manager() {
+        return crate::process::hidden_command(manager.cmd)
+            .arg(directory)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+    open_linux_associated_path(directory)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +556,18 @@ mod tests {
         );
         assert!(file_manager_by_id("linux", "inventado").is_none());
         assert!(file_manager_by_id("windows", "dolphin").is_none());
+    }
+
+    #[test]
+    fn la_asociacion_xdg_de_carpeta_se_reduce_a_un_gestor_conocido() {
+        assert_eq!(
+            manager_id_from_desktop_entry("org.kde.dolphin.desktop"),
+            Some("dolphin")
+        );
+        assert_eq!(
+            manager_id_from_desktop_entry("org.gnome.Nautilus.desktop"),
+            Some("nautilus")
+        );
+        assert_eq!(manager_id_from_desktop_entry("desconocido.desktop"), None);
     }
 }

@@ -308,6 +308,8 @@
                 {app.t('scripts.noFilterMatch', 'Ningún archivo coincide con «{query}».').replace('{query}', query)}
             {:else if (selected ?? []).length === 0}
                 {app.t('scripts.noTypeSelected', 'Selecciona al menos un tipo de archivo.')}
+            {:else if mode === 'library' && (data?.scripts.length ?? 0) === 0 && (data?.pinned.length ?? 0) === 0}
+                {app.t('scripts.noPinnedYet', 'No hay elementos anclados.')}
             {:else}
                 {app.t('scripts.noneInScope', 'No hay archivos de los tipos seleccionados en este ámbito.')}
             {/if}

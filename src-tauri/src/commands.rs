@@ -245,6 +245,8 @@ pub struct AppInfo {
     /// Perfiles oficiales del catálogo: dueños del proyecto, además de
     /// desarrolladores.
     pub owners: Vec<String>,
+    /// Creadores y responsables de la dirección del proyecto.
+    pub project_leads: Vec<String>,
     /// Dónde vive `settings.json`, para poder abrirlo o respaldarlo a mano.
     pub settings_path: String,
 }
@@ -261,6 +263,7 @@ pub fn app_info(app: AppHandle) -> AppInfo {
         platform: std::env::consts::OS,
         developers: catalog.developers,
         owners: catalog.owners,
+        project_leads: catalog.project_leads,
         settings_path: settings::settings_path().to_string_lossy().to_string(),
     }
 }
@@ -277,11 +280,19 @@ pub fn log_frontend_error(payload: Value) {
 pub fn log_open_folder(app: AppHandle) -> Option<String> {
     let dir = logger::log_dir()?;
     let path = dir.to_string_lossy().to_string();
-    if let Err(error) = tauri_plugin_opener::OpenerExt::opener(&app).open_path(&path, None::<&str>)
-    {
+    #[cfg(target_os = "linux")]
+    let opened = {
+        let _ = app;
+        crate::file_viewers::open_linux_directory(&path)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let opened = tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(&path, None::<&str>)
+        .map_err(|error| error.to_string());
+    if let Err(error) = opened {
         log_error!(
             "No se pudo abrir la carpeta de logs",
-            serde_json::json!({ "dir": path, "error": error.to_string() })
+            serde_json::json!({ "dir": path, "error": error })
         );
         return None;
     }

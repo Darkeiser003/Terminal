@@ -397,6 +397,8 @@ pub struct Catalog {
     /// Los que trae el catálogo de fábrica y no se pueden desanclar.
     pub fixed_profiles: Vec<String>,
     pub developers: Vec<String>,
+    /// Responsables de la dirección del proyecto y de su creación.
+    pub project_leads: Vec<String>,
     pub repositories: Vec<String>,
     /// El repositorio DE ESTA aplicación, si el catálogo lo declara.
     ///
@@ -481,6 +483,12 @@ pub fn normalize_catalog(raw: &Value, platform: &str) -> Catalog {
                 .filter(|value| is_github_owner(value))
                 .collect(),
         ),
+        project_leads: unique(
+            string_list(&source, "projectLeads")
+                .into_iter()
+                .filter(|value| is_github_owner(value))
+                .collect(),
+        ),
         repositories: unique(
             string_list(&source, "repositories")
                 .into_iter()
@@ -560,6 +568,7 @@ pub fn merge_pins(catalog: &Catalog, settings: &serde_json::Map<String, Value>) 
         ),
         fixed_profiles: catalog.fixed_profiles.clone(),
         developers: catalog.developers.clone(),
+        project_leads: catalog.project_leads.clone(),
         self_repository: catalog.self_repository.clone(),
         repositories: unique(
             catalog
@@ -1254,20 +1263,19 @@ mod tests {
     }
 
     #[test]
-    fn los_perfiles_anclados_de_fabrica_dependen_de_la_plataforma() {
-        // `platformOverrides` reescribe la lista entera, asi que lo que se pone
-        // en la base queda SOLO en Windows. LTerminal es marca propia y ahi solo
-        // se ancla su desarrollador.
+    fn los_creditos_de_fabrica_no_se_convierten_en_anclados() {
         let windows = load_catalog(Path::new("config/project-catalog.json"), "win32");
-        assert!(windows.fixed_profiles.iter().any(|p| p == "tiranosaurio73"));
+        assert!(windows.fixed_profiles.is_empty());
+        assert!(windows.repositories.is_empty());
+        assert!(windows.developers.iter().any(|p| p == "tiranosaurio73"));
+        assert!(windows.project_leads.iter().any(|p| p == "Christianlg97"));
 
         for plataforma in ["linux", "darwin"] {
             let otro = load_catalog(Path::new("config/project-catalog.json"), plataforma);
-            assert_eq!(
-                otro.fixed_profiles,
-                vec!["Darkeiser003".to_string()],
-                "{plataforma} no debe anclar mas perfiles"
-            );
+            assert!(otro.fixed_profiles.is_empty(), "{plataforma}");
+            assert!(otro.repositories.is_empty(), "{plataforma}");
+            assert!(otro.developers.iter().any(|p| p == "tiranosaurio73"));
+            assert!(otro.project_leads.iter().any(|p| p == "Christianlg97"));
         }
     }
 

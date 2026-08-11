@@ -358,21 +358,32 @@ impl ActionResult {
 /// ninguna asociada, se devuelve además qué visor haría falta, para que la
 /// interfaz pueda ofrecer instalarlo (nunca se instala nada sin aceptar).
 fn open_with_system(app: &AppHandle, path: &str, extension: &str) -> ActionResult {
-    use tauri_plugin_opener::OpenerExt;
-    match app.opener().open_path(path, None::<&str>) {
+    #[cfg(target_os = "linux")]
+    let opened = {
+        let _ = app;
+        file_viewers::open_linux_associated_path(path)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let opened = {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_path(path, None::<&str>)
+            .map_err(|error| error.to_string())
+    };
+    match opened {
         Ok(()) => ActionResult::ok(),
         Err(error) => {
             let suggestion = file_viewers::suggest_viewer(extension, std::env::consts::OS);
             log_warn!(
                 "No se pudo abrir un archivo",
                 serde_json::json!({
-                    "error": error.to_string(),
+                    "error": &error,
                     "suggestedApp": suggestion.as_ref().map(|s| s.app),
                 })
             );
             ActionResult {
                 ok: false,
-                error: Some(error.to_string()),
+                error: Some(error),
                 suggestion,
                 ..Default::default()
             }
@@ -959,8 +970,19 @@ pub fn explorer_open_directory(
         }
     }
 
-    use tauri_plugin_opener::OpenerExt;
-    match app.opener().open_path(&target, None::<&str>) {
+    #[cfg(target_os = "linux")]
+    let opened = {
+        let _ = app;
+        file_viewers::open_linux_directory(&target)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let opened = {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_path(&target, None::<&str>)
+            .map_err(|error| error.to_string())
+    };
+    match opened {
         Ok(()) => OpenDirectoryResult {
             ok: true,
             error: None,
@@ -977,7 +999,7 @@ pub fn explorer_open_directory(
             }
             OpenDirectoryResult {
                 ok: false,
-                error: Some(error.to_string()),
+                error: Some(error),
                 choices: Some(file_viewers::file_manager_choices(
                     std::env::consts::OS,
                     &|cmd| crate::path_env::which(cmd).is_some(),
