@@ -1277,39 +1277,6 @@ fn windows_actions(
         .flat_map(|tool| windows_tool_actions(tool, t))
         .collect();
 
-    // Accesos visibles para quien no quiera memorizar `nsudo <comando>`.
-    // NSudo abre el proceso elevado fuera del PTY: intentar incrustar una shell
-    // TrustedInstaller dentro del proceso sin elevar rompería el aislamiento
-    // de Windows y daría una falsa sensación de privilegios.
-    let resolve_nsudo = "$n = @('C:\\WSCore\\Components\\Hooks\\NSudo\\NSudoLC.exe', 'C:\\Program Files\\NSudo\\NSudoLC.exe', 'C:\\Program Files\\NSudo Launcher\\NSudoLC.exe', 'C:\\Program Files (x86)\\NSudo\\NSudoLC.exe', 'C:\\Tools\\NSudo\\NSudoLC.exe') | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1; if (-not $n) { $n = (Get-Command NSudoLC.exe -ErrorAction Stop).Source }";
-    let nsudo_hint = "TrustedInstaller tiene más privilegios que un administrador normal. Úsalo solo para tareas del sistema que conozcas y cierra la ventana al terminar.";
-    actions.extend(in_subgroup(
-        TOOLS_GROUP,
-        "NSudo · elevación avanzada",
-        vec![
-            InstallAction::new(
-                "nsudo-open-cmd",
-                "Abrir CMD como TrustedInstaller",
-                format!("{resolve_nsudo}; Start-Process -FilePath $n -ArgumentList @('-U:T', '-P:E', 'cmd.exe')"),
-            )
-            .short("Abrir CMD como TrustedInstaller")
-            .powershell()
-            .verb("Abrir")
-            .requires(Some("NSudoLC"))
-            .hint(nsudo_hint),
-            InstallAction::new(
-                "nsudo-open-powershell",
-                "Abrir PowerShell como TrustedInstaller",
-                format!("{resolve_nsudo}; $s = Get-Command pwsh.exe -ErrorAction SilentlyContinue; if (-not $s) {{ $s = Get-Command powershell.exe -ErrorAction Stop }}; Start-Process -FilePath $n -ArgumentList @('-U:T', '-P:E', $s.Source)"),
-            )
-            .short("Abrir PowerShell como TrustedInstaller")
-            .powershell()
-            .verb("Abrir")
-            .requires(Some("NSudoLC"))
-            .hint(nsudo_hint),
-        ],
-    ));
-
     // Mismo subgrupo que la herramienta 'docker' de WINDOWS_TOOLS: así
     // instalar, actualizar, verificar y arrancar Docker caen todas bajo un
     // único plegable en vez de repartirse por el panel.
@@ -2463,17 +2430,6 @@ mod tests {
             assert_eq!(buscar(&actions, id).group, DOCKER_GROUP, "{id}");
         }
         assert_eq!(buscar(&actions, "winget-nsudo").group, TOOLS_GROUP);
-        for id in ["nsudo-open-cmd", "nsudo-open-powershell"] {
-            let action = buscar(&actions, id);
-            assert_eq!(action.group, TOOLS_GROUP);
-            assert_eq!(
-                action.subgroup.as_deref(),
-                Some("NSudo · elevación avanzada")
-            );
-            assert_eq!(action.requires_cmd.as_deref(), Some("NSudoLC"));
-            assert!(action.command.contains("-U:T"));
-            assert!(action.command.contains("-P:E"));
-        }
     }
 
     #[test]

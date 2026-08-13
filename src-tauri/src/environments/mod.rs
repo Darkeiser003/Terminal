@@ -253,6 +253,60 @@ fn detect_windows_shells() -> Vec<Environment> {
         ));
     }
 
+    // NSudo conserva el ConPTY heredado con `-UseCurrentConsole`. `-Wait`
+    // mantiene vivo el proceso raíz de la pestaña mientras la shell elevada
+    // esté abierta, de modo que entrada, salida y redimensionado siguen dentro
+    // del marco de WinSlim Terminal.
+    if let Some(nsudo) = crate::platform::nsudo_path() {
+        let note = "Sesión TrustedInstaller con todos los privilegios. Úsala solo para tareas administrativas concretas.";
+        let mut cmd = Environment::new(
+            "nsudo:cmd",
+            "CMD · TrustedInstaller (NSudo)",
+            ShellKind::Cmd,
+            &nsudo,
+            &["-U:T", "-P:E", "-UseCurrentConsole", "-Wait", &comspec],
+        );
+        cmd.group = "Shells elevadas · NSudo".to_string();
+        cmd.shell = Some("cmd".to_string());
+        cmd.note = Some(note.to_string());
+        cmd.no_auto_select = true;
+        envs.push(cmd);
+
+        if let Some(ps_exe) = which("pwsh.exe")
+            .or_else(|| which("pwsh"))
+            .or_else(|| which("powershell.exe"))
+            .or_else(|| which("powershell"))
+        {
+            let target = ps_exe.to_string_lossy().to_string();
+            let shell = if target.to_lowercase().contains("pwsh") {
+                "pwsh"
+            } else {
+                "powershell"
+            };
+            let mut ps = Environment::new(
+                "nsudo:powershell",
+                "PowerShell · TrustedInstaller (NSudo)",
+                ShellKind::Powershell,
+                &nsudo,
+                &[
+                    "-U:T",
+                    "-P:E",
+                    "-UseCurrentConsole",
+                    "-Wait",
+                    &target,
+                    "-NoLogo",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                ],
+            );
+            ps.group = "Shells elevadas · NSudo".to_string();
+            ps.shell = Some(shell.to_string());
+            ps.note = Some(note.to_string());
+            ps.no_auto_select = true;
+            envs.push(ps);
+        }
+    }
+
     if let Some(git_bash) = find_git_bash() {
         let mut env = Environment::new(
             "gitbash",
