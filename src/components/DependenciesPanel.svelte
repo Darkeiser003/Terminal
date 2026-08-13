@@ -315,7 +315,13 @@
     {/if}
 
     {#each groups as group, groupIndex (group.name)}
-        <details class="group" class:languages={group.key === 'group.languages'} open={autoOpenFirst && groupIndex === 0} ontoggle={onToggle}>
+        <details
+            class="group"
+            class:languages={group.key === 'group.languages'}
+            open={(autoOpenFirst && groupIndex === 0) ||
+                (app.appInfo?.platform === 'windows' && group.key === 'group.windowsCompat')}
+            ontoggle={onToggle}
+        >
             <summary class="group-title">
                 {group.name}
                 <span class="count">{group.entries.length + (group.key === 'group.updates' ? 1 : 0)}</span>

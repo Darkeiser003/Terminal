@@ -246,6 +246,20 @@ fn summary_components(
         },
     ];
 
+    // NSudo es una capacidad propia de Windows, no una shell ni una variante
+    // de WSL. Hacerla visible en el resumen evita que quede enterrada dentro
+    // del apartado de compatibilidad y deja claro si falta instalarla.
+    if crate::platform::host().is_windows() {
+        componentes.push(Component {
+            label: "NSudo".to_string(),
+            value: if crate::platform::nsudo_path().is_some() {
+                t.t("deps.summaryReady", "Listo")
+            } else {
+                t.t("deps.summaryNone", "No instalado")
+            },
+        });
+    }
+
     // WSL2 y Docker Desktop no arrancan sin virtualización. Decirlo aquí evita
     // que alguien instale Docker entero para descubrir después que su Windows
     // no puede ejecutarlo. Solo se añade cuando se sabe algo: un "no se sabe"

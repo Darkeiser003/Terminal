@@ -366,6 +366,24 @@ if (-not $SkipChecks) {
 # 6. Compilacion
 # ---------------------------------------------------------------------------
 Write-Step 'Compilando (tauri build --no-bundle)'
+# Comprobar también las capacidades exclusivas del backend. Estos textos no
+# viven en el bundle de Vite, por lo que validar solo JavaScript permitía crear
+# una build con UI nueva pero un catálogo Windows incompleto.
+$actionsSource = Get-Content (Join-Path $TauriDir 'src\packages\actions.rs') -Raw
+foreach ($capability in @(
+    'M2Team.NSudo',
+    'OpenVPNTechnologies.OpenVPN',
+    'WireGuard.WireGuard',
+    'Tailscale.Tailscale',
+    'Kubernetes.kubectl',
+    'Helm.Helm',
+    'Derailed.k9s'
+)) {
+    if ($actionsSource -notmatch [regex]::Escape($capability)) {
+        throw "El catálogo Windows no contiene '$capability'; no se generará una release parcial."
+    }
+}
+Write-Ok 'Catálogo Windows: NSudo, VPN y Kubernetes presentes'
 # --no-bundle es redundante con bundle.active:false de tauri.windows.conf.json,
 # pero se pasa igualmente para que la intencion se lea aqui: esta build NO
 # genera instalador.
