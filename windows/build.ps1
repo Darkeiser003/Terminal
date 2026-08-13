@@ -372,6 +372,7 @@ Write-Step 'Compilando (tauri build --no-bundle)'
 $actionsSource = Get-Content (Join-Path $TauriDir 'src\packages\actions.rs') -Raw
 foreach ($capability in @(
     'M2Team.NSudo',
+    'C:\WSCore\Components\Hooks\NSudo\NSudoLC.exe',
     'OpenVPNTechnologies.OpenVPN',
     'WireGuard.WireGuard',
     'Tailscale.Tailscale',

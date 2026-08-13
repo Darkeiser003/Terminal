@@ -61,9 +61,17 @@ fn filter_available_actions(actions: Vec<InstallAction>) -> Vec<InstallAction> {
     // Varias acciones preguntan por el mismo comando: se resuelve una vez.
     let mut checked: HashMap<String, bool> = HashMap::new();
     let mut installed = |cmd: &str| -> bool {
-        *checked
-            .entry(cmd.to_string())
-            .or_insert_with(|| crate::path_env::is_tool_installed(cmd))
+        *checked.entry(cmd.to_string()).or_insert_with(|| {
+            // WinSlim incorpora NSudo fuera del PATH. La misma sonda que
+            // alimenta Ajustes y los alias debe decidir también si el
+            // catálogo ofrece instalarlo; de otro modo las dos pantallas
+            // podían contradecirse.
+            if cmd.eq_ignore_ascii_case("NSudoLC") {
+                crate::platform::nsudo_path().is_some()
+            } else {
+                crate::path_env::is_tool_installed(cmd)
+            }
+        })
     };
     actions
         .into_iter()

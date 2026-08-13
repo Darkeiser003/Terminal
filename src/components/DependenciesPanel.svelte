@@ -318,8 +318,7 @@
         <details
             class="group"
             class:languages={group.key === 'group.languages'}
-            open={(autoOpenFirst && groupIndex === 0) ||
-                (app.appInfo?.platform === 'windows' && group.key === 'group.windowsCompat')}
+            open={autoOpenFirst && groupIndex === 0}
             ontoggle={onToggle}
         >
             <summary class="group-title">
