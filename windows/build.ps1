@@ -366,25 +366,6 @@ if (-not $SkipChecks) {
 # 6. Compilacion
 # ---------------------------------------------------------------------------
 Write-Step 'Compilando (tauri build --no-bundle)'
-# Comprobar también las capacidades exclusivas del backend. Estos textos no
-# viven en el bundle de Vite, por lo que validar solo JavaScript permitía crear
-# una build con UI nueva pero un catálogo Windows incompleto.
-$actionsSource = Get-Content (Join-Path $TauriDir 'src\packages\actions.rs') -Raw
-foreach ($capability in @(
-    'M2Team.NSudo',
-    'C:\WSCore\Components\Hooks\NSudo\NSudoLC.exe',
-    'OpenVPNTechnologies.OpenVPN',
-    'WireGuard.WireGuard',
-    'Tailscale.Tailscale',
-    'Kubernetes.kubectl',
-    'Helm.Helm',
-    'Derailed.k9s'
-)) {
-    if ($actionsSource -notmatch [regex]::Escape($capability)) {
-        throw "El catálogo Windows no contiene '$capability'; no se generará una release parcial."
-    }
-}
-Write-Ok 'Catálogo Windows: NSudo, VPN y Kubernetes presentes'
 # --no-bundle es redundante con bundle.active:false de tauri.windows.conf.json,
 # pero se pasa igualmente para que la intencion se lea aqui: esta build NO
 # genera instalador.
@@ -392,9 +373,9 @@ $code = Invoke-Native 'npm' @('run', 'tauri', '--', 'build', '--no-bundle')
 if ($code -ne 0) { throw "La compilacion fallo (codigo $code)." }
 
 # Evita publicar por accidente un frontend anterior (por ejemplo, una copia
-# del proyecto sin los últimos cambios compartidos). Los marcadores están en
-# la build minificada únicamente si incluye WASD con Control derecho, filtros
-# compactos y el catálogo de Kubernetes actual.
+# del proyecto sin los últimos cambios compartidos). Estos marcadores solo
+# validan funciones del frontend; las herramientas opcionales se detectan en
+# tiempo de ejecución y nunca condicionan la compilación.
 $frontendBundles = Get-ChildItem (Join-Path $ProjectRoot 'dist\assets') -Filter 'index-*.js' -File
 $frontendText = ($frontendBundles | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
 foreach ($marker in @('ControlRight', 'KeyW', 'environment-controls')) {
