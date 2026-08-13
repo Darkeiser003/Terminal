@@ -4,6 +4,43 @@
 
     import { app, MAX_PANES } from '../lib/appState.svelte';
 
+    let draggedTabId = $state<string | null>(null);
+    let dropTargetId = $state<string | null>(null);
+    let dropAfter = $state(false);
+
+    function dragStart(event: DragEvent, tabId: string): void {
+        draggedTabId = tabId;
+        dropTargetId = null;
+        if (!event.dataTransfer) return;
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/x-terminal-tab', tabId);
+    }
+
+    function dragOver(event: DragEvent, targetId: string): void {
+        if (!draggedTabId || draggedTabId === targetId) {
+            dropTargetId = null;
+            return;
+        }
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+        dropTargetId = targetId;
+        dropAfter = event.clientX >= bounds.left + bounds.width / 2;
+    }
+
+    function drop(event: DragEvent, targetId: string): void {
+        event.preventDefault();
+        const sourceId = draggedTabId ?? event.dataTransfer?.getData('text/x-terminal-tab');
+        if (sourceId) app.reorderTab(sourceId, targetId, dropAfter);
+        endDrag();
+    }
+
+    function endDrag(): void {
+        draggedTabId = null;
+        dropTargetId = null;
+        dropAfter = false;
+    }
+
     async function close(event: MouseEvent, tabId: string): Promise<void> {
         // Sin esto, cerrar una pestaña inactiva la activaría primero.
         event.stopPropagation();
@@ -126,9 +163,18 @@
             type="button"
             class="tab"
             class:active={tab.id === app.activeTabId}
+            class:dragging={tab.id === draggedTabId}
+            class:drop-before={tab.id === dropTargetId && !dropAfter}
+            class:drop-after={tab.id === dropTargetId && dropAfter}
+            draggable="true"
+            aria-label={`${tab.label}. ${app.t('tabs.dragHint', 'Arrastra para reordenar')}`}
             title={tab.label}
             onclick={() => app.activateTab(tab.id)}
             onauxclick={(event) => onAuxClick(event, tab.id)}
+            ondragstart={(event) => dragStart(event, tab.id)}
+            ondragover={(event) => dragOver(event, tab.id)}
+            ondrop={(event) => drop(event, tab.id)}
+            ondragend={endDrag}
         >
             <span class="tab-label">{tab.label}</span>
             <span
@@ -199,6 +245,18 @@
         background: var(--accent-soft);
         border-color: var(--accent);
         color: var(--text);
+    }
+
+    .tab.dragging {
+        opacity: 0.45;
+    }
+
+    .tab.drop-before {
+        box-shadow: -3px 0 0 var(--accent);
+    }
+
+    .tab.drop-after {
+        box-shadow: 3px 0 0 var(--accent);
     }
 
     .tab-label {

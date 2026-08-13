@@ -139,6 +139,29 @@ class AppStore {
         return this.panes;
     }
 
+    /** Mueve una pestaña dentro de la barra. La cuadrícula dividida conserva
+     *  las mismas terminales visibles, pero adopta también el nuevo orden para
+     *  que arrastrar una pestaña cambie de sitio su terminal en pantalla. */
+    reorderTab(tabId: string, targetId: string, after = false): void {
+        if (tabId === targetId) return;
+        const from = this.tabs.findIndex((tab) => tab.id === tabId);
+        const target = this.tabs.findIndex((tab) => tab.id === targetId);
+        if (from === -1 || target === -1) return;
+
+        const reordered = [...this.tabs];
+        const [moved] = reordered.splice(from, 1);
+        const targetAfterRemoval = reordered.findIndex((tab) => tab.id === targetId);
+        reordered.splice(targetAfterRemoval + (after ? 1 : 0), 0, moved);
+        this.tabs = reordered;
+
+        if (this.panes.length > 1) {
+            const visible = new Set(this.panes);
+            this.panes = reordered
+                .map((tab) => tab.id)
+                .filter((id) => visible.has(id));
+        }
+    }
+
     /** Rota entre 1, 2, 3 y 4 casillas.
      *
      *  Las casillas que no tengan pestaña con la que llenarse la abren: pedir

@@ -81,6 +81,16 @@ impl ShellKind {
 
 pub const SYSTEM_SHELLS_GROUP: &str = "Shells del sistema";
 
+/// Los alias de ejecución de aplicaciones de Microsoft Store viven dentro del
+/// perfil interactivo. Funcionan para ese usuario, pero un proceso lanzado con
+/// el token de TrustedInstaller no puede resolverlos ni acceder a su destino.
+/// Para una shell NSudo hace falta un ejecutable real (MSI/ZIP o el PowerShell
+/// incluido con Windows), no el `pwsh.exe` diminuto de `WindowsApps`.
+fn usable_from_service_token(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('/', "\\").to_lowercase();
+    !normalized.contains("\\appdata\\local\\microsoft\\windowsapps\\")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
@@ -274,8 +284,10 @@ fn detect_windows_shells() -> Vec<Environment> {
 
         if let Some(ps_exe) = which("pwsh.exe")
             .or_else(|| which("pwsh"))
+            .filter(|path| usable_from_service_token(path))
             .or_else(|| which("powershell.exe"))
             .or_else(|| which("powershell"))
+            .filter(|path| usable_from_service_token(path))
         {
             let target = ps_exe.to_string_lossy().to_string();
             let shell = if target.to_lowercase().contains("pwsh") {
@@ -642,6 +654,19 @@ mod tests {
         assert!(!is_git_bash_path("C:\\Windows\\System32\\bash.exe"));
         assert!(!is_git_bash_path("C:\\Tools\\bash.exe"));
         assert!(!is_git_bash_path(""));
+    }
+
+    #[test]
+    fn nsudo_descarta_alias_de_windowsapps_del_usuario() {
+        assert!(!usable_from_service_token(Path::new(
+            r"C:\Users\Administrador\AppData\Local\Microsoft\WindowsApps\pwsh.exe"
+        )));
+        assert!(usable_from_service_token(Path::new(
+            r"C:\Program Files\PowerShell\7\pwsh.exe"
+        )));
+        assert!(usable_from_service_token(Path::new(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        )));
     }
 
     #[test]
