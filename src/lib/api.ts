@@ -10,6 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { openPath } from '@tauri-apps/plugin-opener';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 import type {
     ActionResult,
@@ -24,6 +25,7 @@ import type {
     GitRunResult,
     InstallList,
     InstallRunResult,
+    InternalCommand,
     Inventory,
     Listing,
     LocalRepository,
@@ -32,6 +34,9 @@ import type {
     PinResult,
     PreferencesPayload,
     Preferences,
+    ProfileTransferResult,
+    PluginInfo,
+    WindowsIntegrationStatus,
     ProjectsState,
     ReleaseResult,
     ScriptEntry,
@@ -41,6 +46,7 @@ import type {
     TabList,
     TabSummary,
     UpdateResult,
+    UpdateProgress,
     UpdateStatus
 } from './types';
 
@@ -58,10 +64,37 @@ export const activateTab = (tabId: string) => invoke<void>('tabs_activate', { ta
 /** Avisa al backend de que ya existe un xterm para esta pestaña, para que
  *  entregue la salida que el pty produjo antes de que estuviera listo. */
 export const markTabReady = (tabId: string) => invoke<void>('tabs_ready', { tabId });
+export const markFrontendReady = (tabId: string) => invoke<void>('frontend_ready', { tabId });
 
 // ---- pty ----
 
 export const sendInput = (tabId: string, data: string) => invoke<void>('pty_input', { tabId, data });
+
+export const parseInternalCommand = (line: string) =>
+    invoke<InternalCommand | null>('internal_command_parse', { line });
+
+export async function exportProfile(): Promise<ProfileTransferResult | null> {
+    const path = await save({ defaultPath: 'LTerminal.winslim-profile', filters: [{ name: 'Perfil de terminal', extensions: ['winslim-profile'] }] });
+    return path ? invoke<ProfileTransferResult>('profile_export', { path }) : null;
+}
+
+export async function importProfile(): Promise<ProfileTransferResult | null> {
+    const path = await open({ multiple: false, directory: false, filters: [{ name: 'Perfil de terminal', extensions: ['winslim-profile'] }] });
+    return typeof path === 'string' ? invoke<ProfileTransferResult>('profile_import', { path }) : null;
+}
+
+export const listPlugins = () => invoke<PluginInfo[]>('plugins_list');
+export const setPluginEnabled = (id: string, enabled: boolean) =>
+    invoke<PluginInfo[]>('plugins_set_enabled', { id, enabled });
+export async function installPlugin(): Promise<PluginInfo[] | null> {
+    const path = await open({ multiple: false, directory: false, filters: [{ name: 'Manifest de plugin', extensions: ['json'] }] });
+    return typeof path === 'string' ? invoke<PluginInfo[]>('plugins_install', { manifestPath: path }) : null;
+}
+export const removePlugin = (id: string) => invoke<PluginInfo[]>('plugins_remove', { id });
+export const getWindowsIntegration = () =>
+    invoke<WindowsIntegrationStatus>('windows_integration_status');
+export const setWindowsIntegration = (enabled: boolean) =>
+    invoke<WindowsIntegrationStatus>('windows_integration_set', { enabled });
 
 export const resize = (tabId: string, cols: number, rows: number) =>
     invoke<void>('pty_resize', { tabId, cols, rows });
@@ -259,6 +292,9 @@ export const onUpdateAvailable = (
     callback: (status: UpdateStatus) => void
 ): Promise<UnlistenFn> =>
     listen<UpdateStatus>('update-available', (event) => callback(event.payload));
+
+export const onUpdateProgress = (callback: (progress: UpdateProgress) => void): Promise<UnlistenFn> =>
+    listen<UpdateProgress>('update-progress', (event) => callback(event.payload));
 
 // ---- Preferencias ----
 

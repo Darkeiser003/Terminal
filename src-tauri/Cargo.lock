@@ -5570,7 +5570,7 @@ dependencies = [
 
 [[package]]
 name = "winslim-terminal"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5589,6 +5589,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
+ "toml 0.8.2",
  "winreg 0.55.0",
 ]
 

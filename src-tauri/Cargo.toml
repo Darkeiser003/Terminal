@@ -1,8 +1,8 @@
 [package]
 name = "winslim-terminal"
-version = "1.4.2"
-description = "WinSlim Terminal - terminal y hub de proyectos de WinSlim Project"
-authors = ["WinSlim Project"]
+version = "1.4.3"
+description = "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003"
+authors = ["Darkeiser003"]
 license = "UNLICENSED"
 edition = "2021"
 rust-version = "1.77"
@@ -24,6 +24,7 @@ tauri-plugin-clipboard-manager = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 
 # ConPTY en Windows y forkpty en Unix, con la misma API. Sustituye a node-pty.
 portable-pty = "0.9"

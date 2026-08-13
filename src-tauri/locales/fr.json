@@ -461,7 +461,7 @@
   "settings.densityComfortable": "Confortable",
   "settings.densityCompact": "Compacte",
   "settings.developers": "Développeurs principaux",
-  "settings.developersHint": "Équipe de conception et de développement de WinSlim Terminal.",
+  "settings.developersHint": "Équipe de conception et de développement de WinSlim.",
   "settings.developersPending": "Chargement des informations des développeurs…",
   "settings.envAuto": "Automatique (système)",
   "settings.exclusiveGroups": "Accordéon exclusif des dépendances",
@@ -574,5 +574,6 @@
   "banner.motherboard": "Carte mère",
   "banner.storage": "Disque",
   "action.uninstall.hint": "Supprime l'outil du système. La commande est écrite dans le terminal : vérifiez-la avant de confirmer.",
-  "action.gitPull.hint": "Parcourt le dossier des projets et effectue un pull --ff-only dans chaque dépôt Git. Ceux ayant des modifications locales sont ignorés avec avertissement."
+  "action.gitPull.hint": "Parcourt le dossier des projets et effectue un pull --ff-only dans chaque dépôt Git. Ceux ayant des modifications locales sont ignorés avec avertissement.",
+  "settings.bannerColor": "Couleur des informations système"
 }

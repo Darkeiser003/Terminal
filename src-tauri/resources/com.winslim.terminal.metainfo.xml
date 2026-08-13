@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.winslim.terminal</id>
+  <name>LTerminal</name>
+  <summary>Terminal multipestaña y centro local de herramientas</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <developer id="io.github.darkeiser003">
+    <name>Darkeiser003</name>
+  </developer>
+  <description>
+    <p>LTerminal reúne shells, REPL, dependencias, scripts, proyectos y exploración de archivos en una interfaz rápida y configurable.</p>
+  </description>
+  <launchable type="desktop-id">LTerminal.desktop</launchable>
+  <url type="homepage">https://github.com/Darkeiser003</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="1.4.3" date="2026-08-13" />
+  </releases>
+</component>

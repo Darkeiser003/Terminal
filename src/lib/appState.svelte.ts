@@ -59,7 +59,19 @@ class AppStore {
     /** Traduce una clave con su respaldo en español escrito en el propio
      *  componente, igual que hacía `t()` en el backend. */
     t(key: string, fallback: string): string {
-        return this.catalog.strings[key] ?? fallback;
+        const text = this.catalog.strings[key] ?? fallback;
+
+        // Los catálogos comparten traducciones con Windows para no duplicar
+        // reglas ni archivos. La identidad, en cambio, es una decisión de la
+        // plataforma: en Linux ningún texto de interfaz debe heredar la marca
+        // de Windows. Se transforma al presentar, después de elegir idioma,
+        // para que funcione igual con todos los catálogos.
+        if (this.appInfo?.platform !== 'linux') return text;
+        const appName = this.appInfo.name || 'LTerminal';
+        return text
+            .replaceAll('WinSlim Terminal', appName)
+            .replaceAll('WinSlim Project', appName)
+            .replaceAll('WinSlim', appName);
     }
 
     async load(): Promise<void> {
@@ -177,7 +189,17 @@ class AppStore {
     /** Navega entre casillas de la rejilla dividida en dirección cardinal (Alt + Flechas). */
     navigatePaneDirection(direction: 'left' | 'right' | 'up' | 'down'): void {
         const visible = this.visibleTabs;
-        if (visible.length < 2 || !this.activeTabId) return;
+        if (!this.activeTabId) return;
+        // En vista de una sola terminal, Alt+flechas navega por todas las
+        // pestañas. En vista dividida conserva la navegación espacial.
+        if (visible.length < 2) {
+            if (this.tabs.length < 2) return;
+            const current = this.tabs.findIndex((tab) => tab.id === this.activeTabId);
+            const forward = direction === 'right' || direction === 'down';
+            const target = (current + (forward ? 1 : -1) + this.tabs.length) % this.tabs.length;
+            void this.activateTab(this.tabs[target].id);
+            return;
+        }
         const current = visible.indexOf(this.activeTabId);
         if (current === -1) return;
 

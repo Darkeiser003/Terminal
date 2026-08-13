@@ -65,19 +65,8 @@ const RUNTIME_SCRIPT_DIRS: &[&str] = &[
     "task", "tasks", "command", "commands", "cli", "hooks",
 ];
 
-/// Rutas históricas de utilidades WinSlim. Ya no se importan automáticamente
-/// en la Biblioteca: solo se conservan para etiquetar correctamente una de
-/// estas herramientas si el usuario la ancla expresamente desde «Ruta actual».
-#[rustfmt::skip]
-pub const WINSLIM_VBS_SOURCES: &[(&str, &str)] = &[
-    (r"C:\WSCore\Components\Hooks\WinSlimToolbox", "WinSlim Toolbox"),
-    (r"C:\WSCore\Components\Hooks\EXEfinder", "EXEfinder"),
-];
-
-pub const NSUDO_PATH: &str = r"C:\WSCore\Components\Hooks\NSudo\NSudoLC.exe";
-
 pub fn nsudo_available() -> bool {
-    cfg!(windows) && Path::new(NSUDO_PATH).is_file()
+    crate::platform::nsudo_path().is_some()
 }
 
 /// Scripts VBS conocidos como sensibles: no se excluyen (el usuario decidió
@@ -598,7 +587,6 @@ pub fn describe_path(path: &Path) -> Option<ScriptEntry> {
     // activo del panel no incluya su tipo.
     let categories = crate::scripts::types::all_categories();
     let descriptor = describe(path, &name, &ext, &categories)?;
-    let source = source_for(path);
     Some(ScriptEntry {
         hint: sensitive_hint(&name),
         name,
@@ -615,25 +603,13 @@ pub fn describe_path(path: &Path) -> Option<ScriptEntry> {
             .and_then(|dir| dir.file_name())
             .map(|nombre| nombre.to_string_lossy().to_string())
             .unwrap_or_default(),
-        source,
+        source: "Scripts".to_string(),
     })
 }
 
-/// De qué fuente viene un archivo, para etiquetarlo igual que en el escaneo.
-fn source_for(path: &Path) -> String {
-    let ruta = path.to_string_lossy().to_lowercase().replace('\\', "/");
-    for (dir, etiqueta) in WINSLIM_VBS_SOURCES {
-        if ruta.starts_with(&dir.to_lowercase().replace('\\', "/")) {
-            return (*etiqueta).to_string();
-        }
-    }
-    "Scripts".to_string()
-}
-
 /// Enumera exclusivamente la carpeta de Biblioteca elegida por el usuario. Las
-/// utilidades de `C:\WSCore` dejaron de ser accesos de fábrica en Windows: si
-/// interesan, se pueden localizar en «Ruta actual» y anclar como cualquier
-/// otro archivo.
+/// utilidades no se importan ni se etiquetan como contenido de fábrica: cada
+/// persona construye su biblioteca desde una carpeta que haya elegido.
 pub fn list_all_scripts(user_scripts_dir: &Path, categories: &[FileCategory]) -> Vec<ScriptEntry> {
     list_scripts(
         user_scripts_dir,
@@ -667,7 +643,14 @@ mod tests {
             dir,
             &ScanOptions {
                 scope: Scope::Library,
-                categories: &super::super::types::default_categories(),
+                // Las pruebas de clasificación no dependen de los tres
+                // filtros visuales de fábrica de cada SO. Se habilitan aquí
+                // solo los intérpretes que los casos de prueba ejercitan.
+                categories: &[
+                    FileCategory::Shell,
+                    FileCategory::Powershell,
+                    FileCategory::Node,
+                ],
                 max_depth: DEFAULT_HERE_DEPTH,
                 source: "scripts".into(),
             },
@@ -781,7 +764,7 @@ mod tests {
             dir.path(),
             &ScanOptions {
                 scope: Scope::Here,
-                categories: &super::super::types::default_categories(),
+                categories: &super::super::types::all_categories(),
                 max_depth: 5,
                 source: "here".into(),
             },
@@ -800,7 +783,7 @@ mod tests {
             dir.path(),
             &ScanOptions {
                 scope: Scope::Here,
-                categories: &super::super::types::default_categories(),
+                categories: &super::super::types::all_categories(),
                 max_depth: 3,
                 source: "here".into(),
             },
@@ -817,7 +800,7 @@ mod tests {
             dir.path(),
             &ScanOptions {
                 scope: Scope::Here,
-                categories: &super::super::types::default_categories(),
+                categories: &super::super::types::all_categories(),
                 max_depth: 1,
                 source: "here".into(),
             },
@@ -840,7 +823,7 @@ mod tests {
             dir.path(),
             &ScanOptions {
                 scope: Scope::Here,
-                categories: &super::super::types::default_categories(),
+                categories: &super::super::types::all_categories(),
                 max_depth: 1,
                 source: "here".into(),
             },
@@ -865,7 +848,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "personal.cmd", "@echo off\r\n");
 
-        let found = list_all_scripts(dir.path(), &super::super::types::default_categories());
+        let found = list_all_scripts(dir.path(), &super::super::types::all_categories());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "personal.cmd");
         assert_eq!(found[0].source, "scripts");
@@ -893,7 +876,7 @@ mod tests {
             dir.path(),
             &ScanOptions {
                 scope: Scope::Here,
-                categories: &super::super::types::default_categories(),
+                categories: &super::super::types::all_categories(),
                 max_depth: 2,
                 source: "here".into(),
             },

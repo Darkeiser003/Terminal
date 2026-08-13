@@ -461,7 +461,7 @@
   "settings.densityComfortable": "ゆったり",
   "settings.densityCompact": "コンパクト",
   "settings.developers": "主要開発者",
-  "settings.developersHint": "WinSlim Terminal のデザイン・開発チーム。",
+  "settings.developersHint": "WinSlim のデザイン・開発チーム。",
   "settings.developersPending": "開発者情報を読み込み中…",
   "settings.envAuto": "自動 (システムに従う)",
   "settings.exclusiveGroups": "依存関係のアコーディオン排他表示",
@@ -574,5 +574,6 @@
   "banner.motherboard": "マザーボード",
   "banner.storage": "ストレージ",
   "action.uninstall.hint": "システムからツールを削除します。コマンドはターミナルに表示されるので確認の上ご実行ください。",
-  "action.gitPull.hint": "プロジェクトフォルダを巡回し各Gitリポジトリでgit pull --ff-onlyを実行します。変更のあるリポジトリは警告と共にスキップされます。"
+  "action.gitPull.hint": "プロジェクトフォルダを巡回し各Gitリポジトリでgit pull --ff-onlyを実行します。変更のあるリポジトリは警告と共にスキップされます。",
+  "settings.bannerColor": "システム情報の色"
 }

@@ -13,7 +13,10 @@
     "targets": ["appimage"],
     "linux": {
       "appimage": {
-        "bundleMediaFramework": false
+        "bundleMediaFramework": false,
+        "files": {
+          "usr/share/metainfo/com.winslim.terminal.metainfo.xml": "resources/com.winslim.terminal.metainfo.xml"
+        }
       }
     }
   }

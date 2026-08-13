@@ -1,0 +1,63 @@
+# Valores de fábrica de LTerminal.
+#
+# No se copia automáticamente al perfil del usuario: `Preferences` lo carga,
+# lo valida y lo expone al frontend. El archivo existe para que los valores por
+# defecto sean auditables sin recorrer código Rust.
+
+language = "auto"
+scriptsHereDepth = 3
+autoStartDocker = false
+exclusiveAccordionGroups = true
+autoOpenFirstGroup = true
+showSystemBanner = true
+showDependenciesPanel = true
+showProjectsPanel = true
+showScriptsPanel = true
+showExplorerPanel = true
+manualAliasesText = ""
+favoriteReplIds = ""
+hiddenEnvironmentIds = ""
+
+# Atajos globales. Se guardan como combinaciones normalizadas para poder
+# reasignarlos sin que el frontend dependa de la distribución del teclado.
+shortcutNewTab = "Ctrl+Shift+T"
+shortcutNextTab = "Ctrl+Tab"
+shortcutPreviousTab = "Ctrl+Shift+Tab"
+shortcutCyclePanes = "Ctrl+Shift+Backslash"
+shortcutToggleExplorer = "Ctrl+Shift+E"
+shortcutPaneLeft = "Alt+ArrowLeft"
+shortcutPaneRight = "Alt+ArrowRight"
+shortcutPaneUp = "Alt+ArrowUp"
+shortcutPaneDown = "Alt+ArrowDown"
+
+themeId = "silver"
+accentColor = "#b8bec6"
+uiBackgroundColor = "#080808"
+uiSurfaceColor = "#191919"
+uiSurfaceAltColor = "#111111"
+uiBorderColor = "#3b3d40"
+uiTextColor = "#d7d7d7"
+uiMutedColor = "#8b8e92"
+terminalSelectionColor = "#4b5056"
+fastfetchColor = "#b8bec6"
+terminalCursorColor = "#b8bec6"
+terminalBackground = "#080808"
+terminalForeground = "#d7d7d7"
+terminalFontFamily = "system-mono"
+terminalFontSize = 13
+terminalLineHeight = 1.1
+terminalLetterSpacing = 0.0
+terminalCursorStyle = "block"
+terminalFontWeight = "normal"
+terminalPadding = 10
+terminalScrollback = 5000
+terminalCursorBlink = true
+terminalScrollSensitivity = 3
+copyOnSelect = true
+uiDensity = "comfortable"
+
+defaultEnvironmentId = ""
+defaultScriptEnvironmentId = ""
+fileManagerId = ""
+viewportCols = 80
+viewportRows = 24

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "custom-repl-example",
+  "name": "Ejemplo de REPL personalizado",
+  "version": "1.0.0",
+  "description": "Plantilla mínima para desarrollar un plugin declarativo.",
+  "technologies": [{
+    "id": "custom-repl",
+    "label": "REPL personalizado",
+    "category": "plugin",
+    "windowsExe": "custom-repl.exe",
+    "unixExe": "custom-repl",
+    "args": [],
+    "note": "Solo aparece cuando el ejecutable está en PATH."
+  }]
+}

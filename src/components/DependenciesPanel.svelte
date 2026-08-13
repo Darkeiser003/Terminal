@@ -23,6 +23,8 @@
     /** La acción que se está preparando, para dejar su botón en marcha sin
      *  bloquear el resto del panel. */
     let running = $state('');
+    let query = $state('');
+    let statusFilter = $state<'all' | 'installed' | 'missing'>('all');
 
     /** Estado de la actualización de la PROPIA terminal. Null mientras no se ha
      *  consultado. No es una acción del catálogo: no se escribe ningún comando
@@ -60,6 +62,7 @@
         if (rawGroup === 'Visores de archivos') return app.t('group.viewers', 'Visores de archivos');
         if (rawGroup === 'WSL') return app.t('group.wslShort', 'WSL');
         if (rawGroup === 'Docker') return app.t('group.dockerShort', 'Docker');
+        if (rawGroup === 'Contenedores y Kubernetes') return app.t('group.containers', 'Contenedores y Kubernetes');
         if (rawGroup === 'Android · ADB') return app.t('group.androidShort', 'Android · ADB');
         return rawGroup;
     }
@@ -124,12 +127,25 @@
             }
             // La clave viaja con el grupo para poder reconocer «Actualizaciones»
             // sin comparar contra su nombre traducido.
+            const needle = query.trim().toLocaleLowerCase('es');
+            const filteredEntries = entries.filter((entry) => {
+                if (statusFilter === 'installed' && !entry.installed) return false;
+                if (statusFilter === 'missing' && entry.installed) return false;
+                if (!needle) return true;
+                return [entry.name, name, ...entry.actions.flatMap((action) => [action.label, action.hint ?? ''])]
+                    .some((text) => text.toLocaleLowerCase('es').includes(needle));
+            });
             return {
                 name,
                 key: groupActions[0].groupKey,
                 total: groupActions.length,
-                entries: entries.sort(byStateThenName)
+                entries: filteredEntries.sort(byStateThenName)
             };
+        }).filter((group) => {
+            if (group.entries.length > 0) return true;
+            if (group.key !== 'group.updates' || statusFilter === 'missing') return false;
+            const needle = query.trim().toLocaleLowerCase('es');
+            return !needle || app.t('deps.updateApp', 'Actualizar la terminal').toLocaleLowerCase('es').includes(needle);
         });
     });
 
@@ -268,6 +284,19 @@
     error={Boolean(error)}
     count={actions.length}
 >
+    <div class="filters" role="search">
+        <input
+            type="search"
+            bind:value={query}
+            placeholder={app.t('deps.search', 'Buscar herramienta o acción…')}
+            aria-label={app.t('deps.search', 'Buscar herramienta o acción…')}
+        />
+        <select bind:value={statusFilter} aria-label={app.t('deps.filterStatus', 'Filtrar por estado')}>
+            <option value="all">{app.t('deps.filterAll', 'Todas')}</option>
+            <option value="installed">{app.t('deps.filterInstalled', 'Instaladas')}</option>
+            <option value="missing">{app.t('deps.filterMissing', 'No instaladas')}</option>
+        </select>
+    </div>
     {#if components.length}
         <div class="summary">
             {#each components as component (component.label)}
@@ -286,10 +315,10 @@
     {/if}
 
     {#each groups as group, groupIndex (group.name)}
-        <details class="group" open={autoOpenFirst && groupIndex === 0} ontoggle={onToggle}>
+        <details class="group" class:languages={group.key === 'group.languages'} open={autoOpenFirst && groupIndex === 0} ontoggle={onToggle}>
             <summary class="group-title">
                 {group.name}
-                <span class="count">{group.key === 'group.updates' ? group.total + 1 : group.total}</span>
+                <span class="count">{group.entries.length + (group.key === 'group.updates' ? 1 : 0)}</span>
             </summary>
 
             <!-- La propia terminal va la primera del apartado: actualizar la
@@ -299,6 +328,7 @@
                 {@render selfUpdate()}
             {/if}
 
+            <div class:compact-grid={group.key === 'group.languages'}>
             {#each group.entries as entry (entry.name)}
                 {#if entry.actions.length === 1}
                     <!-- Una herramienta con una sola acción disponible no gana
@@ -323,6 +353,7 @@
                     </details>
                 {/if}
             {/each}
+            </div>
         </details>
     {/each}
 </Panel>
@@ -424,6 +455,25 @@
 {/snippet}
 
 <style>
+    .filters {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+        padding: 6px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .filters input,
+    .filters select {
+        min-width: 0;
+        padding: 7px 9px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: inherit;
+    }
+
     /* `auto-fit` con un minimo real: las fichas se reparten en las columnas
        que quepan y bajan a una sola cuando el panel se estrecha, en vez de
        encogerse hasta que el valor no se lee. */
@@ -539,6 +589,30 @@
     /* Una herramienta con una sola acción: tarjeta con borde e identidad propia */
     .tool {
         margin: 6px 6px;
+    }
+
+    /* Los intérpretes crecerán hasta varias decenas: tarjetas completas en una
+       sola columna desperdician casi toda la ventana. En este apartado se
+       distribuyen en columnas automáticas; cada herramienta conserva sus
+       acciones, estado y plegable, pero ocupa solo el ancho que necesita. */
+    .compact-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 6px;
+        padding: 6px;
+    }
+
+    .compact-grid .tool,
+    .compact-grid .subgroup {
+        min-width: 0;
+        margin: 0;
+    }
+
+    .compact-grid .item {
+        height: 100%;
+        min-height: 38px;
+        box-sizing: border-box;
+        padding: 7px 9px;
     }
 
     .tool .item {

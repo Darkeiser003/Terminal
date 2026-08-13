@@ -1,0 +1,19 @@
+[
+  {"id":"yaegi","label":"Go · Yaegi","category":"compiled","windowsExe":"yaegi","unixExe":"yaegi","args":[]},
+  {"id":"scala-cli","label":"Scala CLI","category":"jvm","windowsExe":"scala-cli","unixExe":"scala-cli","args":["repl"]},
+  {"id":"utop","label":"OCaml · UTop","category":"functional","windowsExe":"utop","unixExe":"utop","args":[]},
+  {"id":"clisp","label":"Common Lisp · CLISP","category":"functional","windowsExe":"clisp","unixExe":"clisp","args":[]},
+  {"id":"ecl","label":"Common Lisp · ECL","category":"functional","windowsExe":"ecl","unixExe":"ecl","args":[]},
+  {"id":"mit-scheme","label":"Scheme · MIT","category":"functional","windowsExe":"mit-scheme","unixExe":"mit-scheme","args":[]},
+  {"id":"idris","label":"Idris","category":"functional","windowsExe":"idris","unixExe":"idris","args":[]},
+  {"id":"lean","label":"Lean","category":"functional","windowsExe":"lean","unixExe":"lean","args":[]},
+  {"id":"sqlserver","label":"SQL Server","category":"database","windowsExe":"sqlcmd","unixExe":"sqlcmd","args":[]},
+  {"id":"oracle-sql","label":"Oracle SQL","category":"database","windowsExe":"sqlplus","unixExe":"sqlplus","args":[]},
+  {"id":"neo4j","label":"Neo4j · Cypher","category":"database","windowsExe":"cypher-shell","unixExe":"cypher-shell","args":[]},
+  {"id":"cassandra","label":"Cassandra","category":"database","windowsExe":"cqlsh","unixExe":"cqlsh","args":[]},
+  {"id":"sicstus","label":"Prolog · SICStus","category":"logic","windowsExe":"sicstus","unixExe":"sicstus","args":[]},
+  {"id":"picat","label":"Picat","category":"logic","windowsExe":"picat","unixExe":"picat","args":[]},
+  {"id":"logtalk","label":"Logtalk","category":"logic","windowsExe":"logtalk","unixExe":"logtalk","args":[]},
+  {"id":"smalltalk","label":"Smalltalk · GNU","category":"historic","windowsExe":"gst","unixExe":"gst","args":[]},
+  {"id":"postscript","label":"PostScript · Ghostscript","category":"historic","windowsExe":"gswin64c","unixExe":"gs","args":["-q"],"note":"Ghostscript es un intérprete de PostScript; usa quit para salir."}
+]

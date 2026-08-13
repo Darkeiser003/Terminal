@@ -1,20 +1,31 @@
 {
   "name": "winslim-terminal",
-  "version": "1.4.2",
-  "description": "WinSlim Terminal - terminal y hub de proyectos de WinSlim Project",
-  "author": "WinSlim Project",
+  "version": "1.4.3",
+  "description": "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003",
+  "author": "Darkeiser003",
   "license": "UNLICENSED",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "npm run check:workspace && npm run metadata:sync",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "start": "tauri dev",
-    "dist:win": "tauri build",
-    "dist:linux": "tauri build",
-    "check": "svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
+    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun",
+    "dist:linux": "bash linux/build.sh --no-run",
+    "e2e:build": "tauri build --debug --no-bundle",
+    "e2e": "node tests/e2e/smoke.mjs",
+    "test:release": "bash linux/validate-release.sh",
+    "test:host": "bash linux/exercise-host.sh",
+    "check:version": "node scripts/verify-version.mjs",
+    "check:assets": "node scripts/verify-runtime-assets.mjs",
+    "check:architecture": "node scripts/verify-architecture.mjs",
+    "check:workspace": "node scripts/verify-workspace.mjs",
+    "metadata:sync": "node scripts/sync-package-metadata.mjs",
+    "check:metadata": "node scripts/sync-package-metadata.mjs --check",
+    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:workspace && npm run check:metadata && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -39,5 +50,12 @@
   },
   "allowScripts": {
     "esbuild@0.25.12": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Darkeiser003/Terminal"
+  },
+  "bugs": {
+    "email": "tebarcascallarromen@gmail.com"
   }
 }

@@ -17,9 +17,8 @@ pub use launch::{
 pub use scan::{
     list_all_scripts, list_scripts, normalize_here_depth, nsudo_available, ScanOptions, ScanResult,
     Scope, ScriptEntry, DEFAULT_HERE_DEPTH, MAX_HERE_DEPTH, MAX_HERE_SCRIPTS, MIN_HERE_DEPTH,
-    NSUDO_PATH,
 };
 pub use types::{
-    default_categories, default_here_categories, normalize_categories, FileCategory, ScriptType,
-    FILE_FILTERS,
+    default_categories, default_here_categories, file_filters, normalize_categories, FileCategory,
+    ScriptType,
 };

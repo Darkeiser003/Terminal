@@ -16,6 +16,8 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
+use crate::platform::traits::HostPlatform;
+
 use super::scan::ScriptEntry;
 
 /// La clave de `settings.json`. El nombre sigue el de `githubPinnedRepos`.
@@ -69,7 +71,7 @@ pub fn toggle(current: &[String], path: &str, pinned: bool) -> Vec<String> {
 pub fn same_path(a: &str, b: &str) -> bool {
     fn normalizar(ruta: &str) -> String {
         let plana = ruta.replace('\\', "/");
-        if cfg!(windows) {
+        if crate::platform::host().is_windows() {
             plana.to_lowercase()
         } else {
             plana

@@ -461,7 +461,7 @@
   "settings.densityComfortable": "Зручна",
   "settings.densityCompact": "Компактна",
   "settings.developers": "Головні розробники",
-  "settings.developersHint": "Команда дизайну та розробки WinSlim Terminal.",
+  "settings.developersHint": "Команда дизайну та розробки WinSlim.",
   "settings.developersPending": "Завантаження інформації про розробників…",
   "settings.envAuto": "Автоматично (за системою)",
   "settings.exclusiveGroups": "Взаємовиключний акордеон залежностей",
@@ -574,5 +574,6 @@
   "banner.motherboard": "Материнська плата",
   "banner.storage": "Диск",
   "action.uninstall.hint": "Видаляє інструмент із системи. Команда записується в термінал: перевірте її перед підтвердженням.",
-  "action.gitPull.hint": "Обходить папку проектів і виконує git pull --ff-only у кожному Git-репозиторії. Репозиторії з локальними змінами пропускаються з попередженням."
+  "action.gitPull.hint": "Обходить папку проектів і виконує git pull --ff-only у кожному Git-репозиторії. Репозиторії з локальними змінами пропускаються з попередженням.",
+  "settings.bannerColor": "Колір системної інформації"
 }

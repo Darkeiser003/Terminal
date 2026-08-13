@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform::traits::HostPlatform;
+
 /// Cómo se ejecuta (o se abre) un archivo. No es lo mismo que su extensión:
 /// un archivo sin extensión con shebang `#!/bin/bash` es `Shell`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,14 +98,14 @@ pub struct FileFilter {
 
 #[rustfmt::skip]
 pub static FILE_FILTERS: &[FileFilter] = &[
-    FileFilter { id: FileCategory::Batch,       label: "CMD / BAT",                   default: true },
-    FileFilter { id: FileCategory::Powershell,  label: "PowerShell",                  default: true },
-    FileFilter { id: FileCategory::Shell,       label: "SH / Bash / Zsh",             default: true },
-    FileFilter { id: FileCategory::Fish,        label: "Fish",                        default: true },
-    FileFilter { id: FileCategory::Python,      label: "Python",                      default: true },
-    FileFilter { id: FileCategory::Node,        label: "Node.js",                     default: true },
-    FileFilter { id: FileCategory::Vbscript,    label: "VBScript",                    default: true },
-    FileFilter { id: FileCategory::OtherScript, label: "Ruby / PHP / Perl / Lua / R", default: true },
+    FileFilter { id: FileCategory::Batch,       label: "CMD / BAT",                   default: false },
+    FileFilter { id: FileCategory::Powershell,  label: "PowerShell",                  default: false },
+    FileFilter { id: FileCategory::Shell,       label: "SH / Bash / Zsh",             default: false },
+    FileFilter { id: FileCategory::Fish,        label: "Fish",                        default: false },
+    FileFilter { id: FileCategory::Python,      label: "Python",                      default: false },
+    FileFilter { id: FileCategory::Node,        label: "Node.js",                     default: false },
+    FileFilter { id: FileCategory::Vbscript,    label: "VBScript",                    default: false },
+    FileFilter { id: FileCategory::OtherScript, label: "Ruby / PHP / Perl / Lua / R", default: false },
     FileFilter { id: FileCategory::Autohotkey,  label: "AutoHotkey (.ahk)",            default: false },
     FileFilter { id: FileCategory::Registry,    label: "Registro (.reg)",              default: false },
     FileFilter { id: FileCategory::LinuxPackage,label: "Paquetes Linux",               default: false },
@@ -114,25 +116,95 @@ pub static FILE_FILTERS: &[FileFilter] = &[
     FileFilter { id: FileCategory::Video,       label: "Vídeo",                       default: false },
 ];
 
-pub fn all_categories() -> Vec<FileCategory> {
-    FILE_FILTERS.iter().map(|filter| filter.id).collect()
-}
+const LINUX_ORDER: &[FileCategory] = &[
+    FileCategory::Shell,
+    FileCategory::Fish,
+    FileCategory::LinuxPackage,
+    FileCategory::Python,
+    FileCategory::Node,
+    FileCategory::OtherScript,
+    FileCategory::Html,
+    FileCategory::Image,
+    FileCategory::Audio,
+    FileCategory::Video,
+    FileCategory::Batch,
+    FileCategory::Powershell,
+    FileCategory::Vbscript,
+    FileCategory::Autohotkey,
+    FileCategory::Registry,
+    FileCategory::Program,
+];
 
-pub fn default_categories() -> Vec<FileCategory> {
+const WINDOWS_ORDER: &[FileCategory] = &[
+    FileCategory::Batch,
+    FileCategory::Powershell,
+    FileCategory::Vbscript,
+    FileCategory::Autohotkey,
+    FileCategory::Registry,
+    FileCategory::Program,
+    FileCategory::Python,
+    FileCategory::Node,
+    FileCategory::OtherScript,
+    FileCategory::Shell,
+    FileCategory::Fish,
+    FileCategory::LinuxPackage,
+    FileCategory::Html,
+    FileCategory::Image,
+    FileCategory::Audio,
+    FileCategory::Video,
+];
+
+fn filter_for(category: FileCategory) -> &'static FileFilter {
     FILE_FILTERS
         .iter()
-        .filter(|filter| filter.default)
-        .map(|filter| filter.id)
-        .collect()
+        .find(|filter| filter.id == category)
+        .expect("cada categoría ordenada debe tener su filtro")
 }
 
-pub fn default_here_categories() -> Vec<FileCategory> {
-    if cfg!(windows) {
+/// Orden y valor de fábrica son parte de la experiencia de cada plataforma,
+/// no del formato de los archivos. Linux enseña primero sus herramientas
+/// nativas; Windows conserva las suyas al inicio. Mantener aquí una única
+/// tabla evita duplicar extensiones, lanzadores o validadores.
+pub fn filters_for_platform(is_windows: bool) -> Vec<&'static FileFilter> {
+    let order = if is_windows {
+        WINDOWS_ORDER
+    } else {
+        LINUX_ORDER
+    };
+    order.iter().copied().map(filter_for).collect()
+}
+
+pub fn file_filters() -> Vec<&'static FileFilter> {
+    filters_for_platform(crate::platform::host().is_windows())
+}
+
+pub fn all_categories() -> Vec<FileCategory> {
+    file_filters().into_iter().map(|filter| filter.id).collect()
+}
+
+pub fn default_categories_for(is_windows: bool) -> Vec<FileCategory> {
+    if is_windows {
         vec![
             FileCategory::Batch,
             FileCategory::Powershell,
             FileCategory::Vbscript,
         ]
+    } else {
+        vec![
+            FileCategory::Shell,
+            FileCategory::Fish,
+            FileCategory::LinuxPackage,
+        ]
+    }
+}
+
+pub fn default_categories() -> Vec<FileCategory> {
+    default_categories_for(crate::platform::host().is_windows())
+}
+
+pub fn default_here_categories() -> Vec<FileCategory> {
+    if crate::platform::host().is_windows() {
+        default_categories_for(true)
     } else {
         default_categories()
     }
@@ -365,11 +437,35 @@ mod tests {
 
     #[test]
     fn de_fabrica_se_ofrecen_los_scripts_y_no_los_recursos() {
-        let defaults = default_categories();
-        assert!(defaults.contains(&FileCategory::Powershell));
-        assert!(defaults.contains(&FileCategory::OtherScript));
-        assert!(!defaults.contains(&FileCategory::Image));
-        assert!(!defaults.contains(&FileCategory::Program));
+        assert_eq!(
+            default_categories_for(false),
+            vec![
+                FileCategory::Shell,
+                FileCategory::Fish,
+                FileCategory::LinuxPackage,
+            ]
+        );
+        assert_eq!(
+            default_categories_for(true),
+            vec![
+                FileCategory::Batch,
+                FileCategory::Powershell,
+                FileCategory::Vbscript,
+            ]
+        );
+    }
+
+    #[test]
+    fn cada_plataforma_ordena_primero_sus_herramientas() {
+        let linux = filters_for_platform(false);
+        assert_eq!(linux[0].id, FileCategory::Shell);
+        assert_eq!(linux[1].id, FileCategory::Fish);
+        assert_eq!(linux[2].id, FileCategory::LinuxPackage);
+
+        let windows = filters_for_platform(true);
+        assert_eq!(windows[0].id, FileCategory::Batch);
+        assert_eq!(windows[1].id, FileCategory::Powershell);
+        assert_eq!(windows[2].id, FileCategory::Vbscript);
     }
 
     #[test]

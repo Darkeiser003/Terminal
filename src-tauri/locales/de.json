@@ -461,7 +461,7 @@
   "settings.densityComfortable": "Komfortabel",
   "settings.densityCompact": "Kompakt",
   "settings.developers": "Hauptentwickler",
-  "settings.developersHint": "Design- und Entwicklungsteam von WinSlim Terminal.",
+  "settings.developersHint": "Design- und Entwicklungsteam von WinSlim.",
   "settings.developersPending": "Entwicklerinformationen werden geladen…",
   "settings.envAuto": "Automatisch (System)",
   "settings.exclusiveGroups": "Exklusiver Akkordeon-Modus",
@@ -574,5 +574,6 @@
   "banner.motherboard": "Mainboard",
   "banner.storage": "Speicher",
   "action.uninstall.hint": "Entfernt das Werkzeug vom System. Der Befehl wird im Terminal eingegeben: Überprüfen Sie ihn vor der Bestätigung.",
-  "action.gitPull.hint": "Geht den Projektordner durch und führt git pull --ff-only in jedem Git-Repository aus. Repositories mit lokalen Änderungen werden übersprungen."
+  "action.gitPull.hint": "Geht den Projektordner durch und führt git pull --ff-only in jedem Git-Repository aus. Repositories mit lokalen Änderungen werden übersprungen.",
+  "settings.bannerColor": "Farbe der Systeminformationen"
 }

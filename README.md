@@ -1,4 +1,4 @@
-# WinSlim Terminal / WS-LTerminal (1.4.2)
+# WinSlim Terminal / WS-LTerminal (1.4.3)
 
 ---
 
@@ -14,16 +14,15 @@ y como lanzador de scripts.
 
 La aplicación se llama **WinSlim Terminal** en Windows y **LTerminal** en
 Linux y macOS. No es una marca distinta: es la misma base con identidad,
-identificador y rutas de datos propias por plataforma (`src-tauri/src/identity.rs`).
+identificador y rutas de datos propias por plataforma (`src-tauri/src/config/identity.rs`).
 
 | | |
 |---|---|
-| Versión | 1.4.2 |
+| Versión | 1.4.3 |
 | Plataformas | Windows 10/11, Linux (x64), macOS (parcial) |
 | Runtime | Tauri 2 · Rust 1.77+ · Node.js ≥ 22.12.0 (solo para compilar) |
 | Licencia | UNLICENSED (privado) |
-| Repositorio | https://github.com/Darkeiser003/Terminal |
-| Idiomas | Español, inglés |
+| Idiomas | Español, inglés, francés, alemán, italiano, portugués, rumano, ruso, ucraniano, polaco, chino, japonés, coreano, hindi y árabe |
 
 ## Índice
 
@@ -48,6 +47,7 @@ identificador y rutas de datos propias por plataforma (`src-tauri/src/identity.r
 - [Datos, logs y diagnóstico](#datos-logs-y-diagnóstico)
 - [Pruebas](#pruebas)
 - [Convenciones del código](#convenciones-del-código)
+- [Estructura del repositorio](docs/repository-layout.md)
 - [Problemas conocidos](#problemas-conocidos)
 
 ---
@@ -86,17 +86,16 @@ registro y no crea accesos directos. Los tres archivos de la carpeta
 
 **Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
 
-La aplicación se actualiza sola. Al arrancar comprueba si hay una versión más
-reciente publicada y, si la hay, la descarga **donde ya está instalada**, la
-aplica y se reinicia. También se puede buscar a mano desde
-**Ajustes › Información**. El porqué de cada paso está en
-`src-tauri/src/self_update.rs`.
+La aplicación consulta sus actualizaciones en su repositorio propio, que se
+mantiene separado de los proyectos anclados: no aparece en la biblioteca ni se
+puede clonar desde el panel como proyecto. El porqué de cada paso está en
+`src-tauri/src/updater/self_update.rs`.
 
 ## Entorno de desarrollo
 
+Desde una copia local del código:
+
 ```bash
-git clone https://github.com/Darkeiser003/Terminal.git
-cd Terminal
 npm ci
 npm start
 ```
@@ -117,10 +116,12 @@ Todos se ejecutan desde la raíz del repositorio.
 | Script | Qué hace |
 |---|---|
 | `npm start` | Arranca la aplicación en desarrollo (Vite + `cargo run`). |
-| `npm run check` | Ciclo completo de verificación: `svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y `cargo test`. **Es lo que hay que pasar antes de compilar.** |
-| `npm run build` | Solo el frontend (`svelte-check` + `vite build`). |
-| `npm run dist:win` | Compila la versión de Windows sin empaquetar. |
-| `npm run dist:linux` | Compila el AppImage. |
+| `npm run check` | Ciclo completo: versión, metadatos, recursos, arquitectura, permisos, `svelte-check`, formato, análisis estático y pruebas Rust. **Es lo que hay que pasar antes de compilar.** |
+| `npm run check:workspace` | Comprueba que las cachés, salidas y directorio temporal se puedan leer y escribir; detecta un `chown`/`chmod` pendiente antes de una build. |
+| `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
+| `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. |
+| `npm run dist:win` | Ejecuta la build completa de Windows: comprueba recursos, valida, genera la carpeta desempaquetada y su ZIP. |
+| `npm run dist:linux` | Ejecuta la build Linux completa: solicita la versión, valida y genera el AppImage. |
 
 Para una build completa y verificada, con sus comprobaciones previas y su
 release comprimida, usar los scripts de `windows/` y `linux/` en vez de estos.
@@ -139,6 +140,10 @@ Argumentos: `-Clean`/`--clean` borra `node_modules` y `target` antes,
 `-SkipChecks`/`--skip-checks` salta las comprobaciones, `-NoRun`/`--no-run` no
 lanza la app al terminar.
 
+Al comenzar, los scripts de empaquetado preguntan la versión a generar y
+proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
+`-Version 1.4.4 -NonInteractive` en Windows o `--version 1.4.4` en Linux.
+
 Cada script comprueba los requisitos, instala dependencias, pasa `npm run check`,
 compila, monta el artefacto, hace una comprobación de humo (abre la app y mira
 que no se cierre sola) y publica la release con su SHA-256 en `release/`.
@@ -154,10 +159,9 @@ Una sola cosa por plataforma, a propósito. **No** se genera instalador NSIS, ni
 MSI, ni portable, ni `.deb`, ni `.rpm`, ni accesos directos. El razonamiento
 está en `src-tauri/BUNDLE.md`.
 
-El nombre del artefacto no es libre: es el que busca el actualizador de la
-propia app al elegir el adjunto de una release
-(`self_update::asset_for_platform`). Publicar con otro nombre deja la
-actualización automática sin nada que descargar.
+Si se configura actualización automática más adelante, el nombre del artefacto
+debe coincidir con `self_update::asset_for_platform`; de otro modo una release
+no tendrá un adjunto compatible.
 
 ### Comprobaciones que hacen los scripts, y por qué
 
@@ -176,14 +180,19 @@ toca el sistema, y un frontend en Svelte que solo pinta.
 
 ```
 src-tauri/src/
-├── lib.rs                   Arranque, ventana y registro de comandos
-├── commands*.rs             Los comandos que el frontend puede invocar
-├── tabs.rs · pty.rs         Pestañas y su pty (portable-pty)
-├── environments.rs          Detección de shells, WSL, Docker, ADB, lenguajes
-├── install_actions.rs       Catálogo de dependencias instalables
-├── scripts/ · file_explorer.rs · github.rs
-├── console_ui.rs            Cómo se ve en la terminal lo que ejecuta la app
-├── self_update.rs           Actualización de la propia aplicación
+├── app/                     Arranque, estado y comandos Tauri
+├── config/                  Identidad, rutas, preferencias, migración e i18n
+├── environments/            Shells, WSL, Docker, Android y lenguajes
+├── explorer/                Explorador y catálogo de visores
+├── infrastructure/          Procesos y caché de PATH compartidos
+├── packages/                Catálogo y acciones de instalación
+├── platform/                Adaptadores compilados de Windows y Linux
+├── projects/                GitHub y panel de proyectos
+├── scripts/                 Escaneo, favoritos y lanzamiento de scripts
+├── system/                  Modelos y políticas del sistema
+├── terminal/                PTY, pestañas, flujo y sesiones
+├── updater/                 Actualización de la aplicación
+├── default_settings.toml    Valores de fábrica auditables
 └── locales/                 Catálogos de traducción
 
 src/
@@ -240,7 +249,7 @@ El selector agrupa los entornos por familia:
 | Grupo | Contenido |
 |---|---|
 | Shells del sistema | cmd, PowerShell, PowerShell 7, Git Bash, bash, zsh, fish, sh, distribuciones WSL y sus shells, `cmd.exe · Wine` |
-| Lenguajes · intérprete interactivo | REPL de los lenguajes instalados |
+| Lenguajes · intérprete interactivo | REPL detectados bajo demanda: Python, Node.js, Ruby, Java, PHP, Lua, R, Groovy, Deno, Bun, Perl, Julia, Kotlin, C#/F#, Haskell, Scala, Clojure, Elixir, Erlang, OCaml, Racket y Rust mediante evcxr |
 | Docker · contenedores en ejecución | Entrar en un contenedor vivo |
 | Docker · imágenes | Crear un contenedor nuevo y efímero |
 | Android (ADB) | Un entorno por dispositivo conectado |
@@ -311,14 +320,13 @@ ejecutarse, para que no se consuma como respuesta.
 
 ## Proyectos y GitHub
 
-**Anclados** combina el catálogo fijo de la build con los perfiles y
-repositorios que cada usuario ancle. En Windows (WinSlim Terminal) figuran como
-perfiles fijos `Darkeiser003`, `Christianlg97` y `tiranosaurio73`; en Linux y
-macOS (LTerminal) solo `Darkeiser003`. Los fijos no se pueden desanclar; los
-anclados personales sí. Los
-créditos de **Ajustes › Información** salen de una lista distinta
-(`developers`), de modo que un perfil puede seguir anclado con sus
-repositorios sin aparecer en los créditos.
+**Anclados** incluye únicamente el perfil fijo
+[`Darkeiser003`](https://github.com/Darkeiser003), como referencia del proyecto.
+No importa scripts ni repositorios externos de WinSlim y el repositorio interno
+de actualización no forma parte de esta lista. Cada persona puede anclar sus
+propios perfiles y repositorios, y quitarlos después sin restricciones. Los
+créditos de **Ajustes › Información** se configuran por separado del listado de
+proyectos.
 
 Cada panel tiene un **buscador con lupa** que filtra sin volver a consultar
 nada: en **Anclados** acota perfiles y repositorios, y en **Explorar GitHub**
@@ -400,10 +408,11 @@ El panel tiene el mismo **buscador con lupa** que Proyectos, y actúa sobre el
 último escaneo: filtra por nombre, subcarpeta o extensión sin volver a recorrer
 el disco, que en **Aquí** puede costar segundos.
 
-El filtro de tipos es una selección múltiple —CMD/BAT, PowerShell, SH/Bash/Zsh,
-Fish, Python, Node.js, VBScript, otros runtimes, programas, HTML, imágenes,
-audio y vídeo—. Por defecto solo están marcados los scripts: programas y
-multimedia son opt-in, así que activar la vista nunca convierte **Aquí** en un
+El filtro de tipos se adapta al sistema. En Linux aparecen primero
+SH/Bash/Zsh, Fish y paquetes Linux, que son los tres valores de fábrica; en
+Windows, CMD/BAT, PowerShell y VBScript ocupan esas posiciones. Python,
+Node.js, otros runtimes, programas, HTML, imágenes, audio y vídeo siguen
+siendo opt-in, así que activar la vista nunca convierte **Aquí** en un
 explorador de todos los archivos.
 
 Al ejecutar un script, la aplicación reutiliza una pestaña compatible o abre
@@ -495,25 +504,40 @@ propio panel muestra su ruta. También se puede distribuir preconfigurado
 modificando ese JSON: cualquier valor fuera de rango se recorta o se sustituye
 por el predeterminado, nunca rompe la aplicación.
 
+Los valores de fábrica viven en `src-tauri/default_settings.toml`; Cargo los
+incluye en el binario y los valida al iniciar. La versión se sincroniza entre
+`package.json`, `package-lock.json`, `Cargo.toml` y `Cargo.lock`; los scripts
+de empaquetado la solicitan y `npm run check:version` evita divergencias.
+
+Los metadatos editables del paquete viven en
+`src-tauri/config/package-metadata.json`: nombre, binario, identificador,
+descripciones, marca, autor, licencia, copyright, repositorio, web, correo de
+soporte y créditos. La web puede quedar vacía si no se usa. Los créditos que
+deban aparecer dentro de la app se indican como usuarios de GitHub. Tras
+editarlos, ejecutar
+`npm run metadata:sync`.
+
 | Clave | Tipo · rango | Por defecto |
 |---|---|---|
-| `language` | `auto` \| `es` \| `en` | `auto` |
+| `language` | `auto` \| 15 idiomas disponibles | `auto` |
 | `defaultEnvironmentId` | id de entorno | `""` (automático) |
 | `themeId` | `silver`, `winslim`, `ocean`, `forest`, `amber`, `violet`, `nordic`, `crimson`, `matrix`, `contrast`, `slate`, `plum`, `teal` | `silver` |
 | `accentColor` | `#rrggbb` | `#b8bec6` |
 | `terminalBackground` | `#rrggbb` | `#080808` |
 | `terminalForeground` | `#rrggbb` | `#d7d7d7` |
-| `terminalFontFamily` | `system-mono`, `jetbrains`, `fira`, `monospace` | `system-mono` |
-| `terminalFontSize` | 10–24 | `14` |
+| `terminalFontFamily` | Sistema, JetBrains Mono, Fira Code, Hack, Source Code Pro, IBM Plex Mono, Iosevka, Victor Mono, Ubuntu Mono, Inconsolata, Monaspace o monoespaciada genérica | `system-mono` |
+| `terminalFontSize` | 10–24 | `13` |
 | `terminalLineHeight` | 0.9–1.8 | `1.1` |
 | `terminalLetterSpacing` | −1–3 | `0` |
-| `terminalCursorStyle` | `block`, `bar`, `underline` | `block` |
-| `terminalFontWeight` | `normal`, `bold` | `normal` |
+| `terminalCursorStyle` | `block`, `bar`, `underline`, `beam`, `underline-thick` | `block` |
+| `terminalFontWeight` | `light`, `normal`, `medium`, `semibold`, `bold` | `normal` |
 | `terminalCursorBlink` | booleano | `true` |
 | `terminalScrollSensitivity` | 1–10 | `3` |
-| `copyOnSelect` | booleano | `false` |
+| `copyOnSelect` | booleano | `true` |
 | `terminalPadding` | 4–24 | `10` |
 | `terminalScrollback` | 1000–100000 | `5000` |
+| `fastfetchColor` | `#rrggbb` | color del banner de información del sistema |
+| `terminalCursorColor` | `#rrggbb` | color del cursor |
 | `uiDensity` | `comfortable`, `compact` | `comfortable` |
 | `showSystemBanner` | booleano | `true` |
 | `scriptsHereDepth` | 0–10 | `3` |
@@ -523,6 +547,7 @@ por el predeterminado, nunca rompe la aplicación.
 | `fileManagerId` | id de gestor | `""` |
 | `viewportCols` | 20–1000 | `80` |
 | `viewportRows` | 5–500 | `24` |
+| `defaultScriptEnvironmentId` | id de entorno | `""` (automático) |
 
 `fileManagerId`, `viewportCols` y `viewportRows` no se editan desde la interfaz:
 los escribe la aplicación. Los dos últimos guardan el tamaño medido de la
@@ -639,5 +664,4 @@ ejecutable recién creado.
 
 ## Créditos
 
-Desarrollado por [Christianlg97](https://github.com/Christianlg97) y
-[Darkeiser003](https://github.com/Darkeiser003) para **WinSlim Project**.
+Desarrollado por [Darkeiser003](https://github.com/Darkeiser003).

@@ -461,7 +461,7 @@
   "settings.densityComfortable": "आरामदायक",
   "settings.densityCompact": "कॉम्पैक्ट",
   "settings.developers": "मुख्य डेवलपर",
-  "settings.developersHint": "WinSlim Terminal की डिज़ाइन और विकास टीम।",
+  "settings.developersHint": "WinSlim की डिज़ाइन और विकास टीम।",
   "settings.developersPending": "डेवलपर जानकारी लोड हो रही है…",
   "settings.envAuto": "स्वतः (सिस्टम के अनुसार)",
   "settings.exclusiveGroups": "अनन्य अकोर्डियन निर्भरताएं",
@@ -574,5 +574,6 @@
   "banner.motherboard": "मदरबोर्ड",
   "banner.storage": "डिस्क",
   "action.uninstall.hint": "सिस्टम से टूल को हटाता है। कमांड टर्मिनल में लिखी जाती है: पुष्टि करने से पहले इसकी समीक्षा करें।",
-  "action.gitPull.hint": "प्रोजेक्ट फ़ोल्डर के माध्यम से जाता है और प्रत्येक Git रिपॉजिटरी में git pull --ff-only चलाता है। स्थानीय परिवर्तनों वालों को चेतावनी के साथ छोड़ दिया जाता है।"
+  "action.gitPull.hint": "प्रोजेक्ट फ़ोल्डर के माध्यम से जाता है और प्रत्येक Git रिपॉजिटरी में git pull --ff-only चलाता है। स्थानीय परिवर्तनों वालों को चेतावनी के साथ छोड़ दिया जाता है।",
+  "settings.bannerColor": "सिस्टम जानकारी का रंग"
 }

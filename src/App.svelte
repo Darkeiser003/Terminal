@@ -20,6 +20,7 @@
     import Toolbar from "./components/Toolbar.svelte";
 
     let ready = $state(false);
+    let startupError = $state("");
     let deps = $state<DependenciesPanel | null>(null);
     let settings = $state<SettingsPanel | null>(null);
     let scripts = $state<ScriptsPanel | null>(null);
@@ -36,6 +37,46 @@
     let update = $state<UpdateStatus | null>(null);
     let updating = $state(false);
     let updateError = $state("");
+    // KeyboardEvent.ctrlKey no distingue izquierda/derecha. Se conserva el
+    // estado físico de ControlRight para ofrecer un chord que no robe los
+    // Ctrl+A/C/S/W habituales de la shell.
+    let rightControlDown = false;
+
+    function onGamingNavigationKeyDown(event: KeyboardEvent): void {
+        if (event.code === "ControlRight" || (event.key === "Control" && event.location === 2)) {
+            rightControlDown = true;
+            return;
+        }
+        if (!rightControlDown || !event.ctrlKey || event.altKey || event.metaKey) return;
+        const directions: Record<string, "left" | "right" | "up" | "down"> = {
+            KeyA: "left",
+            KeyD: "right",
+            KeyW: "up",
+            KeyS: "down",
+        };
+        const direction = directions[event.code];
+        if (!direction) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!event.repeat) app.navigatePaneDirection(direction);
+    }
+
+    function onGamingNavigationKeyUp(event: KeyboardEvent): void {
+        if (event.code === "ControlRight" || (event.key === "Control" && event.location === 2)) {
+            rightControlDown = false;
+        }
+    }
+
+    function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
+        const parts = shortcut.toLowerCase().split("+");
+        const expectedKey = parts.at(-1);
+        const key = event.key === "\\" ? "backslash" : event.key.toLowerCase();
+        return key === expectedKey
+            && event.ctrlKey === parts.includes("ctrl")
+            && event.altKey === parts.includes("alt")
+            && event.shiftKey === parts.includes("shift")
+            && event.metaKey === parts.includes("meta");
+    }
 
     async function loadDeps(): Promise<void> {
         depsMounted = true;
@@ -81,13 +122,15 @@
             !dentroDeTerminal &&
             (target?.closest("input, textarea, select") != null ||
                 target?.isContentEditable === true);
-        const esNavegacion = event.ctrlKey && event.key === "Tab";
+        const preferences = app.preferences;
+        if (!preferences) return;
+        const esSiguiente = matchesShortcut(event, preferences.shortcutNextTab);
+        const esAnterior = matchesShortcut(event, preferences.shortcutPreviousTab);
+        const esNavegacion = esSiguiente || esAnterior;
         if (enFormulario && !esNavegacion) return;
 
         if (
-            event.ctrlKey &&
-            event.shiftKey &&
-            event.key.toLowerCase() === "t"
+            matchesShortcut(event, preferences.shortcutNewTab)
         ) {
             event.preventDefault();
             void app.createTab(app.activeTab?.envId ?? undefined);
@@ -101,49 +144,37 @@
             );
             // Shift invierte el sentido; el módulo hace que dé la vuelta por los
             // dos extremos sin casos especiales.
-            const salto = event.shiftKey ? -1 : 1;
+            const salto = esAnterior ? -1 : 1;
             const siguiente =
                 (actual + salto + app.tabs.length) % app.tabs.length;
             void app.activateTab(app.tabs[siguiente].id);
             return;
         }
         // Ctrl+Shift+\ rota entre 1, 2, 3 y 4 terminales a la vista.
-        if (event.ctrlKey && event.shiftKey && event.key === "\\") {
+        if (matchesShortcut(event, preferences.shortcutCyclePanes)) {
             event.preventDefault();
             app.cyclePanes();
             return;
         }
         // Ctrl + Flechas o Alt + Flechas: mover el foco de la terminal en la vista dividida
-        if (
-            (event.ctrlKey || event.altKey) &&
-            !event.shiftKey &&
-            app.panes.length >= 2
-        ) {
-            const key = event.key;
-            if (
-                key === "ArrowLeft" ||
-                key === "ArrowRight" ||
-                key === "ArrowUp" ||
-                key === "ArrowDown"
-            ) {
+        {
+            const directions = [
+                [preferences.shortcutPaneLeft, "left"],
+                [preferences.shortcutPaneRight, "right"],
+                [preferences.shortcutPaneUp, "up"],
+                [preferences.shortcutPaneDown, "down"],
+            ] as const;
+            const direction = directions.find(([shortcut]) => matchesShortcut(event, shortcut));
+            if (direction) {
                 event.preventDefault();
                 event.stopPropagation();
-                const dirMap: Record<string, "left" | "right" | "up" | "down"> =
-                    {
-                        ArrowLeft: "left",
-                        ArrowRight: "right",
-                        ArrowUp: "up",
-                        ArrowDown: "down",
-                    };
-                app.navigatePaneDirection(dirMap[key]);
+                app.navigatePaneDirection(direction[1]);
                 return;
             }
         }
 
         if (
-            event.ctrlKey &&
-            event.shiftKey &&
-            event.key.toLowerCase() === "e"
+            matchesShortcut(event, preferences.shortcutToggleExplorer)
         ) {
             event.preventDefault();
             app.explorerVisible = !app.explorerVisible;
@@ -151,13 +182,28 @@
     }
 
     onMount(() => {
+        const openSettingsFromTerminal = () => {
+            panels.show('settings');
+            void loadSettings();
+        };
+        window.addEventListener('winslim:open-settings', openSettingsFromTerminal);
         const unlisteners: Promise<UnlistenFn>[] = [
             api.onData((tabId, data) => {
                 const term = getTerminal(tabId);
-                if (term) {
+                // La cola de escritura de xterm puede completar después de que
+                // el usuario cierre la pestaña. No conservar una referencia
+                // destruida evita `_renderer.value.dimensions` al intentar
+                // desplazarla desde el callback tardío.
+                if (!term?.element?.isConnected) return;
+                try {
                     term.write(data, () => {
-                        term.scrollToBottom();
+                        const current = getTerminal(tabId);
+                        if (!current?.element?.isConnected) return;
+                        try { current.scrollToBottom(); }
+                        catch (error) { console.debug('[App] terminal closed while scrolling', error); }
                     });
+                } catch (error) {
+                    console.debug('[App] terminal closed while writing', error);
                 }
             }),
 
@@ -184,10 +230,6 @@
             ),
 
             api.onEnvironmentChanged((event) => {
-                // La sesión anterior ya no existe: su historial no tiene nada
-                // que ver con la shell nueva, y el banner de esta llega justo
-                // detrás. Sin el reset quedaban los dos pegados.
-                getTerminal(event.tabId)?.reset();
                 app.applyEnvironmentChange(event);
             }),
 
@@ -204,9 +246,16 @@
             }),
         ];
 
-        void app.load().then(() => {
-            ready = true;
-        });
+        void app.load()
+            .then(() => {
+                ready = true;
+            })
+            .catch((cause) => {
+                startupError = String(cause);
+                void api.reportFrontendError({
+                    message: `No se pudo iniciar la interfaz: ${startupError}`,
+                });
+            });
 
         // Los errores del frontend acaban en el mismo archivo de log que los del
         // backend, que es donde se mira cuando algo falla.
@@ -222,10 +271,20 @@
 
         window.addEventListener("error", onError);
         window.addEventListener("unhandledrejection", onRejection);
+        // Captura antes que xterm/readline: la letra no llega al PTY cuando el
+        // chord es Control derecho + WASD.
+        window.addEventListener("keydown", onGamingNavigationKeyDown, true);
+        window.addEventListener("keyup", onGamingNavigationKeyUp, true);
+        const resetGamingChord = () => { rightControlDown = false; };
+        window.addEventListener("blur", resetGamingChord);
 
         return () => {
+            window.removeEventListener('winslim:open-settings', openSettingsFromTerminal);
             window.removeEventListener("error", onError);
             window.removeEventListener("unhandledrejection", onRejection);
+            window.removeEventListener("keydown", onGamingNavigationKeyDown, true);
+            window.removeEventListener("keyup", onGamingNavigationKeyUp, true);
+            window.removeEventListener("blur", resetGamingChord);
             for (const pending of unlisteners)
                 void pending.then((stop) => stop());
         };
@@ -235,6 +294,13 @@
 <svelte:window onkeydown={onShortcut} />
 
 <main class:platform-linux={app.appInfo?.platform === "linux"}>
+    {#if startupError}
+        <section class="startup-error" role="alert">
+            <h1>LTerminal no pudo iniciar la interfaz</h1>
+            <p>{startupError}</p>
+            <p>Consulta <code>~/.config/lterminal/logs/main.log</code>.</p>
+        </section>
+    {/if}
     <Toolbar
         onOpenDeps={() => void loadDeps()}
         onOpenSettings={() => void loadSettings()}
@@ -244,7 +310,9 @@
     <TabBar />
 
     <div class="workspace">
-        <ExplorerSidebar />
+        {#if app.preferences?.showExplorerPanel !== false}
+            <ExplorerSidebar />
+        {/if}
 
         <!-- La rejilla: una casilla es la vista normal, y de dos a cuatro es la
              vista dividida. Los paneles NO se destruyen al ocultarse — cada uno
@@ -453,6 +521,19 @@
         display: flex;
         flex: 0 0 auto;
         gap: 6px;
+    }
+
+    .startup-error {
+        position: fixed;
+        inset: 24px;
+        z-index: 10000;
+        overflow: auto;
+        padding: 24px;
+        border: 2px solid #e06c75;
+        border-radius: 8px;
+        background: #1f1f1f;
+        color: #f3f3f3;
+        font: 14px/1.5 system-ui, sans-serif;
     }
 
     .suggestion button {

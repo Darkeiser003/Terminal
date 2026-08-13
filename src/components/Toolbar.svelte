@@ -33,6 +33,7 @@
     let logsError = $state('');
 
     let envMenuOpen = $state(false);
+    let envQuery = $state('');
     let langMenuOpen = $state(false);
 
     const flags: Record<string, string> = {
@@ -93,13 +94,25 @@
      *  apariencia coherente con el resto de la aplicación. */
     const grouped = $derived.by(() => {
         const groups = new Map<string, Environment[]>();
+        const needle = envQuery.trim().toLocaleLowerCase();
         for (const env of app.environments) {
+            if (needle && ![env.label, env.language ?? '', env.group].some((text) => text.toLocaleLowerCase().includes(needle))) continue;
             const list = groups.get(env.group);
             if (list) list.push(env);
             else groups.set(env.group, [env]);
         }
         return [...groups.entries()];
     });
+
+    const favoriteIds = $derived(new Set((app.preferences?.favoriteReplIds ?? '').split(',').filter(Boolean)));
+    const favoriteRepls = $derived(app.environments.filter((env) => env.repl && env.available && favoriteIds.has(env.id)));
+
+    async function toggleFavorite(environment: Environment): Promise<void> {
+        const next = new Set(favoriteIds);
+        if (next.has(environment.id)) next.delete(environment.id);
+        else if (next.size < 24) next.add(environment.id);
+        await app.savePreferences({ favoriteReplIds: [...next].join(',') });
+    }
 
     function translateGroup(group: string): string {
         if (group === 'Shells del sistema' || group === 'Shells') return app.t('group.system', 'Shells del sistema');
@@ -173,19 +186,24 @@
                     role="listbox"
                     aria-label={app.t('toolbar.environment', 'Entorno de la pestaña activa')}
                 >
+                    <label class="env-search">
+                        <span aria-hidden="true">⌕</span>
+                        <input bind:value={envQuery} placeholder={app.t('env.search', 'Buscar shell o REPL…')} autocomplete="off" />
+                    </label>
                     {#each grouped as [group, envs] (group)}
                         <section class="env-group">
                             <div class="env-group-title">{translateGroup(group)}</div>
                             {#each envs as environment (environment.id)}
-                                <button
-                                    type="button"
+                                <div
                                     role="option"
+                                    tabindex={environment.available ? 0 : -1}
                                     class="env-item"
                                     class:selected={environment.id === app.activeTab?.envId}
-                                    disabled={!environment.available}
+                                    aria-disabled={!environment.available}
                                     aria-selected={environment.id === app.activeTab?.envId}
                                     title={translateLabel(environment.note ?? environment.label)}
                                     onclick={() => void selectEnvironment(environment)}
+                                    onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') void selectEnvironment(environment); }}
                                 >
                                     <span
                                         class="env-status"
@@ -201,7 +219,10 @@
                                     {#if environment.id === app.activeTab?.envId}
                                         <span class="env-check" aria-hidden="true">✓</span>
                                     {/if}
-                                </button>
+                                    {#if environment.repl && environment.available}
+                                        <button type="button" class="env-favorite" class:selected={favoriteIds.has(environment.id)} title="Fijar REPL" onclick={(event) => { event.stopPropagation(); void toggleFavorite(environment); }}>★</button>
+                                    {/if}
+                                </div>
                             {/each}
                         </section>
                     {/each}
@@ -215,10 +236,13 @@
             title={app.t('env.refresh', 'Volver a detectar entornos')}
             onclick={() => app.refreshEnvironments()}
         >⟳</button>
+        {#each favoriteRepls as environment (environment.id)}
+            <button type="button" class="repl-favorite" title={`Abrir ${environment.label}`} onclick={() => app.createTab(environment.id)}>★ {environment.label.replace(' · REPL', '')}</button>
+        {/each}
     </div>
 
     <div class="toolbar-group">
-        <button
+        {#if app.preferences?.showProjectsPanel !== false}<button
             type="button"
             data-panel-toggle
             class:active={panels.isOpen('projects')}
@@ -227,9 +251,9 @@
             }}
         >
             {app.t('toolbar.projects', 'Proyectos')}
-        </button>
+        </button>{/if}
 
-        <button
+        {#if app.preferences?.showScriptsPanel !== false}<button
             type="button"
             data-panel-toggle
             class:active={panels.isOpen('scripts')}
@@ -238,9 +262,9 @@
             }}
         >
             {app.t('toolbar.scripts', 'Biblioteca')}
-        </button>
+        </button>{/if}
 
-        <button
+        {#if app.preferences?.showDependenciesPanel !== false}<button
             type="button"
             data-panel-toggle
             class:active={panels.isOpen('deps')}
@@ -249,7 +273,7 @@
             }}
         >
             {app.t('toolbar.deps', 'Entorno y dependencias')}
-        </button>
+        </button>{/if}
 
         <button
             type="button"
@@ -457,6 +481,27 @@
         border-top: 1px solid var(--border);
     }
 
+    .env-search {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 2px 2px 6px;
+        padding: 5px 7px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--muted);
+        background: var(--surface-alt);
+    }
+
+    .env-search input {
+        width: 100%;
+        min-width: 0;
+        border: 0;
+        outline: 0;
+        color: var(--text);
+        background: transparent;
+    }
+
     .env-group-title {
         padding: 5px 8px 4px;
         color: var(--muted);
@@ -478,7 +523,7 @@
         text-align: left;
     }
 
-    .env-item:hover:not(:disabled) {
+    .env-item:hover:not([aria-disabled="true"]) {
         border-color: var(--border);
         background: var(--surface-hover);
     }
@@ -488,9 +533,27 @@
         background: var(--accent-soft);
     }
 
-    .env-item:disabled {
+    .env-item[aria-disabled="true"] {
         cursor: not-allowed;
         opacity: 0.58;
+    }
+
+    .env-favorite {
+        flex: 0 0 auto;
+        padding: 2px 4px;
+        border: 0;
+        color: var(--muted);
+        background: transparent;
+    }
+
+    .env-favorite.selected { color: #f2c94c; }
+
+    .repl-favorite {
+        max-width: 130px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #f2c94c;
     }
 
     .env-status {

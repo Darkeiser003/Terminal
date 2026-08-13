@@ -461,7 +461,7 @@
   "settings.densityComfortable": "편안함",
   "settings.densityCompact": "조밀함",
   "settings.developers": "주요 개발자",
-  "settings.developersHint": "WinSlim Terminal의 디자인 및 개발 팀.",
+  "settings.developersHint": "WinSlim의 디자인 및 개발 팀.",
   "settings.developersPending": "개발자 정보 로드 중…",
   "settings.envAuto": "자동 (시스템 기준)",
   "settings.exclusiveGroups": "의존성 패널 배타적 아코디언",
@@ -574,5 +574,6 @@
   "banner.motherboard": "메인보드",
   "banner.storage": "디스크",
   "action.uninstall.hint": "시스템에서 도구를 제거합니다. 명령어가 터미널에 작성되므로 확인 후 실행하세요.",
-  "action.gitPull.hint": "프로젝트 폴더를 순회하며 각 Git 저장소에서 git pull --ff-only를 실행합니다. 로컬 변경 사항이 있는 저장소는 경고와 함께 건너뜁니다."
+  "action.gitPull.hint": "프로젝트 폴더를 순회하며 각 Git 저장소에서 git pull --ff-only를 실행합니다. 로컬 변경 사항이 있는 저장소는 경고와 함께 건너뜁니다.",
+  "settings.bannerColor": "시스템 정보 색상"
 }

@@ -461,7 +461,7 @@
   "settings.densityComfortable": "Confortabil",
   "settings.densityCompact": "Compact",
   "settings.developers": "Dezvoltatori principali",
-  "settings.developersHint": "Echipa de design și dezvoltare WinSlim Terminal.",
+  "settings.developersHint": "Echipa de design și dezvoltare WinSlim.",
   "settings.developersPending": "Se încarcă informațiile despre dezvoltatori…",
   "settings.envAuto": "Automat (după sistem)",
   "settings.exclusiveGroups": "Acordeon exclusiv dependențe",
@@ -574,5 +574,6 @@
   "banner.motherboard": "Placă de bază",
   "banner.storage": "Disc",
   "action.uninstall.hint": "Elimină instrumentul din sistem. Comanda este scrisă în terminal: verificați-o înainte de a confirma.",
-  "action.gitPull.hint": "Parcurge dosarul de proiecte și execută pull --ff-only în fiecare depozit Git. Cele cu modificări locale sunt omise cu un avertisment."
+  "action.gitPull.hint": "Parcurge dosarul de proiecte și execută pull --ff-only în fiecare depozit Git. Cele cu modificări locale sunt omise cu un avertisment.",
+  "settings.bannerColor": "Culoarea informațiilor de sistem"
 }

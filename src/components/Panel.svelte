@@ -14,6 +14,7 @@
 
     import type { Snippet } from 'svelte';
 
+    import { app } from '../lib/appState.svelte';
     import { panels, type PanelId } from '../lib/panels.svelte';
 
     interface Props {
@@ -25,6 +26,7 @@
         /** Contador de la derecha de la cabecera (cuántas entradas hay). */
         count?: number;
         width?: number;
+        height?: number;
         children: Snippet;
         /** Fila propia bajo la cabecera (filtros, pestañas de modo). */
         header?: Snippet;
@@ -37,6 +39,7 @@
         error = false,
         count,
         width = 410,
+        height,
         children,
         header
     }: Props = $props();
@@ -47,7 +50,11 @@
     const MIN_HEIGHT = 160;
 
     let box = $state<HTMLDivElement | null>(null);
+    let closeButton = $state<HTMLButtonElement | null>(null);
     let viewport = $state({ width: window.innerWidth, height: window.innerHeight });
+    /** El control que abrió el panel. Se restaura al cerrarlo para que el
+     *  teclado no se pierda en el documento después de Escape o del botón. */
+    let previousFocus: HTMLElement | null = null;
 
     /** El tamaño que el usuario haya elegido para ESTE panel. Se guarda por
      *  panel: Ajustes necesita más ancho que Dependencias, y una talla única
@@ -90,7 +97,7 @@
     let draggedHeight = $state<number | null>(null);
 
     const boxWidth = $derived(draggedWidth ?? stored?.width ?? width);
-    const boxHeight = $derived(draggedHeight ?? stored?.height ?? null);
+    const boxHeight = $derived(draggedHeight ?? stored?.height ?? height ?? null);
 
     /** Lo que de verdad cabe en la ventana AHORA. Un tamaño guardado con la
      *  ventana maximizada no puede dejar el panel fuera de una ventana pequeña,
@@ -175,6 +182,28 @@
         if (event.key === 'Escape') panels.close();
     }
 
+    /** El panel es un diálogo real: Tab no puede escapar hacia la terminal que
+     *  quedó detrás. Mantener este comportamiento aquí evita que cada panel
+     *  tenga que reimplementar su propia lista de controles enfocables. */
+    function trapFocus(event: KeyboardEvent): void {
+        if (event.key !== 'Tab' || !box) return;
+        const focusable = Array.from(
+            box.querySelectorAll<HTMLElement>(
+                'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            )
+        ).filter((element) => element.offsetParent !== null);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    }
+
     function onWindowResize(): void {
         viewport = { width: window.innerWidth, height: window.innerHeight };
     }
@@ -183,6 +212,16 @@
         const handleMouseDown = (e: MouseEvent) => onPointerDown(e);
         window.addEventListener('mousedown', handleMouseDown, { capture: true });
         return () => window.removeEventListener('mousedown', handleMouseDown, { capture: true });
+    });
+
+    $effect(() => {
+        if (!panels.isOpen(id)) return;
+        previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        queueMicrotask(() => closeButton?.focus());
+        return () => {
+            if (previousFocus?.isConnected) previousFocus.focus();
+            previousFocus = null;
+        };
     });
 </script>
 
@@ -200,7 +239,10 @@
             : `height: ${clampedHeight}px`}"
         bind:this={box}
         role="dialog"
+        tabindex="-1"
+        aria-modal="true"
         aria-label={title}
+        onkeydown={trapFocus}
     >
         <!-- Asas de redimensionado. Solo ratón: el teclado no las necesita
              porque el panel ya se adapta al ancho disponible por su cuenta. -->
@@ -241,6 +283,14 @@
                 {#if count !== undefined}
                     <span class="panel-count">{count}</span>
                 {/if}
+                <button
+                    type="button"
+                    class="panel-close"
+                    bind:this={closeButton}
+                    aria-label={app.t('common.close', 'Cerrar')}
+                    title={app.t('common.close', 'Cerrar')}
+                    onclick={() => panels.close()}
+                >×</button>
             </div>
 
             {#if header}
@@ -365,6 +415,7 @@
        empujar al contador fuera de la caja: un hijo de flex no baja de su
        contenido mínimo salvo que se le diga. */
     .panel-heading {
+        flex: 1 1 auto;
         min-width: 0;
     }
 
@@ -391,5 +442,28 @@
         background: var(--surface-hover);
         color: var(--muted);
         font-size: 10px;
+    }
+
+    .panel-close {
+        flex: 0 0 auto;
+        display: grid;
+        width: 24px;
+        height: 24px;
+        place-items: center;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+    }
+
+    .panel-close:hover,
+    .panel-close:focus-visible {
+        border-color: var(--border);
+        background: var(--surface-hover);
+        color: var(--text);
+        outline: none;
     }
 </style>

@@ -461,7 +461,7 @@
   "settings.densityComfortable": "مريح",
   "settings.densityCompact": "مدمج",
   "settings.developers": "المطورون الرئيسيون",
-  "settings.developersHint": "فريق التصميم والتطوير لـ WinSlim Terminal.",
+  "settings.developersHint": "فريق التصميم والتطوير لـ WinSlim.",
   "settings.developersPending": "جاري تحميل معلومات المطورين…",
   "settings.envAuto": "تلقائي (حسب النظام)",
   "settings.exclusiveGroups": "قائمة تبعيات حصرية التوسيع",
@@ -574,5 +574,6 @@
   "banner.motherboard": "اللوحة الأم",
   "banner.storage": "القرص",
   "action.uninstall.hint": "لإزالة الأداة من النظام. يتم كتابة الأمر في الموجه: راجعه قبل التأكيد.",
-  "action.gitPull.hint": "يتنقل عبر مجلد المشاريع وينفذ git pull --ff-only في كل مستودع Git. يتم تجاوز المستودعات ذات التغييرات المحلية مع تحذير."
+  "action.gitPull.hint": "يتنقل عبر مجلد المشاريع وينفذ git pull --ff-only في كل مستودع Git. يتم تجاوز المستودعات ذات التغييرات المحلية مع تحذير.",
+  "settings.bannerColor": "لون معلومات النظام"
 }

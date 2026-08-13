@@ -11,7 +11,7 @@
 
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
-    import { cursorOptions, terminalFont, terminalTheme } from '../lib/theme';
+    import { cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
 
     interface Props {
@@ -25,6 +25,49 @@
     let term: Terminal | undefined;
     let fitAddon: FitAddon | undefined;
     let observer: ResizeObserver | undefined;
+    let mirroredLine: string | null = '';
+
+    async function runInternal(line: string): Promise<boolean> {
+        const command = await api.parseInternalCommand(line);
+        if (!command) return false;
+        // Borrar carácter a carácter funciona también en cmd.exe, donde
+        // Ctrl+U no limpia la línea. El espejo solo admite ASCII simple, así
+        // que el número de DEL coincide exactamente con lo escrito.
+        await api.sendInput(tabId, '\u007f'.repeat(line.length));
+        if (command.action === 'config' || command.action === 'alias') {
+            window.dispatchEvent(new CustomEvent('winslim:open-settings'));
+        } else if (command.action === 'reload') {
+            await app.refreshEnvironments();
+        } else if (command.action === 'repl') {
+            const wanted = command.argument!.toLocaleLowerCase();
+            const environment = app.environments.find((env) =>
+                env.repl && [env.id, env.language ?? '', env.label]
+                    .some((value) => value.toLocaleLowerCase().includes(wanted))
+            );
+            if (environment) await app.createTab(environment.id);
+            else term?.writeln(`\r\n\x1b[33m[REPL no detectado: ${command.argument}]\x1b[0m`);
+        } else {
+            term?.writeln('\r\n:config  :reload  :repl <nombre>  :alias  :help');
+        }
+        return true;
+    }
+
+    function completeRepl(line: string): boolean {
+        const match = /^\s*:repl\s+([\w-]*)$/i.exec(line);
+        if (!match) return false;
+        const partial = match[1].toLocaleLowerCase();
+        const names = [...new Set(app.environments
+            .filter((env) => env.repl && env.available)
+            .map((env) => env.language ?? env.id.replace(/^.*:/, '')))]
+            .filter((name) => name.toLocaleLowerCase().startsWith(partial))
+            .sort();
+        if (names.length === 1) {
+            const suffix = names[0].slice(match[1].length);
+            mirroredLine = line + suffix;
+            if (suffix) void api.sendInput(tabId, suffix);
+        }
+        return true;
+    }
 
     /** Último tamaño enviado al backend. Evita mandar un resize por cada píxel
      *  mientras se arrastra el borde de la ventana. */
@@ -81,7 +124,7 @@
             fontSize: preferences?.terminalFontSize ?? 14,
             lineHeight: preferences?.terminalLineHeight ?? 1.1,
             letterSpacing: preferences?.terminalLetterSpacing ?? 0,
-            fontWeight: preferences?.terminalFontWeight ?? 'normal',
+            fontWeight: preferences ? terminalFontWeight(preferences) : 400,
             scrollSensitivity: preferences?.terminalScrollSensitivity ?? 3,
             theme: preferences ? terminalTheme(preferences, app.themes) : undefined
         });
@@ -93,12 +136,55 @@
             // Si el usuario había desplazado el historial, cualquier entrada
             // nueva debe devolverle a la línea que está editando.
             term?.scrollToBottom();
+            const mirroredData = data
+                .replaceAll('\x1b[200~', '')
+                .replaceAll('\x1b[201~', '');
+            if (mirroredData === '\t' && mirroredLine !== null && completeRepl(mirroredLine)) return;
+
+            // xterm puede entregar Enter separado (tecleo normal) o junto a la
+            // línea completa (pegado, IME y algunas configuraciones de Fish).
+            // Solo se intercepta una línea única; un pegado multilínea sigue
+            // viajando intacto a la shell.
+            const terminators = [...mirroredData.matchAll(/[\r\n]/g)];
+            const enterAt = terminators.length === 1 ? terminators[0].index : undefined;
+            const beforeEnter = enterAt === undefined ? mirroredData : mirroredData.slice(0, enterAt);
+            const afterEnter = enterAt === undefined ? '' : mirroredData.slice(enterAt + 1);
+            const candidate = mirroredLine === null ? beforeEnter : mirroredLine + beforeEnter;
+            if (enterAt !== undefined && !afterEnter && candidate.trimStart().startsWith(':')) {
+                const line = candidate;
+                mirroredLine = '';
+                void runInternal(line)
+                    .then((handled) => {
+                        if (!handled) void api.sendInput(tabId, data);
+                    })
+                    .catch((error) => {
+                        // Si el backend no está disponible, conservar el
+                        // comportamiento normal de la shell y no perder Enter.
+                        console.error('[TerminalPane] internal command failed', error);
+                        void api.sendInput(tabId, data);
+                    });
+                return;
+            }
+            if (enterAt !== undefined) mirroredLine = '';
+            else if (mirroredData === '\u007f' && mirroredLine !== null) mirroredLine = mirroredLine.slice(0, -1);
+            else if (/^[\x20-\x7e]+$/.test(mirroredData) && mirroredLine !== null) mirroredLine += mirroredData;
+            else mirroredLine = null;
             void api.sendInput(tabId, data);
         });
 
         // Devolver false impide que xterm procese además la pulsación (y la
         // mande al proceso como una tecla más).
         term.attachCustomKeyEventHandler((event) => {
+            if (event.type === 'keydown' && event.altKey && !event.ctrlKey && !event.metaKey) {
+                const directions: Record<string, 'left' | 'right' | 'up' | 'down'> = {
+                    ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down'
+                };
+                const direction = directions[event.key];
+                if (direction) {
+                    app.navigatePaneDirection(direction);
+                    return false;
+                }
+            }
             if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
             const key = (event.key || '').toLowerCase();
             if (key === 'c' && term?.hasSelection()) {
@@ -121,7 +207,9 @@
 
         // Solo ahora existe un xterm donde pintar: el backend suelta todo lo
         // que el pty escribió mientras tanto (banner + primer prompt).
-        void api.markTabReady(tabId);
+        void api.markTabReady(tabId)
+            .then(() => api.markFrontendReady(tabId))
+            .catch((error) => console.error('[TerminalPane] ready handshake failed', error));
     });
 
     onDestroy(() => {
@@ -256,7 +344,7 @@
         term.options.fontSize = preferences.terminalFontSize;
         term.options.lineHeight = preferences.terminalLineHeight;
         term.options.letterSpacing = preferences.terminalLetterSpacing;
-        term.options.fontWeight = preferences.terminalFontWeight;
+        term.options.fontWeight = terminalFontWeight(preferences);
         term.options.scrollSensitivity = preferences.terminalScrollSensitivity;
         term.options.theme = terminalTheme(preferences, app.themes);
         fitAndReport();

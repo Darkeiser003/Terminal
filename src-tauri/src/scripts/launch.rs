@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use crate::environments::{ShellKind, Transport};
+use crate::platform::traits::HostPlatform;
 use crate::shell_paths::{to_msys_path, unix_path_for};
 
 use super::scan::ScriptEntry;
@@ -26,7 +27,7 @@ pub struct LaunchContext {
     /// El sistema donde corre la APLICACIÓN. `None` es el de la compilación,
     /// que es lo que quiere producción.
     ///
-    /// Se puede fijar porque `cfg!(windows)` se resuelve al compilar: sin esto,
+    /// Se puede fijar porque el host se selecciona al compilar: sin esto,
     /// el comportamiento de LTerminal solo se puede comprobar compilando en
     /// Linux, y justamente los casos que se equivocaban —un `.vbs` o un `.exe`
     /// ofrecidos donde no existe con qué abrirlos— son los del otro sistema.
@@ -47,7 +48,8 @@ impl LaunchContext {
     }
 
     fn on_windows_host(&self) -> bool {
-        self.windows_host.unwrap_or(cfg!(windows))
+        self.windows_host
+            .unwrap_or_else(|| crate::platform::host().is_windows())
     }
 }
 
@@ -703,7 +705,7 @@ mod tests {
         }
     }
 
-    /// WinSlim Terminal: la app corriendo en Windows.
+    /// LTerminal: la app corriendo en Windows.
     fn winslim() -> LaunchContext {
         LaunchContext {
             windows_host: Some(true),

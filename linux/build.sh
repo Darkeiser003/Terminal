@@ -25,25 +25,64 @@ fi
 # ellas cortaba el script sin pasar por el aviso de qué paso se rompió.
 set -Eeuo pipefail
 
+# Si este script se lanzó desde la propia AppImage, sus bibliotecas privadas
+# viven en `/tmp/.mount_*`. No pueden heredarse por npm, git, cargo ni sus
+# herramientas auxiliares: de hacerlo, programas del sistema terminan
+# cargando una libpcre2 incompatible del montaje temporal.
+if [ -n "${APPIMAGE:-}" ] || [[ "${LD_LIBRARY_PATH:-}" == *"/tmp/.mount_"* ]]; then
+    unset APPDIR APPIMAGE ARGV0 LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD
+fi
+
+# El paquete npm conserva su identificador técnico compartido con Windows,
+# pero sus mensajes de ciclo de vida lo imprimen aunque no aporten información
+# a una build Linux (por ejemplo, "npm notice run …"). Mantener el nivel en
+# `error` deja visibles los fallos reales sin filtrar la identidad LTerminal en
+# la salida de este script.
+export NPM_CONFIG_LOGLEVEL=error
+
+# Cargo también etiqueta sus barras de progreso con el nombre técnico del
+# paquete compartido. El modo silencioso solo oculta progreso; los diagnósticos
+# y los fallos continúan apareciendo completos. Así la build Linux conserva una
+# salida limpia de LTerminal sin cambiar la identidad de la distribución
+# Windows.
+export CARGO_TERM_QUIET=true
+# La batería es deliberadamente secuencial y Cargo queda limitado para que una
+# validación larga no congele el escritorio ni agote la RAM de una VM pequeña.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
+
 CLEAN=0
 NO_RUN=0
 SKIP_CHECKS=0
 AUTO_INSTALL=1
-for arg in "$@"; do
-    case "$arg" in
+VERSION_OVERRIDE=""
+EXTENDED_TESTS=-1
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --clean)       CLEAN=1 ;;
         --no-run)      NO_RUN=1 ;;
         --skip-checks) SKIP_CHECKS=1 ;;
         --no-install)  AUTO_INSTALL=0 ;;
+        --extended-tests) EXTENDED_TESTS=1 ;;
+        --no-extended-tests) EXTENDED_TESTS=0 ;;
+        --version)
+            shift
+            if [ "$#" -eq 0 ] || [ -z "$1" ]; then
+                echo "--version necesita un valor SemVer, por ejemplo 1.4.4" >&2
+                exit 2
+            fi
+            VERSION_OVERRIDE="$1"
+            ;;
         -h|--help)
-            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install]"
+            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install] [--extended-tests|--no-extended-tests] [--version X.Y.Z]"
             exit 0
             ;;
         *)
-            echo "Argumento desconocido: $arg" >&2
+            echo "Argumento desconocido: $1" >&2
             exit 2
             ;;
     esac
+    shift
 done
 
 step() { CURRENT_STEP="$1"; printf '\n\033[36m==> %s\033[0m\n' "$1"; }
@@ -124,13 +163,13 @@ install_system_dependencies() {
             run_as_root apt-get install -y --no-install-recommends \
                 build-essential curl wget file pkg-config ca-certificates xz-utils \
                 libwebkit2gtk-4.1-dev libsoup-3.0-dev libxdo-dev libssl-dev \
-                libayatana-appindicator3-dev librsvg2-dev
+                libayatana-appindicator3-dev librsvg2-dev ibus
             ;;
         dnf)
             run_as_root dnf install -y \
                 gcc gcc-c++ make curl wget file pkgconf-pkg-config ca-certificates xz \
                 webkit2gtk4.1-devel libsoup3-devel openssl-devel \
-                libappindicator-gtk3-devel librsvg2-devel libxdo-devel
+                libappindicator-gtk3-devel librsvg2-devel libxdo-devel ibus
             ;;
         pacman)
             # Arch/CachyOS no admite actualizaciones parciales: sincronizar sin
@@ -138,20 +177,20 @@ install_system_dependencies() {
             run_as_root pacman -Syu --needed --noconfirm \
                 base-devel curl wget file pkgconf ca-certificates xz \
                 webkit2gtk-4.1 libsoup3 openssl appmenu-gtk-module \
-                libappindicator-gtk3 librsvg xdotool
+                libappindicator-gtk3 librsvg xdotool ibus
             ;;
         zypper)
             run_as_root zypper --non-interactive install -y \
                 -t pattern devel_basis
             run_as_root zypper --non-interactive install -y \
                 curl wget file pkg-config ca-certificates xz \
-                webkit2gtk3-devel libopenssl-devel libappindicator3-1 librsvg-devel
+                webkit2gtk3-devel libopenssl-devel libappindicator3-1 librsvg-devel ibus
             ;;
         apk)
             run_as_root apk add \
                 build-base curl wget file pkgconf ca-certificates xz \
                 webkit2gtk-4.1-dev libsoup3-dev openssl-dev \
-                libayatana-appindicator-dev librsvg-dev xdotool-dev font-dejavu
+                libayatana-appindicator-dev librsvg-dev xdotool-dev font-dejavu ibus
             ;;
     esac
     ok "Dependencias nativas instaladas"
@@ -365,6 +404,45 @@ if command -v pkg-config >/dev/null 2>&1; then
     ok "WebKitGTK y sus dependencias presentes"
 fi
 
+# El plugin GTK de linuxdeploy analiza los módulos de entrada de GTK para
+# incluirlos en el AppImage. Si IBus está instalado parcialmente (o falta su
+# biblioteca de ejecución), linuxdeploy llega a compilar todo Rust y falla en
+# el último paso con `im-ibus.so: libibus-1.0.so.5: cannot open`. Detectarlo
+# aquí permite instalar el paquete correcto antes de gastar varios minutos de
+# compilación.
+has_ibus_runtime() {
+    ldconfig -p 2>/dev/null | grep -q 'libibus-1\.0\.so\.5' \
+        || [ -e /usr/lib/libibus-1.0.so.5 ] \
+        || [ -e /usr/lib64/libibus-1.0.so.5 ]
+}
+
+if ! has_ibus_runtime; then
+    warn "Falta libibus-1.0.so.5, necesaria para empaquetar AppImage con linuxdeploy."
+    install_system_dependencies || {
+        err "Instala el paquete 'ibus' y vuelve a ejecutar la build."
+        exit 1
+    }
+    if ! has_ibus_runtime; then
+        err "La biblioteca libibus-1.0.so.5 sigue sin estar disponible tras instalar dependencias."
+        exit 1
+    fi
+fi
+ok "IBus disponible para linuxdeploy"
+
+CURRENT_VERSION="$(node -p "require('./package.json').version")"
+if [ -n "$VERSION_OVERRIDE" ]; then
+    VERSION="$VERSION_OVERRIDE"
+elif [ -t 0 ]; then
+    read -r -p "Versión a compilar [$CURRENT_VERSION]: " VERSION
+    VERSION="${VERSION:-$CURRENT_VERSION}"
+else
+    VERSION="$CURRENT_VERSION"
+fi
+
+node scripts/set-package-version.mjs "$VERSION" || {
+    err "La versión indicada no es válida o no se pudo guardar en todos los manifiestos."
+    exit 1
+}
 VERSION="$(node -p "require('./package.json').version")"
 ok "Versión a compilar: $VERSION"
 
@@ -439,32 +517,20 @@ check_path() {
 }
 
 # --- Iconos ---
-ICON_DIR="$(get_json_value "$TAURI_CONF" 'tauri.bundle.icon')"
-if [ -z "$ICON_DIR" ] || [ "$ICON_DIR" = "''" ]; then
-    ICON_DIR="icons"
+# Las rutas de `tauri.conf.json` son relativas a `src-tauri/`, no a la raíz.
+# Crear un icono rojo de reserva ocultaba una configuración rota y dejaba una
+# carpeta `icons/` ajena en la raíz; para empaquetar se exigen los recursos
+# reales que Tauri va a incluir.
+ICON_DIR="$TAURI_DIR/icons"
+MISSING_ICONS=""
+for icon in 32x32.png 128x128.png 128x128@2x.png icon.ico icon.icns; do
+    [ -f "$ICON_DIR/$icon" ] || MISSING_ICONS="$MISSING_ICONS $icon"
+done
+if [ -n "$MISSING_ICONS" ]; then
+    err "Faltan iconos obligatorios en $ICON_DIR:$MISSING_ICONS"
+    exit 1
 fi
-if [[ "$ICON_DIR" != /* ]]; then
-    ICON_DIR="$PROJECT_ROOT/$ICON_DIR"
-fi
-if [ -d "$ICON_DIR" ]; then
-    PNG_COUNT=$(find "$ICON_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)
-    if [ "$PNG_COUNT" -gt 0 ]; then
-        ok "Iconos encontrados en $ICON_DIR ($PNG_COUNT PNGs)"
-    else
-        warn "No hay iconos PNG en $ICON_DIR. Se generará un icono por defecto."
-        mkdir -p "$ICON_DIR"
-        # Crear un icono simple de 128x128 usando convert si está disponible, o fallar con un aviso
-        if command -v convert >/dev/null 2>&1; then
-            convert -size 128x128 xc:red "$ICON_DIR/icon-128x128@2x.png" 2>/dev/null || true
-        fi
-    fi
-else
-    warn "La carpeta de iconos '$ICON_DIR' no existe. Se creará y se pondrá un icono genérico."
-    mkdir -p "$ICON_DIR"
-    if command -v convert >/dev/null 2>&1; then
-        convert -size 128x128 xc:red "$ICON_DIR/icon-128x128@2x.png" 2>/dev/null || true
-    fi
-fi
+ok "Iconos de Tauri encontrados en $ICON_DIR"
 
 # --- Archivo .desktop ---
 DESKTOP_FILE=""
@@ -528,9 +594,16 @@ else
     ok "El puerto 1420 está libre"
 fi
 
-if pgrep -x lterminal >/dev/null 2>&1 || pgrep -f 'LTerminal-.*\.AppImage' >/dev/null 2>&1; then
-    warn "LTerminal está abierto. La comprobación de humo del final puede confundirse con esa ventana."
-    warn "Ciérralo para que el resultado sea fiable."
+is_lterminal_running() {
+    # La L entre corchetes evita que pgrep encuentre la propia línea de orden
+    # que contiene este patrón. `comm` está limitado a 15 caracteres, por eso
+    # el binario Linux se comprueba por su nombre corto y el AppImage por argv.
+    pgrep -x lterminal >/dev/null 2>&1 || \
+        pgrep -f '[/][L]Terminal[_-][^/[:space:]]*\.AppImage([[:space:]]|$)' >/dev/null 2>&1
+}
+
+if is_lterminal_running; then
+    warn "Hay una instancia abierta; el smoke usará un token único y no la confundirá con esta build."
 else
     ok "Nada bloqueando los archivos"
 fi
@@ -545,6 +618,27 @@ if [ "$CLEAN" -eq 1 ]; then
 fi
 
 step "Instalando dependencias del frontend (npm ci)"
+# `npm ci` borra y recrea enlaces en `.bin`. Comprobar la escritura antes da
+# una solución clara cuando una ejecución anterior con sudo dejó esos enlaces
+# a nombre de root/nobody, en vez de caer al genérico error EACCES de npm.
+assert_writable_directory() {
+    local directory="$1"
+    [ -e "$directory" ] || return 0
+    [ -d "$directory" ] || {
+        err "$directory existe pero no es una carpeta."
+        return 1
+    }
+    local probe="$directory/.lterminal-permission-$$"
+    if ! (umask 077; : > "$probe") 2>/dev/null; then
+        err "No se puede escribir en $directory. Corrige solo esa caché con:"
+        echo "    sudo chown -R $(id -un):$(id -gn) $PROJECT_ROOT/node_modules" >&2
+        return 1
+    fi
+    rm -f "$probe"
+}
+
+assert_writable_directory "$PROJECT_ROOT/node_modules" || exit 1
+assert_writable_directory "$PROJECT_ROOT/node_modules/.bin" || exit 1
 # `npm ci` exige un package-lock.json coherente con package.json y aborta si no
 # lo es. Es lo que se quiere en una release —instala exactamente lo fijado— pero
 # no es motivo para no poder compilar: se avisa y se cae a `npm install`, que
@@ -557,6 +651,8 @@ elif ! npm ci; then
     npm install
 fi
 ok "Dependencias instaladas"
+npm audit --audit-level=high
+ok "Dependencias sin vulnerabilidades altas o críticas conocidas"
 
 # ---------------------------------------------------------------------------
 # 4. Comprobaciones
@@ -585,9 +681,48 @@ if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/nul
     export APPIMAGE_EXTRACT_AND_RUN=1
     warn "Sin FUSE: las herramientas AppImage usarán extracción temporal durante el bundling."
 fi
-# npm run tauri -- build
-# Reemplázala por:
-npm run tauri -- build --verbose
+# Esta limpieza también se aplica al proceso que ejecuta Tauri. Así funciona
+# incluso si el script se inició desde una AppImage antigua que dejó variables
+# privadas de montaje en el entorno del terminal.
+if ! env -u APPDIR -u APPIMAGE -u ARGV0 -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \
+    npm run tauri -- build --config "$LINUX_CONF" --verbose; then
+    # Tauri 2/linuxdeploy duplica el metadato proporcionado con el nombre del
+    # producto (LTerminal.appdata.xml). Su ID sigue siendo el identificador
+    # estable com.winslim.terminal y appimagetool rechaza esa copia por no
+    # coincidir el nombre del archivo. El metadato canónico ya está incluido;
+    # retiramos únicamente la copia generada y reintentamos el empaquetado.
+    APPDIR_RECOVERY="$BUNDLE_DIR/LTerminal.AppDir"
+    GENERATED_APPDATA="$APPDIR_RECOVERY/usr/share/metainfo/LTerminal.appdata.xml"
+    CANONICAL_APPDATA="$APPDIR_RECOVERY/usr/share/metainfo/com.winslim.terminal.metainfo.xml"
+    if [ ! -d "$APPDIR_RECOVERY" ] || [ ! -f "$GENERATED_APPDATA" ] || \
+        [ ! -f "$CANONICAL_APPDATA" ]; then
+        err "Tauri falló antes de crear un AppDir recuperable."
+        exit 1
+    fi
+    warn "Corrigiendo el nombre duplicado de AppStream generado por Tauri..."
+    rm -f "$GENERATED_APPDATA"
+    # Si se cambió mainBinaryName entre builds, linuxdeploy puede conservar el
+    # ejecutable previo dentro del AppDir aunque ya no sea el destino de Exec.
+    rm -f "$APPDIR_RECOVERY/usr/bin/com.winslim.terminal"
+    # linuxdeploy puede empaquetar el backend TLS de GIO junto con su propia
+    # pila GnuTLS/nettle. En distribuciones rolling esa mezcla se carga además
+    # de los módulos del sistema y puede segfaultar antes de mostrar la ventana.
+    # GIO conserva su búsqueda normal de módulos del host; retiramos solo la
+    # copia privada conflictiva, no el soporte HTTPS de la aplicación.
+    rm -f "$APPDIR_RECOVERY/usr/lib/gio/modules/libgiognutls.so"
+    # WebKitGTK intenta usar DMA-BUF incluso con combinaciones NVIDIA/Wayland
+    # que rechazan el buffer; el resultado puede ser una ventana gris aunque
+    # backend, PTY y DOM estén vivos. El usuario aún puede sobrescribirlo con 0.
+    if ! grep -q 'WEBKIT_DISABLE_DMABUF_RENDERER' "$APPDIR_RECOVERY/apprun-hooks/linuxdeploy-plugin-gtk.sh"; then
+        printf '\nexport WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"\n' \
+            >> "$APPDIR_RECOVERY/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+    fi
+    if command -v appstreamcli >/dev/null 2>&1; then
+        appstreamcli validate --no-net "$CANONICAL_APPDATA"
+    fi
+    ARCH="${APPIMAGE_ARCH:-$(uname -m)}" "$APPIMAGETOOL" "$APPDIR_RECOVERY" \
+        "$BUNDLE_DIR/LTerminal_${VERSION}_amd64.AppImage"
+fi
 
 APPIMAGE="$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)"
 if [ -z "$APPIMAGE" ]; then
@@ -617,6 +752,15 @@ fi
 # comprobar, y eso no es un fallo de la build: se avisa y se sigue.
 step "Comprobación de humo"
 
+# Esta comprobación no requiere servidor gráfico y verifica primero que el
+# runtime AppImage es legible. Es una garantía reproducible incluso en CI o
+# cuando ya hay otra ventana de LTerminal abierta.
+if ! "$APPIMAGE" --appimage-version >/dev/null 2>&1; then
+    err "El runtime del AppImage no responde; no se publicará un artefacto dañado."
+    exit 1
+fi
+ok "Runtime AppImage verificable"
+
 # Un AppImage se monta con FUSE 2, que las distribuciones recientes ya no
 # instalan de serie. Sin él no arranca ni el «hola mundo», y el error
 # ("dlopen(): error loading libfuse.so.2") parece un fallo de la app cuando no
@@ -632,17 +776,25 @@ if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
     warn "Sin servidor gráfico: no se puede comprobar que arranque. El AppImage sí se generó."
 else
     SMOKE_LOG="$(mktemp)"
-    "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
+    SMOKE_TOKEN="build-$$-$(date +%s)"
+    LTERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
     SMOKE_PID=$!
-    sleep 6
-    if kill -0 "$SMOKE_PID" 2>/dev/null; then
+    READY=0
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$SMOKE_PID" 2>/dev/null; then break; fi
+        if grep -Fq "\"smokeToken\":\"$SMOKE_TOKEN\"" "$HOME/.config/lterminal/logs/main.log" 2>/dev/null; then
+            READY=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$READY" -eq 1 ] && kill -0 "$SMOKE_PID" 2>/dev/null; then
         kill "$SMOKE_PID" 2>/dev/null || true
-        ok "Arranca y se mantiene abierto"
+        ok "Backend, frontend, IPC, xterm y primera terminal preparados"
         rm -f "$SMOKE_LOG"
     else
-        err "La aplicación se cerró sola. Revisa el log en ~/.config/lterminal/logs."
-        # Antes se mandaba su salida a /dev/null, así que la causa —que casi
-        # siempre viene impresa aquí— se perdía justo cuando hacía falta.
+        kill "$SMOKE_PID" 2>/dev/null || true
+        err "El AppImage no completó el frontend y la primera terminal; no se publicará."
         if [ -s "$SMOKE_LOG" ]; then
             echo "    Salida de la aplicación:" >&2
             sed 's/^/      /' "$SMOKE_LOG" >&2
@@ -671,6 +823,29 @@ chmod +x "$RELEASE_DIR/$RELEASE_NAME"
 ( cd "$RELEASE_DIR" && sha256sum "$RELEASE_NAME" > SHA256SUMS.txt )
 ok "Release: $RELEASE_DIR/$RELEASE_NAME"
 ok "SHA256: $(cut -d' ' -f1 < "$RELEASE_DIR/SHA256SUMS.txt")"
+
+if [ "$EXTENDED_TESTS" -lt 0 ]; then
+    if [ "$NO_RUN" -eq 0 ] && [ -t 0 ]; then
+        printf '¿Ejecutar también las pruebas secuenciales de shells y REPL instalados? [s/N]: '
+        read -r EXTENDED_REPLY
+        case "$EXTENDED_REPLY" in
+            s|S|si|SI|sí|Sí) EXTENDED_TESTS=1 ;;
+            *) EXTENDED_TESTS=0 ;;
+        esac
+    else
+        EXTENDED_TESTS=0
+    fi
+fi
+
+if [ "$EXTENDED_TESTS" -eq 1 ]; then
+    step "Pruebas ampliadas secuenciales"
+    if command -v ionice >/dev/null 2>&1; then
+        nice -n 10 ionice -c 3 bash "$PROJECT_ROOT/linux/exercise-host.sh"
+    else
+        nice -n 10 bash "$PROJECT_ROOT/linux/exercise-host.sh"
+    fi
+    ok "Shells y REPL instalados respondieron correctamente"
+fi
 
 if [ "$NO_RUN" -eq 0 ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
     step "Lanzando LTerminal"

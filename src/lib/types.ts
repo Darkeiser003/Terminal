@@ -103,9 +103,33 @@ export interface Preferences {
     exclusiveAccordionGroups: boolean;
     autoOpenFirstGroup: boolean;
     showSystemBanner: boolean;
+    showDependenciesPanel: boolean;
+    showProjectsPanel: boolean;
+    showScriptsPanel: boolean;
+    showExplorerPanel: boolean;
+    manualAliasesText: string;
+    favoriteReplIds: string;
+    hiddenEnvironmentIds: string;
+    shortcutNewTab: string;
+    shortcutNextTab: string;
+    shortcutPreviousTab: string;
+    shortcutCyclePanes: string;
+    shortcutToggleExplorer: string;
+    shortcutPaneLeft: string;
+    shortcutPaneRight: string;
+    shortcutPaneUp: string;
+    shortcutPaneDown: string;
     themeId: string;
     accentColor: string;
+    uiBackgroundColor: string;
+    uiSurfaceColor: string;
+    uiSurfaceAltColor: string;
+    uiBorderColor: string;
+    uiTextColor: string;
+    uiMutedColor: string;
+    terminalSelectionColor: string;
     fastfetchColor: string;
+    terminalCursorColor: string;
     terminalBackground: string;
     terminalForeground: string;
     terminalFontFamily: string;
@@ -113,7 +137,7 @@ export interface Preferences {
     terminalLineHeight: number;
     terminalLetterSpacing: number;
     terminalCursorStyle: 'block' | 'underline' | 'bar' | 'beam' | 'underline-thick';
-    terminalFontWeight: 'normal' | 'bold';
+    terminalFontWeight: 'light' | 'normal' | 'medium' | 'semibold' | 'bold';
     terminalPadding: number;
     terminalScrollback: number;
     terminalCursorBlink: boolean;
@@ -139,6 +163,38 @@ export interface PreferencesPayload {
     fonts: FontFamily[];
     languages: LanguageOption[];
     catalog: TranslationCatalog;
+}
+
+export interface ProfileTransferResult {
+    ok: boolean;
+    error?: string;
+    preferences?: PreferencesPayload;
+}
+
+export interface PluginInfo {
+    id: string;
+    name: string;
+    version: string;
+    description: string;
+    enabled: boolean;
+    technologyCount: number;
+    error?: string;
+}
+
+export interface WindowsIntegrationStatus {
+    supported: boolean;
+    contextMenuRegistered: boolean;
+    protocolRegistered: boolean;
+    appPathRegistered: boolean;
+    nsudoAvailable: boolean;
+    nsudoPath?: string;
+    modernDefaultTerminalSupported: boolean;
+    note: string;
+}
+
+export interface InternalCommand {
+    action: 'config' | 'reload' | 'repl' | 'alias' | 'help';
+    argument?: string;
 }
 
 export interface AppInfo {
@@ -510,6 +566,13 @@ export interface UpdateStatus {
     /** Dónde está instalada, que es donde va a aterrizar la actualización. */
     installPath?: string;
     error?: string;
+}
+
+export interface UpdateProgress {
+    stage: 'download' | 'extract' | 'complete';
+    bytes: number;
+    total?: number;
+    percent?: number;
 }
 
 export interface UpdateResult {

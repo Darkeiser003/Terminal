@@ -461,7 +461,7 @@
   "settings.densityComfortable": "Wygodna",
   "settings.densityCompact": "Kompaktowa",
   "settings.developers": "Główni deweloperzy",
-  "settings.developersHint": "Zespół projektowy i deweloperski WinSlim Terminal.",
+  "settings.developersHint": "Zespół projektowy i deweloperski WinSlim.",
   "settings.developersPending": "Ładowanie informacji o deweloperach…",
   "settings.envAuto": "Automatycznie (według systemu)",
   "settings.exclusiveGroups": "Ekskluzywny akordeon zależności",
@@ -574,5 +574,6 @@
   "banner.motherboard": "Płyta główna",
   "banner.storage": "Dysk",
   "action.uninstall.hint": "Usuwa narzędzie z systemu. Polecenie jest wpisywane w terminalu: przejrzyj je przed zatwierdzeniem.",
-  "action.gitPull.hint": "Przegląda folder projektów i wykonuje git pull --ff-only w każdym repozytorium Git. Repozytoria z lokalnymi zmianami są pomijane z ostrzeżeniem."
+  "action.gitPull.hint": "Przegląda folder projektów i wykonuje git pull --ff-only w każdym repozytorium Git. Repozytoria z lokalnymi zmianami są pomijane z ostrzeżeniem.",
+  "settings.bannerColor": "Kolor informacji systemowych"
 }

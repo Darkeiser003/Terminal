@@ -13,7 +13,7 @@
 
     import * as api from "../lib/api";
     import { app } from "../lib/appState.svelte";
-    import type { Preferences, ThemePreset, UpdateStatus } from "../lib/types";
+    import type { PluginInfo, Preferences, ThemePreset, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
     import Panel from "./Panel.svelte";
 
     type Section = "appearance" | "terminal" | "behavior" | "about";
@@ -30,6 +30,11 @@
      *  por qué hacerse cada vez que alguien viene a cambiar un color. */
     let update = $state<UpdateStatus | null>(null);
     let updating = $state(false);
+    let updateProgress = $state<UpdateProgress | null>(null);
+    let plugins = $state<PluginInfo[]>([]);
+    let windowsIntegration = $state<WindowsIntegrationStatus | null>(null);
+    let environmentQuery = $state("");
+    let environmentGroup = $state("all");
 
     const PLATFORM_NAMES: Record<string, string> = {
         windows: "Windows",
@@ -44,6 +49,8 @@
         // Se piden al backend en vez de reutilizar las que ya hay en memoria:
         // el archivo puede haber cambiado por fuera.
         await app.reloadPreferences();
+        plugins = await api.listPlugins();
+        windowsIntegration = app.appInfo?.platform === "windows" ? await api.getWindowsIntegration() : null;
         draft = app.preferences ? { ...app.preferences } : null;
     }
 
@@ -53,7 +60,15 @@
         if (!draft) return;
         draft.themeId = theme.id;
         draft.accentColor = theme.palette.accent;
+        draft.uiBackgroundColor = theme.palette.background;
+        draft.uiSurfaceColor = theme.palette.surface;
+        draft.uiSurfaceAltColor = theme.palette.surfaceAlt;
+        draft.uiBorderColor = theme.palette.border;
+        draft.uiTextColor = theme.palette.text;
+        draft.uiMutedColor = theme.palette.muted;
+        draft.terminalSelectionColor = theme.palette.selection;
         draft.fastfetchColor = theme.palette.accent;
+        draft.terminalCursorColor = theme.palette.accent;
         draft.terminalBackground = theme.palette.terminalBackground;
         draft.terminalForeground = theme.palette.terminalForeground;
     }
@@ -75,9 +90,40 @@
         return theme.label;
     }
 
+    function setEnvironmentEnabled(environmentId: string, enabled: boolean): void {
+        if (!draft) return;
+        const hidden = new Set(draft.hiddenEnvironmentIds.split(',').filter(Boolean));
+        if (enabled) hidden.delete(environmentId);
+        else hidden.add(environmentId);
+        draft.hiddenEnvironmentIds = [...hidden].join(',');
+    }
+
+    const environmentGroups = $derived([...new Set(app.environments.map((environment) => environment.group))]);
+    const visibleEnvironments = $derived.by(() => {
+        const needle = environmentQuery.trim().toLocaleLowerCase('es');
+        return app.environments.filter((environment) =>
+            (environmentGroup === 'all' || environment.group === environmentGroup) &&
+            (!needle || `${environment.label} ${environment.group}`.toLocaleLowerCase('es').includes(needle))
+        );
+    });
+
+    function setVisibleEnvironmentsEnabled(enabled: boolean): void {
+        for (const environment of visibleEnvironments) setEnvironmentEnabled(environment.id, enabled);
+    }
+
     async function save(event: SubmitEvent): Promise<void> {
         event.preventDefault();
         if (!draft || saving) return;
+        const shortcuts = [
+            draft.shortcutNewTab, draft.shortcutNextTab, draft.shortcutPreviousTab,
+            draft.shortcutCyclePanes, draft.shortcutToggleExplorer, draft.shortcutPaneLeft,
+            draft.shortcutPaneRight, draft.shortcutPaneUp, draft.shortcutPaneDown,
+        ].map((shortcut) => shortcut.trim().toLowerCase());
+        if (new Set(shortcuts).size !== shortcuts.length) {
+            statusError = true;
+            status = app.t("settings.shortcutConflict", "Dos acciones no pueden usar el mismo atajo.");
+            return;
+        }
         saving = true;
         try {
             await app.savePreferences(draft);
@@ -125,6 +171,72 @@
         }
     }
 
+    async function exportProfile(): Promise<void> {
+        const result = await api.exportProfile();
+        if (!result) return;
+        statusError = !result.ok;
+        status = result.ok ? "Perfil exportado correctamente." : (result.error ?? "No se pudo exportar el perfil.");
+    }
+
+    async function importProfile(): Promise<void> {
+        const result = await api.importProfile();
+        if (!result) return;
+        statusError = !result.ok;
+        if (!result.ok) {
+            status = result.error ?? "No se pudo importar el perfil.";
+            return;
+        }
+        await app.reloadPreferences();
+        draft = app.preferences ? { ...app.preferences } : null;
+        status = "Perfil importado, validado y aplicado.";
+    }
+
+    async function installPlugin(): Promise<void> {
+        try {
+            const installed = await api.installPlugin();
+            if (installed) plugins = installed;
+            statusError = false;
+            status = installed ? "Plugin instalado. Reescanea los entornos para aplicar sus aportaciones." : "";
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
+    async function togglePlugin(plugin: PluginInfo): Promise<void> {
+        try {
+            plugins = await api.setPluginEnabled(plugin.id, !plugin.enabled);
+            await app.refreshEnvironments();
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
+    async function removePlugin(plugin: PluginInfo): Promise<void> {
+        try {
+            plugins = await api.removePlugin(plugin.id);
+            await app.refreshEnvironments();
+            statusError = false;
+            status = "Plugin retirado y conservado en la carpeta de respaldos.";
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
+    async function toggleWindowsIntegration(): Promise<void> {
+        if (!windowsIntegration) return;
+        try {
+            windowsIntegration = await api.setWindowsIntegration(!windowsIntegration.contextMenuRegistered);
+            statusError = false;
+            status = "Integración de Windows actualizada para el usuario actual.";
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
     async function checkUpdate(): Promise<void> {
         if (updating) return;
         updating = true;
@@ -144,6 +256,7 @@
         updating = true;
         statusError = false;
         status = app.t("update.installing", "Actualizando…");
+        const unlisten = await api.onUpdateProgress((progress) => (updateProgress = progress));
         try {
             // Si va bien, el proceso muere durante esta llamada y no vuelve.
             const result = await api.installUpdate();
@@ -155,6 +268,7 @@
             statusError = true;
             status = String(cause);
         } finally {
+            unlisten();
             updating = false;
         }
     }
@@ -177,7 +291,7 @@
         if (projectLeads.includes(developer.toLowerCase())) {
             return app.t(
                 "projects.projectLeadCreator",
-                "Creador de WinSlim · Director de proyectos",
+                "Creador de LTerminal · Director de proyectos",
             );
         }
         const owners = (app.appInfo?.owners ?? []).map((login) =>
@@ -205,7 +319,8 @@
             "Personaliza la interfaz sin cambiar el sistema.",
         )}
     error={statusError}
-    width={610}
+    width={760}
+    height={640}
 >
     {#snippet header()}
         <div
@@ -294,6 +409,29 @@
                                 type="color"
                                 bind:value={draft.accentColor}
                             />
+                        </label>
+                        <label class="field"><span>Fondo de la aplicación</span><input type="color" bind:value={draft.uiBackgroundColor} /></label>
+                        <label class="field"><span>Superficie principal</span><input type="color" bind:value={draft.uiSurfaceColor} /></label>
+                        <label class="field"><span>Superficie secundaria</span><input type="color" bind:value={draft.uiSurfaceAltColor} /></label>
+                        <label class="field"><span>Bordes</span><input type="color" bind:value={draft.uiBorderColor} /></label>
+                        <label class="field"><span>Texto de interfaz</span><input type="color" bind:value={draft.uiTextColor} /></label>
+                        <label class="field"><span>Texto atenuado</span><input type="color" bind:value={draft.uiMutedColor} /></label>
+                        <label class="field"><span>Selección de terminal</span><input type="color" bind:value={draft.terminalSelectionColor} /></label>
+                        <label class="field">
+                            <span
+                                >{app.t(
+                                    "settings.bannerColor",
+                                    "Color de información del sistema",
+                                )}</span
+                            >
+                            <input
+                                type="color"
+                                bind:value={draft.fastfetchColor}
+                            />
+                        </label>
+                        <label class="field">
+                            <span>{app.t("settings.cursorColor", "Color del cursor")}</span>
+                            <input type="color" bind:value={draft.terminalCursorColor} />
                         </label>
                         <label class="field">
                             <span
@@ -451,12 +589,15 @@
                             <span>{app.t("settings.fontWeight", "Grosor")}</span
                             >
                             <select bind:value={draft.terminalFontWeight}>
+                                <option value="light">{app.t("settings.fontWeightLight", "Fino")}</option>
                                 <option value="normal"
                                     >{app.t(
                                         "settings.fontWeightNormal",
                                         "Normal",
                                     )}</option
                                 >
+                                <option value="medium">{app.t("settings.fontWeightMedium", "Medio")}</option>
+                                <option value="semibold">{app.t("settings.fontWeightSemibold", "Seminegrita")}</option>
                                 <option value="bold"
                                     >{app.t(
                                         "settings.fontWeightBold",
@@ -740,6 +881,103 @@
                             </small>
                         </span>
                     </label>
+                    <div class="heading">
+                        <strong>{app.t("settings.visiblePanels", "Secciones visibles")}</strong>
+                        <span>{app.t("settings.visiblePanelsHint", "Oculta funciones que no uses; puedes recuperarlas desde Ajustes.")}</span>
+                    </div>
+                    <label class="check"><input type="checkbox" bind:checked={draft.showDependenciesPanel} /><span><strong>{app.t("toolbar.deps", "Entorno y dependencias")}</strong></span></label>
+                    <label class="check"><input type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong></span></label>
+                    <label class="check"><input type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong></span></label>
+                    <label class="check"><input type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong></span></label>
+                    <div class="heading">
+                        <strong>Entornos habilitados</strong>
+                        <span>Oculta shells, contenedores, dispositivos o REPL concretos sin desinstalarlos.</span>
+                    </div>
+                    <div class="environment-controls">
+                        <input type="search" bind:value={environmentQuery} placeholder="Buscar shell, REPL o contenedor…" aria-label="Buscar entornos" />
+                        <select bind:value={environmentGroup} aria-label="Filtrar entornos por grupo">
+                            <option value="all">Todos los grupos</option>
+                            {#each environmentGroups as group (group)}<option value={group}>{group}</option>{/each}
+                        </select>
+                        <button type="button" class="secondary" onclick={() => setVisibleEnvironmentsEnabled(true)}>Activar visibles</button>
+                        <button type="button" class="secondary" onclick={() => setVisibleEnvironmentsEnabled(false)}>Desactivar visibles</button>
+                    </div>
+                    <div class="environment-toggles">
+                        {#each visibleEnvironments as environment (environment.id)}
+                            <label class="check">
+                                <input
+                                    type="checkbox"
+                                    checked={!draft.hiddenEnvironmentIds.split(',').includes(environment.id)}
+                                    onchange={(event) => setEnvironmentEnabled(
+                                        environment.id,
+                                        (event.currentTarget as HTMLInputElement).checked
+                                    )}
+                                />
+                                <span><strong>{environment.label}</strong><small>{environment.group}</small></span>
+                            </label>
+                        {/each}
+                    </div>
+                    <div class="heading">
+                        <strong>{app.t("settings.manualAliases", "Alias manuales")}</strong>
+                        <span>{app.t("settings.manualAliasesHint", "Uno por línea: nombre=comando. Admite comandos compuestos; Fish los convierte en functions y conserva $argv. Se aplican a pestañas nuevas.")}</span>
+                    </div>
+                    <label class="field wide alias-editor">
+                        <textarea rows="6" spellcheck="false" placeholder="serve=npm run dev&#10;gs=git status" bind:value={draft.manualAliasesText}></textarea>
+                    </label>
+                    <div class="heading">
+                        <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
+                        <span>{app.t("settings.shortcutsHint", "Usa combinaciones como Ctrl+Shift+T. Navegación directa: Control derecho + W/A/S/D, sin interferir con el Control izquierdo de la shell.")}</span>
+                    </div>
+                    <div class="field-grid">
+                        <label class="field"><span>Nueva pestaña</span><input spellcheck="false" bind:value={draft.shortcutNewTab} /></label>
+                        <label class="field"><span>Pestaña siguiente</span><input spellcheck="false" bind:value={draft.shortcutNextTab} /></label>
+                        <label class="field"><span>Pestaña anterior</span><input spellcheck="false" bind:value={draft.shortcutPreviousTab} /></label>
+                        <label class="field"><span>Dividir terminales</span><input spellcheck="false" bind:value={draft.shortcutCyclePanes} /></label>
+                        <label class="field"><span>Mostrar explorador</span><input spellcheck="false" bind:value={draft.shortcutToggleExplorer} /></label>
+                        <label class="field"><span>Foco a la izquierda</span><input spellcheck="false" bind:value={draft.shortcutPaneLeft} /></label>
+                        <label class="field"><span>Foco a la derecha</span><input spellcheck="false" bind:value={draft.shortcutPaneRight} /></label>
+                        <label class="field"><span>Foco arriba</span><input spellcheck="false" bind:value={draft.shortcutPaneUp} /></label>
+                        <label class="field"><span>Foco abajo</span><input spellcheck="false" bind:value={draft.shortcutPaneDown} /></label>
+                    </div>
+                    <div class="heading">
+                        <strong>{app.t("settings.profiles", "Perfiles portables")}</strong>
+                        <span>{app.t("settings.profilesHint", "Exporta o importa preferencias validadas; no incluye tokens ni sesiones.")}</span>
+                    </div>
+                    <div class="update-row">
+                        <button type="button" class="secondary" onclick={exportProfile}>Exportar perfil</button>
+                        <button type="button" class="secondary" onclick={importProfile}>Importar perfil</button>
+                    </div>
+                    <div class="heading">
+                        <strong>{app.t("settings.plugins", "Plugins")}</strong>
+                        <span>{app.t("settings.pluginsHint", "Extensiones declarativas validadas; no cargan código dentro de la aplicación.")}</span>
+                    </div>
+                    <div class="update-row">
+                        <button type="button" class="secondary" onclick={installPlugin}>Instalar plugin.json</button>
+                    </div>
+                    {#if plugins.length === 0}
+                        <div class="field-hint">No hay plugins instalados.</div>
+                    {:else}
+                        {#each plugins as plugin (plugin.id)}
+                            <div class="check">
+                                <input type="checkbox" checked={plugin.enabled} disabled={Boolean(plugin.error)} onchange={() => togglePlugin(plugin)} />
+                                <span><strong>{plugin.name} {plugin.version}</strong><small>{plugin.error ?? plugin.description ?? `${plugin.technologyCount} tecnologías`}</small></span>
+                                <button type="button" class="secondary" onclick={() => removePlugin(plugin)}>Retirar</button>
+                            </div>
+                        {/each}
+                    {/if}
+                    {#if windowsIntegration?.supported}
+                        <div class="heading">
+                            <strong>Integración de Windows</strong>
+                            <span>{windowsIntegration.note}</span>
+                        </div>
+                        <label class="check">
+                            <input type="checkbox" checked={windowsIntegration.contextMenuRegistered} onchange={toggleWindowsIntegration} />
+                            <span><strong>Menús «Abrir con WinSlim Terminal», App Paths y protocolo winslim://</strong><small>Se registra únicamente en HKCU para el usuario actual.</small></span>
+                        </label>
+                        <div class="field-hint">
+                            NSudo: {windowsIntegration.nsudoAvailable ? `detectado en ${windowsIntegration.nsudoPath}` : "no instalado; puede instalarse desde Entorno y dependencias"}.
+                        </div>
+                    {/if}
                 </section>
             {/if}
 
@@ -819,6 +1057,13 @@
                         {/if}
                     </div>
                     {#if update?.available && update.installPath}
+                        {#if updating && updateProgress}
+                            <div class="field-hint" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={updateProgress.percent}>
+                                {updateProgress.stage === "download"
+                                    ? `Descargando: ${updateProgress.percent ?? "…"}% (${Math.round(updateProgress.bytes / 1048576)} MiB${updateProgress.total ? ` / ${Math.round(updateProgress.total / 1048576)} MiB` : ""})`
+                                    : updateProgress.stage === "extract" ? "Preparando los archivos…" : "Descarga completada."}
+                            </div>
+                        {/if}
                         <div class="field-hint">
                             {app
                                 .t("update.into", "Se instalará en {path}")
@@ -1026,15 +1271,15 @@
 
     .grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-        gap: 9px;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 12px;
     }
 
     .field {
         display: flex;
         min-width: 0;
         flex-direction: column;
-        gap: 3px;
+        gap: 5px;
         color: var(--muted);
         font-size: 10px;
     }
@@ -1052,23 +1297,91 @@
     }
 
     .field.wide {
-        max-width: 320px;
+        width: 100%;
+        max-width: none;
+    }
+
+    .alias-editor textarea {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 112px;
+        resize: vertical;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: 11px/1.55 var(--terminal-font);
+    }
+
+    .alias-editor textarea:focus,
+    .environment-controls input:focus,
+    .environment-controls select:focus {
+        border-color: var(--accent);
+        outline: none;
+        box-shadow: 0 0 0 2px var(--accent-soft);
+    }
+
+    .environment-controls {
+        display: grid;
+        grid-template-columns: minmax(160px, 1fr) minmax(140px, .65fr) auto auto;
+        gap: 6px;
+    }
+
+    .environment-controls input,
+    .environment-controls select {
+        min-width: 0;
+        padding: 7px 9px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: inherit;
+    }
+
+    .environment-toggles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 3px 12px;
+        max-height: 220px;
+        overflow: auto;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-alt);
+    }
+
+    @container (max-width: 580px) {
+        .environment-controls { grid-template-columns: 1fr 1fr; }
     }
 
     .field :global(input),
     .field :global(select) {
-        padding: 4px 6px;
+        min-height: 32px;
+        padding: 6px 8px;
         border: 1px solid var(--border);
-        border-radius: 4px;
+        border-radius: 6px;
         background: var(--surface-alt);
         color: var(--text);
         font: inherit;
         font-size: 11px;
+        transition: border-color 120ms ease, box-shadow 120ms ease;
+    }
+
+    .field :global(select) {
+        padding-right: 28px;
+    }
+
+    .field :global(input:focus),
+    .field :global(select:focus) {
+        border-color: var(--accent);
+        outline: none;
+        box-shadow: 0 0 0 2px var(--accent-soft);
     }
 
     .field :global(input[type="color"]) {
-        height: 26px;
-        padding: 2px;
+        height: 32px;
+        padding: 3px;
     }
 
     .field-hint {

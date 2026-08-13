@@ -23,6 +23,26 @@ export function cursorOptions(
     }
 }
 
+/** xterm acepta pesos numéricos, mientras que la preferencia usa nombres
+ * legibles. Mantener la conversión aquí hace que los cinco valores se apliquen
+ * de verdad en vez de enviar etiquetas CSS que xterm no reconoce. */
+export function terminalFontWeight(
+    preferences: Preferences
+): NonNullable<ITerminalOptions['fontWeight']> {
+    switch (preferences.terminalFontWeight) {
+        case 'light':
+            return 300;
+        case 'medium':
+            return 500;
+        case 'semibold':
+            return 600;
+        case 'bold':
+            return 700;
+        default:
+            return 400;
+    }
+}
+
 /** Mezcla dos colores hexadecimales. Se usa para el estado `hover`, que no
  *  está en la paleta pero se deriva de la superficie y el acento. */
 function mix(a: string, b: string, weight: number): string {
@@ -45,13 +65,13 @@ export function applyTheme(
     const { palette } = theme;
     const root = document.documentElement.style;
 
-    root.setProperty('--app-bg', palette.background);
-    root.setProperty('--surface', palette.surface);
-    root.setProperty('--surface-alt', palette.surfaceAlt);
-    root.setProperty('--surface-hover', mix(palette.surface, palette.text, 0.12));
-    root.setProperty('--border', palette.border);
-    root.setProperty('--text', palette.text);
-    root.setProperty('--muted', palette.muted);
+    root.setProperty('--app-bg', preferences.uiBackgroundColor);
+    root.setProperty('--surface', preferences.uiSurfaceColor);
+    root.setProperty('--surface-alt', preferences.uiSurfaceAltColor);
+    root.setProperty('--surface-hover', mix(preferences.uiSurfaceColor, preferences.uiTextColor, 0.12));
+    root.setProperty('--border', preferences.uiBorderColor);
+    root.setProperty('--text', preferences.uiTextColor);
+    root.setProperty('--muted', preferences.uiMutedColor);
     // El acento y los colores de terminal son editables por separado: mandan
     // los de las preferencias, no los del tema.
     root.setProperty('--accent', preferences.accentColor);
@@ -67,13 +87,15 @@ export function applyTheme(
 
 /** La parte de las preferencias que entiende xterm. */
 export function terminalTheme(preferences: Preferences, themes: ThemePreset[]): ITheme {
-    const theme = themes.find((candidate) => candidate.id === preferences.themeId) ?? themes[0];
+    // Mantener el parámetro hace explícito que la función comparte contrato
+    // con applyTheme; los colores editables ya no dependen del preset.
+    void themes;
     return {
         background: preferences.terminalBackground,
         foreground: preferences.terminalForeground,
-        cursor: preferences.accentColor,
+        cursor: preferences.terminalCursorColor,
         cursorAccent: preferences.terminalBackground,
-        selectionBackground: theme?.palette.selection
+        selectionBackground: preferences.terminalSelectionColor
     };
 }
 

@@ -1,6 +1,6 @@
 #requires -Version 5.0
 <#
-    Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
+    Build de LTerminal (Tauri 2 + Rust) para Windows.
 
     Produce UNA sola cosa: la carpeta desempaquetada con el .exe, conpty.dll y
     OpenConsole.exe. Sin instalador NSIS, sin portable y sin accesos directos;
@@ -13,7 +13,9 @@
 param(
     [switch]$Clean,
     [switch]$NoRun,
-    [switch]$SkipChecks
+    [switch]$SkipChecks,
+    [string]$Version,
+    [switch]$NonInteractive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -257,8 +259,23 @@ if (-not (Test-MSVCLinker)) {
     Write-Ok 'Visual Studio C++ Build Tools (link.exe)'
 }
 
-# La version del paquete manda: es la que Tauri incrusta en el .exe y con la que
-# el actualizador compara la release publicada.
+# La versión se pregunta antes de empaquetar. Enter conserva la actual; el
+# parámetro permite builds automatizadas sin diálogo.
+$packageJson = Get-Content (Join-Path $ProjectRoot 'package.json') -Raw | ConvertFrom-Json
+$currentVersion = $packageJson.version
+if (-not $Version) {
+    if ($NonInteractive) {
+        $Version = $currentVersion
+    } else {
+        $enteredVersion = Read-Host "Versión a compilar [$currentVersion]"
+        $Version = if ([string]::IsNullOrWhiteSpace($enteredVersion)) { $currentVersion } else { $enteredVersion.Trim() }
+    }
+}
+
+if ((Invoke-Native 'node' @('scripts/set-package-version.mjs', $Version)) -ne 0) {
+    throw 'La versión indicada no es válida o no se pudo guardar en todos los manifiestos.'
+}
+
 $packageJson = Get-Content (Join-Path $ProjectRoot 'package.json') -Raw | ConvertFrom-Json
 $version = $packageJson.version
 Write-Ok "Version a compilar: $version"
@@ -298,7 +315,7 @@ if ($devServer) {
 
 $running = Get-Process -Name 'winslim-terminal' -ErrorAction SilentlyContinue
 if ($running) {
-    Write-Err "WinSlim Terminal esta abierto ($($running.Count) proceso(s))."
+    Write-Err "LTerminal esta abierto ($($running.Count) proceso(s))."
     Write-Err 'Cierralo antes de compilar: su .exe y su conpty.dll no se pueden reemplazar en uso.'
     throw 'La aplicacion esta en marcha.'
 }
@@ -424,6 +441,6 @@ if (-not $NoRun) {
 }
 
 Write-Host ''
-Write-Host "Listo. WinSlim Terminal $version compilado y verificado." -ForegroundColor Green
+Write-Host "Listo. LTerminal $version compilado y verificado." -ForegroundColor Green
 Write-Host "  Carpeta: $distDir"
 Write-Host "  Release: $zipPath"

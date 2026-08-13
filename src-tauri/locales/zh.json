@@ -461,7 +461,7 @@
   "settings.densityComfortable": "舒适",
   "settings.densityCompact": "紧凑",
   "settings.developers": "主要开发者",
-  "settings.developersHint": "WinSlim Terminal 的设计与开发团队。",
+  "settings.developersHint": "WinSlim 的设计与开发团队。",
   "settings.developersPending": "正在加载开发者信息…",
   "settings.envAuto": "自动 (跟随系统)",
   "settings.exclusiveGroups": "依赖面板互斥折叠",
@@ -574,5 +574,6 @@
   "banner.motherboard": "主板",
   "banner.storage": "磁盘",
   "action.uninstall.hint": "从系统中卸载该工具。命令将写入终端：请在确认前予以检查。",
-  "action.gitPull.hint": "遍历项目文件夹并在每个 Git 仓库中执行 pull --ff-only。含有本地修改或分歧的仓库将被跳过并发出警告。"
+  "action.gitPull.hint": "遍历项目文件夹并在每个 Git 仓库中执行 pull --ff-only。含有本地修改或分歧的仓库将被跳过并发出警告。",
+  "settings.bannerColor": "系统信息颜色"
 }

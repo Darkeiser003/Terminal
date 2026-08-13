@@ -5,53 +5,48 @@
 //! cotejarlos mientras dure la migración.
 
 #[macro_use]
+#[path = "infrastructure/logger.rs"]
 pub mod logger;
-
-pub mod alias_profiles;
-pub mod android_env;
-pub mod command_not_found;
-pub mod commands;
-pub mod commands_install;
-pub mod commands_panels;
-pub mod commands_projects;
-pub mod commands_update;
-pub mod console_ui;
-pub mod current_dir;
-pub mod docker_env;
+pub mod app;
+pub mod config;
 pub mod environments;
-pub mod file_explorer;
-pub mod file_viewers;
-pub mod github;
-pub mod i18n;
-pub mod identity;
-pub mod install_actions;
-pub mod install_dir;
-pub mod language_env;
-pub mod migration;
-pub mod package_aliases;
-pub mod path_env;
-pub mod paths;
-pub mod preferences;
-pub mod process;
-pub mod pty;
-pub mod recycle;
+pub mod explorer;
+pub mod infrastructure;
+pub mod packages;
+pub mod platform;
+pub mod projects;
 pub mod scripts;
-pub mod self_update;
-pub mod session_files;
-pub mod settings;
-pub mod shell_paths;
-pub mod spawn_cwd;
-pub mod state;
-pub mod stream;
-pub mod system_info;
-pub mod tabs;
-pub mod virtualization;
-pub mod wsl_env;
+pub mod system;
+pub mod terminal;
+pub mod updater;
+
+// Compatibilidad interna durante la migración por dominios. Los consumidores
+// nuevos deben importar el módulo de dominio; estos reexports evitan cambiar
+// de golpe las APIs Tauri y los módulos ya probados.
+pub use app::{commands, panel_commands as commands_panels, state};
+pub use config::{i18n, identity, install_dir, migration, paths, preferences, settings};
+pub use environments::{
+    android as android_env, docker as docker_env, languages as language_env, wsl as wsl_env,
+};
+pub use explorer::{files as file_explorer, recycle, viewers as file_viewers};
+pub use infrastructure::{path_env, process};
+pub use packages::{
+    actions as install_actions, aliases as package_aliases, command_not_found,
+    commands as commands_install,
+};
+pub use projects::{commands as commands_projects, github};
+pub use system::{info as system_info, virtualization};
+pub use terminal::{
+    aliases as alias_profiles, console_ui, current_dir, pty, session_files, shell_paths, spawn_cwd,
+    stream, tabs,
+};
+pub use updater::{commands as commands_update, self_update};
 
 use std::time::Instant;
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
+use crate::platform::traits::HostPlatform;
 use crate::state::AppState;
 
 /// Unifica los datos que pudieran haber quedado bajo el nombre visible de la
@@ -91,7 +86,7 @@ pub fn run() {
             "migrationMs": migration_ms,
         })),
     );
-    if cfg!(windows) && conpty.is_none() {
+    if platform::host().is_windows() && conpty.is_none() {
         // Sin ella la app arranca igual, pero en un Windows recortado las
         // pestañas se quedarán en blanco varios minutos antes de fallar. Ver
         // vendor/conpty/README.md.
@@ -122,7 +117,9 @@ pub fn run() {
             commands::tabs_close,
             commands::tabs_activate,
             commands::tabs_ready,
+            commands::frontend_ready,
             commands::pty_input,
+            commands::internal_command_parse,
             commands::pty_resize,
             commands::env_list,
             commands::env_refresh,
@@ -130,6 +127,14 @@ pub fn run() {
             commands::settings_get,
             commands::settings_save,
             commands::settings_reset,
+            commands::profile_export,
+            commands::profile_import,
+            config::plugins::plugins_list,
+            config::plugins::plugins_set_enabled,
+            config::plugins::plugins_install,
+            config::plugins::plugins_remove,
+            platform::windows_integration::windows_integration_status,
+            platform::windows_integration::windows_integration_set,
             commands::app_info,
             commands::log_frontend_error,
             commands::log_open_folder,

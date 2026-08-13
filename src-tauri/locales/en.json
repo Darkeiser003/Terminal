@@ -574,5 +574,6 @@
   "banner.motherboard": "Motherboard",
   "banner.storage": "Disk",
   "action.uninstall.hint": "Removes the tool from the system. The command is written to the terminal: review it before confirming.",
-  "action.gitPull.hint": "Iterates through the projects folder and runs git pull --ff-only on each Git repository. Divergent or modified repositories are skipped with a warning."
+  "action.gitPull.hint": "Iterates through the projects folder and runs git pull --ff-only on each Git repository. Divergent or modified repositories are skipped with a warning.",
+  "settings.bannerColor": "System information color"
 }
