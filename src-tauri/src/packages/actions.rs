@@ -434,6 +434,16 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-perl",   "Perl",            "perl",   "StrawberryPerl.StrawberryPerl",  Some("perl -v"),                      LANGUAGES_GROUP),
     win("winget-lua",    "Lua",             "lua",    "DEVCOM.Lua",                     Some("lua -v"),                       LANGUAGES_GROUP),
     win("winget-deno",   "Deno",            "deno",   "DenoLand.Deno",                  Some("deno --version"),               LANGUAGES_GROUP),
+    win("winget-bun",    "Bun",             "bun",    "Oven-sh.Bun",                    Some("bun --version"),                LANGUAGES_GROUP),
+    win("winget-julia",  "Julia",           "julia",  "Julialang.Julia",               Some("julia --version"),              LANGUAGES_GROUP),
+    win("winget-r",      "R",               "R",      "RProject.R",                     Some("R --version"),                  LANGUAGES_GROUP),
+    win("winget-dotnet", "C#/F# · .NET SDK", "dotnet", "Microsoft.DotNet.SDK.8",        Some("dotnet --info"),                LANGUAGES_GROUP),
+    win("winget-llvm",   "C/C++ · Clang/LLVM", "clang", "LLVM.LLVM",                    Some("clang --version; clang++ --version"), LANGUAGES_GROUP),
+    win("winget-cmake",  "C/C++ · CMake",   "cmake",  "Kitware.CMake",                  Some("cmake --version"),               LANGUAGES_GROUP),
+    win("winget-groovy", "Groovy",          "groovysh", "Apache.Groovy.4",              Some("groovy --version"),              LANGUAGES_GROUP),
+    win("winget-kubectl", "Kubernetes · kubectl", "kubectl", "Kubernetes.kubectl",       Some("kubectl version --client"),      DOCKER_GROUP),
+    win("winget-helm",    "Kubernetes · Helm", "helm", "Helm.Helm",                     Some("helm version --short"),          DOCKER_GROUP),
+    win("winget-k9s",     "Kubernetes · k9s (interactivo)", "k9s", "Derailed.k9s",       Some("k9s version --short"),           DOCKER_GROUP),
     WindowsTool {
         hint: Some("Requiere WSL2 y normalmente pide reiniciar Windows antes de poder usarse."),
         ..win("winget-docker", "Docker Desktop", "docker", "Docker.DockerDesktop", Some("docker --version"), DOCKER_GROUP)
@@ -2388,6 +2398,32 @@ mod tests {
     }
 
     #[test]
+    fn windows_incluye_nsudo_lenguajes_y_kubernetes_en_el_catalogo() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "winget-nsudo",
+            "winget-bun",
+            "winget-julia",
+            "winget-r",
+            "winget-dotnet",
+            "winget-llvm",
+            "winget-cmake",
+            "winget-kubectl",
+            "winget-helm",
+            "winget-k9s",
+        ] {
+            assert!(
+                actions.iter().any(|action| action.id == id),
+                "falta {id} en Windows"
+            );
+        }
+        for id in ["winget-kubectl", "winget-helm", "winget-k9s"] {
+            assert_eq!(buscar(&actions, id).group, DOCKER_GROUP, "{id}");
+        }
+        assert_eq!(buscar(&actions, "winget-nsudo").group, WINDOWS_COMPAT_GROUP);
+    }
+
+    #[test]
     fn el_script_de_adb_no_lleva_comillas_dobles_porque_cmd_lo_envuelve_con_ellas() {
         // wrap_powershell_command mete el script entero entre comillas dobles
         // para invocarlo desde cmd.exe: una comilla doble dentro lo partiría.
@@ -2784,7 +2820,7 @@ mod tests {
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(lenguajes.first(), Some(&"winget-node"));
-        assert_eq!(lenguajes.last(), Some(&"winget-deno"));
+        assert_eq!(lenguajes.last(), Some(&"winget-groovy"));
     }
 
     #[test]

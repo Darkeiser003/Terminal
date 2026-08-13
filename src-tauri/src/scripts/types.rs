@@ -188,6 +188,7 @@ pub fn default_categories_for(is_windows: bool) -> Vec<FileCategory> {
             FileCategory::Batch,
             FileCategory::Powershell,
             FileCategory::Vbscript,
+            FileCategory::Program,
         ]
     } else {
         vec![
@@ -451,6 +452,7 @@ mod tests {
                 FileCategory::Batch,
                 FileCategory::Powershell,
                 FileCategory::Vbscript,
+                FileCategory::Program,
             ]
         );
     }

@@ -372,6 +372,19 @@ Write-Step 'Compilando (tauri build --no-bundle)'
 $code = Invoke-Native 'npm' @('run', 'tauri', '--', 'build', '--no-bundle')
 if ($code -ne 0) { throw "La compilacion fallo (codigo $code)." }
 
+# Evita publicar por accidente un frontend anterior (por ejemplo, una copia
+# del proyecto sin los últimos cambios compartidos). Los marcadores están en
+# la build minificada únicamente si incluye WASD con Control derecho, filtros
+# compactos y el catálogo de Kubernetes actual.
+$frontendBundles = Get-ChildItem (Join-Path $ProjectRoot 'dist\assets') -Filter 'index-*.js' -File
+$frontendText = ($frontendBundles | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+foreach ($marker in @('ControlRight', 'KeyW', 'environment-controls')) {
+    if ($frontendText -notmatch [regex]::Escape($marker)) {
+        throw "El frontend compilado no contiene '$marker': parece una build desactualizada y no se publicara."
+    }
+}
+Write-Ok 'Frontend compartido actualizado: Control derecho + WASD y preferencias compactas presentes'
+
 $exePath = Join-Path $ReleaseDir 'winslim-terminal.exe'
 if (-not (Test-Path $exePath)) { throw "La compilacion termino pero no hay ejecutable en $exePath." }
 Write-Ok "Compilado: $exePath"
@@ -403,17 +416,47 @@ Write-Ok "Carpeta lista: $distDir ($sizeMb MB, $($payload.Count) archivos)"
 # ---------------------------------------------------------------------------
 # 8. Comprobacion de humo
 # ---------------------------------------------------------------------------
-# Que compile no significa que arranque: una DLL que falte o una ruta mal puesta
-# solo se ven al ejecutar. Se abre y se cierra a los pocos segundos.
-Write-Step 'Comprobacion de humo (se abre y se cierra)'
-$process = Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -PassThru
-Start-Sleep -Seconds 6
-if ($process.HasExited) {
-    Write-Err "La aplicacion se cerro sola con codigo $($process.ExitCode)."
-    throw 'La build compila pero no arranca. Revisa el log en %APPDATA%\winslim-terminal\logs.'
+# Que compile o mantenga un proceso vivo no demuestra que WebView, xterm y el
+# primer PTY hayan terminado de inicializar. Un token unico debe volver por IPC
+# y quedar escrito en el log antes de permitir publicar la release.
+Write-Step 'Comprobacion de humo (ventana, frontend, terminal y PTY)'
+$smokeToken = "windows-build-$([guid]::NewGuid().ToString('N'))"
+$logPath = Join-Path $env:APPDATA 'winslim-terminal\logs\main.log'
+$previousSmokeToken = $env:LTERMINAL_SMOKE_TOKEN
+$process = $null
+try {
+    $env:LTERMINAL_SMOKE_TOKEN = $smokeToken
+    $process = Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -PassThru
+    $ready = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        Start-Sleep -Seconds 1
+        $process.Refresh()
+        if ($process.HasExited) {
+            Write-Err "La aplicacion se cerro sola con codigo $($process.ExitCode)."
+            throw 'La build compila pero no arranca. Revisa el log en %APPDATA%\winslim-terminal\logs.'
+        }
+        if (Test-Path $logPath) {
+            $recentLog = Get-Content $logPath -Tail 200 -ErrorAction SilentlyContinue
+            if (($recentLog -join "`n") -match [regex]::Escape($smokeToken)) {
+                $ready = $true
+                break
+            }
+        }
+    }
+    if (-not $ready) {
+        throw "La ventana siguio viva, pero frontend/xterm/PTY no confirmaron el arranque en 30 s. Revisa $logPath."
+    }
+    Write-Ok 'Frontend, terminal y PTY confirmaron el arranque'
+} finally {
+    if ($process -and -not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $previousSmokeToken) {
+        Remove-Item Env:LTERMINAL_SMOKE_TOKEN -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_SMOKE_TOKEN = $previousSmokeToken
+    }
 }
-Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-Write-Ok 'Arranca y se mantiene abierta'
 
 # ---------------------------------------------------------------------------
 # 9. Release comprimida

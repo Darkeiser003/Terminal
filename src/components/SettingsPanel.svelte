@@ -928,6 +928,12 @@
                         <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
                         <span>{app.t("settings.shortcutsHint", "Usa combinaciones como Ctrl+Shift+T. Navegación directa: Control derecho + W/A/S/D, sin interferir con el Control izquierdo de la shell.")}</span>
                     </div>
+                    <div class="shortcut-preset" aria-label="Navegación fija entre paneles">
+                        <span><kbd>Ctrl derecho</kbd> + <kbd>W</kbd> arriba</span>
+                        <span><kbd>Ctrl derecho</kbd> + <kbd>A</kbd> izquierda</span>
+                        <span><kbd>Ctrl derecho</kbd> + <kbd>S</kbd> abajo</span>
+                        <span><kbd>Ctrl derecho</kbd> + <kbd>D</kbd> derecha</span>
+                    </div>
                     <div class="field-grid">
                         <label class="field"><span>Nueva pestaña</span><input spellcheck="false" bind:value={draft.shortcutNewTab} /></label>
                         <label class="field"><span>Pestaña siguiente</span><input spellcheck="false" bind:value={draft.shortcutNextTab} /></label>
@@ -1443,6 +1449,28 @@
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
+    }
+
+    .shortcut-preset {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 6px;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: var(--surface-alt);
+        color: var(--muted);
+        font-size: 10px;
+    }
+
+    .shortcut-preset kbd {
+        padding: 2px 5px;
+        border: 1px solid var(--border);
+        border-bottom-width: 2px;
+        border-radius: 3px;
+        background: var(--surface);
+        color: var(--text);
+        font: inherit;
     }
 
     .update-row button {
