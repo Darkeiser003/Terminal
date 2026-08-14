@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::environments::{Environment, ShellKind, Transport};
@@ -132,9 +132,23 @@ impl ScriptsPanel {
     }
 }
 
-fn library_panel(state: &AppState, categories: &[FileCategory]) -> ScriptsPanel {
+fn bundled_operation_scripts(app: &AppHandle, categories: &[FileCategory]) -> Vec<ScriptEntry> {
+    let Ok(resource_dir) = app.path().resource_dir() else {
+        return Vec::new();
+    };
+    let folder = resource_dir.join("scripts").join("containers");
+    let mut found = scripts::list_all_scripts(&folder, categories);
+    for entry in &mut found {
+        entry.source = "LTerminal".to_string();
+    }
+    found
+}
+
+fn library_panel(app: &AppHandle, state: &AppState, categories: &[FileCategory]) -> ScriptsPanel {
     let folder = crate::tabs::scripts_folder();
-    let found = scripts::list_all_scripts(&folder, categories);
+    let mut found = bundled_operation_scripts(app, categories);
+    let mut personal = scripts::list_all_scripts(&folder, categories);
+    found.append(&mut personal);
     state.remember_visible_items(&found);
     ScriptsPanel {
         dir: folder.to_string_lossy().to_string(),
@@ -149,10 +163,11 @@ fn library_panel(state: &AppState, categories: &[FileCategory]) -> ScriptsPanel 
 /// `scripts:list`
 #[tauri::command(async)]
 pub fn scripts_list(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     categories: Option<Vec<String>>,
 ) -> ScriptsPanel {
-    library_panel(&state, &categories_from(categories))
+    library_panel(&app, &state, &categories_from(categories))
 }
 
 fn here_panel(
@@ -280,7 +295,7 @@ pub fn scripts_choose_folder(
             serde_json::json!({ "scriptsFolder": chosen })
         );
     }
-    library_panel(&state, &categories)
+    library_panel(&app, &state, &categories)
 }
 
 /// `scripts:chooseHereFolder`

@@ -113,6 +113,10 @@ ejecución anterior, hay que liberarlo antes.
 
 Todos se ejecutan desde la raíz del repositorio.
 
+Las herramientas operativas reutilizables para Docker Compose y Kubernetes se
+describen en [`docs/automation-tools.md`](docs/automation-tools.md). El panel
+**Scripts** puede descubrirlas y ejecutarlas directamente en la terminal.
+
 | Script | Qué hace |
 |---|---|
 | `npm start` | Arranca la aplicación en desarrollo (Vite + `cargo run`). |

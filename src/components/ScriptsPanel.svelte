@@ -31,6 +31,11 @@
     let argsFor = $state('');
     let args = $state('');
     let running = $state('');
+    let operationArgsFor = $state('');
+    let operationArgs = $state('');
+
+    type OperationAction = { label: string; args: string; title: string };
+    type OperationTool = { script: ScriptEntry; kind: 'docker' | 'kubernetes'; actions: OperationAction[] };
 
     const NIVELES = [0, 1, 2, 3, 4, 5, 6, 8, 10];
 
@@ -81,6 +86,43 @@
     }
 
     const visible = $derived((data?.scripts ?? []).filter(matches));
+
+    /** Los gestores incluidos por LTerminal conservan su CLI normal, pero se
+     *  reconocen para ofrecer las consultas habituales sin memorizar flags.
+     *  Las acciones destructivas se dejan en el modo avanzado del propio
+     *  script, donde siguen pasando por su confirmación. */
+    const operationTools = $derived.by((): OperationTool[] => {
+        const tools: OperationTool[] = [];
+        const seen = new Set<string>();
+        for (const script of [...visible, ...(data?.pinned ?? [])]) {
+            if (seen.has(script.path) || !script.runnable) continue;
+            if (script.name === 'docker-manager.sh') {
+                tools.push({
+                    script,
+                    kind: 'docker',
+                    actions: [
+                        { label: app.t('scripts.operation.status', 'Resumen'), args: 'status', title: app.t('scripts.operation.dockerStatus', 'Ver el estado global de Docker') },
+                        { label: app.t('scripts.operation.containers', 'Contenedores'), args: 'containers', title: app.t('scripts.operation.dockerContainers', 'Listar todos los contenedores') },
+                        { label: app.t('scripts.operation.images', 'Imágenes'), args: 'images', title: app.t('scripts.operation.dockerImages', 'Listar imágenes locales') },
+                        { label: app.t('scripts.operation.stats', 'Recursos'), args: 'stats', title: app.t('scripts.operation.dockerStats', 'Ver consumo de recursos') }
+                    ]
+                });
+                seen.add(script.path);
+            } else if (script.name === 'kubernetes-manager.sh') {
+                tools.push({
+                    script,
+                    kind: 'kubernetes',
+                    actions: [
+                        { label: app.t('scripts.operation.pods', 'Pods'), args: 'status', title: app.t('scripts.operation.kubernetesStatus', 'Ver pods del namespace default') },
+                        { label: app.t('scripts.operation.contexts', 'Contextos'), args: 'contexts', title: app.t('scripts.operation.contextsTitle', 'Listar contextos de Kubernetes') },
+                        { label: app.t('scripts.operation.namespaces', 'Namespaces'), args: 'namespaces', title: app.t('scripts.operation.namespacesTitle', 'Listar namespaces de Kubernetes') }
+                    ]
+                });
+                seen.add(script.path);
+            }
+        }
+        return tools;
+    });
     // Los anclados forman la vista Favoritos. En Ruta actual solo deben verse
     // los resultados de esa carpeta para no mezclar dos ámbitos distintos.
     const pinned = $derived(mode === 'library' ? (data?.pinned ?? []).filter(matches) : []);
@@ -140,7 +182,7 @@
         );
     });
 
-    async function run(script: ScriptEntry, asAdmin: boolean): Promise<void> {
+    async function run(script: ScriptEntry, asAdmin: boolean, explicitArgs?: string): Promise<void> {
         if (!app.activeTabId || running) return;
         running = script.path;
         statusError = false;
@@ -149,7 +191,7 @@
                 app.activeTabId,
                 script.path,
                 asAdmin,
-                argsFor === script.path ? args : undefined
+                explicitArgs ?? (argsFor === script.path ? args : undefined)
             );
             if (!result.ok) {
                 statusError = true;
@@ -171,6 +213,11 @@
         // Entrecomillado: casi todas las rutas que alguien elige a mano tienen
         // espacios, y sin comillas el script recibiría dos argumentos.
         if (chosen) args = `"${chosen}"`;
+    }
+
+    async function pickOperation(mode: 'file' | 'folder'): Promise<void> {
+        const chosen = await api.pickTarget(mode);
+        if (chosen) operationArgs = `"${chosen}"`;
     }
 </script>
 
@@ -296,6 +343,60 @@
                 {/each}
             </div>
         </details>
+    {/if}
+
+    {#if operationTools.length}
+        <section class="operations" aria-label={app.t('scripts.operations', 'Operaciones rápidas')}>
+            <div class="operations-title">
+                <span>{app.t('scripts.operations', 'Operaciones rápidas')}</span>
+                <small>{app.t('scripts.operationsNote', 'Consultas y acciones frecuentes; el comando se mostrará en la terminal.')}</small>
+            </div>
+            {#each operationTools as tool (tool.script.path)}
+                <div class="operation-tool">
+                    <span class="operation-name">
+                        <span class="operation-mark">{tool.kind === 'docker' ? 'D' : 'K'}</span>
+                        {tool.kind === 'docker' ? 'Docker Compose' : 'Kubernetes'}
+                    </span>
+                    <div class="operation-actions">
+                        {#each tool.actions as action (action.args)}
+                            <button
+                                type="button"
+                                title={action.title}
+                                disabled={running !== '' || !app.activeTabId}
+                                onclick={() => run(tool.script, false, action.args)}
+                            >{action.label}</button>
+                        {/each}
+                        <button
+                            type="button"
+                            class="advanced"
+                            title={app.t('scripts.operation.advancedTitle', 'Abrir argumentos para usar todas las acciones del gestor')}
+                            onclick={() => {
+                                operationArgsFor = operationArgsFor === tool.script.path ? '' : tool.script.path;
+                                operationArgs = '';
+                            }}
+                        >{app.t('scripts.operation.advanced', 'Avanzado…')}</button>
+                    </div>
+                    {#if operationArgsFor === tool.script.path}
+                        <div class="operation-advanced">
+                            <input
+                                type="text"
+                                bind:value={operationArgs}
+                                placeholder={tool.kind === 'docker'
+                                    ? app.t('scripts.operation.dockerPlaceholder', 'Ej.: logs --follow nginx · compose up --build')
+                                    : app.t('scripts.operation.kubernetesPlaceholder', 'Ej.: -n staging logs --follow api-abc123')}
+                            />
+                            <button type="button" onclick={() => pickOperation('file')}>{app.t('scripts.pickFile', 'Archivo…')}</button>
+                            <button type="button" onclick={() => pickOperation('folder')}>{app.t('scripts.pickFolder', 'Carpeta…')}</button>
+                            <button
+                                type="button"
+                                disabled={!operationArgs.trim() || running !== '' || !app.activeTabId}
+                                onclick={() => run(tool.script, false, operationArgs)}
+                            >{app.t('scripts.run', 'Ejecutar')}</button>
+                        </div>
+                    {/if}
+                </div>
+            {/each}
+        </section>
     {/if}
 
     {#if loading}
@@ -580,6 +681,136 @@
     .types-options input {
         flex: 0 0 auto;
         margin: 0;
+    }
+
+    .operations {
+        margin: 8px 0;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface));
+    }
+
+    .operations-title {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 7px 8px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text);
+        font-size: 11px;
+        font-weight: 700;
+    }
+
+    .operations-title small {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 400;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .operation-tool {
+        display: grid;
+        grid-template-columns: minmax(105px, auto) 1fr;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 8px;
+    }
+
+    .operation-tool + .operation-tool {
+        border-top: 1px solid var(--border);
+    }
+
+    .operation-name {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        color: var(--text);
+        font-size: 10px;
+        font-weight: 600;
+    }
+
+    .operation-mark {
+        display: grid;
+        width: 17px;
+        height: 17px;
+        place-items: center;
+        border-radius: 4px;
+        background: var(--accent);
+        color: var(--surface);
+        font-size: 9px;
+        font-weight: 800;
+    }
+
+    .operation-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 4px;
+    }
+
+    .operation-actions button {
+        padding: 3px 6px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: inherit;
+        font-size: 9px;
+        cursor: pointer;
+    }
+
+    .operation-actions button:hover:not(:disabled) {
+        border-color: var(--accent);
+    }
+
+    .operation-actions button.advanced {
+        color: var(--accent);
+    }
+
+    .operation-advanced {
+        display: grid;
+        grid-column: 1 / -1;
+        grid-template-columns: minmax(120px, 1fr) auto auto auto;
+        gap: 4px;
+        padding-top: 2px;
+    }
+
+    .operation-advanced input,
+    .operation-advanced button {
+        min-width: 0;
+        padding: 4px 6px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: inherit;
+        font-size: 9px;
+    }
+
+    .operation-advanced button {
+        cursor: pointer;
+    }
+
+    @media (max-width: 420px) {
+        .operation-tool {
+            grid-template-columns: 1fr;
+        }
+
+        .operation-actions {
+            justify-content: flex-start;
+        }
+
+        .operation-advanced {
+            grid-column: 1;
+            grid-template-columns: 1fr auto;
+        }
+
+        .operation-advanced input {
+            grid-column: 1 / -1;
+        }
     }
 
     .group {

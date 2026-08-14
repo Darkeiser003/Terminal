@@ -33,6 +33,10 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "../scripts/containers/docker-manager.sh": "scripts/containers/docker-manager.sh",
+      "../scripts/containers/kubernetes-manager.sh": "scripts/containers/kubernetes-manager.sh"
+    },
     "targets": [
       "nsis"
     ],
