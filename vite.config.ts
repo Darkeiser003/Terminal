@@ -25,6 +25,16 @@ export default defineConfig({
     build: {
         target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
         minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,
-        sourcemap: !!process.env.TAURI_ENV_DEBUG
+        sourcemap: !!process.env.TAURI_ENV_DEBUG,
+        // xterm y sus addons son la parte más pesada y solo los necesita la
+        // vista de terminal. Separarlos permite que el código de paneles y
+        // configuración tenga su propio caché y evita un único chunk enorme.
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    terminal: ['@xterm/xterm', '@xterm/addon-fit']
+                }
+            }
+        }
     }
 });

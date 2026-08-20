@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "LTerminal",
+        "title": "WinSlim Terminal",
         "width": 980,
         "height": 640,
         "minWidth": 480,
@@ -35,7 +35,17 @@
     "active": true,
     "resources": {
       "../scripts/containers/docker-manager.sh": "scripts/containers/docker-manager.sh",
-      "../scripts/containers/kubernetes-manager.sh": "scripts/containers/kubernetes-manager.sh"
+      "../scripts/containers/kubernetes-manager.sh": "scripts/containers/kubernetes-manager.sh",
+      "../scripts/operations/docker-manager.ps1": "scripts/operations/docker-manager.ps1",
+      "../scripts/operations/kubernetes-manager.ps1": "scripts/operations/kubernetes-manager.ps1",
+      "../scripts/operations/ssh-manager.sh": "scripts/operations/ssh-manager.sh",
+      "../scripts/operations/service-manager.sh": "scripts/operations/service-manager.sh",
+      "../scripts/operations/network-manager.sh": "scripts/operations/network-manager.sh",
+      "../scripts/operations/adb-manager.sh": "scripts/operations/adb-manager.sh",
+      "../scripts/operations/ssh-manager.ps1": "scripts/operations/ssh-manager.ps1",
+      "../scripts/operations/service-manager.ps1": "scripts/operations/service-manager.ps1",
+      "../scripts/operations/network-manager.ps1": "scripts/operations/network-manager.ps1",
+      "../scripts/operations/adb-manager.ps1": "scripts/operations/adb-manager.ps1"
     },
     "targets": [
       "nsis"

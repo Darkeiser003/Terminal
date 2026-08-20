@@ -1,4 +1,4 @@
-//! WinSlim Terminal / LTerminal — backend.
+//! LTerminal / WinSlim Terminal — backend.
 //!
 //! Migración de `electron/main.js` (Electron + node-pty) a Tauri 2 + Rust.
 //! Cada módulo anota de qué archivo de la versión anterior viene, para poder
@@ -71,6 +71,25 @@ pub fn run() {
     let startup_started = Instant::now();
     let migration_started = Instant::now();
     migrate_local_data();
+    if let Some(profile) = commands::profile_import_argument() {
+        match commands::import_profile_file(&profile) {
+            Ok(_) => log_info!(
+                "Perfil portable importado antes del arranque",
+                serde_json::json!({ "path": profile.to_string_lossy() })
+            ),
+            Err(error) => {
+                eprintln!("No se pudo importar el perfil portable: {error}");
+                log_error!(
+                    "No se pudo importar el perfil portable antes del arranque",
+                    serde_json::json!({
+                        "path": profile.to_string_lossy(),
+                        "error": error,
+                    })
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     let migration_ms = migration_started.elapsed().as_millis();
     system_info::prewarm_hardware_info();
 
@@ -121,6 +140,7 @@ pub fn run() {
             commands::pty_input,
             commands::internal_command_parse,
             commands::pty_resize,
+            commands::pty_refresh_banner,
             commands::env_list,
             commands::env_refresh,
             commands::env_switch,

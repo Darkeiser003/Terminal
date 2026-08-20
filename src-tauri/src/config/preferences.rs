@@ -607,7 +607,7 @@ mod tests {
             "language": "xx"
         }));
         assert_eq!(prefs.theme_id, "silver");
-        assert_eq!(prefs.terminal_font_family, "system-mono");
+        assert_eq!(prefs.terminal_font_family, "ubuntu-mono");
         assert_eq!(prefs.ui_density, "comfortable");
         assert_eq!(prefs.language, "auto");
     }
@@ -647,7 +647,7 @@ mod tests {
         // Una entrada que no sea booleana conserva el valor de fábrica...
         assert!(!prefs.auto_start_docker);
         assert!(!prefs.show_system_banner);
-        assert!(prefs.copy_on_select);
+        assert!(!prefs.copy_on_select);
         assert!(prefs.auto_open_first_group);
     }
 
@@ -676,7 +676,7 @@ mod tests {
     fn el_json_conserva_los_nombres_de_la_version_electron() {
         let text = serde_json::to_string(&Preferences::default()).unwrap();
         let parsed: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["terminalFontSize"], json!(13));
+        assert_eq!(parsed["terminalFontSize"], json!(12));
         assert_eq!(parsed["scriptsHereDepth"], json!(3));
         assert_eq!(parsed["viewportRows"], json!(24));
         assert_eq!(parsed["showDependenciesPanel"], json!(true));

@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title LTerminal - Build
+title WinSlim Terminal - Build
 
 REM Envoltorio para poder compilar con doble clic desde el explorador.
 REM Todo el trabajo lo hace build.ps1; aqui solo se comprueba que PowerShell
@@ -22,7 +22,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Compilando LTerminal (Tauri + Rust)...
+echo Compilando WinSlim Terminal (Tauri + Rust)...
 echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%build.ps1" %*

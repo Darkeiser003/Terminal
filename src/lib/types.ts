@@ -208,6 +208,7 @@ export interface AppInfo {
     owners: string[];
     /** Creadores y responsables de la dirección del proyecto. */
     projectLeads: string[];
+    collaborators: { login: string; role: string }[];
     /** Dónde vive `settings.json`. */
     settingsPath: string;
 }
@@ -218,7 +219,7 @@ export interface AppInfo {
  *  archivo sin extensión con shebang `#!/bin/bash` es `shell`. */
 export type ScriptType =
     | 'powershell' | 'batch' | 'shell' | 'fish' | 'python' | 'node'
-    | 'vbscript' | 'ruby' | 'php' | 'perl' | 'lua' | 'rscript'
+    | 'vbscript' | 'ruby' | 'php' | 'perl' | 'lua' | 'rscript' | 'sql'
     | 'autohotkey' | 'registry' | 'linuxpackage'
     | 'program' | 'html' | 'image' | 'audio' | 'video' | 'other';
 
@@ -227,7 +228,7 @@ export type ScriptType =
 export type FileCategory =
     | 'batch' | 'powershell' | 'shell' | 'fish' | 'python' | 'node'
     | 'vbscript' | 'other-script' | 'autohotkey' | 'registry' | 'linux-package'
-    | 'program' | 'html' | 'image' | 'audio' | 'video';
+    | 'program' | 'html' | 'image' | 'audio' | 'video' | 'database';
 
 export interface ScriptEntry {
     name: string;

@@ -33,9 +33,125 @@
     let running = $state('');
     let operationArgsFor = $state('');
     let operationArgs = $state('');
+    let windowsAppPath = $state('');
+
+    type FilterLeaf = {
+        id: string;
+        label: string;
+        scan: string;
+        extensions: string[];
+        allowNoExtension?: boolean;
+    };
+    type FilterGroup = {
+        id: string;
+        label: string;
+        description: string;
+        children?: FilterLeaf[];
+        subgroups?: FilterGroup[];
+    };
+
+    // La categoría que se envía al backend sigue siendo amplia para no hacer
+    // cientos de recorridos del disco. Los subtipos se filtran aquí por
+    // extensión, de modo que desactivar Zsh realmente oculta solo .zsh sin
+    // perder los demás scripts Linux.
+    const FILTER_GROUPS: FilterGroup[] = [
+        {
+            id: 'linux-scripts',
+            label: 'Scripts Linux',
+            description: 'Scripts POSIX y Fish; cada intérprete se puede activar por separado.',
+            subgroups: [
+                {
+                    id: 'linux-posix',
+                    label: 'POSIX · SH, Bash, Zsh y Ksh',
+                    description: 'Scripts de shell compatibles con la familia POSIX.',
+                    children: [
+                        { id: 'linux-sh', label: 'SH / Bash', scan: 'shell', extensions: ['.sh', '.bash'], allowNoExtension: true },
+                        { id: 'linux-zsh', label: 'Zsh', scan: 'shell', extensions: ['.zsh'] },
+                        { id: 'linux-ksh', label: 'Ksh', scan: 'shell', extensions: ['.ksh'] }
+                    ]
+                },
+                { id: 'linux-fish', label: 'Fish', description: 'Scripts propios de Fish.', children: [{ id: 'linux-fish-script', label: 'Fish', scan: 'fish', extensions: ['.fish'] }] }
+            ]
+        },
+        {
+            id: 'packages',
+            label: 'Paquetes y ejecutables',
+            description: 'Paquetes Linux, programas Windows, Java y binarios sin extensión.',
+            subgroups: [
+                { id: 'packages-debian', label: 'Linux · Debian / Ubuntu', description: 'Paquetes APT en formato Debian.', children: [{ id: 'packages-deb', label: 'Debian (.deb, .udeb)', scan: 'linux-package', extensions: ['.deb', '.udeb'] }] },
+                { id: 'packages-rpm', label: 'Linux · RPM', description: 'Paquetes de Fedora, RHEL, openSUSE y compatibles.', children: [{ id: 'packages-rpm-file', label: 'RPM (.rpm)', scan: 'linux-package', extensions: ['.rpm'] }] },
+                { id: 'packages-portable', label: 'Linux · portables', description: 'Aplicaciones autocontenidas o instaladores ejecutables.', children: [{ id: 'packages-portable-file', label: 'AppImage / Run / Ebuild', scan: 'linux-package', extensions: ['.appimage', '.run', '.ebuild'] }, { id: 'packages-arch-file', label: 'Arch / paquetes comprimidos', scan: 'linux-package', extensions: ['.pkg.tar.zst', '.pkg.tar.xz', '.txz'] }] },
+                { id: 'packages-sandbox', label: 'Linux · sandbox y otros', description: 'Flatpak, Snap, APK y formatos de distribución adicionales.', children: [{ id: 'packages-sandbox-file', label: 'Flatpak / Snap', scan: 'linux-package', extensions: ['.flatpak', '.flatpakref', '.flatpakrepo', '.snap'] }, { id: 'packages-other-file', label: 'APK / XBPS / EOPKG / PET / SFS', scan: 'linux-package', extensions: ['.apk', '.xbps', '.eopkg', '.pet', '.sfs'] }] },
+                { id: 'packages-windows', label: 'Windows · ejecutables', description: 'Programas y paquetes instalables de Windows.', children: [{ id: 'packages-windows-file', label: 'EXE / COM / MSI / MSIX', scan: 'program', extensions: ['.exe', '.com', '.msi', '.msix', '.msixbundle'] }] },
+                { id: 'packages-java', label: 'Java · aplicaciones', description: 'Aplicaciones Java empaquetadas.', children: [{ id: 'packages-java-file', label: 'JAR', scan: 'program', extensions: ['.jar'] }] },
+                { id: 'packages-binary', label: 'Binarios sin extensión', description: 'Ejecutables detectados por permisos o cabecera.', children: [{ id: 'packages-binary-file', label: 'Sin extensión', scan: 'program', extensions: [], allowNoExtension: true }] }
+            ]
+        },
+        {
+            id: 'windows-scripts',
+            label: 'Scripts Windows',
+            description: 'CMD, PowerShell y automatización de Windows.',
+            subgroups: [
+                { id: 'windows-cmd', label: 'CMD / Batch', description: 'Archivos de comandos clásicos de Windows.', children: [{ id: 'windows-cmd-file', label: 'CMD / BAT', scan: 'batch', extensions: ['.cmd', '.bat'] }] },
+                { id: 'windows-powershell', label: 'PowerShell', description: 'Scripts, módulos y manifiestos de PowerShell.', children: [{ id: 'windows-powershell-file', label: 'PS1 / PSM1 / PSD1', scan: 'powershell', extensions: ['.ps1', '.psm1', '.psd1'] }] },
+                { id: 'windows-automation', label: 'Automatización', description: 'AutoHotkey y VBScript.', children: [{ id: 'windows-ahk', label: 'AutoHotkey', scan: 'autohotkey', extensions: ['.ahk'] }, { id: 'windows-vbs', label: 'VBScript', scan: 'vbscript', extensions: ['.vbs'] }] },
+                { id: 'windows-registry', label: 'Registro', description: 'Archivos de modificación del Registro.', children: [{ id: 'windows-reg', label: 'REG', scan: 'registry', extensions: ['.reg'] }] }
+            ]
+        },
+        {
+            id: 'languages',
+            label: 'Lenguajes y datos',
+            description: 'Código fuente, web, configuración y bases de datos.',
+            subgroups: [
+                { id: 'lang-python', label: 'Python', description: 'Scripts y módulos Python.', children: [{ id: 'lang-python-file', label: 'PY', scan: 'python', extensions: ['.py'] }] },
+                { id: 'lang-js-ts', label: 'JavaScript / TypeScript', description: 'Node.js, JavaScript, JSX y TypeScript.', children: [{ id: 'lang-js-ts-file', label: 'JS / MJS / CJS / TS / TSX / JSX', scan: 'node', extensions: ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx'] }] },
+                { id: 'lang-ruby-php', label: 'Ruby / PHP', description: 'Scripts de Ruby y PHP.', children: [{ id: 'lang-ruby-php-file', label: 'RB / PHP', scan: 'other-script', extensions: ['.rb', '.php'] }] },
+                { id: 'lang-perl-lua-r', label: 'Perl / Lua / R', description: 'Scripts de Perl, Lua y R.', children: [{ id: 'lang-perl-lua-r-file', label: 'PL / LUA / R', scan: 'other-script', extensions: ['.pl', '.lua', '.r'] }] },
+                { id: 'lang-groovy', label: 'Groovy', description: 'Scripts de Groovy.', children: [{ id: 'lang-groovy-file', label: 'GROOVY', scan: 'other-script', extensions: ['.groovy'] }] },
+                { id: 'lang-sql', label: 'SQL y bases de datos', description: 'SQL, SQLite y archivos asociados a motores de bases de datos.', children: [{ id: 'lang-sql-file', label: 'SQL / SQLite / DB / MySQL / PostgreSQL', scan: 'database', extensions: ['.sql', '.sqlite', '.sqlite2', '.sqlite3', '.db', '.mysql', '.pgsql', '.psql', '.mariadb'] }] },
+                { id: 'lang-web', label: 'Web', description: 'Contenido HTML, CSS, XML y hojas de estilo.', children: [{ id: 'lang-web-file', label: 'HTML / HTM / CSS / SCSS / LESS / XML / XSL', scan: 'html', extensions: ['.html', '.htm', '.css', '.scss', '.less', '.xml', '.xsl'] }] },
+                { id: 'lang-config', label: 'Configuración y documentación', description: 'JSON, YAML, TOML, INI, Markdown y configuración.', children: [{ id: 'lang-config-file', label: 'JSON / JSONC / YAML / YML / TOML / INI / CONF / ENV / MD', scan: 'html', extensions: ['.json', '.jsonc', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env', '.md', '.markdown', '.properties'] }] }
+            ]
+        },
+        {
+            id: 'media',
+            label: 'Recursos multimedia',
+            description: 'Imágenes, audio y vídeo; se abren con el visor del sistema.',
+            subgroups: [
+                { id: 'media-images', label: 'Imágenes', description: 'Formatos gráficos.', children: [{ id: 'media-images-file', label: 'PNG / JPG / GIF / WEBP / SVG / ICO', scan: 'image', extensions: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico'] }] },
+                { id: 'media-audio', label: 'Audio', description: 'Formatos de sonido.', children: [{ id: 'media-audio-file', label: 'MP3 / WAV / FLAC / OGG / M4A / AAC / OPUS', scan: 'audio', extensions: ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.opus'] }] },
+                { id: 'media-video', label: 'Vídeo', description: 'Formatos de vídeo.', children: [{ id: 'media-video-file', label: 'MP4 / MKV / WEBM / AVI / MOV / M4V / WMV', scan: 'video', extensions: ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v', '.wmv'] }] }
+            ]
+        }
+    ];
+
+    function leavesOf(group: FilterGroup): FilterLeaf[] {
+        if (group.subgroups) return group.subgroups.flatMap(leavesOf);
+        return group.children ?? [];
+    }
+
+    const FILTER_LEAVES = FILTER_GROUPS.flatMap(leavesOf);
+    const autoOpenFirst = $derived(app.preferences?.autoOpenFirstGroup ?? false);
+    const exclusiveGroups = $derived(app.preferences?.exclusiveAccordionGroups ?? false);
+    // Los subtipos no se abren en cascada aunque esté activa la opción de
+    // abrir la primera lista: esa opción solo afecta al primer acordeón
+    // principal del panel (Tipos de archivo).
+    let openFilterGroups = $state<string[]>([]);
+
+    function defaultFilterIds(filters: { id: string; default: boolean }[]): string[] {
+        const defaults = new Set(filters.filter((filter) => filter.default).map((filter) => filter.id));
+        return FILTER_LEAVES.filter((filter) => defaults.has(filter.scan)).map((filter) => filter.id);
+    }
 
     type OperationAction = { label: string; args: string; title: string };
-    type OperationTool = { script: ScriptEntry; kind: 'docker' | 'kubernetes'; actions: OperationAction[] };
+    type OperationKind = 'docker' | 'kubernetes' | 'ssh' | 'services' | 'network' | 'adb';
+    type OperationTool = {
+        script: ScriptEntry;
+        kind: OperationKind;
+        label: string;
+        mark: string;
+        actions: OperationAction[];
+    };
 
     const NIVELES = [0, 1, 2, 3, 4, 5, 6, 8, 10];
 
@@ -44,13 +160,15 @@
         loading = true;
         statusError = false;
         try {
-            const categories = selected ?? undefined;
+            const categories = selected === null
+                ? undefined
+                : [...new Set(FILTER_LEAVES.filter((filter) => selected?.includes(filter.id)).map((filter) => filter.scan))];
             data =
                 mode === 'here' && app.activeTabId
                     ? await api.listScriptsHere(app.activeTabId, categories, depth)
                     : await api.listScripts(categories);
             if (selected === null) {
-                selected = data.filters.filter((f) => f.default).map((f) => f.id);
+                selected = defaultFilterIds(data.filters);
             }
             if (data.depth !== undefined) depth = data.depth;
         } catch (cause) {
@@ -74,6 +192,56 @@
         void applyTypes(on ? [...actual, id] : actual.filter((value) => value !== id));
     }
 
+    function toggleGroup(group: FilterGroup): void {
+        const actual = selected ?? [];
+        const leaves = leavesOf(group);
+        const allSelected = leaves.every((filter) => actual.includes(filter.id));
+        const next = allSelected
+            ? actual.filter((id) => !leaves.some((filter) => filter.id === id))
+            : [...new Set([...actual, ...leaves.map((filter) => filter.id)])];
+        void applyTypes(next);
+    }
+
+    function toggleFilterGroupOpen(id: string, siblingIds: string[]): void {
+        openFilterGroups = openFilterGroups.includes(id)
+            ? openFilterGroups.filter((value) => value !== id)
+            : exclusiveGroups
+                ? [...openFilterGroups.filter((value) => !siblingIds.includes(value)), id]
+                : [...openFilterGroups, id];
+    }
+
+    /** Los detalles de resultados y filtros comparten el mismo acordeón del
+     *  panel. La preferencia solo cierra hermanos directos: abrir un subtipo
+     *  no puede cerrar el apartado padre que lo contiene. */
+    function onDetailsToggle(event: Event): void {
+        const details = event.currentTarget as HTMLDetailsElement;
+        if (!details.open || !exclusiveGroups) return;
+        const parent = details.parentElement;
+        if (!parent) return;
+        for (const other of parent.children) {
+            if (other !== details && other instanceof HTMLDetailsElement) other.open = false;
+        }
+    }
+
+    function groupSelectedCount(group: FilterGroup): number {
+        return leavesOf(group).filter((filter) => selected?.includes(filter.id)).length;
+    }
+
+    function filterTitle(filter: FilterLeaf): string {
+        return filter.extensions.length
+            ? `Extensiones incluidas: ${filter.extensions.join(', ')}`
+            : 'Incluye archivos ejecutables sin extensión';
+    }
+
+    function typeMatches(script: ScriptEntry): boolean {
+        if (selected === null) return true;
+        const selectedTypes = selected;
+        return FILTER_LEAVES.some((filter) => {
+            if (!selectedTypes.includes(filter.id) || filter.scan !== script.category) return false;
+            return filter.extensions.includes(script.ext) || (filter.allowNoExtension === true && script.ext === '');
+        });
+    }
+
     /** El filtro de texto es local sobre el último escaneo: en «Aquí» volver al
      *  disco por cada tecla costaría segundos. */
     function matches(script: ScriptEntry): boolean {
@@ -85,21 +253,28 @@
             .includes(needle);
     }
 
-    const visible = $derived((data?.scripts ?? []).filter(matches));
+    const visible = $derived((data?.scripts ?? []).filter(typeMatches).filter(matches));
 
     /** Los gestores incluidos por LTerminal conservan su CLI normal, pero se
      *  reconocen para ofrecer las consultas habituales sin memorizar flags.
      *  Las acciones destructivas se dejan en el modo avanzado del propio
      *  script, donde siguen pasando por su confirmación. */
     const operationTools = $derived.by((): OperationTool[] => {
+        // Las operaciones rápidas pertenecen a la Biblioteca: en «Ruta
+        // actual» se muestran los scripts encontrados, no utilidades globales
+        // repetidas. Así cada pestaña conserva un único lugar para Docker y
+        // Kubernetes.
+        if (mode !== 'library') return [];
         const tools: OperationTool[] = [];
         const seen = new Set<string>();
         for (const script of [...visible, ...(data?.pinned ?? [])]) {
             if (seen.has(script.path) || !script.runnable) continue;
-            if (script.name === 'docker-manager.sh') {
+            if (script.name === 'docker-manager.sh' || script.name === 'docker-manager.ps1') {
                 tools.push({
                     script,
                     kind: 'docker',
+                    label: 'Docker Compose',
+                    mark: 'D',
                     actions: [
                         { label: app.t('scripts.operation.status', 'Resumen'), args: 'status', title: app.t('scripts.operation.dockerStatus', 'Ver el estado global de Docker') },
                         { label: app.t('scripts.operation.containers', 'Contenedores'), args: 'containers', title: app.t('scripts.operation.dockerContainers', 'Listar todos los contenedores') },
@@ -108,10 +283,12 @@
                     ]
                 });
                 seen.add(script.path);
-            } else if (script.name === 'kubernetes-manager.sh') {
+            } else if (script.name === 'kubernetes-manager.sh' || script.name === 'kubernetes-manager.ps1') {
                 tools.push({
                     script,
                     kind: 'kubernetes',
+                    label: 'Kubernetes',
+                    mark: 'K',
                     actions: [
                         { label: app.t('scripts.operation.pods', 'Pods'), args: 'status', title: app.t('scripts.operation.kubernetesStatus', 'Ver pods del namespace default') },
                         { label: app.t('scripts.operation.contexts', 'Contextos'), args: 'contexts', title: app.t('scripts.operation.contextsTitle', 'Listar contextos de Kubernetes') },
@@ -119,13 +296,97 @@
                     ]
                 });
                 seen.add(script.path);
+            } else if (script.name === 'ssh-manager.sh' || script.name === 'ssh-manager.ps1') {
+                tools.push({
+                    script,
+                    kind: 'ssh',
+                    label: 'SSH y acceso remoto',
+                    mark: 'S',
+                    actions: [
+                        { label: app.t('scripts.operation.connect', 'Conectar'), args: 'connect', title: 'Conectar a un host SSH guardado o introducir uno nuevo' },
+                        { label: app.t('scripts.operation.hosts', 'Hosts'), args: 'hosts', title: 'Listar los hosts guardados en la configuración SSH' },
+                        { label: app.t('scripts.operation.network', 'IPs / VPN'), args: 'network', title: 'Ver IPs, Tailscale, WireGuard y conexiones activas' }
+                    ]
+                });
+                seen.add(script.path);
+            } else if (script.name === 'service-manager.sh' || script.name === 'service-manager.ps1') {
+                tools.push({
+                    script,
+                    kind: 'services',
+                    label: 'Servicios',
+                    mark: '⚙',
+                    actions: [
+                        { label: app.t('scripts.operation.status', 'Estado'), args: 'status', title: 'Ver servicios activos y fallidos' },
+                        { label: app.t('scripts.operation.restart', 'Reiniciar'), args: 'restart', title: 'Elegir y reiniciar un servicio' },
+                        { label: app.t('scripts.operation.logs', 'Logs'), args: 'logs', title: 'Ver los últimos logs o eventos del servicio' }
+                    ]
+                });
+                seen.add(script.path);
+            } else if (script.name === 'network-manager.sh' || script.name === 'network-manager.ps1') {
+                tools.push({
+                    script,
+                    kind: 'network',
+                    label: 'Red y VPN',
+                    mark: 'N',
+                    actions: [
+                        { label: app.t('scripts.operation.interfaces', 'Interfaces'), args: 'interfaces', title: 'Ver interfaces, direcciones y rutas' },
+                        { label: app.t('scripts.operation.vpn', 'VPN'), args: 'vpn', title: 'Consultar Tailscale, WireGuard, OpenVPN y VPN del sistema' }
+                    ]
+                });
+                seen.add(script.path);
+            } else if (script.name === 'adb-manager.sh' || script.name === 'adb-manager.ps1') {
+                tools.push({
+                    script,
+                    kind: 'adb',
+                    label: 'Android · ADB',
+                    mark: 'A',
+                    actions: [
+                        { label: app.t('scripts.operation.devices', 'Dispositivos'), args: 'devices', title: 'Listar dispositivos y emuladores ADB' },
+                        { label: app.t('scripts.operation.restartAdb', 'Reiniciar ADB'), args: 'restart', title: 'Reiniciar el servidor ADB y volver a detectar dispositivos' },
+                        { label: app.t('scripts.operation.shell', 'Shell'), args: 'shell', title: 'Abrir una shell en el dispositivo elegido' }
+                    ]
+                });
+                seen.add(script.path);
             }
         }
         return tools;
     });
+
+    const windowsCompatibilityQuickAction = $derived(
+        app.appInfo?.platform === 'linux' && app.environments.some((environment) => environment.id === 'wine-cmd')
+    );
+
+    async function runWindowsApplication(): Promise<void> {
+        const tabId = app.activeTabId;
+        const path = windowsAppPath.replace(/[\r\n]/g, '').trim();
+        if (!tabId || !path || running) return;
+        const quotedPath = `'${path.replaceAll("'", "'\\''")}'`;
+        const command = /\.msi$/i.test(path)
+            ? `wine msiexec /i ${quotedPath}`
+            : `wine start /unix ${quotedPath}`;
+        running = '__windows-compatibility__';
+        statusError = false;
+        try {
+            await api.sendInput(tabId, `${command}\r`);
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        } finally {
+            running = '';
+        }
+    }
+
+    function operationPlaceholder(kind: OperationKind): string {
+        if (kind === 'docker') return app.t('scripts.operation.dockerPlaceholder', 'Ej.: logs --follow nginx · compose up --build');
+        if (kind === 'kubernetes') return app.t('scripts.operation.kubernetesPlaceholder', 'Ej.: -n staging logs --follow api-abc123');
+        if (kind === 'ssh') return 'Ej.: connect usuario@servidor · hosts · network';
+        if (kind === 'services') return 'Ej.: status · restart docker.service · logs ssh.service';
+        if (kind === 'network') return 'Ej.: interfaces · vpn';
+        return 'Ej.: devices · restart · shell';
+    }
     // Los anclados forman la vista Favoritos. En Ruta actual solo deben verse
     // los resultados de esa carpeta para no mezclar dos ámbitos distintos.
-    const pinned = $derived(mode === 'library' ? (data?.pinned ?? []).filter(matches) : []);
+    const pinned = $derived(mode === 'library' ? (data?.pinned ?? []).filter(typeMatches).filter(matches) : []);
     const pinnedPaths = $derived(new Set((data?.pinned ?? []).map((s) => s.path)));
 
     /** Agrupado por origen y carpeta, y dentro de cada grupo por extensión y
@@ -208,17 +469,6 @@
         }
     }
 
-    async function pick(mode: 'file' | 'folder'): Promise<void> {
-        const chosen = await api.pickTarget(mode);
-        // Entrecomillado: casi todas las rutas que alguien elige a mano tienen
-        // espacios, y sin comillas el script recibiría dos argumentos.
-        if (chosen) args = `"${chosen}"`;
-    }
-
-    async function pickOperation(mode: 'file' | 'folder'): Promise<void> {
-        const chosen = await api.pickTarget(mode);
-        if (chosen) operationArgs = `"${chosen}"`;
-    }
 </script>
 
 <Panel
@@ -314,48 +564,147 @@
     </div>
 
     {#if data}
-        <details class="types" open>
+        <details class="types" open={autoOpenFirst} ontoggle={onDetailsToggle}>
             <summary>
                 {app.t('scripts.fileTypes', 'Tipos de archivo')}
-                <span class="count">{(selected ?? []).length}/{data.filters.length}</span>
+                <span class="count">{(selected ?? []).length}/{FILTER_LEAVES.length}</span>
             </summary>
             <div class="types-toolbar">
-                <button type="button" onclick={() => applyTypes(data!.filters.filter((f) => f.default).map((f) => f.id))}>
+                <button type="button" onclick={() => applyTypes(defaultFilterIds(data!.filters))}>
                     {app.t('scripts.typesDefaults', 'Scripts')}
                 </button>
-                <button type="button" onclick={() => applyTypes(data!.filters.map((f) => f.id))}>
+                <button type="button" onclick={() => applyTypes(FILTER_LEAVES.map((filter) => filter.id))}>
                     {app.t('scripts.typesAll', 'Todos')}
                 </button>
                 <button type="button" onclick={() => applyTypes([])}>
                     {app.t('scripts.typesNone', 'Ninguno')}
                 </button>
             </div>
-            <div class="types-options">
-                {#each data.filters as filter (filter.id)}
-                    <label>
-                        <input
-                            type="checkbox"
-                            checked={(selected ?? []).includes(filter.id)}
-                            onchange={(event) => toggleType(filter.id, event.currentTarget.checked)}
-                        />
-                        <span>{app.t(`scripts.filter.${filter.id}`, filter.label)}</span>
-                    </label>
+            <div class="filter-groups">
+                {#each FILTER_GROUPS as group (group.id)}
+                    <section class="filter-group">
+                        <div class="filter-group-header">
+                            <button
+                                type="button"
+                                class="filter-group-name"
+                                title={group.description}
+                                onclick={() => toggleGroup(group)}
+                            >
+                                <span>{group.label}</span>
+                                <small>{group.description}</small>
+                            </button>
+                            <button
+                                type="button"
+                                class="filter-group-expand"
+                                title={app.t('scripts.typesSubtypes', 'Mostrar u ocultar los subtipos')}
+                                onclick={() => toggleFilterGroupOpen(group.id, FILTER_GROUPS.map((item) => item.id))}
+                            >
+                                {groupSelectedCount(group)}/{leavesOf(group).length}
+                                {openFilterGroups.includes(group.id) ? '⌃' : '⌄'}
+                            </button>
+                        </div>
+                        {#if openFilterGroups.includes(group.id)}
+                            {#if group.subgroups}
+                                <div class="filter-subgroups">
+                                    {#each group.subgroups as subgroup (subgroup.id)}
+                                        <section class="filter-subgroup">
+                                            <div class="filter-group-header">
+                                                <button
+                                                    type="button"
+                                                    class="filter-group-name"
+                                                    title={subgroup.description}
+                                                    onclick={() => toggleGroup(subgroup)}
+                                                >
+                                                    <span>{subgroup.label}</span>
+                                                    <small>{subgroup.description}</small>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    class="filter-group-expand"
+                                                    title={app.t('scripts.typesExtensions', 'Mostrar u ocultar extensiones')}
+                                                    onclick={() => toggleFilterGroupOpen(
+                                                        subgroup.id,
+                                                        group.subgroups?.map((item) => item.id) ?? [subgroup.id]
+                                                    )}
+                                                >
+                                                    {groupSelectedCount(subgroup)}/{leavesOf(subgroup).length}
+                                                    {openFilterGroups.includes(subgroup.id) ? '⌃' : '⌄'}
+                                                </button>
+                                            </div>
+                                            {#if openFilterGroups.includes(subgroup.id)}
+                                                <div class="types-options">
+                                                    {#each leavesOf(subgroup) as filter (filter.id)}
+                                                        <label title={filterTitle(filter)}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={(selected ?? []).includes(filter.id)}
+                                                                onchange={(event) => toggleType(filter.id, event.currentTarget.checked)}
+                                                            />
+                                                            <span>{filter.label}</span>
+                                                        </label>
+                                                    {/each}
+                                                </div>
+                                            {/if}
+                                        </section>
+                                    {/each}
+                                </div>
+                            {:else}
+                                <div class="types-options">
+                                    {#each leavesOf(group) as filter (filter.id)}
+                                        <label title={filterTitle(filter)}>
+                                            <input
+                                                type="checkbox"
+                                                checked={(selected ?? []).includes(filter.id)}
+                                                onchange={(event) => toggleType(filter.id, event.currentTarget.checked)}
+                                            />
+                                            <span>{filter.label}</span>
+                                        </label>
+                                    {/each}
+                                </div>
+                            {/if}
+                        {/if}
+                    </section>
                 {/each}
             </div>
         </details>
     {/if}
 
-    {#if operationTools.length}
-        <section class="operations" aria-label={app.t('scripts.operations', 'Operaciones rápidas')}>
-            <div class="operations-title">
+    {#if operationTools.length || windowsCompatibilityQuickAction}
+        <details class="operations" aria-label={app.t('scripts.operations', 'Operaciones rápidas')} ontoggle={onDetailsToggle}>
+            <summary class="operations-title">
                 <span>{app.t('scripts.operations', 'Operaciones rápidas')}</span>
                 <small>{app.t('scripts.operationsNote', 'Consultas y acciones frecuentes; el comando se mostrará en la terminal.')}</small>
-            </div>
+                <span class="operations-chevron" aria-hidden="true">⌄</span>
+            </summary>
+            {#if windowsCompatibilityQuickAction}
+                <div class="operation-tool">
+                    <span class="operation-name">
+                        <span class="operation-mark">W</span>
+                        {app.t('scripts.operation.windows', 'Aplicaciones Windows')}
+                    </span>
+                    <div class="operation-actions windows-operation">
+                        <input
+                            type="text"
+                            bind:value={windowsAppPath}
+                            placeholder={app.t('scripts.operation.windowsPlaceholder', 'Ej.: /ruta/Aplicacion.exe o instalador.msi')}
+                            title={app.t('scripts.operation.windowsTitle', 'Ruta de un EXE o MSI que se abrirá con Wine')}
+                            disabled={running !== '' || !app.activeTabId}
+                        />
+                        <button
+                            type="button"
+                            class="run-direct"
+                            title={app.t('scripts.operation.windowsRunTitle', 'Abrir la aplicación con Wine sin cambiar tu shell')}
+                            disabled={!windowsAppPath.trim() || running !== '' || !app.activeTabId}
+                            onclick={() => void runWindowsApplication()}
+                        >{app.t('scripts.operation.windowsRun', 'Ejecutar con Wine')}</button>
+                    </div>
+                </div>
+            {/if}
             {#each operationTools as tool (tool.script.path)}
                 <div class="operation-tool">
                     <span class="operation-name">
-                        <span class="operation-mark">{tool.kind === 'docker' ? 'D' : 'K'}</span>
-                        {tool.kind === 'docker' ? 'Docker Compose' : 'Kubernetes'}
+                        <span class="operation-mark">{tool.mark}</span>
+                        {tool.label}
                     </span>
                     <div class="operation-actions">
                         {#each tool.actions as action (action.args)}
@@ -366,6 +715,13 @@
                                 onclick={() => run(tool.script, false, action.args)}
                             >{action.label}</button>
                         {/each}
+                        <button
+                            type="button"
+                            class="run-direct"
+                            title={app.t('scripts.operation.runMenuTitle', 'Ejecutar sin argumentos y abrir el menú interno del script')}
+                            disabled={running !== '' || !app.activeTabId}
+                            onclick={() => run(tool.script, false, '')}
+                        >{app.t('scripts.run', 'Ejecutar')}</button>
                         <button
                             type="button"
                             class="advanced"
@@ -381,12 +737,8 @@
                             <input
                                 type="text"
                                 bind:value={operationArgs}
-                                placeholder={tool.kind === 'docker'
-                                    ? app.t('scripts.operation.dockerPlaceholder', 'Ej.: logs --follow nginx · compose up --build')
-                                    : app.t('scripts.operation.kubernetesPlaceholder', 'Ej.: -n staging logs --follow api-abc123')}
+                                placeholder={operationPlaceholder(tool.kind)}
                             />
-                            <button type="button" onclick={() => pickOperation('file')}>{app.t('scripts.pickFile', 'Archivo…')}</button>
-                            <button type="button" onclick={() => pickOperation('folder')}>{app.t('scripts.pickFolder', 'Carpeta…')}</button>
                             <button
                                 type="button"
                                 disabled={!operationArgs.trim() || running !== '' || !app.activeTabId}
@@ -396,7 +748,7 @@
                     {/if}
                 </div>
             {/each}
-        </section>
+        </details>
     {/if}
 
     {#if loading}
@@ -419,7 +771,7 @@
 
     <!-- Los anclados pertenecen exclusivamente a Favoritos. -->
     {#if pinned.length}
-        <details class="group pinned" open>
+        <details class="group pinned" ontoggle={onDetailsToggle}>
             <summary class="group-title">
                 {app.t('scripts.pinned', 'Anclados')}
                 <span class="count">{pinned.length}</span>
@@ -431,7 +783,7 @@
     {/if}
 
     {#each groups as group (group.name)}
-        <details class="group">
+        <details class="group" ontoggle={onDetailsToggle}>
             <summary class="group-title">
                 {group.name}
                 <span class="count">{group.scripts.length}</span>
@@ -532,12 +884,6 @@
                     bind:value={args}
                     placeholder={app.t('scripts.argsPlaceholder', 'Argumentos (ej. "C:\\ruta\\archivo.txt")')}
                 />
-                <button type="button" onclick={() => pick('file')}>
-                    {app.t('scripts.pickFile', 'Archivo…')}
-                </button>
-                <button type="button" onclick={() => pick('folder')}>
-                    {app.t('scripts.pickFolder', 'Carpeta…')}
-                </button>
                 {#if script.runnable}
                     <button type="button" title={app.t('scripts.runAdminTitle', 'Ejecutar con permisos elevados')} onclick={() => run(script, true)}>
                         {app.t('scripts.runAdmin', 'Admin')}
@@ -661,6 +1007,80 @@
         padding: 0 8px 6px;
     }
 
+    .filter-groups {
+        padding: 0 8px 8px;
+    }
+
+    .filter-group {
+        border-top: 1px solid var(--border);
+    }
+
+    .filter-subgroups {
+        margin-left: 8px;
+        border-left: 1px solid var(--border);
+    }
+
+    .filter-subgroup {
+        padding-left: 7px;
+        border-top: 1px dotted var(--border);
+    }
+
+    .filter-group-header {
+        display: flex;
+        align-items: stretch;
+        gap: 5px;
+        padding: 5px 0;
+    }
+
+    .filter-group-name,
+    .filter-group-expand {
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+    }
+
+    .filter-group-name {
+        display: flex;
+        flex: 1 1 auto;
+        min-width: 0;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1px;
+        padding: 3px 5px;
+        text-align: left;
+    }
+
+    .filter-group-name span {
+        font-size: 11px;
+        font-weight: 700;
+    }
+
+    .filter-group-name small {
+        overflow: hidden;
+        max-width: 100%;
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 400;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .filter-group-name:hover,
+    .filter-group-expand:hover {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+    }
+
+    .filter-group-expand {
+        flex: 0 0 auto;
+        padding: 3px 6px;
+        color: var(--muted);
+        font-size: 10px;
+    }
+
     .types-options {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
@@ -700,6 +1120,25 @@
         color: var(--text);
         font-size: 11px;
         font-weight: 700;
+        cursor: pointer;
+        list-style: none;
+    }
+
+    .operations-title::-webkit-details-marker {
+        display: none;
+    }
+
+    .operations-chevron {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1;
+        transition: transform 120ms ease;
+    }
+
+    .operations[open] .operations-chevron {
+        transform: rotate(180deg);
     }
 
     .operations-title small {
@@ -768,6 +1207,24 @@
 
     .operation-actions button.advanced {
         color: var(--accent);
+    }
+
+    .operation-actions button.run-direct {
+        border-color: var(--accent);
+        color: var(--accent);
+        font-weight: 700;
+    }
+
+    .windows-operation input {
+        min-width: 0;
+        flex: 1 1 180px;
+        padding: 3px 6px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: inherit;
+        font-size: 9px;
     }
 
     .operation-advanced {

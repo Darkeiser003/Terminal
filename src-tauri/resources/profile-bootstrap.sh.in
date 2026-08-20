@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROFILE_REPOSITORY="Darkeiser003/Terminal"
+PROFILE_FILE="${1:-$PWD/LTerminal-profile.lterminal-profile}"
+case "$(uname -s)" in
+    Linux*) ;;
+    *) echo "ERROR: este perfil .sh instala la edición Linux y necesita Linux." >&2; exit 1 ;;
+esac
+mkdir -p "$(dirname "$PROFILE_FILE")"
+cat > "$PROFILE_FILE" <<'WINSLIM_PROFILE_JSON'
+WINSLIM_PROFILE_JSON_BEGIN
+{{PROFILE_JSON}}
+WINSLIM_PROFILE_JSON_END
+WINSLIM_PROFILE_JSON
+# Los marcadores permiten importar también el propio script desde la UI. El
+# archivo entregado a la aplicación contiene únicamente el JSON.
+sed -i '/^WINSLIM_PROFILE_JSON_BEGIN$/d; /^WINSLIM_PROFILE_JSON_END$/d' "$PROFILE_FILE"
+
+find_existing_app() {
+    local candidate
+    for candidate in "$(command -v lterminal 2>/dev/null || true)" \
+        "$HOME/.local/bin/lterminal" \
+        "$HOME/.local/share/lterminal/LTerminal.AppImage" \
+        "$HOME/Applications/LTerminal.AppImage"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+APP_PATH="$(find_existing_app || true)"
+if [ -z "$APP_PATH" ]; then
+    command -v curl >/dev/null 2>&1 || {
+        echo "ERROR: hace falta curl para instalar LTerminal desde GitHub." >&2
+        exit 1
+    }
+    if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+        echo "ERROR: hace falta jq o python3 para leer la release de GitHub." >&2
+        exit 1
+    fi
+    TEMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TEMP_DIR"' EXIT
+    RELEASE_JSON="$TEMP_DIR/release.json"
+    curl --proto '=https' --tlsv1.2 -fsSL \
+        -H 'Accept: application/vnd.github+json' \
+        "https://api.github.com/repos/$PROFILE_REPOSITORY/releases/latest" \
+        -o "$RELEASE_JSON"
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        amd64) ARCH=x86_64 ;;
+        arm64) ARCH=aarch64 ;;
+        x86_64|aarch64) ;;
+        *) echo "ERROR: no hay una release Linux prevista para la arquitectura $ARCH." >&2; exit 1 ;;
+    esac
+    if command -v jq >/dev/null 2>&1; then
+        ASSET_LINE="$(jq -r --arg arch "$ARCH" 'first((.assets[] | select((.name | endswith(".AppImage")) and (.name | contains($arch)))), (.assets[] | select(.name | endswith(".AppImage")))) | [.name, .browser_download_url] | @tsv' "$RELEASE_JSON")"
+    else
+        ASSET_LINE="$(python3 - "$RELEASE_JSON" "$ARCH" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+arch = sys.argv[2]
+assets = [a for a in data.get("assets", []) if a.get("name", "").endswith(".AppImage")]
+assets.sort(key=lambda a: arch not in a.get("name", ""))
+if not assets:
+    raise SystemExit("No hay un AppImage publicado para Linux")
+print(assets[0]["name"] + "\t" + assets[0]["browser_download_url"])
+PY
+        )"
+    fi
+    IFS=$'\t' read -r ASSET_NAME ASSET_URL <<< "$ASSET_LINE"
+    [ -n "${ASSET_NAME:-}" ] && [ -n "${ASSET_URL:-}" ] || {
+        echo "ERROR: GitHub no publicó un AppImage compatible." >&2
+        exit 1
+    }
+    DOWNLOADED="$TEMP_DIR/$ASSET_NAME"
+    curl --proto '=https' --tlsv1.2 -fL --progress-bar "$ASSET_URL" -o "$DOWNLOADED"
+    CHECKSUMS="$TEMP_DIR/SHA256SUMS.txt"
+    if command -v sha256sum >/dev/null 2>&1 && curl --proto '=https' --tlsv1.2 -fsSL \
+        "https://github.com/$PROFILE_REPOSITORY/releases/latest/download/SHA256SUMS.txt" \
+        -o "$CHECKSUMS"; then
+        EXPECTED="$(awk -v file="$ASSET_NAME" '$2 == file { print $1; exit }' "$CHECKSUMS")"
+        ACTUAL="$(sha256sum "$DOWNLOADED" | awk '{ print $1 }')"
+        [ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ] || {
+            echo "ERROR: la huella SHA-256 del AppImage no coincide." >&2
+            exit 1
+        }
+    else
+        echo "AVISO: no se pudo verificar SHA256SUMS.txt; se comprobará que la descarga no esté vacía." >&2
+    fi
+    [ -s "$DOWNLOADED" ] || {
+        echo "ERROR: la descarga del AppImage está vacía." >&2
+        exit 1
+    }
+    INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/lterminal"
+    BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+    mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+    install -m 755 "$DOWNLOADED" "$INSTALL_DIR/$ASSET_NAME"
+    ln -sfn "$INSTALL_DIR/$ASSET_NAME" "$BIN_DIR/lterminal"
+    APP_PATH="$BIN_DIR/lterminal"
+    echo "LTerminal instalado en $INSTALL_DIR."
+fi
+
+echo "Importando configuración y complementos en: $APP_PATH"
+"$APP_PATH" --import-profile "$PROFILE_FILE"
+echo "Perfil aplicado. Incluye preferencias saneadas, temas, opciones de terminal y manifests de plugins."
+echo "No incluye sesiones, tokens, contraseñas, claves privadas ni binarios."

@@ -14,6 +14,17 @@
   {"id":"sicstus","label":"Prolog · SICStus","category":"logic","windowsExe":"sicstus","unixExe":"sicstus","args":[]},
   {"id":"picat","label":"Picat","category":"logic","windowsExe":"picat","unixExe":"picat","args":[]},
   {"id":"logtalk","label":"Logtalk","category":"logic","windowsExe":"logtalk","unixExe":"logtalk","args":[]},
+  {"id":"agda","label":"Agda","category":"functional","windowsExe":"agda","unixExe":"agda","args":[]},
+  {"id":"mercury","label":"Mercury","category":"logic","windowsExe":"mmc","unixExe":"mmc","args":[]},
+  {"id":"purescript","label":"PureScript","category":"functional","windowsExe":"purs","unixExe":"purs","args":["repl"]},
+  {"id":"gambit-scheme","label":"Scheme · Gambit","category":"functional","windowsExe":"gsi","unixExe":"gsi","args":[]},
+  {"id":"gauche","label":"Scheme · Gauche","category":"functional","windowsExe":"gosh","unixExe":"gosh","args":[]},
+  {"id":"chez-scheme","label":"Scheme · Chez","category":"functional","windowsExe":"chez","unixExe":"chez","args":[]},
+  {"id":"chibi-scheme","label":"Scheme · Chibi","category":"functional","windowsExe":"chibi-scheme","unixExe":"chibi-scheme","args":[]},
+  {"id":"supercollider","label":"SuperCollider · sclang","category":"audio","windowsExe":"sclang","unixExe":"sclang","args":[]},
+  {"id":"nix-repl","label":"Nix","category":"systems","windowsExe":"nix","unixExe":"nix","args":["repl"]},
+  {"id":"wolfram","label":"Wolfram Language","category":"scientific","windowsExe":"wolframscript","unixExe":"wolframscript","args":[]},
+  {"id":"matlab","label":"MATLAB","category":"scientific","windowsExe":"matlab","unixExe":"matlab","args":["-nodesktop","-nosplash"]},
   {"id":"smalltalk","label":"Smalltalk · GNU","category":"historic","windowsExe":"gst","unixExe":"gst","args":[]},
   {"id":"postscript","label":"PostScript · Ghostscript","category":"historic","windowsExe":"gswin64c","unixExe":"gs","args":["-q"],"note":"Ghostscript es un intérprete de PostScript; usa quit para salir."}
 ]

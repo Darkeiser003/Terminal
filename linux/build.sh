@@ -57,6 +57,8 @@ SKIP_CHECKS=0
 AUTO_INSTALL=1
 VERSION_OVERRIDE=""
 EXTENDED_TESTS=-1
+INSTALL_E2E_DRIVER=0
+E2E_DRIVER_PATH="${TAURI_NATIVE_DRIVER:-}"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --clean)       CLEAN=1 ;;
@@ -64,7 +66,18 @@ while [ "$#" -gt 0 ]; do
         --skip-checks) SKIP_CHECKS=1 ;;
         --no-install)  AUTO_INSTALL=0 ;;
         --extended-tests) EXTENDED_TESTS=1 ;;
+        --full-tests)     EXTENDED_TESTS=1 ;;
         --no-extended-tests) EXTENDED_TESTS=0 ;;
+        --install-e2e-driver) INSTALL_E2E_DRIVER=1 ;;
+        --e2e-driver)
+            shift
+            if [ "$#" -eq 0 ] || [ -z "$1" ]; then
+                echo "--e2e-driver necesita la ruta a WebKitWebDriver." >&2
+                exit 2
+            fi
+            E2E_DRIVER_PATH="$1"
+            ;;
+        --e2e-driver=*) E2E_DRIVER_PATH="${1#*=}" ;;
         --version)
             shift
             if [ "$#" -eq 0 ] || [ -z "$1" ]; then
@@ -74,7 +87,7 @@ while [ "$#" -gt 0 ]; do
             VERSION_OVERRIDE="$1"
             ;;
         -h|--help)
-            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install] [--extended-tests|--no-extended-tests] [--version X.Y.Z]"
+            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install] [--extended-tests|--full-tests|--no-extended-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
             exit 0
             ;;
         *)
@@ -89,6 +102,33 @@ step() { CURRENT_STEP="$1"; printf '\n\033[36m==> %s\033[0m\n' "$1"; }
 ok()   { printf '    \033[32mOK:\033[0m %s\n' "$1"; }
 warn() { printf '    \033[33mAVISO:\033[0m %s\n' "$1"; }
 err()  { printf '    \033[31mERROR:\033[0m %s\n' "$1" >&2; }
+
+# Tener DISPLAY o WAYLAND_DISPLAY definido no garantiza que esta shell pueda
+# hablar con el servidor gráfico. En contenedores y sesiones remotas las
+# variables suelen heredarse, pero GTK falla después con un panic poco útil.
+# Cuando hay una sonda disponible, valida el acceso antes de arrancar la app o
+# el E2E y deja un diagnóstico accionable.
+graphical_session_available() {
+    if [ -n "${DISPLAY:-}" ]; then
+        if command -v xdpyinfo >/dev/null 2>&1; then
+            timeout 5 xdpyinfo >/dev/null 2>&1
+            return $?
+        fi
+        if command -v xdotool >/dev/null 2>&1; then
+            timeout 5 xdotool getdisplaygeometry >/dev/null 2>&1
+            return $?
+        fi
+        return 0
+    fi
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        if command -v wayland-info >/dev/null 2>&1; then
+            timeout 5 wayland-info >/dev/null 2>&1
+            return $?
+        fi
+        return 0
+    fi
+    return 1
+}
 
 # Con `set -e` un fallo a mitad corta el script sin decir nada más, y en una
 # build de varios minutos no queda claro qué paso se quedó a medias. El
@@ -194,6 +234,98 @@ install_system_dependencies() {
             ;;
     esac
     ok "Dependencias nativas instaladas"
+}
+
+# WebKitGTK y WebKitWebDriver son paquetes distintos. En algunas distribuciones
+# el paquete de desarrollo trae la biblioteca pero elimina el ejecutable del
+# driver, así que no basta con comprobar que WebKitGTK esté instalado. La ruta
+# explícita permite usar un driver compatible descargado por el administrador
+# del sistema o generado desde el mismo WebKitGTK, sin copiar binarios ajenos
+# silenciosamente a la release.
+find_native_e2e_driver() {
+    local candidate
+    if [ -n "${E2E_DRIVER_PATH:-}" ] && [ -x "$E2E_DRIVER_PATH" ]; then
+        printf '%s\n' "$E2E_DRIVER_PATH"
+        return 0
+    fi
+    for candidate in WebKitWebDriver webkit2gtk-driver; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return 0
+        fi
+    done
+    for candidate in \
+        "$HOME/.local/bin/WebKitWebDriver" \
+        "$HOME/.cache/lterminal/e2e/WebKitWebDriver"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+install_e2e_driver() {
+    local manager package
+    manager="$(package_manager)" || {
+        err "No se reconoce el gestor de paquetes para instalar WebKitWebDriver."
+        return 1
+    }
+    warn "Falta WebKitWebDriver; se intentará instalar el paquete nativo del driver con $manager."
+    case "$manager" in
+        apt-get)
+            package=""
+            if apt-cache show webkit2gtk-driver >/dev/null 2>&1; then
+                package="webkit2gtk-driver"
+            elif apt-cache show webkitgtk-webdriver >/dev/null 2>&1; then
+                package="webkitgtk-webdriver"
+            fi
+            [ -n "$package" ] || {
+                err "Los repositorios apt no ofrecen webkit2gtk-driver ni webkitgtk-webdriver."
+                return 1
+            }
+            run_as_root apt-get update
+            run_as_root apt-get install -y --no-install-recommends "$package"
+            ;;
+        dnf)
+            run_as_root dnf install -y webkit2gtk-driver
+            ;;
+        pacman)
+            # En Arch/CachyOS WebKitGTK y WebKitWebDriver suelen vivir en
+            # paquetes distintos. Primero se consulta el repositorio oficial;
+            # solo si no existe allí se ofrece el helper AUR que el usuario
+            # haya elegido al pedir explícitamente --install-e2e-driver.
+            if pacman -Si webkit2gtk-driver >/dev/null 2>&1; then
+                run_as_root pacman -S --needed --noconfirm webkit2gtk-driver
+            elif pacman -Si webkitgtk-webdriver >/dev/null 2>&1; then
+                run_as_root pacman -S --needed --noconfirm webkitgtk-webdriver
+            elif command -v paru >/dev/null 2>&1; then
+                warn "No hay driver oficial; se usará paru para instalar webkit2gtk-driver desde AUR."
+                paru -S --needed webkit2gtk-driver
+            elif command -v yay >/dev/null 2>&1; then
+                warn "No hay driver oficial; se usará yay para instalar webkit2gtk-driver desde AUR."
+                yay -S --needed webkit2gtk-driver
+            else
+                err "Arch no ofrece un driver oficial y no hay paru/yay disponible."
+                return 1
+            fi
+            ;;
+        zypper)
+            run_as_root zypper --non-interactive install -y webkit2gtk-driver || \
+                run_as_root zypper --non-interactive install -y webkit2gtk
+            ;;
+        apk)
+            run_as_root apk add webkit2gtk-webdriver || run_as_root apk add webkit2gtk
+            ;;
+    esac
+    E2E_DRIVER_PATH="$(find_native_e2e_driver || true)"
+    if [ -n "$E2E_DRIVER_PATH" ]; then
+        ok "WebKitWebDriver disponible en $E2E_DRIVER_PATH"
+        return 0
+    fi
+    err "WebKitGTK está instalado, pero no se encontró WebKitWebDriver."
+    err "Usa --e2e-driver /ruta/WebKitWebDriver o instala el paquete webdriver de tu distribución."
+    return 1
 }
 
 ensure_download_tools() {
@@ -564,9 +696,13 @@ mkdir -p "$BUNDLE_OUTPUT" 2>/dev/null || true
 if [ -d "$BUNDLE_OUTPUT" ]; then
     ok "Directorio de salida del bundle: $BUNDLE_OUTPUT"
     # Limpiar para evitar residuos de builds anteriores
-    if [ -d "$BUNDLE_OUTPUT/appimage" ]; then
+    if [ -d "$BUNDLE_OUTPUT/appimage" ] || [ -d "$BUNDLE_OUTPUT/appimage_deb" ]; then
         warn "Eliminando restos de bundling anterior..."
         rm -rf "$BUNDLE_OUTPUT/appimage"
+        # Tauri usa esta carpeta como staging aunque solo se solicite AppImage.
+        # Si se conserva, linuxdeploy puede volver a copiar un binario de otra
+        # plataforma en el AppDir recién creado.
+        rm -rf "$BUNDLE_OUTPUT/appimage_deb"
     fi
 else
     err "No se puede crear el directorio $BUNDLE_OUTPUT. Revisa permisos."
@@ -671,6 +807,32 @@ fi
 # 5. Compilación
 # ---------------------------------------------------------------------------
 step "Compilando el AppImage"
+# Tauri compila el binario Linux en el mismo `target/release` que puede haber
+# usado antes una build de Windows. Si queda un ejecutable antiguo con el
+# identificador de Windows, linuxdeploy lo considera otro binario de la
+# aplicación y lo copia dentro del AppImage. Solo se eliminan estos dos
+# nombres conocidos; nunca se borra el directorio release completo.
+for stale_binary in "$TAURI_DIR/target/release/com.winslim.terminal" \
+    "$TAURI_DIR/target/release/winslim-terminal"; do
+    if [ -e "$stale_binary" ]; then
+        warn "Eliminando artefacto cruzado de Windows antes de empaquetar: $stale_binary"
+        rm -f "$stale_binary"
+    fi
+done
+# El AppDir también sobrevive entre builds. Eliminar los restos conocidos aquí
+# evita que linuxdeploy los vuelva a detectar como binarios o metadata de una
+# build de Windows anterior. No se toca ningún archivo fuente ni el resto del
+# caché de Cargo.
+STALE_APPDIR="$BUNDLE_DIR/LTerminal.AppDir"
+for stale_appdir_file in \
+    "$STALE_APPDIR/usr/bin/com.winslim.terminal" \
+    "$STALE_APPDIR/usr/bin/winslim-terminal" \
+    "$STALE_APPDIR/usr/share/metainfo/com.winslim.terminal.metainfo.xml"; do
+    if [ -e "$stale_appdir_file" ]; then
+        warn "Eliminando resto de Windows del AppDir Linux: $stale_appdir_file"
+        rm -f "$stale_appdir_file"
+    fi
+done
 # linuxdeploy's embedded strip can fail on newer ELF sections such as .relr.dyn.
 # Disable its internal binary stripping and keep the AppImage build compatible.
 export NO_STRIP=1
@@ -688,12 +850,12 @@ if ! env -u APPDIR -u APPIMAGE -u ARGV0 -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRE
     npm run tauri -- build --config "$LINUX_CONF" --verbose; then
     # Tauri 2/linuxdeploy duplica el metadato proporcionado con el nombre del
     # producto (LTerminal.appdata.xml). Su ID sigue siendo el identificador
-    # estable com.winslim.terminal y appimagetool rechaza esa copia por no
+    # estable com.lterminal.terminal y appimagetool rechaza esa copia por no
     # coincidir el nombre del archivo. El metadato canónico ya está incluido;
     # retiramos únicamente la copia generada y reintentamos el empaquetado.
     APPDIR_RECOVERY="$BUNDLE_DIR/LTerminal.AppDir"
     GENERATED_APPDATA="$APPDIR_RECOVERY/usr/share/metainfo/LTerminal.appdata.xml"
-    CANONICAL_APPDATA="$APPDIR_RECOVERY/usr/share/metainfo/com.winslim.terminal.metainfo.xml"
+    CANONICAL_APPDATA="$APPDIR_RECOVERY/usr/share/metainfo/com.lterminal.terminal.metainfo.xml"
     if [ ! -d "$APPDIR_RECOVERY" ] || [ ! -f "$GENERATED_APPDATA" ] || \
         [ ! -f "$CANONICAL_APPDATA" ]; then
         err "Tauri falló antes de crear un AppDir recuperable."
@@ -703,26 +865,66 @@ if ! env -u APPDIR -u APPIMAGE -u ARGV0 -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRE
     rm -f "$GENERATED_APPDATA"
     # Si se cambió mainBinaryName entre builds, linuxdeploy puede conservar el
     # ejecutable previo dentro del AppDir aunque ya no sea el destino de Exec.
+    rm -f "$APPDIR_RECOVERY/usr/bin/com.lterminal.terminal"
     rm -f "$APPDIR_RECOVERY/usr/bin/com.winslim.terminal"
+    rm -f "$APPDIR_RECOVERY/usr/bin/winslim-terminal"
+    rm -f "$APPDIR_RECOVERY/usr/share/metainfo/com.winslim.terminal.metainfo.xml"
     # linuxdeploy puede empaquetar el backend TLS de GIO junto con su propia
     # pila GnuTLS/nettle. En distribuciones rolling esa mezcla se carga además
     # de los módulos del sistema y puede segfaultar antes de mostrar la ventana.
     # GIO conserva su búsqueda normal de módulos del host; retiramos solo la
     # copia privada conflictiva, no el soporte HTTPS de la aplicación.
     rm -f "$APPDIR_RECOVERY/usr/lib/gio/modules/libgiognutls.so"
-    # WebKitGTK intenta usar DMA-BUF incluso con combinaciones NVIDIA/Wayland
-    # que rechazan el buffer; el resultado puede ser una ventana gris aunque
-    # backend, PTY y DOM estén vivos. El usuario aún puede sobrescribirlo con 0.
-    if ! grep -q 'WEBKIT_DISABLE_DMABUF_RENDERER' "$APPDIR_RECOVERY/apprun-hooks/linuxdeploy-plugin-gtk.sh"; then
-        printf '\nexport WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"\n' \
-            >> "$APPDIR_RECOVERY/apprun-hooks/linuxdeploy-plugin-gtk.sh"
-    fi
     if command -v appstreamcli >/dev/null 2>&1; then
         appstreamcli validate --no-net "$CANONICAL_APPDATA"
     fi
-    ARCH="${APPIMAGE_ARCH:-$(uname -m)}" "$APPIMAGETOOL" "$APPDIR_RECOVERY" \
-        "$BUNDLE_DIR/LTerminal_${VERSION}_amd64.AppImage"
 fi
+
+# El hook de GTK forma parte del runtime que el usuario ejecuta, no solo de la
+# comprobación de humo. WebKitGTK intenta usar DMA-BUF en combinaciones de
+# NVIDIA/Wayland que pueden dejar una ventana gris o una PTY sin pintar; se
+# desactiva por defecto y se permite recuperar el comportamiento original con
+# WEBKIT_DISABLE_DMABUF_RENDERER=0. Reempaquetar aquí hace que el resultado sea
+# idéntico tanto si Tauri terminó en su primera pasada como si usó recovery.
+APPDIR="$BUNDLE_DIR/LTerminal.AppDir"
+GTK_HOOK="$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+if [ ! -f "$GTK_HOOK" ]; then
+    err "El AppDir no contiene el hook GTK esperado: $GTK_HOOK"
+    exit 1
+fi
+# linuxdeploy puede copiar el módulo TLS de GIO junto con su propia pila
+# GnuTLS/nettle. En distribuciones rolling esa copia se carga antes que los
+# módulos del sistema y puede cerrar la aplicación durante el arranque. GIO
+# conserva su soporte HTTPS normal usando el módulo del host.
+rm -f "$APPDIR/usr/lib/gio/modules/libgiognutls.so"
+if ! grep -q 'WEBKIT_DISABLE_DMABUF_RENDERER' "$GTK_HOOK"; then
+    printf '\nexport WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"\n' \
+        >> "$GTK_HOOK"
+fi
+# WebKitGTK puede consultar GStreamer durante el arranque aunque LTerminal no
+# reproduzca multimedia. linuxdeploy copia la biblioteca libgstapp, pero no
+# siempre su plugin appsink; incluirlo evita el aviso y mantiene ese soporte
+# autocontenido cuando el AppImage se ejecuta en otro sistema.
+GSTREAMER_PLUGIN_DIR="$(pkg-config --variable=pluginsdir gstreamer-1.0 2>/dev/null || true)"
+if [ -n "$GSTREAMER_PLUGIN_DIR" ] && [ -f "$GSTREAMER_PLUGIN_DIR/libgstapp.so" ]; then
+    mkdir -p "$APPDIR/usr/lib/gstreamer-1.0"
+    cp -f "$GSTREAMER_PLUGIN_DIR/libgstapp.so" "$APPDIR/usr/lib/gstreamer-1.0/libgstapp.so"
+fi
+GSTREAMER_SCANNER="$(command -v gst-plugin-scanner 2>/dev/null || true)"
+if [ -z "$GSTREAMER_SCANNER" ] && [ -x /usr/lib/gstreamer-1.0/gst-plugin-scanner ]; then
+    GSTREAMER_SCANNER=/usr/lib/gstreamer-1.0/gst-plugin-scanner
+fi
+if [ -n "$GSTREAMER_SCANNER" ] && [ -x "$GSTREAMER_SCANNER" ]; then
+    mkdir -p "$APPDIR/usr/lib/gstreamer-1.0"
+    cp -f "$GSTREAMER_SCANNER" "$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner"
+fi
+if [ -x "$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner" ] && \
+    ! grep -q 'GST_PLUGIN_SCANNER' "$GTK_HOOK"; then
+    printf '\nexport GST_PLUGIN_SCANNER="${GST_PLUGIN_SCANNER:-$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner}"\n' \
+        >> "$GTK_HOOK"
+fi
+ARCH="${APPIMAGE_ARCH:-$(uname -m)}" "$APPIMAGETOOL" "$APPDIR" \
+    "$BUNDLE_DIR/LTerminal_${VERSION}_amd64.AppImage"
 
 APPIMAGE="$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)"
 if [ -z "$APPIMAGE" ]; then
@@ -732,6 +934,42 @@ fi
 chmod +x "$APPIMAGE"
 APPIMAGE_MB="$(( $(stat -c '%s' "$APPIMAGE") / 1024 / 1024 ))"
 ok "AppImage: $APPIMAGE (${APPIMAGE_MB} MB)"
+
+# Una release Linux debe tener un único ejecutable nativo y el desktop file
+# debe apuntar a él. Esta comprobación evita que un binario Windows arrastrado
+# de una build anterior quede oculto dentro del AppImage.
+if [ ! -x "$APPDIR/usr/bin/lterminal" ]; then
+    err "El AppDir no contiene el ejecutable Linux esperado: $APPDIR/usr/bin/lterminal"
+    exit 1
+fi
+for forbidden_binary in "$APPDIR/usr/bin/com.winslim.terminal" \
+    "$APPDIR/usr/bin/winslim-terminal"; do
+    if [ -e "$forbidden_binary" ]; then
+        err "El AppDir contiene un ejecutable cruzado de Windows: $forbidden_binary"
+        exit 1
+    fi
+done
+if [ ! -f "$APPDIR/LTerminal.desktop" ] || ! grep -Fxq 'Exec=lterminal' "$APPDIR/LTerminal.desktop"; then
+    err "El AppDir no tiene un desktop file Linux coherente con lterminal."
+    exit 1
+fi
+ok "AppDir Linux coherente: solo lterminal y LTerminal.desktop"
+
+# Tauri vuelve a construir el frontend mediante beforeBuildCommand. Verificar
+# el bundle que acaba de entrar en el AppImage evita publicar por accidente un
+# frontend viejo si una configuración de Tauri deja de ejecutar ese paso.
+FRONTEND_BUNDLE="$(find "$PROJECT_ROOT/dist/assets" -maxdepth 1 -type f -name 'index-*.js' -print -quit 2>/dev/null || true)"
+if [ -z "$FRONTEND_BUNDLE" ]; then
+    err "No se encontró el bundle JavaScript del frontend en dist/assets."
+    exit 1
+fi
+for FRONTEND_MARKER in ControlRight KeyW environment-controls; do
+    if ! grep -Fq "$FRONTEND_MARKER" "$FRONTEND_BUNDLE"; then
+        err "El frontend compilado no contiene '$FRONTEND_MARKER': parece una build desactualizada."
+        exit 1
+    fi
+done
+ok "Frontend compartido actualizado: controles de teclado y preferencias presentes"
 
 # Que la build produzca SOLO el AppImage no es un detalle estético: un .deb o un
 # .rpm que se cuelen acabarían publicados en la release sin que nadie los haya
@@ -777,7 +1015,13 @@ if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
 else
     SMOKE_LOG="$(mktemp)"
     SMOKE_TOKEN="build-$$-$(date +%s)"
-    LTERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
+    # El smoke debe ser idéntico en máquinas con FUSE y sin FUSE. El montaje
+    # directo puede heredar librerías/variables del host y producir un falso
+    # fallo antes de crear la PTY; la extracción temporal es el camino
+    # reproducible que también usa validate-release.sh.
+    APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
+        WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}" \
+        LTERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
     SMOKE_PID=$!
     READY=0
     for _ in $(seq 1 20); do
@@ -799,6 +1043,8 @@ else
             echo "    Salida de la aplicación:" >&2
             sed 's/^/      /' "$SMOKE_LOG" >&2
         fi
+        echo "    Últimas líneas de $HOME/.config/lterminal/logs/main.log:" >&2
+        tail -n 80 "$HOME/.config/lterminal/logs/main.log" 2>/dev/null | sed 's/^/      /' >&2 || true
         rm -f "$SMOKE_LOG"
         exit 1
     fi
@@ -825,8 +1071,8 @@ ok "Release: $RELEASE_DIR/$RELEASE_NAME"
 ok "SHA256: $(cut -d' ' -f1 < "$RELEASE_DIR/SHA256SUMS.txt")"
 
 if [ "$EXTENDED_TESTS" -lt 0 ]; then
-    if [ "$NO_RUN" -eq 0 ] && [ -t 0 ]; then
-        printf '¿Ejecutar también las pruebas secuenciales de shells y REPL instalados? [s/N]: '
+    if [ -t 0 ]; then
+        printf '¿Ejecutar también la batería completa de shells y REPL instalados? [s/N]: '
         read -r EXTENDED_REPLY
         case "$EXTENDED_REPLY" in
             s|S|si|SI|sí|Sí) EXTENDED_TESTS=1 ;;
@@ -838,19 +1084,49 @@ if [ "$EXTENDED_TESTS" -lt 0 ]; then
 fi
 
 if [ "$EXTENDED_TESTS" -eq 1 ]; then
-    step "Pruebas ampliadas secuenciales"
+    step "Pruebas ampliadas secuenciales (shells, herramientas y E2E)"
     if command -v ionice >/dev/null 2>&1; then
         nice -n 10 ionice -c 3 bash "$PROJECT_ROOT/linux/exercise-host.sh"
     else
         nice -n 10 bash "$PROJECT_ROOT/linux/exercise-host.sh"
     fi
     ok "Shells y REPL instalados respondieron correctamente"
+
+    if ! graphical_session_available; then
+        err "El test completo requiere una sesión gráfica accesible para ejecutar E2E."
+        err "DISPLAY/WAYLAND_DISPLAY está ausente o no se puede abrir desde esta shell."
+        exit 1
+    fi
+    if ! command -v tauri-driver >/dev/null 2>&1; then
+        if [ "$INSTALL_E2E_DRIVER" -eq 1 ] && command -v cargo >/dev/null 2>&1; then
+            warn "Falta tauri-driver; se instalará con cargo para completar E2E."
+            cargo install tauri-driver --locked
+            recover_tool tauri-driver "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" || true
+        fi
+    fi
+    if ! command -v tauri-driver >/dev/null 2>&1; then
+        err "Falta tauri-driver. Reintenta con --install-e2e-driver o instálalo con cargo."
+        exit 1
+    fi
+    E2E_DRIVER_PATH="$(find_native_e2e_driver || true)"
+    if [ -z "$E2E_DRIVER_PATH" ] && [ "$INSTALL_E2E_DRIVER" -eq 1 ]; then
+        install_e2e_driver
+    fi
+    if [ -z "$E2E_DRIVER_PATH" ]; then
+        err "Falta WebKitWebDriver para E2E en Linux."
+        err "Reintenta con --install-e2e-driver o indica --e2e-driver /ruta/WebKitWebDriver."
+        exit 1
+    fi
+    TAURI_NATIVE_DRIVER="$E2E_DRIVER_PATH" E2E_BINARY="$RELEASE_DIR/$RELEASE_NAME" npm run e2e
+    ok "E2E confirmó ventana, terminal, barra y Ajustes"
 fi
 
-if [ "$NO_RUN" -eq 0 ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+if [ "$NO_RUN" -eq 0 ] && graphical_session_available; then
     step "Lanzando LTerminal"
     "$RELEASE_DIR/$RELEASE_NAME" >/dev/null 2>&1 &
     disown
+elif [ "$NO_RUN" -eq 0 ]; then
+    warn "No se lanza la aplicación: la sesión gráfica no es accesible desde esta shell."
 fi
 
 echo

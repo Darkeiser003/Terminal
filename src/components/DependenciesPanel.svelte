@@ -59,6 +59,7 @@
         if (rawGroup === 'Shells') return app.t('group.shells', 'Shells');
         if (rawGroup === 'Sistema y herramientas') return app.t('group.tools', 'Sistema y herramientas');
         if (rawGroup === 'Lenguajes') return app.t('group.languagesShort', 'Lenguajes');
+        if (rawGroup === 'Frameworks') return app.t('group.frameworks', 'Frameworks y ecosistemas');
         if (rawGroup === 'Visores de archivos') return app.t('group.viewers', 'Visores de archivos');
         if (rawGroup === 'WSL') return app.t('group.wslShort', 'WSL');
         if (rawGroup === 'Docker') return app.t('group.dockerShort', 'Docker');
@@ -71,6 +72,7 @@
         if (label === 'Virtualización') return app.t('group.virt', 'Virtualización');
         if (label === 'Lenguajes') return app.t('group.languagesShort', 'Lenguajes');
         if (label === 'Sistema y herramientas') return app.t('group.tools', 'Sistema y herramientas');
+        if (label === 'Frameworks') return app.t('group.frameworks', 'Frameworks y ecosistemas');
         return label;
     }
 
@@ -317,6 +319,7 @@
     {#each groups as group, groupIndex (group.name)}
         <details
             class="group"
+            data-testid="dependency-group"
             class:languages={group.key === 'group.languages'}
             open={autoOpenFirst && groupIndex === 0}
             ontoggle={onToggle}
@@ -347,7 +350,7 @@
                         {@render item(entry.actions[0], false, entry.name)}
                     </div>
                 {:else}
-                    <details class="subgroup" class:installed={entry.installed} ontoggle={onToggle}>
+                    <details class="subgroup" class:installed={entry.installed} data-testid="dependency-subgroup" ontoggle={onToggle}>
                         <summary class="subgroup-title">
                             {entry.name}
                             <span class="count">{entry.actions.length}</span>
@@ -380,6 +383,7 @@
             <button
                 type="button"
                 class="run"
+                data-testid="dependency-action"
                 disabled={updating || checking}
                 onclick={() => (puedeActualizar ? installSelf() : checkSelf())}
             >

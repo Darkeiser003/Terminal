@@ -39,6 +39,7 @@ pub static GROUP_ORDER: &[&str] = &[
     "Shells",
     "Sistema y herramientas",
     "Lenguajes",
+    "Frameworks",
     "Visores de archivos",
     "Compatibilidad Windows",
     "WSL",
@@ -57,10 +58,12 @@ const SSH_GROUP: &str = "Red y acceso remoto";
 const DOCKER_GROUP: &str = "Contenedores y Kubernetes";
 const WSL_GROUP: &str = "WSL";
 const VIEWER_GROUP: &str = "Visores de archivos";
+const CODE_EDITORS_SUBGROUP: &str = "Editores de código";
 const UPDATES_GROUP: &str = "Actualizaciones";
 const SHELLS_GROUP: &str = "Shells";
 const TOOLS_GROUP: &str = "Sistema y herramientas";
 const LANGUAGES_GROUP: &str = "Lenguajes";
+const FRAMEWORKS_GROUP: &str = "Frameworks";
 const WINDOWS_COMPAT_GROUP: &str = "Compatibilidad Windows";
 
 /// Una acción del panel. `shell` es la shell que el comando necesita para
@@ -419,6 +422,15 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-wt",     "Windows Terminal", "wt",    "Microsoft.WindowsTerminal",      None,                                 TOOLS_GROUP),
     win("winget-nsudo",  "NSudo · elevación avanzada", "NSudoLC", "M2Team.NSudo",       Some("$n = @('C:\\WSCore\\Components\\Hooks\\NSudo\\NSudoLC.exe', 'C:\\Program Files\\NSudo\\NSudoLC.exe', 'C:\\Program Files\\NSudo Launcher\\NSudoLC.exe', 'C:\\Program Files (x86)\\NSudo\\NSudoLC.exe', 'C:\\Tools\\NSudo\\NSudoLC.exe') | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1; if (-not $n) { $n = (Get-Command NSudoLC.exe -ErrorAction Stop).Source }; & $n -?"), TOOLS_GROUP),
     WindowsTool { label_key: Some("tool.nodeLts"), ..win("winget-node", "Node.js LTS", "node", "OpenJS.NodeJS.LTS", Some("node -v; npm -v"), LANGUAGES_GROUP) },
+    win("winget-mariadb", "MariaDB + InnoDB", "mariadb", "MariaDB.Server", Some("mariadb --version"), LANGUAGES_GROUP),
+    win("winget-mysql", "MySQL + InnoDB", "mysql", "Oracle.MySQL", Some("mysql --version"), LANGUAGES_GROUP),
+    win("winget-postgresql", "PostgreSQL + psql", "psql", "PostgreSQL.PostgreSQL", Some("psql --version"), LANGUAGES_GROUP),
+    win("winget-kotlin", "Kotlin", "kotlinc", "JetBrains.Kotlin.Compiler", Some("kotlinc -version"), LANGUAGES_GROUP),
+    win("winget-dart", "Dart", "dart", "Dart.Dart", Some("dart --version"), LANGUAGES_GROUP),
+    win("winget-zig", "Zig", "zig", "zig.zig", Some("zig version"), LANGUAGES_GROUP),
+    win("winget-swift", "Swift", "swift", "Swift.Toolchain", Some("swift --version"), LANGUAGES_GROUP),
+    win("winget-mongosh", "MongoDB · mongosh", "mongosh", "MongoDB.Shell", Some("mongosh --version"), LANGUAGES_GROUP),
+    win("winget-redis-cli", "Redis · redis-cli", "redis-cli", "Redis.Redis", Some("redis-cli --version"), LANGUAGES_GROUP),
     win("winget-python", "Python",          "python", "Python.Python.3.12",             Some("python --version"),             LANGUAGES_GROUP),
     win("winget-ruby",   "Ruby",            "ruby",   "RubyInstallerTeam.Ruby.3.3",     Some("ruby -v"),                      LANGUAGES_GROUP),
     WindowsTool {
@@ -441,6 +453,13 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-dotnet", "C#/F# · .NET SDK", "dotnet", "Microsoft.DotNet.SDK.8",        Some("dotnet --info"),                LANGUAGES_GROUP),
     win("winget-llvm",   "C/C++ · Clang/LLVM", "clang", "LLVM.LLVM",                    Some("clang --version; clang++ --version"), LANGUAGES_GROUP),
     win("winget-cmake",  "C/C++ · CMake",   "cmake",  "Kitware.CMake",                  Some("cmake --version"),               LANGUAGES_GROUP),
+    win("winget-maven",  "Java · Maven",   "mvn",    "Apache.Maven",                    Some("mvn --version"),                 LANGUAGES_GROUP),
+    win("winget-gradle", "JVM · Gradle",   "gradle", "Gradle.Gradle",                   Some("gradle --version"),              LANGUAGES_GROUP),
+    win("winget-ant",    "Java · Ant",     "ant",    "Apache.Ant",                      Some("ant -version"),                   LANGUAGES_GROUP),
+    win("winget-bazel",  "C/C++ · Bazel",  "bazel",  "Bazel.Bazel",                     Some("bazel --version"),               LANGUAGES_GROUP),
+    win("winget-ninja",  "C/C++ · Ninja",  "ninja",  "Ninja-build.Ninja",               Some("ninja --version"),               LANGUAGES_GROUP),
+    win("winget-meson",  "C/C++ · Meson",  "meson",  "MesonBuild.Meson",                Some("meson --version"),               LANGUAGES_GROUP),
+    win("winget-gdb",    "C/C++ · GDB",    "gdb",    "MSYS2.MSYS2",                     Some("gdb --version"),                 LANGUAGES_GROUP),
     win("winget-groovy", "Groovy",          "groovysh", "Apache.Groovy.4",              Some("groovy --version"),              LANGUAGES_GROUP),
     win("winget-jq",     "jq · JSON",        "jq",     "jqlang.jq",                      Some("jq --version"),                  TOOLS_GROUP),
     win("winget-yq",     "yq · YAML",        "yq",     "MikeFarah.yq",                   Some("yq --version"),                  TOOLS_GROUP),
@@ -467,8 +486,6 @@ static WINDOWS_VIEWERS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     WindowsTool { label_key: Some("tool.viewerMediaWin"),    no_detect: true, ..win("viewer-media",    "VLC (audio y vídeo)",                  "", "VideoLAN.VLC",             None, VIEWER_GROUP) },
     WindowsTool { label_key: Some("tool.viewerDocumentWin"), no_detect: true, ..win("viewer-document", "SumatraPDF (PDF y libros)",            "", "SumatraPDF.SumatraPDF",    None, VIEWER_GROUP) },
     WindowsTool { label_key: Some("tool.viewerArchiveWin"),  no_detect: true, ..win("viewer-archive",  "7-Zip (comprimidos)",                  "", "7zip.7zip",                None, VIEWER_GROUP) },
-    // VS Code sí añade `code` al PATH durante su instalación.
-    WindowsTool { label_key: Some("tool.viewerCode"), ..win("viewer-code", "Visual Studio Code (código y texto)", "code", "Microsoft.VisualStudioCode", Some("code --version"), VIEWER_GROUP) },
 ]);
 
 const WINGET_INSTALL_FLAGS: &str = "-e --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity";
@@ -758,8 +775,41 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-gcc", "C/C++ · GCC y herramientas de compilación", "gcc", &[("apt", "build-essential"), ("pacman", "base-devel"), ("dnf", "gcc gcc-c++ make"), ("zypper", "gcc gcc-c++ make"), ("apk", "build-base")], Some("gcc --version; g++ --version"), LANGUAGES_GROUP),
     pkg("pkg-clang", "C/C++ · Clang/LLVM", "clang", &[("default", "clang"), ("pacman", "clang")], Some("clang --version; clang++ --version"), LANGUAGES_GROUP),
     pkg("pkg-cmake", "C/C++ · CMake", "cmake", &[("default", "cmake")], Some("cmake --version"), LANGUAGES_GROUP),
+    pkg("pkg-nasm", "Ensamblador · NASM", "nasm", &[("default", "nasm")], Some("nasm -version"), LANGUAGES_GROUP),
+    pkg("pkg-yasm", "Ensamblador · YASM", "yasm", &[("default", "yasm")], Some("yasm --version"), LANGUAGES_GROUP),
+    pkg("pkg-binutils", "Ensamblador · GNU binutils", "as", &[("default", "binutils")], Some("as --version"), LANGUAGES_GROUP),
+    pkg("pkg-gfortran", "Fortran · GNU", "gfortran", &[("default", "gfortran")], Some("gfortran --version"), LANGUAGES_GROUP),
+    pkg("pkg-haxe", "Haxe", "haxe", &[("default", "haxe")], Some("haxe --version"), LANGUAGES_GROUP),
+    pkg("pkg-guile", "Scheme · Guile", "guile", &[("default", "guile")], Some("guile --version"), LANGUAGES_GROUP),
+    pkg("pkg-sbcl", "Common Lisp · SBCL", "sbcl", &[("default", "sbcl")], Some("sbcl --version"), LANGUAGES_GROUP),
+    pkg("pkg-tcl", "Tcl", "tclsh", &[("default", "tcl")], Some("tclsh <<< 'puts [info patchlevel]'"), LANGUAGES_GROUP),
+    pkg("pkg-octave", "GNU Octave", "octave", &[("default", "octave")], Some("octave --version"), LANGUAGES_GROUP),
+    pkg("pkg-maxima", "Maxima", "maxima", &[("default", "maxima")], Some("maxima --version"), LANGUAGES_GROUP),
+    pkg("pkg-swipl", "Prolog · SWI", "swipl", &[("default", "swi-prolog")], Some("swipl --version"), LANGUAGES_GROUP),
+    pkg("pkg-gforth", "Forth · Gforth", "gforth", &[("default", "gforth")], Some("gforth --version"), LANGUAGES_GROUP),
     pkg("pkg-dotnet-sdk", "C#/F# · .NET SDK", "dotnet", &[("apt", "dotnet-sdk-8.0"), ("pacman", "dotnet-sdk"), ("dnf", "dotnet-sdk-8.0"), ("zypper", "dotnet-sdk-8.0")], Some("dotnet --info"), LANGUAGES_GROUP),
     PkgTool { label_key: Some("tool.nodeNpm"), ..pkg("pkg-node", "Node.js + npm", "node", &[("default", "nodejs npm")], Some("node -v; npm -v"), LANGUAGES_GROUP) },
+    pkg("pkg-typescript", "TypeScript + ts-node", "tsc", &[("default", "node-typescript"), ("apt", "node-typescript"), ("dnf", "typescript"), ("pacman", "typescript"), ("zypper", "node-typescript"), ("apk", "typescript")], Some("tsc --version"), LANGUAGES_GROUP),
+    pkg("pkg-deno", "Deno", "deno", &[("default", "deno")], Some("deno --version"), LANGUAGES_GROUP),
+    pkg("pkg-bun", "Bun", "bun", &[("default", "bun")], Some("bun --version"), LANGUAGES_GROUP),
+    pkg("pkg-kotlin", "Kotlin", "kotlinc", &[("default", "kotlin")], Some("kotlinc -version"), LANGUAGES_GROUP),
+    pkg("pkg-scala", "Scala", "scala", &[("default", "scala")], Some("scala -version"), LANGUAGES_GROUP),
+    pkg("pkg-dart", "Dart", "dart", &[("default", "dart")], Some("dart --version"), LANGUAGES_GROUP),
+    pkg("pkg-zig", "Zig", "zig", &[("default", "zig")], Some("zig version"), LANGUAGES_GROUP),
+    pkg("pkg-nim", "Nim", "nim", &[("default", "nim")], Some("nim --version"), LANGUAGES_GROUP),
+    pkg("pkg-crystal", "Crystal", "crystal", &[("default", "crystal")], Some("crystal --version"), LANGUAGES_GROUP),
+    pkg("pkg-swift", "Swift", "swift", &[("default", "swift")], Some("swift --version"), LANGUAGES_GROUP),
+    pkg("pkg-maven", "Java · Maven", "mvn", &[("default", "maven")], Some("mvn --version"), LANGUAGES_GROUP),
+    pkg("pkg-gradle", "JVM · Gradle", "gradle", &[("default", "gradle")], Some("gradle --version"), LANGUAGES_GROUP),
+    pkg("pkg-ant", "Java · Ant", "ant", &[("default", "ant")], Some("ant -version"), LANGUAGES_GROUP),
+    pkg("pkg-sbt", "Scala · sbt", "sbt", &[("default", "sbt")], Some("sbt --version"), LANGUAGES_GROUP),
+    pkg("pkg-bazel", "C/C++ · Bazel", "bazel", &[("default", "bazel")], Some("bazel --version"), LANGUAGES_GROUP),
+    pkg("pkg-ninja", "C/C++ · Ninja", "ninja", &[("default", "ninja-build")], Some("ninja --version"), LANGUAGES_GROUP),
+    pkg("pkg-meson", "C/C++ · Meson", "meson", &[("default", "meson")], Some("meson --version"), LANGUAGES_GROUP),
+    pkg("pkg-clang-tidy", "C/C++ · clang-tidy", "clang-tidy", &[("default", "clang-tools-extra")], Some("clang-tidy --version"), LANGUAGES_GROUP),
+    pkg("pkg-gdb", "C/C++ · GDB", "gdb", &[("default", "gdb")], Some("gdb --version"), LANGUAGES_GROUP),
+    pkg("pkg-lldb", "C/C++ · LLDB", "lldb", &[("default", "lldb")], Some("lldb --version"), LANGUAGES_GROUP),
+    pkg("pkg-valgrind", "C/C++ · Valgrind", "valgrind", &[("default", "valgrind")], Some("valgrind --version"), LANGUAGES_GROUP),
     pkg("pkg-python", "Python", "python3", &[("default", "python3"), ("pacman", "python")], Some("python3 --version"), LANGUAGES_GROUP),
     pkg("pkg-ruby",   "Ruby",   "ruby",    &[("default", "ruby"), ("apt", "ruby-full")], Some("ruby -v"), LANGUAGES_GROUP),
     PkgTool {
@@ -783,6 +833,12 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-clojure","Clojure","clj",    &[("default", "clojure")], Some("clojure -Sdescribe"), LANGUAGES_GROUP),
     pkg("pkg-haskell","Haskell · GHCi", "ghci", &[("default", "ghc")], Some("ghc --version"), LANGUAGES_GROUP),
     pkg("pkg-sqlite", "SQLite", "sqlite3", &[("default", "sqlite3")], Some("sqlite3 --version"), LANGUAGES_GROUP),
+    pkg("pkg-mariadb", "MariaDB + InnoDB", "mariadb", &[("apt", "mariadb-client"), ("dnf", "mariadb"), ("pacman", "mariadb"), ("zypper", "mariadb"), ("apk", "mariadb")], Some("mariadb --version"), LANGUAGES_GROUP),
+    pkg("pkg-mysql", "MySQL + InnoDB", "mysql", &[("apt", "default-mysql-client"), ("dnf", "mysql"), ("pacman", "mariadb"), ("zypper", "mysql-client"), ("apk", "mysql-client")], Some("mysql --version"), LANGUAGES_GROUP),
+    pkg("pkg-postgresql", "PostgreSQL + psql", "psql", &[("default", "postgresql"), ("apt", "postgresql-client"), ("dnf", "postgresql"), ("pacman", "postgresql"), ("zypper", "postgresql"), ("apk", "postgresql-client")], Some("psql --version"), LANGUAGES_GROUP),
+    pkg("pkg-duckdb", "DuckDB", "duckdb", &[("default", "duckdb")], Some("duckdb --version"), LANGUAGES_GROUP),
+    pkg("pkg-mongosh", "MongoDB · mongosh", "mongosh", &[("default", "mongodb-mongosh")], Some("mongosh --version"), LANGUAGES_GROUP),
+    pkg("pkg-redis-cli", "Redis · redis-cli", "redis-cli", &[("default", "redis")], Some("redis-cli --version"), LANGUAGES_GROUP),
     pkg("pkg-openvpn", "OpenVPN", "openvpn", &[("default", "openvpn")], Some("openvpn --version"), SSH_GROUP),
     pkg("pkg-wireguard", "WireGuard", "wg", &[("default", "wireguard-tools")], Some("wg --version"), SSH_GROUP),
     pkg("pkg-kubectl", "Kubernetes · kubectl", "kubectl", &[("apt", "kubectl"), ("pacman", "kubectl"), ("dnf", "kubernetes-client"), ("zypper", "kubectl"), ("apk", "kubectl")], Some("kubectl version --client"), DOCKER_GROUP),
@@ -797,24 +853,16 @@ static LINUX_VIEWERS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     PkgTool { label_key: Some("tool.viewerMedia"),      ..pkg("viewer-media",    "VLC (audio y vídeo)",     "vlc",   &[("default", "vlc")],    Some("vlc --version"), VIEWER_GROUP) },
     PkgTool { label_key: Some("tool.viewerDocument"),   ..pkg("viewer-document", "Evince (PDF)",            "evince",&[("default", "evince")], None,                  VIEWER_GROUP) },
     PkgTool { label_key: Some("tool.viewerArchive"),    ..pkg("viewer-archive",  "p7zip (comprimidos)",     "7z",    &[("default", "p7zip"), ("apt", "p7zip-full")], Some("7z i"), VIEWER_GROUP) },
-    PkgTool {
-        label_key: Some("tool.viewerCode"),
-        hint: Some("Muchas distribuciones necesitan el repositorio de Microsoft o el paquete Snap (sudo snap install code --classic)."),
-        ..pkg("viewer-code", "Visual Studio Code (código y texto)", "code", &[("default", "code")], Some("code --version"), VIEWER_GROUP)
-    },
 ]);
 
 /// Gestores de archivos gráficos. Solo hacen falta en Linux: Windows y macOS
 /// traen el suyo y nunca se puede quedar el sistema sin ninguno. Se ofrecen
-/// tres, uno por escritorio mayoritario, y no los seis que la app reconoce:
-/// para abrir una carpeta basta con tener uno, y seis instaladores en el panel
-/// convierten una elección simple en una lista que hay que leer entera. Los
+/// para abrir una carpeta basta con tener uno y no conviene convertir una
+/// elección simple en una lista de instaladores. Los
 /// ids coinciden con los de `FILE_MANAGERS` en `file_viewers`.
 #[rustfmt::skip]
 static FILE_MANAGER_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
-    PkgTool { label_key: Some("tool.nautilus"), ..pkg("viewer-files-nautilus", "Archivos / Nautilus (GNOME)", "nautilus", &[("default", "nautilus")], Some("nautilus --version"), VIEWER_GROUP) },
     pkg("viewer-files-dolphin", "Dolphin (KDE)",          "dolphin", &[("default", "dolphin")], Some("dolphin --version"), VIEWER_GROUP),
-    PkgTool { label_key: Some("tool.thunar"), ..pkg("viewer-files-thunar", "Thunar (Xfce, ligero)", "thunar", &[("default", "thunar")], Some("thunar --version"), VIEWER_GROUP) },
 ]);
 
 /// macOS: mismo ciclo de vida sobre Homebrew. Los identificadores de instalar
@@ -830,6 +878,12 @@ static MAC_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("brew-python", "Python",        "python3", &[("default", "python")], Some("python3 --version"), LANGUAGES_GROUP),
     pkg("brew-ruby",   "Ruby",          "ruby",    &[("default", "ruby")],   Some("ruby -v"),          LANGUAGES_GROUP),
     PkgTool { label_key: Some("tool.java"), ..pkg("brew-java", "Java (JDK)", "java", &[("default", "openjdk")], Some("java -version"), LANGUAGES_GROUP) },
+    pkg("brew-maven", "Java · Maven", "mvn", &[("default", "maven")], Some("mvn --version"), LANGUAGES_GROUP),
+    pkg("brew-gradle", "JVM · Gradle", "gradle", &[("default", "gradle")], Some("gradle --version"), LANGUAGES_GROUP),
+    pkg("brew-ant", "Java · Ant", "ant", &[("default", "ant")], Some("ant -version"), LANGUAGES_GROUP),
+    pkg("brew-bazel", "C/C++ · Bazel", "bazel", &[("default", "bazel")], Some("bazel --version"), LANGUAGES_GROUP),
+    pkg("brew-ninja", "C/C++ · Ninja", "ninja", &[("default", "ninja")], Some("ninja --version"), LANGUAGES_GROUP),
+    pkg("brew-meson", "C/C++ · Meson", "meson", &[("default", "meson")], Some("meson --version"), LANGUAGES_GROUP),
     pkg("brew-php",    "PHP",           "php",     &[("default", "php")],    Some("php -v"),           LANGUAGES_GROUP),
     pkg("brew-go",     "Go",            "go",      &[("default", "go")],     Some("go version"),       LANGUAGES_GROUP),
     pkg("brew-rust",   "Rust",          "rustc",   &[("default", "rust")],   Some("rustc --version; cargo --version"), LANGUAGES_GROUP),
@@ -949,6 +1003,162 @@ fn tool_lifecycle_actions(
     actions
 }
 
+/// Editores de código como menú único. Son alternativas excluyentes de la
+/// misma función, no ocho visores distintos: el usuario puede desplegar el
+/// apartado y elegir el editor que prefiera sin que VS Code aparezca como
+/// instalación predeterminada.
+fn linux_code_editor_actions(
+    pm: &str,
+    commands: &PkgCommands,
+    _t: &Translator,
+) -> Vec<InstallAction> {
+    let editors = [
+        ("viewer-code-oss", "Code - OSS", "code", "code-oss"),
+        (
+            "viewer-code",
+            "Visual Studio Code",
+            "code",
+            "visual-studio-code-bin",
+        ),
+        ("editor-vscodium", "VSCodium", "codium", "vscodium"),
+        ("editor-zed", "Zed", "zed", "zed"),
+        ("editor-kate", "Kate", "kate", "kate"),
+        ("editor-neovim", "Neovim", "nvim", "neovim"),
+        ("editor-geany", "Geany", "geany", "geany"),
+        ("editor-emacs", "Emacs", "emacs", "emacs"),
+        ("editor-helix", "Helix", "hx", "helix"),
+        ("editor-micro", "micro", "micro", "micro"),
+    ];
+    editors
+        .into_iter()
+        .map(|(id, label, command, package)| {
+            // En Arch, `code` es el paquete comunitario de Code - OSS. En
+            // las demás familias conservamos el nombre habitual `code-oss`.
+            // VS Code sigue siendo una alternativa separada y, en Arch,
+            // utiliza el paquete binario de AUR que ya ofrecía el catálogo.
+            let package = match (id, pm) {
+                ("viewer-code-oss", "pacman") => "code",
+                ("viewer-code", "pacman") => "visual-studio-code-bin",
+                _ => package,
+            };
+            InstallAction::new(
+                id,
+                format!("{label} (código y texto)"),
+                format!("{} {package}", commands.install),
+            )
+            // Dentro del submenú no sirve repetir «Instalar con pacman»: el
+            // usuario necesita distinguir qué editor va a instalar. El
+            // gestor queda visible en el comando y en la ayuda de abajo.
+            .short(format!("{label} (código y texto)"))
+            .group(VIEWER_GROUP)
+            .subgroup(CODE_EDITORS_SUBGROUP)
+            .check(Some(command))
+            .hint("Alternativa de editor; la disponibilidad del paquete depende de la distribución y sus repositorios." )
+        })
+        .collect()
+}
+
+fn windows_code_editor_actions(_t: &Translator) -> Vec<InstallAction> {
+    let editors = [
+        (
+            "viewer-code",
+            "Visual Studio Code",
+            "Microsoft.VisualStudioCode",
+            "code",
+            Some("code"),
+        ),
+        (
+            "editor-vscodium-win",
+            "VSCodium",
+            "VSCodium.VSCodium",
+            "codium",
+            Some("codium"),
+        ),
+        (
+            "editor-zed-win",
+            "Zed",
+            "ZedIndustries.Zed",
+            "zed",
+            Some("zed"),
+        ),
+        (
+            "editor-notepadpp-win",
+            "Notepad++",
+            "Notepad++.Notepad++",
+            "notepad++",
+            Some("notepad++"),
+        ),
+        (
+            "editor-sublime-win",
+            "Sublime Text",
+            "SublimeHQ.SublimeText.4",
+            "subl",
+            Some("subl"),
+        ),
+        (
+            "editor-cursor-win",
+            "Cursor",
+            "Anysphere.Cursor",
+            "cursor",
+            Some("cursor"),
+        ),
+        (
+            "editor-antigravity-win",
+            "Google Antigravity",
+            "",
+            "antigravity",
+            None,
+        ),
+        (
+            "editor-visualstudio-win",
+            "Visual Studio Community",
+            "Microsoft.VisualStudio.2022.Community",
+            "devenv",
+            Some("devenv"),
+        ),
+        (
+            "editor-jetbrains-toolbox-win",
+            "JetBrains Toolbox",
+            "JetBrains.Toolbox",
+            "jetbrains-toolbox",
+            Some("jetbrains-toolbox"),
+        ),
+    ];
+    editors
+        .into_iter()
+        .map(|(id, label, package, _command, check)| {
+            let is_official_download = package.is_empty();
+            InstallAction::new(
+                id,
+                if is_official_download {
+                    "Google Antigravity (descarga oficial)".to_string()
+                } else {
+                    format!("{label} (código y texto)")
+                },
+                if is_official_download {
+                    "Start-Process 'https://antigravity.google/download?app=antigravity'".to_string()
+                } else {
+                    winget_install_command(package)
+                },
+            )
+            .short(if is_official_download {
+                "Abrir descarga oficial".to_string()
+            } else {
+                format!("{label} (código y texto)")
+            })
+            .group(VIEWER_GROUP)
+            .subgroup(CODE_EDITORS_SUBGROUP)
+            .powershell()
+            .check(check)
+            .hint(if is_official_download {
+                "Abre la página oficial para elegir el instalador de Windows. No se descarga ni instala nada en segundo plano."
+            } else {
+                "Editor opcional; se instala desde el catálogo de winget y solo aparece mientras no esté detectado."
+            })
+        })
+        .collect()
+}
+
 /// `sh` no es un paquete: es un enlace al intérprete POSIX que haya elegido la
 /// distribución (bash en Arch y macOS, dash en Debian/Ubuntu). Por eso aquí no
 /// hay instalar/actualizar/desinstalar que ofrecer sin mentir — se actualiza y
@@ -988,7 +1198,7 @@ fn git_pull_projects_action(projects_folder: &str) -> InstallAction {
         "Actualizar repositorios clonados (git pull)",
         format!(
             "if (Test-Path {folder}) {{ \
-             Get-ChildItem -Path {folder} -Directory -Recurse -Depth 1 \
+             Get-ChildItem -Path {folder} -Directory -Recurse -Depth 2 \
              | Where-Object {{ Test-Path (Join-Path $_.FullName '.git') }} \
              | ForEach-Object {{ Write-Host ('== ' + $_.FullName) -ForegroundColor Cyan; git -C $_.FullName pull --ff-only }} \
              }} else {{ Write-Host 'Todavia no hay repositorios clonados en la carpeta de proyectos.' -ForegroundColor Yellow }}"
@@ -1034,6 +1244,587 @@ fn in_subgroup(group: &str, subgroup: &str, actions: Vec<InstallAction>) -> Vec<
             action
         })
         .collect()
+}
+
+/// Ecosistemas que se instalan encima de un intérprete. No son shells ni
+/// lenguajes nuevos: se muestran en su propio apartado para que, por ejemplo,
+/// Pyramid no quede mezclado con Python ni TypeScript se confunda con Node.
+/// Las acciones requieren el runtime correspondiente y siguen escribiendo el
+/// comando visible en la pestaña activa, igual que el resto del catálogo.
+fn ecosystem_action(
+    id: &str,
+    label: &str,
+    command: String,
+    subgroup: &str,
+    hint: &str,
+) -> InstallAction {
+    InstallAction::new(id.to_string(), label.to_string(), command)
+        .short(format!("Instalar {label}"))
+        .group(FRAMEWORKS_GROUP)
+        .subgroup(subgroup)
+        .hint(hint)
+}
+
+fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<InstallAction> {
+    let mut actions = Vec::new();
+    for (id, label, package) in [
+        ("framework-pyramid", "Pyramid", "pyramid"),
+        ("framework-django", "Django", "django"),
+        ("framework-flask", "Flask", "flask"),
+        ("framework-fastapi", "FastAPI", "fastapi"),
+        ("framework-sqlalchemy", "SQLAlchemy", "sqlalchemy"),
+        ("framework-tornado", "Tornado", "tornado"),
+        ("framework-sanic", "Sanic", "sanic"),
+        ("framework-pydantic", "Pydantic", "pydantic"),
+        ("framework-celery", "Celery", "celery"),
+        ("framework-scrapy", "Scrapy", "scrapy"),
+        ("framework-pytest", "pytest", "pytest"),
+        ("framework-jupyter", "Jupyter", "jupyter"),
+        ("framework-bottle", "Bottle", "bottle"),
+        ("framework-falcon", "Falcon", "falcon"),
+        ("framework-litestar", "Litestar", "litestar"),
+        ("framework-wagtail", "Wagtail", "wagtail"),
+        ("framework-streamlit", "Streamlit", "streamlit"),
+        ("framework-mkdocs", "MkDocs", "mkdocs"),
+        ("framework-poetry", "Poetry", "poetry"),
+        ("framework-pipenv", "Pipenv", "pipenv"),
+        ("framework-starlette", "Starlette", "starlette"),
+        ("framework-aiohttp", "aiohttp", "aiohttp"),
+        ("framework-httpx", "HTTPX", "httpx"),
+        ("framework-uvicorn", "Uvicorn", "uvicorn"),
+        ("framework-gunicorn", "Gunicorn", "gunicorn"),
+        ("framework-jinja", "Jinja", "jinja2"),
+        ("framework-alembic", "Alembic", "alembic"),
+        ("framework-marshmallow", "Marshmallow", "marshmallow"),
+        ("framework-hypothesis", "Hypothesis", "hypothesis"),
+        (
+            "framework-pytest-asyncio",
+            "pytest-asyncio",
+            "pytest-asyncio",
+        ),
+        ("framework-numpy", "NumPy", "numpy"),
+        ("framework-pandas", "pandas", "pandas"),
+        ("framework-scipy", "SciPy", "scipy"),
+        ("framework-matplotlib", "Matplotlib", "matplotlib"),
+        ("framework-gradio", "Gradio", "gradio"),
+        ("framework-locust", "Locust", "locust"),
+        ("framework-sphinx", "Sphinx", "sphinx"),
+        ("framework-pre-commit", "pre-commit", "pre-commit"),
+        ("framework-mypy", "Mypy", "mypy"),
+        ("framework-ruff", "Ruff", "ruff"),
+        ("framework-black", "Black", "black"),
+        ("framework-isort", "isort", "isort"),
+        ("framework-tox", "tox", "tox"),
+        ("framework-nox", "Nox", "nox"),
+        ("framework-invoke", "Invoke", "invoke"),
+        ("framework-click", "Click", "click"),
+        ("framework-typer", "Typer", "typer"),
+        (
+            "framework-django-rest",
+            "Django REST Framework",
+            "djangorestframework",
+        ),
+        ("framework-django-ninja", "Django Ninja", "django-ninja"),
+        ("framework-robot", "Robot Framework", "robotframework"),
+        ("framework-coverage", "Coverage.py", "coverage"),
+        ("framework-seaborn", "Seaborn", "seaborn"),
+        ("framework-polars", "Polars", "polars"),
+        ("framework-torch", "PyTorch", "torch"),
+        ("framework-tensorflow", "TensorFlow", "tensorflow"),
+        ("framework-opencv", "OpenCV", "opencv-python"),
+        ("framework-pillow", "Pillow", "pillow"),
+        ("framework-pyspark", "PySpark", "pyspark"),
+        ("framework-sqlmodel", "SQLModel", "sqlmodel"),
+        ("framework-tortoise", "Tortoise ORM", "tortoise-orm"),
+        ("framework-psycopg", "Psycopg", "psycopg[binary]"),
+        ("framework-asyncpg", "asyncpg", "asyncpg"),
+        ("framework-redis-py", "redis-py", "redis"),
+        ("framework-boto3", "Boto3", "boto3"),
+        ("framework-ansible", "Ansible", "ansible"),
+        ("framework-prefect", "Prefect", "prefect"),
+        ("framework-mlflow", "MLflow", "mlflow"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Python)"),
+            format!("{python_cmd} -m pip install --user {package}"),
+            "Python · frameworks y librerías",
+            "Necesita Python y pip. Si no están instalados, instálalos primero desde Lenguajes; después, vuelve a abrir Entorno y dependencias.",
+        ));
+    }
+    for (id, label, packages) in [
+        (
+            "tool-typescript",
+            "TypeScript + ts-node",
+            "typescript ts-node",
+        ),
+        ("framework-vite", "Vite", "vite"),
+        ("framework-nest", "NestJS CLI", "@nestjs/cli"),
+        ("framework-angular", "Angular CLI", "@angular/cli"),
+        ("framework-next", "Next.js", "create-next-app"),
+        ("framework-nuxt", "Nuxt", "nuxi"),
+        ("framework-astro", "Astro", "create-astro"),
+        ("framework-svelte", "Svelte", "svelte"),
+        ("framework-electron", "Electron", "electron"),
+        ("framework-express", "Express", "express-generator"),
+        ("framework-remix", "Remix", "create-remix"),
+        ("framework-redwood", "RedwoodJS", "redwoodjs"),
+        ("framework-playwright", "Playwright", "playwright"),
+        ("framework-jest", "Jest", "jest"),
+        ("framework-eslint", "ESLint", "eslint"),
+        ("framework-prettier", "Prettier", "prettier"),
+        (
+            "framework-react",
+            "React · create-react-app",
+            "create-react-app",
+        ),
+        ("framework-vue", "Vue CLI", "@vue/cli"),
+        ("framework-solid", "SolidStart", "create-solid"),
+        ("framework-qwik", "Qwik", "create-qwik"),
+        ("framework-preact", "Preact", "preact-cli"),
+        ("framework-webpack", "Webpack", "webpack webpack-cli"),
+        ("framework-rollup", "Rollup", "rollup"),
+        ("framework-parcel", "Parcel", "parcel"),
+        ("framework-esbuild", "esbuild", "esbuild"),
+        ("framework-swc", "SWC", "@swc/cli @swc/core"),
+        ("framework-babel", "Babel", "@babel/cli @babel/core"),
+        ("framework-tsx", "tsx", "tsx"),
+        ("framework-pnpm", "pnpm", "pnpm"),
+        ("framework-yarn", "Yarn", "yarn"),
+        ("framework-turbo", "Turborepo", "turbo"),
+        ("framework-nx", "Nx", "nx"),
+        ("framework-storybook", "Storybook", "storybook"),
+        ("framework-vitest", "Vitest", "vitest"),
+        ("framework-cypress", "Cypress", "cypress"),
+        ("framework-mocha", "Mocha", "mocha"),
+        ("framework-ava", "AVA", "ava"),
+        ("framework-prisma", "Prisma", "prisma"),
+        ("framework-drizzle", "Drizzle Kit", "drizzle-kit"),
+        ("framework-typeorm", "TypeORM CLI", "typeorm"),
+        ("framework-sequelize", "Sequelize CLI", "sequelize-cli"),
+        ("framework-lerna", "Lerna", "lerna"),
+        ("framework-changesets", "Changesets", "@changesets/cli"),
+        ("framework-hono", "Hono", "hono"),
+        ("framework-fastify", "Fastify", "fastify"),
+        ("framework-koa", "Koa", "koa-generator"),
+        ("framework-sails", "Sails.js", "sails"),
+        ("framework-trpc", "tRPC", "@trpc/server @trpc/client"),
+        ("framework-serverless", "Serverless Framework", "serverless"),
+        ("framework-vercel", "Vercel CLI", "vercel"),
+        ("framework-netlify", "Netlify CLI", "netlify-cli"),
+        ("framework-firebase", "Firebase CLI", "firebase-tools"),
+        ("framework-aws-cdk", "AWS CDK", "aws-cdk"),
+        ("framework-tsup", "tsup", "tsup"),
+        ("framework-unbuild", "unbuild", "unbuild"),
+        ("framework-gulp", "Gulp", "gulp-cli"),
+        ("framework-grunt", "Grunt", "grunt-cli"),
+        ("framework-husky", "Husky", "husky"),
+        ("framework-lint-staged", "lint-staged", "lint-staged"),
+        (
+            "framework-commitlint",
+            "Commitlint",
+            "@commitlint/cli @commitlint/config-conventional",
+        ),
+        (
+            "framework-semantic-release",
+            "semantic-release",
+            "semantic-release",
+        ),
+        ("framework-release-it", "release-it", "release-it"),
+        ("framework-msw", "Mock Service Worker", "msw"),
+        ("framework-supertest", "Supertest", "supertest"),
+        ("framework-c8", "c8", "c8"),
+        ("framework-typedoc", "TypeDoc", "typedoc"),
+        ("framework-ts-jest", "ts-jest", "ts-jest"),
+        ("framework-zod", "Zod", "zod"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (JavaScript / TypeScript)"),
+            format!("{npm_cmd} install --global {packages}"),
+            "JavaScript / TypeScript · herramientas y frameworks",
+            "Necesita Node.js y npm. Si no están instalados, instálalos primero desde Lenguajes; después, vuelve a abrir Entorno y dependencias.",
+        ));
+    }
+
+    for (id, label, packages) in [
+        ("framework-purescript", "PureScript", "purescript"),
+        ("framework-spago", "Spago", "spago"),
+        ("framework-pulp", "Pulp", "pulp"),
+        ("framework-elm", "Elm", "elm"),
+        ("framework-elm-test", "Elm Test", "elm-test"),
+        ("framework-elm-format", "Elm Format", "elm-format"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (PureScript / Elm)"),
+            format!("{npm_cmd} install --global {packages}"),
+            "PureScript / Elm · ecosistema funcional",
+            "Necesita Node.js y npm. Instala las herramientas del ecosistema para poder abrir sus REPL o crear proyectos.",
+        ));
+    }
+
+    for (id, label, command) in [
+        (
+            "framework-cargo-leptos",
+            "Leptos",
+            "cargo install cargo-leptos",
+        ),
+        (
+            "framework-wasm-pack",
+            "wasm-pack",
+            "cargo install wasm-pack",
+        ),
+        (
+            "framework-trunk",
+            "Trunk · WebAssembly",
+            "cargo install trunk",
+        ),
+        (
+            "framework-cargo-watch",
+            "cargo-watch",
+            "cargo install cargo-watch",
+        ),
+        (
+            "framework-cargo-nextest",
+            "cargo-nextest",
+            "cargo install cargo-nextest",
+        ),
+        ("framework-sqlx-cli", "SQLx CLI", "cargo install sqlx-cli"),
+        (
+            "framework-diesel-cli",
+            "Diesel CLI",
+            "cargo install diesel_cli",
+        ),
+        ("framework-mdbook", "mdBook", "cargo install mdbook"),
+        (
+            "framework-cargo-generate",
+            "cargo-generate",
+            "cargo install cargo-generate",
+        ),
+        (
+            "framework-cargo-audit",
+            "cargo-audit",
+            "cargo install cargo-audit",
+        ),
+        (
+            "framework-cargo-deny",
+            "cargo-deny",
+            "cargo install cargo-deny",
+        ),
+        (
+            "framework-cargo-edit",
+            "cargo-edit",
+            "cargo install cargo-edit",
+        ),
+        (
+            "framework-cargo-expand",
+            "cargo-expand",
+            "cargo install cargo-expand",
+        ),
+        (
+            "framework-cargo-make",
+            "cargo-make",
+            "cargo install cargo-make",
+        ),
+        (
+            "framework-cargo-release",
+            "cargo-release",
+            "cargo install cargo-release",
+        ),
+        (
+            "framework-cargo-tarpaulin",
+            "cargo-tarpaulin",
+            "cargo install cargo-tarpaulin",
+        ),
+        (
+            "framework-cargo-fuzz",
+            "cargo-fuzz",
+            "cargo install cargo-fuzz",
+        ),
+        (
+            "framework-cargo-binstall",
+            "cargo-binstall",
+            "cargo install cargo-binstall",
+        ),
+        (
+            "framework-cargo-udeps",
+            "cargo-udeps",
+            "cargo install cargo-udeps",
+        ),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Rust)"),
+            command.to_string(),
+            "Rust · frameworks y herramientas",
+            "Necesita Rust y Cargo. Se instala como herramienta global del usuario.",
+        ));
+    }
+
+    for (id, label, command) in [
+        (
+            "framework-air",
+            "Air · recarga Go",
+            "go install github.com/air-verse/air@latest",
+        ),
+        (
+            "framework-golangci-lint",
+            "golangci-lint",
+            "go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest",
+        ),
+        (
+            "framework-goreleaser",
+            "GoReleaser",
+            "go install github.com/goreleaser/goreleaser/v2@latest",
+        ),
+        (
+            "framework-gopls",
+            "gopls",
+            "go install golang.org/x/tools/gopls@latest",
+        ),
+        (
+            "framework-goose",
+            "Goose · migraciones",
+            "go install github.com/pressly/goose/v3/cmd/goose@latest",
+        ),
+        (
+            "framework-sqlc",
+            "sqlc",
+            "go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest",
+        ),
+        (
+            "framework-swag",
+            "Swag · OpenAPI para Go",
+            "go install github.com/swaggo/swag/cmd/swag@latest",
+        ),
+        ("framework-gofumpt", "gofumpt", "go install mvdan.cc/gofumpt@latest"),
+        ("framework-goimports", "goimports", "go install golang.org/x/tools/cmd/goimports@latest"),
+        ("framework-staticcheck", "staticcheck", "go install honnef.co/go/tools/cmd/staticcheck@latest"),
+        ("framework-delve", "Delve", "go install github.com/go-delve/delve/cmd/dlv@latest"),
+        ("framework-mockgen", "GoMock · mockgen", "go install go.uber.org/mock/mockgen@latest"),
+        ("framework-oapi-codegen", "oapi-codegen", "go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest"),
+        ("framework-templ", "templ", "go install github.com/a-h/templ/cmd/templ@latest"),
+        ("framework-ginkgo", "Ginkgo", "go install github.com/onsi/ginkgo/v2/ginkgo@latest"),
+        ("framework-golang-migrate", "golang-migrate", "go install -tags 'postgres mysql sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Go)"),
+            command.to_string(),
+            "Go · frameworks y herramientas",
+            "Necesita Go. Se instala con go install en el entorno del usuario.",
+        ));
+    }
+
+    for (id, label, package) in [
+        (
+            "framework-laravel",
+            "Laravel Installer",
+            "laravel/installer",
+        ),
+        ("framework-symfony", "Symfony Components", "symfony/console"),
+        ("framework-cakephp", "CakePHP", "cakephp/cakephp"),
+        (
+            "framework-codeigniter",
+            "CodeIgniter",
+            "codeigniter4/framework",
+        ),
+        ("framework-phpunit", "PHPUnit", "phpunit/phpunit"),
+        ("framework-phpstan", "PHPStan", "phpstan/phpstan"),
+        (
+            "framework-php-cs-fixer",
+            "PHP CS Fixer",
+            "friendsofphp/php-cs-fixer",
+        ),
+        ("framework-drush", "Drush · Drupal", "drush/drush"),
+        (
+            "framework-php-codesniffer",
+            "PHP_CodeSniffer",
+            "squizlabs/php_codesniffer",
+        ),
+        ("framework-psalm", "Psalm", "vimeo/psalm"),
+        ("framework-pest", "Pest", "pestphp/pest"),
+        ("framework-livewire", "Livewire", "livewire/livewire"),
+        ("framework-doctrine", "Doctrine ORM", "doctrine/orm"),
+        ("framework-guzzle", "Guzzle", "guzzlehttp/guzzle"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (PHP)"),
+            format!("composer global require {package}"),
+            "PHP · frameworks y herramientas",
+            "Necesita PHP y Composer. Los paquetes se instalan en el perfil global de Composer.",
+        ));
+    }
+
+    for (id, label, package) in [
+        ("framework-rails", "Ruby on Rails", "rails"),
+        ("framework-sinatra", "Sinatra", "sinatra"),
+        ("framework-hanami", "Hanami", "hanami"),
+        ("framework-rspec", "RSpec", "rspec"),
+        ("framework-rubocop", "RuboCop", "rubocop"),
+        ("framework-jekyll", "Jekyll", "jekyll"),
+        ("framework-bundler", "Bundler", "bundler"),
+        ("framework-minitest", "Minitest", "minitest"),
+        ("framework-sidekiq", "Sidekiq", "sidekiq"),
+        ("framework-puma", "Puma", "puma"),
+        ("framework-rake", "Rake", "rake"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Ruby)"),
+            format!("gem install {package}"),
+            "Ruby · frameworks y herramientas",
+            "Necesita Ruby y RubyGems. Se instala en el perfil de gemas del usuario.",
+        ));
+    }
+
+    for (id, label, command) in [
+        (
+            "framework-dotnet-ef",
+            "Entity Framework CLI",
+            "dotnet tool install --global dotnet-ef",
+        ),
+        (
+            "framework-aspnet-codegenerator",
+            "ASP.NET Code Generator",
+            "dotnet tool install --global dotnet-aspnet-codegenerator",
+        ),
+        (
+            "framework-csharpier",
+            "CSharpier",
+            "dotnet tool install --global csharpier",
+        ),
+        (
+            "framework-nswag",
+            "NSwag",
+            "dotnet tool install --global NSwag.ConsoleCore",
+        ),
+        (
+            "framework-paket",
+            "Paket",
+            "dotnet tool install --global paket",
+        ),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (.NET)"),
+            command.to_string(),
+            ".NET · herramientas y frameworks",
+            "Necesita el SDK de .NET. Se instala como herramienta global de dotnet.",
+        ));
+    }
+
+    for (id, label, command) in [
+        (
+            "framework-phoenix",
+            "Phoenix",
+            "mix archive.install hex phx_new",
+        ),
+        ("framework-credo", "Credo", "mix escript.install hex credo"),
+        (
+            "framework-ex-doc",
+            "ExDoc",
+            "mix escript.install hex ex_doc",
+        ),
+        (
+            "framework-nerves",
+            "Nerves",
+            "mix archive.install hex nerves_bootstrap",
+        ),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Elixir)"),
+            command.to_string(),
+            "Elixir · frameworks y herramientas",
+            "Necesita Elixir, Erlang y Mix. El comando instala la herramienta en el perfil de Mix.",
+        ));
+    }
+
+    for (id, label, command) in [
+        (
+            "framework-dart-melos",
+            "Melos",
+            "dart pub global activate melos",
+        ),
+        (
+            "framework-dart-mason",
+            "Mason CLI",
+            "dart pub global activate mason_cli",
+        ),
+        (
+            "framework-dart-very-good",
+            "Very Good CLI",
+            "dart pub global activate very_good_cli",
+        ),
+        (
+            "framework-dart-pana",
+            "Pana",
+            "dart pub global activate pana",
+        ),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Dart / Flutter)"),
+            command.to_string(),
+            "Dart / Flutter · herramientas y ecosistema",
+            "Necesita Dart. Flutter puede instalarse aparte desde el gestor de dependencias del sistema.",
+        ));
+    }
+
+    for (id, label, package) in [
+        ("framework-luarocks-busted", "Busted", "busted"),
+        ("framework-luarocks-luacheck", "Luacheck", "luacheck"),
+        ("framework-luarocks-penlight", "Penlight", "penlight"),
+        ("framework-luarocks-lpeg", "LPeg", "lpeg"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Lua)"),
+            format!("luarocks install {package}"),
+            "Lua · frameworks y herramientas",
+            "Necesita Lua y LuaRocks.",
+        ));
+    }
+
+    for (id, label, packages) in [
+        ("framework-conan", "Conan", "conan"),
+        ("framework-meson", "Meson", "meson"),
+        ("framework-platformio", "PlatformIO", "platformio"),
+        ("framework-cppcheck", "Cppcheck", "cppcheck"),
+        ("framework-clang-format", "clang-format", "clang-format"),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (C / C++)"),
+            format!("{python_cmd} -m pip install --user {packages}"),
+            "C / C++ · build y herramientas",
+            "Necesita Python y pip; algunas herramientas también necesitan un compilador C/C++.",
+        ));
+    }
+
+    for (id, label, package) in [
+        ("framework-cabal-hlint", "HLint", "hlint"),
+        ("framework-cabal-ormolu", "Ormolu", "ormolu"),
+        ("framework-cabal-fourmolu", "Fourmolu", "fourmolu"),
+        (
+            "framework-cabal-hls",
+            "Haskell Language Server",
+            "haskell-language-server",
+        ),
+    ] {
+        actions.push(ecosystem_action(
+            id,
+            &format!("{label} (Haskell)"),
+            format!("cabal install {package}"),
+            "Haskell · herramientas y ecosistema",
+            "Necesita GHC y Cabal.",
+        ));
+    }
+
+    actions
 }
 
 // ---- WSL ----
@@ -1276,6 +2067,7 @@ fn windows_actions(
         .chain(WINDOWS_VIEWERS.iter())
         .flat_map(|tool| windows_tool_actions(tool, t))
         .collect();
+    actions.extend(windows_code_editor_actions(t));
 
     // Mismo subgrupo que la herramienta 'docker' de WINDOWS_TOOLS: así
     // instalar, actualizar, verificar y arrancar Docker caen todas bajo un
@@ -1403,6 +2195,8 @@ fn windows_actions(
             ),
         ],
     ));
+
+    actions.extend(ecosystem_actions("python", "npm"));
 
     actions.push(
         // --include-unknown alcanza también a los programas cuya versión
@@ -1557,6 +2351,10 @@ fn mac_actions(projects_folder: &str, t: &Translator) -> Vec<InstallAction> {
     ));
 
     actions.push(posix_sh_action());
+    // Homebrew comparte los mismos ecosistemas de usuario que Linux: Python,
+    // Node y las herramientas globales de cada lenguaje se mantienen en el
+    // mismo catálogo para que el panel no pierda familias al cambiar de host.
+    actions.extend(ecosystem_actions("python3", "npm"));
     actions.push(
         InstallAction::new(
             "brew-update",
@@ -1654,6 +2452,145 @@ fn wine_hint(pkg_manager: &str) -> &'static str {
          dependientes del sistema no funcionarán. Al terminar, \"cmd.exe · Wine\" aparece como \
          entorno en el selector."
     }
+}
+
+const COMPAT_APPS: &str = "Aplicaciones Windows";
+const COMPAT_GAMES: &str = "Juegos Windows";
+const COMPAT_FULL_WINDOWS: &str = "Windows completo";
+const COMPAT_AUXILIARY: &str = "Herramientas auxiliares";
+const COMPAT_DEVELOPMENT: &str = "Desarrollo Windows";
+
+/// Herramientas Linux que amplían Wine con runners, juegos, máquinas virtuales
+/// y utilidades de desarrollo. Se mantienen fuera de `LINUX_TOOLS` para que no
+/// aparezcan mezcladas con los lenguajes y el apartado de sistema.
+#[rustfmt::skip]
+static LINUX_WINDOWS_COMPAT_TOOLS: Lazy<Vec<(PkgTool, &'static str)>> = Lazy::new(|| vec![
+    (PkgTool { hint: Some("En Debian/Ubuntu suele instalarse desde Flathub (com.usebottles.bottles) si no existe un paquete nativo."), ..pkg("compat-bottles", "Bottles", "bottles", &[("default", "bottles"), ("pacman", "bottles")], Some("bottles --version"), WINDOWS_COMPAT_GROUP) }, COMPAT_APPS),
+    (pkg("compat-steam", "Steam · Proton", "steam", &[("default", "steam"), ("apt", "steam-installer"), ("pacman", "steam")], Some("steam --version"), WINDOWS_COMPAT_GROUP), COMPAT_GAMES),
+    (PkgTool { hint: Some("ProtonUp-Qt suele distribuirse como Flatpak o AppImage cuando no aparece en los repositorios de la distribución."), ..pkg("compat-protonup", "Proton-GE · ProtonUp-Qt", "protonup-qt", &[("default", "protonup-qt"), ("pacman", "protonup-qt")], Some("protonup-qt --version"), WINDOWS_COMPAT_GROUP) }, COMPAT_GAMES),
+    (pkg("compat-lutris", "Lutris", "lutris", &[("default", "lutris"), ("apt", "lutris"), ("dnf", "lutris"), ("pacman", "lutris")], Some("lutris --version"), WINDOWS_COMPAT_GROUP), COMPAT_GAMES),
+    (pkg("compat-qemu", "QEMU/KVM", "qemu-system-x86_64", &[("default", "qemu-desktop"), ("apt", "qemu-system-x86"), ("dnf", "qemu-system-x86-core"), ("zypper", "qemu-x86"), ("apk", "qemu-system-x86_64")], Some("qemu-system-x86_64 --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
+    (pkg("compat-libvirt", "libvirt · daemon de virtualización", "virsh", &[("default", "libvirt"), ("apt", "libvirt-daemon-system libvirt-clients"), ("dnf", "libvirt"), ("pacman", "libvirt"), ("zypper", "libvirt"), ("apk", "libvirt")], Some("virsh --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
+    (pkg("compat-virt-manager", "virt-manager", "virt-manager", &[ ("default", "virt-manager") ], Some("virt-manager --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
+    (pkg("compat-gnome-boxes", "GNOME Boxes", "gnome-boxes", &[ ("default", "gnome-boxes") ], Some("gnome-boxes --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
+    (pkg("compat-winetricks", "Winetricks", "winetricks", &[ ("default", "winetricks") ], Some("winetricks --version"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
+    (pkg("compat-dxvk", "DXVK", "setup_dxvk", &[("default", "dxvk")], Some("setup_dxvk"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
+    (pkg("compat-vkd3d", "VKD3D-Proton", "vkd3d", &[("default", "vkd3d")], Some("vkd3d"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
+    (pkg("compat-cabextract", "cabextract", "cabextract", &[ ("default", "cabextract") ], Some("cabextract --version"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
+    (pkg("compat-msitools", "msitools", "msiinfo", &[ ("default", "msitools") ], Some("msiinfo --version"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
+    (pkg("compat-mingw", "MinGW-w64", "x86_64-w64-mingw32-gcc", &[("default", "mingw-w64-gcc"), ("apt", "mingw-w64"), ("dnf", "mingw64-gcc"), ("zypper", "mingw64-cross-gcc")], Some("x86_64-w64-mingw32-gcc --version"), WINDOWS_COMPAT_GROUP), COMPAT_DEVELOPMENT),
+]);
+
+fn compatibility_open_action(
+    id: &str,
+    label: &str,
+    command: &str,
+    subgroup: &str,
+    requires: &str,
+    hint: &str,
+) -> InstallAction {
+    InstallAction::new(id, label, command)
+        .short("Abrir configuración")
+        .subgroup(subgroup)
+        .group(WINDOWS_COMPAT_GROUP)
+        .verb("Abrir")
+        .requires(Some(requires))
+        .hint(hint)
+}
+
+fn linux_windows_compatibility_actions(
+    pm: &str,
+    commands: &PkgCommands,
+    t: &Translator,
+) -> Vec<InstallAction> {
+    let mut actions = Vec::new();
+    for (tool, subgroup) in LINUX_WINDOWS_COMPAT_TOOLS.iter() {
+        let Some(package) = tool.package_for(pm) else {
+            continue;
+        };
+        let mut lifecycle = tool_lifecycle_actions(tool, package, commands, pm, t);
+        // En este apartado el segundo nivel representa la categoría, no cada
+        // paquete: así se puede desplegar «Juegos Windows» y ver todos sus
+        // runners sin fabricar un acordeón por herramienta.
+        for action in &mut lifecycle {
+            action.subgroup = Some((*subgroup).to_string());
+        }
+        actions.extend(lifecycle);
+    }
+
+    // CrossOver no es un paquete libre de los repositorios: requiere descarga
+    // oficial y licencia. Se ofrece el enlace y una comprobación/configuración
+    // separadas, evitando inventar un comando de instalación que fallaría.
+    actions.extend([
+        InstallAction::new(
+            "compat-crossover-download",
+            "Descargar CrossOver",
+            "xdg-open https://www.codeweavers.com/download",
+        )
+        .short("Abrir descarga oficial")
+        .subgroup(COMPAT_APPS)
+        .group(WINDOWS_COMPAT_GROUP)
+        .hint("Alternativa comercial a Wine con soporte técnico y buena integración de aplicaciones como Microsoft Office."),
+        InstallAction::new(
+            "compat-crossover-check",
+            "Comprobar CrossOver",
+            "cxoffice --version",
+        )
+        .short("Ver versión instalada")
+        .subgroup(COMPAT_APPS)
+        .group(WINDOWS_COMPAT_GROUP)
+        .verb("Verificar")
+        .requires(Some("cxoffice")),
+        compatibility_open_action(
+            "compat-bottles-open",
+            "Abrir Bottles",
+            "bottles",
+            COMPAT_APPS,
+            "bottles",
+            "Gestiona prefijos separados, runners Wine/Proton, dependencias y configuración por aplicación.",
+        ),
+        compatibility_open_action(
+            "compat-lutris-open",
+            "Abrir Lutris",
+            "lutris",
+            COMPAT_GAMES,
+            "lutris",
+            "Centraliza juegos, launchers y runners Wine, Proton y DOSBox.",
+        ),
+        compatibility_open_action(
+            "compat-steam-open",
+            "Abrir Steam",
+            "steam",
+            COMPAT_GAMES,
+            "steam",
+            "Gestiona juegos Windows con Proton y permite seleccionar Proton-GE desde Steam.",
+        ),
+        compatibility_open_action(
+            "compat-protonup-open",
+            "Abrir ProtonUp-Qt",
+            "protonup-qt",
+            COMPAT_GAMES,
+            "protonup-qt",
+            "Instala y gestiona Proton-GE y otros runners para Steam y Lutris.",
+        ),
+        compatibility_open_action(
+            "compat-virt-manager-open",
+            "Abrir virt-manager",
+            "virt-manager",
+            COMPAT_FULL_WINDOWS,
+            "virt-manager",
+            "Gestiona máquinas virtuales QEMU/KVM; ofrece la compatibilidad más completa, con mayor consumo.",
+        ),
+        compatibility_open_action(
+            "compat-gnome-boxes-open",
+            "Abrir GNOME Boxes",
+            "gnome-boxes",
+            COMPAT_FULL_WINDOWS,
+            "gnome-boxes",
+            "Interfaz sencilla para crear y abrir máquinas virtuales QEMU/KVM.",
+        ),
+    ]);
+    actions
 }
 
 /// PowerShell NO está en los repositorios oficiales de ninguna distribución
@@ -1927,7 +2864,9 @@ fn linux_actions(
                 tool_lifecycle_actions(tool, package, commands, pm, t)
             }),
     );
+    actions.extend(linux_code_editor_actions(pm, commands, t));
     actions.push(posix_sh_action());
+    actions.extend(ecosystem_actions("python3", "npm"));
 
     // En Linux "Compatibilidad Windows" es lo que en Windows es WSL: la forma
     // de ejecutar lo del otro sistema. PowerShell y Wine son dos herramientas
@@ -2001,6 +2940,7 @@ fn linux_actions(
             .hint("El prefijo con los programas instalados (~/.wine) no se borra."),
         ],
     ));
+    actions.extend(linux_windows_compatibility_actions(pm, commands, t));
 
     let docker_pkg = package_for(LINUX_DOCKER_PKG, pm);
     actions.extend(in_subgroup(
@@ -2365,16 +3305,141 @@ mod tests {
     }
 
     #[test]
-    fn vs_code_si_se_detecta_porque_deja_su_ejecutable_en_el_path() {
+    fn los_editores_de_codigo_se_muestran_en_un_subgrupo_comun() {
         let actions = get_install_actions(&contexto("windows"), &t());
         assert_eq!(
             buscar(&actions, "viewer-code").check_cmd.as_deref(),
             Some("code")
         );
         assert_eq!(
-            buscar(&actions, "viewer-code-version").command,
-            "code --version"
+            buscar(&actions, "viewer-code").subgroup.as_deref(),
+            Some("Editores de código")
         );
+        assert!(actions.iter().any(|a| a.id == "editor-vscodium-win"
+            && a.subgroup.as_deref() == Some("Editores de código")));
+        for id in ["editor-visualstudio-win", "editor-jetbrains-toolbox-win"] {
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| a.id == id && a.subgroup.as_deref() == Some("Editores de código")),
+                "falta {id} en el submenú de IDE"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_incluye_code_oss_como_visor_de_codigo() {
+        let actions = get_install_actions(&contexto("linux"), &t());
+        let code_oss = buscar(&actions, "viewer-code-oss");
+        assert_eq!(code_oss.check_cmd.as_deref(), Some("code"));
+        assert_eq!(code_oss.subgroup.as_deref(), Some("Editores de código"));
+        assert_eq!(code_oss.command, "sudo apt install -y code-oss");
+
+        let arch = get_install_actions(
+            &InstallContext {
+                pkg_manager: Some("pacman".to_string()),
+                ..contexto("linux")
+            },
+            &t(),
+        );
+        assert_eq!(
+            buscar(&arch, "viewer-code-oss").command,
+            "sudo pacman -S --noconfirm code"
+        );
+
+        for platform in ["windows", "macos"] {
+            let actions = get_install_actions(&contexto(platform), &t());
+            assert!(
+                !actions.iter().any(|action| action.id == "viewer-code-oss"),
+                "Code - OSS no debe aparecer en {platform}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_expone_la_compatibilidad_windows_por_categorias() {
+        let actions = get_install_actions(&contexto("linux"), &t());
+        let expected = [
+            ("compat-bottles", COMPAT_APPS),
+            ("compat-crossover-download", COMPAT_APPS),
+            ("compat-steam", COMPAT_GAMES),
+            ("compat-protonup", COMPAT_GAMES),
+            ("compat-lutris", COMPAT_GAMES),
+            ("compat-qemu", COMPAT_FULL_WINDOWS),
+            ("compat-libvirt", COMPAT_FULL_WINDOWS),
+            ("compat-virt-manager", COMPAT_FULL_WINDOWS),
+            ("compat-gnome-boxes", COMPAT_FULL_WINDOWS),
+            ("compat-winetricks", COMPAT_AUXILIARY),
+            ("compat-dxvk", COMPAT_AUXILIARY),
+            ("compat-vkd3d", COMPAT_AUXILIARY),
+            ("compat-cabextract", COMPAT_AUXILIARY),
+            ("compat-msitools", COMPAT_AUXILIARY),
+            ("compat-mingw", COMPAT_DEVELOPMENT),
+        ];
+        for (id, category) in expected {
+            let action = buscar(&actions, id);
+            assert_eq!(
+                action.group, WINDOWS_COMPAT_GROUP,
+                "{id} fuera de compatibilidad"
+            );
+            assert_eq!(
+                action.subgroup.as_deref(),
+                Some(category),
+                "{id} en categoría incorrecta"
+            );
+        }
+        assert_eq!(
+            buscar(&actions, "compat-bottles-open").verb.as_deref(),
+            Some("Abrir")
+        );
+    }
+
+    #[test]
+    fn las_categorias_y_acciones_de_compatibilidad_se_traducen() {
+        let actions = get_install_actions(&contexto("linux"), &t());
+        let bottles = buscar(&actions, "compat-bottles-open").translated("en");
+        assert_eq!(bottles.subgroup.as_deref(), Some("Windows Applications"));
+        assert_eq!(bottles.verb.as_deref(), Some("Open"));
+        assert_eq!(bottles.label, "Open Bottles");
+    }
+
+    #[test]
+    fn la_compatibilidad_windows_de_linux_no_se_mezcla_con_windows_nativo() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "compat-bottles",
+            "compat-steam",
+            "compat-qemu",
+            "compat-winetricks",
+            "compat-mingw",
+        ] {
+            assert!(
+                !actions.iter().any(|action| action.id == id),
+                "{id} no debe aparecer en Windows nativo"
+            );
+        }
+    }
+
+    #[test]
+    fn cada_editor_conserva_su_nombre_dentro_del_submenu() {
+        for platform in ["linux", "windows"] {
+            let actions = get_install_actions(&contexto(platform), &t());
+            let editors: Vec<&InstallAction> = actions
+                .iter()
+                .filter(|action| action.subgroup.as_deref() == Some(CODE_EDITORS_SUBGROUP))
+                .collect();
+            assert!(!editors.is_empty(), "{platform}: no hay editores");
+            for editor in editors {
+                let short = editor.short_label.as_deref().unwrap_or_default();
+                assert_ne!(short, "Instalar con pacman", "{platform}: {}", editor.id);
+                assert_ne!(short, "Instalar con winget", "{platform}: {}", editor.id);
+                assert!(
+                    short.contains("código") || short.contains("descarga oficial"),
+                    "{platform}: el editor {} perdió su nombre: {short}",
+                    editor.id
+                );
+            }
+        }
     }
 
     #[test]
@@ -2401,6 +3466,23 @@ mod tests {
             assert_eq!(action.group, DOCKER_GROUP, "{id} fuera del apartado Docker");
             assert_eq!(action.subgroup.as_deref(), Some("Docker Desktop"), "{id}");
         }
+    }
+
+    #[test]
+    fn cada_sistema_solo_ofrece_su_forma_de_arrancar_docker() {
+        let windows = get_install_actions(&contexto("windows"), &t());
+        assert!(windows.iter().any(|action| action.id == "docker-start-win"));
+        assert!(!windows
+            .iter()
+            .any(|action| action.id == "docker-start-linux"));
+
+        let linux = get_install_actions(&contexto("linux"), &t());
+        assert!(linux.iter().any(|action| action.id == "docker-start-linux"));
+        assert!(!linux.iter().any(|action| action.id == "docker-start-win"));
+        assert_eq!(
+            buscar(&linux, "docker-start-linux").command,
+            "sudo systemctl start docker"
+        );
     }
 
     #[test]
@@ -2788,7 +3870,7 @@ mod tests {
     #[test]
     fn los_gestores_de_archivos_graficos_solo_aparecen_en_linux() {
         let linux = get_install_actions(&contexto("linux"), &t());
-        assert!(linux.iter().any(|a| a.id == "viewer-files-nautilus"));
+        assert!(linux.iter().any(|a| a.id == "viewer-files-dolphin"));
         for platform in ["windows", "macos"] {
             let actions = get_install_actions(&contexto(platform), &t());
             assert!(
@@ -2830,6 +3912,43 @@ mod tests {
             .collect();
         assert_eq!(lenguajes.first(), Some(&"winget-node"));
         assert_eq!(lenguajes.last(), Some(&"winget-groovy"));
+    }
+
+    #[test]
+    fn el_catalogo_de_ecosistemas_cubre_las_familias_principales() {
+        let esperados = [
+            "Python · frameworks y librerías",
+            "JavaScript / TypeScript · herramientas y frameworks",
+            "Rust · frameworks y herramientas",
+            "Go · frameworks y herramientas",
+            "PHP · frameworks y herramientas",
+            "Ruby · frameworks y herramientas",
+            ".NET · herramientas y frameworks",
+            "Elixir · frameworks y herramientas",
+            "Dart / Flutter · herramientas y ecosistema",
+            "Lua · frameworks y herramientas",
+            "C / C++ · build y herramientas",
+            "Haskell · herramientas y ecosistema",
+        ];
+
+        for platform in ["windows", "linux", "macos"] {
+            let actions = get_install_actions(&contexto(platform), &t());
+            let subgroups: Vec<&str> = actions
+                .iter()
+                .filter(|action| action.group == FRAMEWORKS_GROUP)
+                .filter_map(|action| action.subgroup.as_deref())
+                .collect();
+            for subgroup in esperados {
+                assert!(
+                    subgroups.contains(&subgroup),
+                    "{platform}: falta el subgrupo de ecosistema '{subgroup}'"
+                );
+            }
+            assert!(
+                subgroups.len() >= 12,
+                "{platform}: el catálogo de frameworks no tiene suficientes familias"
+            );
+        }
     }
 
     #[test]
@@ -2918,6 +4037,7 @@ mod tests {
     fn actualizar_los_repositorios_clonados_nunca_reescribe_historia() {
         let windows = git_pull_projects_action("C:\\Proyectos");
         let posix = git_pull_projects_posix_action("/home/yo/Proyectos");
+        assert!(windows.command.contains("-Depth 2"));
         for action in [&windows, &posix] {
             assert!(action.command.contains("pull --ff-only"));
             assert!(!action.command.contains("--force"));

@@ -6,5 +6,12 @@
       "vendor/conpty/conpty.dll": "./conpty.dll",
       "vendor/conpty/OpenConsole.exe": "./OpenConsole.exe"
     }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "WinSlim Terminal"
+      }
+    ]
   }
 }

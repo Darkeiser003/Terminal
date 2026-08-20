@@ -1,6 +1,6 @@
 {
   "name": "winslim-terminal",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003",
   "author": "Darkeiser003",
   "license": "UNLICENSED",
@@ -22,10 +22,13 @@
     "check:version": "node scripts/verify-version.mjs",
     "check:assets": "node scripts/verify-runtime-assets.mjs",
     "check:architecture": "node scripts/verify-architecture.mjs",
+    "check:build-scripts": "node scripts/verify-build-scripts.mjs",
     "check:workspace": "node scripts/verify-workspace.mjs",
     "metadata:sync": "node scripts/sync-package-metadata.mjs",
     "check:metadata": "node scripts/sync-package-metadata.mjs --check",
-    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:workspace && npm run check:metadata && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
+    "check:i18n": "node scripts/verify-i18n.mjs",
+    "check:test-surface": "node scripts/verify-test-surface.mjs",
+    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:i18n && npm run check:test-surface && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=22.12.0"

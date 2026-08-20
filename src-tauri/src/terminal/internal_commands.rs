@@ -21,8 +21,8 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "config" if argument.is_none() => "config",
         "reload" if argument.is_none() => "reload",
         "repl" if argument.is_some() => "repl",
-        "alias" => "alias",
-        "help" if argument.is_none() => "help",
+        "alias" if argument.is_none() => "alias",
+        "help" => "help",
         _ => return None,
     };
     Some(InternalCommand {
@@ -43,12 +43,18 @@ mod tests {
         );
         assert_eq!(parse(":config").unwrap().action, "config");
         assert_eq!(parse(":reload").unwrap().action, "reload");
+        assert_eq!(
+            parse(":help paquetes").unwrap().argument.as_deref(),
+            Some("paquetes")
+        );
+        assert_eq!(parse(":alias").unwrap().action, "alias");
     }
 
     #[test]
     fn no_secuestra_comandos_de_shell_ni_ordenes_incompletas() {
         assert!(parse("echo :repl python").is_none());
         assert!(parse(":repl").is_none());
+        assert!(parse(":alias algo").is_none());
         assert!(parse(":desconocido").is_none());
         assert!(parse("").is_none());
     }

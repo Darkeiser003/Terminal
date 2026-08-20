@@ -17,6 +17,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::environments::{Environment, ShellKind, Transport};
 use crate::file_explorer::{self, EntryKind};
 use crate::file_viewers;
+use crate::platform::traits::HostPlatform;
 use crate::preferences;
 use crate::scripts::{self, FileCategory, LaunchContext, ScanOptions, Scope, ScriptEntry};
 use crate::state::AppState;
@@ -136,8 +137,29 @@ fn bundled_operation_scripts(app: &AppHandle, categories: &[FileCategory]) -> Ve
     let Ok(resource_dir) = app.path().resource_dir() else {
         return Vec::new();
     };
-    let folder = resource_dir.join("scripts").join("containers");
-    let mut found = scripts::list_all_scripts(&folder, categories);
+    let is_windows = crate::platform::host().is_windows();
+    let mut found = Vec::new();
+    for folder_name in ["containers", "operations"] {
+        let folder = resource_dir.join("scripts").join(folder_name);
+        found.extend(scripts::list_all_scripts(&folder, categories));
+    }
+    found.retain(|entry| {
+        // Si el usuario activa todos los filtros, no se mezclan los gestores
+        // POSIX con los de PowerShell: cada build enseña su variante nativa.
+        if entry.ext == ".ps1" && !is_windows || entry.ext == ".sh" && is_windows {
+            return false;
+        }
+        let installed = |command: &str| crate::path_env::is_tool_installed(command);
+        match entry.name.trim_end_matches(".sh").trim_end_matches(".ps1") {
+            "docker-manager" => installed("docker"),
+            "kubernetes-manager" => installed("kubectl"),
+            "ssh-manager" => installed("ssh"),
+            "service-manager" => is_windows || installed("systemctl"),
+            "network-manager" => true,
+            "adb-manager" => installed("adb"),
+            _ => true,
+        }
+    });
     for entry in &mut found {
         entry.source = "LTerminal".to_string();
     }
@@ -205,7 +227,8 @@ fn here_panel(
     }
 
     state.tabs.set_here_dir(tab_id, &dir, false);
-    let started = std::time::Instant::now();
+    let total_started = std::time::Instant::now();
+    let scan_started = std::time::Instant::now();
     let result = scripts::list_scripts(
         Path::new(&dir),
         &ScanOptions {
@@ -215,7 +238,13 @@ fn here_panel(
             source: "Aquí".to_string(),
         },
     );
+    let scan_ms = scan_started.elapsed().as_millis() as u64;
+    let whitelist_started = std::time::Instant::now();
     state.remember_visible_items(&result.scripts);
+    let whitelist_ms = whitelist_started.elapsed().as_millis() as u64;
+    let pinned_started = std::time::Instant::now();
+    let pinned = pinned_scripts(state);
+    let pinned_ms = pinned_started.elapsed().as_millis() as u64;
     log_info!(
         "Escaneo de scripts Aquí completado",
         serde_json::json!({
@@ -225,7 +254,11 @@ fn here_panel(
             "results": result.scripts.len(),
             "visitedDirectories": result.info.visited_directories,
             "skippedDirectories": result.info.skipped_directories,
-            "elapsedMs": started.elapsed().as_millis() as u64,
+            "stopReason": result.info.stop_reason,
+            "scanMs": scan_ms,
+            "whitelistMs": whitelist_ms,
+            "pinnedMs": pinned_ms,
+            "elapsedMs": total_started.elapsed().as_millis() as u64,
         })
     );
     ScriptsPanel {
@@ -233,7 +266,7 @@ fn here_panel(
         scripts: result.scripts,
         depth: Some(depth),
         scan: Some(result.info),
-        pinned: pinned_scripts(state),
+        pinned,
         ..ScriptsPanel::empty("here", "", None)
     }
 }

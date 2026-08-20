@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 
 use crate::environments::{self, Environment, Inventory};
+use crate::platform::traits::HostPlatform;
 use crate::preferences;
 use crate::pty::Viewport;
 use crate::tabs::TabManager;
@@ -230,6 +231,7 @@ impl AppState {
             .name("env-detect".into())
             .spawn(move || {
                 let started = Instant::now();
+                maybe_start_docker_on_windows();
                 let inventory = state.refresh_environments();
                 log_info!(
                     "Inventario de entornos completo",
@@ -261,6 +263,56 @@ impl AppState {
         }
         let default_id = environments::default_env_id(&envs)?;
         envs.into_iter().find(|env| env.id == default_id)
+    }
+}
+
+/// La preferencia de arranque automático solo puede actuar de forma segura en
+/// Windows: allí Docker Desktop es una aplicación de usuario que se puede
+/// lanzar sin pedir privilegios. En Linux Docker es un daemon del sistema y
+/// `systemctl` requiere autorización explícita del usuario; nunca se intenta
+/// ejecutar Docker Desktop ni elevar privilegios desde el arranque.
+fn maybe_start_docker_on_windows() {
+    let preferences = preferences::current();
+    if !preferences.auto_start_docker
+        || !crate::platform::host().is_windows()
+        || !crate::path_env::is_tool_installed("docker")
+    {
+        return;
+    }
+
+    if crate::docker_env::is_daemon_ready(crate::docker_env::DEFAULT_TIMEOUT) {
+        return;
+    }
+
+    let start = Instant::now();
+    log_info!(
+        "Docker no responde; se intentará iniciar Docker Desktop en Windows",
+        serde_json::json!({ "platform": "windows" })
+    );
+    match crate::docker_env::start_docker_daemon() {
+        crate::docker_env::StartResult::Started { via } => {
+            let ready = crate::docker_env::wait_for_daemon(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_millis(750),
+            );
+            log_info!(
+                "Arranque de Docker Desktop finalizado",
+                serde_json::json!({
+                    "via": via,
+                    "ready": ready,
+                    "durationMs": start.elapsed().as_millis(),
+                })
+            );
+        }
+        crate::docker_env::StartResult::NotStarted { reason } => {
+            log_warn!(
+                "No se pudo iniciar Docker Desktop automáticamente",
+                serde_json::json!({
+                    "reason": reason,
+                    "durationMs": start.elapsed().as_millis(),
+                })
+            );
+        }
     }
 }
 

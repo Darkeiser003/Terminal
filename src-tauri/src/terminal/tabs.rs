@@ -37,6 +37,13 @@ const FAILED_SESSION: Duration = Duration::from_millis(3000);
 /// antiguos, conservando los recientes.
 const MAX_PENDING_OUTPUT: usize = 500;
 
+/// Solo se puede sustituir el bloque superior si el cursor está fuera de todas
+/// las filas que se van a limpiar. Durante el arranque el frontend todavía no
+/// conoce el cursor; en ese caso se conserva el comportamiento normal.
+fn banner_cursor_is_safe(cursor_row: Option<u16>, affected_rows: usize) -> bool {
+    cursor_row.map_or(true, |cursor| usize::from(cursor) >= affected_rows)
+}
+
 pub const MAX_PTY_INPUT_CHARS: usize = 4 * 1024 * 1024;
 
 // ---- Eventos hacia el frontend ----
@@ -150,6 +157,13 @@ fn script_aliases_for(env: &Environment) -> Vec<crate::alias_profiles::ScriptAli
         aliases.push(alias);
     }
     aliases
+}
+
+/// Las shells del host reciben un script que termina en nuestro marcador de
+/// limpieza. Los REPL, contenedores y dispositivos no lo reciben: su prompt
+/// inicial no debe quedar retenido esperando un marcador que nunca llegará.
+fn waits_for_initial_clear(env: &Environment) -> bool {
+    crate::alias_profiles::transport_loads_host_files(env.transport) && !env.repl
 }
 
 fn manual_aliases_from_text(text: &str) -> Vec<crate::alias_profiles::ScriptAlias> {
@@ -280,6 +294,15 @@ struct Tab {
     /// El último comando que se reportó como no encontrado, para no sugerir lo
     /// mismo dos veces seguidas.
     last_missing_command: Option<String>,
+    /// Filas que ocupó el último banner. Al redibujar se limpian las antiguas
+    /// y las nuevas para que un banner anterior no deje secciones duplicadas.
+    banner_rows: usize,
+    /// Durante el arranque la shell aún está cargando aliases, limpiando la
+    /// pantalla y mostrando el primer prompt. Un resize que llegue en ese
+    /// intervalo no puede repintar el banner todavía: el cursor guardado
+    /// estaría arriba y el prompt acabaría dibujándose sobre el fastfetch.
+    initializing: bool,
+    pending_banner_refresh: Option<(u16, u16, usize)>,
     /// Carpeta que el panel «Aquí» está escaneando para esta pestaña.
     here_scripts_dir: Option<String>,
     /// La eligió el usuario a mano: entonces no la pisa el cwd de la shell.
@@ -504,6 +527,9 @@ impl TabManager {
                 output_buffer: String::new(),
                 cwd_buffer: String::new(),
                 last_missing_command: None,
+                banner_rows: 0,
+                initializing: waits_for_initial_clear(env),
+                pending_banner_refresh: None,
                 here_scripts_dir: None,
                 here_manual: false,
                 explorer_dir: None,
@@ -549,6 +575,12 @@ impl TabManager {
             if let Some(previous) = tab.session.take() {
                 previous.kill();
             }
+            // También se aplica al cambiar de entorno: la shell nueva puede
+            // escribir su prompt antes de que termine de cargarse el script
+            // de inicialización, y esa salida debe descartarse hasta el
+            // marcador de limpieza.
+            tab.initializing = waits_for_initial_clear(env);
+            tab.pending_banner_refresh = None;
             tab.generation
         };
 
@@ -662,6 +694,15 @@ impl TabManager {
                 // alias NSudo no puede filtrarse a builds Linux ni siquiera si
                 // existe un ejecutable con ese nombre en PATH.
                 let nsudo_path = crate::platform::nsudo_path();
+                let banner = crate::system_info::build_banner(
+                    &env.label,
+                    crate::identity::current().name,
+                    viewport.cols,
+                    viewport.rows,
+                    1,
+                    &t,
+                );
+                let banner_rows = banner.lines().count().max(1);
                 let session_files = crate::session_files::write_session_files(
                     &crate::session_files::SessionRequest {
                         tab_id,
@@ -676,24 +717,34 @@ impl TabManager {
                         show_banner: crate::preferences::current().show_system_banner,
                         // El ancho de la pestaña, para que el marco no salga
                         // más ancho que la casilla donde se va a leer.
-                        banner: &crate::system_info::build_banner(
-                            &env.label,
-                            crate::identity::current().name,
-                            viewport.cols,
-                            self.list().tabs.len(),
-                            &t,
-                        ),
+                        banner: &banner,
                     },
                     &t,
                 );
+                if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                    tab.banner_rows = banner_rows;
+                    tab.initializing = session_files.init_command.is_some();
+                    tab.pending_banner_refresh = None;
+                }
 
                 match session_files.init_command {
                     Some(command) => {
                         self.write(tab_id, &format!("{command}\r"));
                     }
                     None => {
+                        let pending = {
+                            let mut registry = self.registry.lock();
+                            let Some(tab) = registry.find_mut(tab_id) else {
+                                return false;
+                            };
+                            tab.initializing = false;
+                            tab.pending_banner_refresh.take()
+                        };
                         if !session_files.banner_text.is_empty() {
                             self.send(app, tab_id, Outbound::Data(session_files.banner_text));
+                        }
+                        if let Some((cols, rows, pane_count)) = pending {
+                            self.refresh_banner(app, tab_id, cols, rows, pane_count, None);
                         }
                     }
                 }
@@ -806,8 +857,43 @@ impl TabManager {
         match event {
             PtyEvent::Data(data) => {
                 if !data.is_empty() {
+                    // Las shells interactivas suelen pintar un prompt nada
+                    // más nacer, antes de que la app pueda cargar sus alias
+                    // y ejecutar la limpieza inicial. Esa salida ya no forma
+                    // parte de la sesión visible: si la enviamos, el prompt
+                    // antiguo puede quedarse entre las secciones del banner
+                    // cuando llega el repintado.
+                    let initializing = self
+                        .registry
+                        .lock()
+                        .find(tab_id)
+                        .map(|tab| tab.initializing)
+                        .unwrap_or(false);
+                    if initializing {
+                        return;
+                    }
                     self.inspect_output(app, tab_id, &data);
                     self.send(app, tab_id, Outbound::Data(data));
+
+                    // El primer bloque posterior al marcador contiene el
+                    // resultado de la limpieza y/o el banner de la shell. En
+                    // ese punto el cursor ya está detrás de esa salida y se
+                    // puede aplicar el resize pendiente sin dejarlo arriba
+                    // del fastfetch.
+                    let pending = {
+                        let mut registry = self.registry.lock();
+                        let Some(tab) = registry.find_mut(tab_id) else {
+                            return;
+                        };
+                        if tab.initializing {
+                            None
+                        } else {
+                            tab.pending_banner_refresh.take()
+                        }
+                    };
+                    if let Some((cols, rows, pane_count)) = pending {
+                        self.refresh_banner(app, tab_id, cols, rows, pane_count, None);
+                    }
                 }
             }
             PtyEvent::Clear(marker) => {
@@ -823,6 +909,10 @@ impl TabManager {
                         return;
                     }
                     tab.last_clear_marker = Some(marker);
+                    // Este es el marcador del script inicial. A partir de
+                    // aquí el siguiente Data ya contiene la salida posterior
+                    // a la limpieza, que es el ancla segura para repintar.
+                    tab.initializing = false;
                 }
                 // El marcador se emite antes del clear nativo: se elimina la
                 // pantalla anterior antes de que ConPTY pinte banner/prompt.
@@ -1012,6 +1102,92 @@ impl TabManager {
         }
     }
 
+    /// Vuelve a dibujar el banner en la parte superior del xterm sin escribir
+    /// en el proceso hijo. Se guarda/restaura la posición del cursor para que
+    /// una ruta o un editor que esté abierto no reciba teclas inesperadas.
+    pub fn refresh_banner(
+        &self,
+        app: &AppHandle,
+        tab_id: &str,
+        cols: u16,
+        rows: u16,
+        pane_count: usize,
+        cursor_row: Option<u16>,
+    ) {
+        {
+            let mut registry = self.registry.lock();
+            let Some(tab) = registry.find_mut(tab_id) else {
+                return;
+            };
+            if tab.initializing {
+                tab.pending_banner_refresh = Some((cols, rows, pane_count));
+                log_debug!(
+                    "Banner pendiente hasta terminar el arranque de la shell",
+                    serde_json::json!({ "tabId": tab_id, "cols": cols, "paneCount": pane_count })
+                );
+                return;
+            }
+        }
+        let env = self
+            .registry
+            .lock()
+            .find(tab_id)
+            .and_then(|tab| tab.env.clone());
+        let Some(env) = env else { return };
+        let t = crate::i18n::Translator::new(&active_language());
+        let banner = crate::system_info::build_banner(
+            &env.label,
+            crate::identity::current().name,
+            cols,
+            rows,
+            pane_count,
+            &t,
+        );
+
+        // El banner ocupa la parte superior de la pantalla. Se limpian solo
+        // esas filas y se restaura el cursor; el historial posterior queda
+        // intacto y no se envía ninguna orden a la shell.
+        let rows = banner.lines().count().max(1);
+        let rows_to_clear = {
+            let mut registry = self.registry.lock();
+            let Some(tab) = registry.find_mut(tab_id) else {
+                return;
+            };
+            let previous = tab.banner_rows.max(1);
+            let affected_rows = previous.max(rows);
+            if !banner_cursor_is_safe(cursor_row, affected_rows) {
+                log_debug!(
+                    "Repintado del banner aplazado para proteger el cursor",
+                    serde_json::json!({
+                        "tabId": tab_id,
+                        "cursorRow": cursor_row,
+                        "affectedRows": affected_rows,
+                        "cols": cols,
+                        "paneCount": pane_count
+                    })
+                );
+                return;
+            }
+            tab.banner_rows = rows;
+            previous.max(rows)
+        };
+        let mut visual = String::from("\x1b7\x1b[H");
+        for index in 0..rows_to_clear {
+            visual.push_str("\x1b[2K");
+            if index + 1 < rows_to_clear {
+                visual.push_str("\r\n");
+            }
+        }
+        visual.push_str("\x1b[H");
+        visual.push_str(&banner);
+        visual.push_str("\x1b8");
+        self.send(app, tab_id, Outbound::Data(visual));
+        log_debug!(
+            "Banner redibujado tras cambio de tamaño",
+            serde_json::json!({ "tabId": tab_id, "cols": cols, "paneCount": pane_count })
+        );
+    }
+
     /// Mata todos los pty al cerrar la app, para no dejar shells huérfanas.
     pub fn shutdown(&self) {
         let mut registry = self.registry.lock();
@@ -1138,6 +1314,9 @@ mod tests {
             output_buffer: String::new(),
             cwd_buffer: String::new(),
             last_missing_command: None,
+            banner_rows: 0,
+            initializing: true,
+            pending_banner_refresh: None,
             here_scripts_dir: None,
             here_manual: false,
             explorer_dir: None,
@@ -1145,6 +1324,14 @@ mod tests {
         });
         assert!(!registry.find("tab-1").unwrap().ready);
         assert!(registry.find("tab-2").is_none());
+    }
+
+    #[test]
+    fn el_repintado_no_pisa_la_fila_del_cursor() {
+        assert!(banner_cursor_is_safe(None, 18));
+        assert!(banner_cursor_is_safe(Some(18), 18));
+        assert!(!banner_cursor_is_safe(Some(17), 18));
+        assert!(!banner_cursor_is_safe(Some(20), 21));
     }
 
     #[test]
@@ -1163,6 +1350,9 @@ mod tests {
             output_buffer: String::new(),
             cwd_buffer: String::new(),
             last_missing_command: None,
+            banner_rows: 0,
+            initializing: false,
+            pending_banner_refresh: None,
             here_scripts_dir: None,
             here_manual: false,
             explorer_dir: None,

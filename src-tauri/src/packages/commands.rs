@@ -261,7 +261,7 @@ fn summary_components(
         componentes.push(Component {
             label: "NSudo".to_string(),
             value: if crate::platform::nsudo_path().is_some() {
-                t.t("deps.summaryReady", "Listo")
+                t.t("deps.ready", "Listo")
             } else {
                 t.t("deps.summaryNone", "No instalado")
             },

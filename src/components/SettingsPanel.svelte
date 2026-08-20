@@ -172,10 +172,10 @@
     }
 
     async function exportProfile(): Promise<void> {
-        const result = await api.exportProfile();
+        const result = await api.exportProfile(app.appInfo?.platform ?? "linux");
         if (!result) return;
         statusError = !result.ok;
-        status = result.ok ? "Perfil exportado correctamente." : (result.error ?? "No se pudo exportar el perfil.");
+        status = result.ok ? "Perfil portable exportado como script." : (result.error ?? "No se pudo exportar el perfil.");
     }
 
     async function importProfile(): Promise<void> {
@@ -282,25 +282,9 @@
             : "",
     );
 
-    /** Los perfiles oficiales del catálogo son además los dueños del proyecto,
-     *  no solo colaboradores del código. */
-    function roleOf(developer: string): string {
-        const projectLeads = (app.appInfo?.projectLeads ?? []).map((login) =>
-            login.toLowerCase(),
-        );
-        if (projectLeads.includes(developer.toLowerCase())) {
-            return app.t(
-                "projects.projectLeadCreator",
-                "Creador de LTerminal · Director de proyectos",
-            );
-        }
-        const owners = (app.appInfo?.owners ?? []).map((login) =>
-            login.toLowerCase(),
-        );
-        return owners.includes(developer.toLowerCase())
-            ? app.t("settings.roleOwner", "Desarrollador · WinSlim")
-            : app.t("settings.roleDeveloper", "Desarrollador");
-    }
+    const primaryDeveloper = $derived(
+        (app.appInfo?.projectLeads ?? [])[0] ?? (app.appInfo?.developers ?? [])[0],
+    );
 
     const sections: { id: Section; label: string }[] = $derived([
         { id: "appearance", label: app.t("settings.appearance", "Apariencia") },
@@ -876,7 +860,7 @@
                             <small>
                                 {app.t(
                                     "settings.autoOpenFirstHint",
-                                    "Desactivado mantiene Docker y los demás grupos cerrados.",
+                                    "Por defecto, todas las listas empiezan cerradas; solo se abre la primera si activas esta opción.",
                                 )}
                             </small>
                         </span>
@@ -888,14 +872,14 @@
                     <label class="check"><input type="checkbox" bind:checked={draft.showDependenciesPanel} /><span><strong>{app.t("toolbar.deps", "Entorno y dependencias")}</strong></span></label>
                     <label class="check"><input type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong></span></label>
                     <label class="check"><input type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong></span></label>
-                    <label class="check"><input type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong></span></label>
+                    <label class="check"><input data-testid="settings-show-explorer" type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong></span></label>
                     <div class="heading">
                         <strong>Entornos habilitados</strong>
                         <span>Oculta shells, contenedores, dispositivos o REPL concretos sin desinstalarlos.</span>
                     </div>
                     <div class="environment-controls">
-                        <input type="search" bind:value={environmentQuery} placeholder="Buscar shell, REPL o contenedor…" aria-label="Buscar entornos" />
-                        <select bind:value={environmentGroup} aria-label="Filtrar entornos por grupo">
+                        <input type="search" bind:value={environmentQuery} placeholder={app.t("env.search", "Buscar shell, REPL o contenedor…")} aria-label={app.t("settings.environmentSearch", "Buscar entornos")} />
+                        <select bind:value={environmentGroup} aria-label={app.t("settings.environmentFilter", "Filtrar entornos por grupo")}>
                             <option value="all">Todos los grupos</option>
                             {#each environmentGroups as group (group)}<option value={group}>{group}</option>{/each}
                         </select>
@@ -928,7 +912,7 @@
                         <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
                         <span>{app.t("settings.shortcutsHint", "Usa combinaciones como Ctrl+Shift+T. Navegación directa: Control derecho + W/A/S/D, sin interferir con el Control izquierdo de la shell.")}</span>
                     </div>
-                    <div class="shortcut-preset" aria-label="Navegación fija entre paneles">
+                    <div class="shortcut-preset" aria-label={app.t("settings.shortcutsNavigation", "Navegación fija entre paneles")}>
                         <span><kbd>Ctrl derecho</kbd> + <kbd>W</kbd> arriba</span>
                         <span><kbd>Ctrl derecho</kbd> + <kbd>A</kbd> izquierda</span>
                         <span><kbd>Ctrl derecho</kbd> + <kbd>S</kbd> abajo</span>
@@ -947,7 +931,7 @@
                     </div>
                     <div class="heading">
                         <strong>{app.t("settings.profiles", "Perfiles portables")}</strong>
-                        <span>{app.t("settings.profilesHint", "Exporta o importa preferencias validadas; no incluye tokens ni sesiones.")}</span>
+                        <span>Genera un .sh o .ps1 que detecta la aplicación, la instala desde GitHub si falta y restaura configuración y plugins declarativos. No incluye sesiones, tokens, contraseñas, claves privadas ni binarios.</span>
                     </div>
                     <div class="update-row">
                         <button type="button" class="secondary" onclick={exportProfile}>Exportar perfil</button>
@@ -1078,12 +1062,7 @@
                     {/if}
 
                     <div class="heading">
-                        <strong
-                            >{app.t(
-                                "settings.developers",
-                                "Desarrolladores",
-                            )}</strong
-                        >
+                        <strong>Desarrollador principal</strong>
                         <span
                             >{app.t(
                                 "settings.developersHint",
@@ -1092,7 +1071,7 @@
                         >
                     </div>
                     <div class="developers">
-                        {#each Array.from(new Set([...(app.appInfo?.projectLeads ?? []), ...(app.appInfo?.developers ?? [])])) as developer (developer)}
+                        {#if primaryDeveloper}
                             <button
                                 type="button"
                                 class="developer"
@@ -1100,11 +1079,11 @@
                                     .t("settings.openProfile", "Abrir {url}")
                                     .replace(
                                         "{url}",
-                                        `https://github.com/${developer}`,
+                                        `https://github.com/${primaryDeveloper}`,
                                     )}
-                                onclick={() => api.openInGithub(developer)}
+                                onclick={() => api.openInGithub(primaryDeveloper)}
                             >
-                                @{developer} · {roleOf(developer)}
+                                @{primaryDeveloper} · Desarrollador principal
                             </button>
                         {:else}
                             <span class="field-hint">
@@ -1113,8 +1092,26 @@
                                     "Pendiente de completar.",
                                 )}
                             </span>
-                        {/each}
+                        {/if}
                     </div>
+                    {#if (app.appInfo?.collaborators ?? []).length}
+                        <div class="heading">
+                            <strong>Colaboradores</strong>
+                            <span>Personas que colaboran específicamente con esta distribución.</span>
+                        </div>
+                        <div class="developers">
+                            {#each app.appInfo?.collaborators ?? [] as collaborator (collaborator.login)}
+                                <button
+                                    type="button"
+                                    class="developer"
+                                    title={app.t("settings.openProfile", "Abrir {url}").replace("{url}", `https://github.com/${collaborator.login}`)}
+                                    onclick={() => api.openInGithub(collaborator.login)}
+                                >
+                                    @{collaborator.login} · {collaborator.role}
+                                </button>
+                            {/each}
+                        </div>
+                    {/if}
 
                     <div class="heading">
                         <strong

@@ -1,6 +1,6 @@
 #requires -Version 5.0
 <#
-    Build de LTerminal (Tauri 2 + Rust) para Windows.
+    Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
 
     Produce UNA sola cosa: la carpeta desempaquetada con el .exe, conpty.dll y
     OpenConsole.exe. Sin instalador NSIS, sin portable y sin accesos directos;
@@ -15,7 +15,9 @@ param(
     [switch]$NoRun,
     [switch]$SkipChecks,
     [string]$Version,
-    [switch]$NonInteractive
+    [switch]$InstallE2eDriver,
+    [switch]$NonInteractive,
+    [switch]$FullTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -315,7 +317,7 @@ if ($devServer) {
 
 $running = Get-Process -Name 'winslim-terminal' -ErrorAction SilentlyContinue
 if ($running) {
-    Write-Err "LTerminal esta abierto ($($running.Count) proceso(s))."
+    Write-Err "WinSlim Terminal esta abierto ($($running.Count) proceso(s))."
     Write-Err 'Cierralo antes de compilar: su .exe y su conpty.dll no se pueden reemplazar en uso.'
     throw 'La aplicacion esta en marcha.'
 }
@@ -433,6 +435,7 @@ try {
         $process.Refresh()
         if ($process.HasExited) {
             Write-Err "La aplicacion se cerro sola con codigo $($process.ExitCode)."
+            if (Test-Path $logPath) { Get-Content $logPath -Tail 80 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray } }
             throw 'La build compila pero no arranca. Revisa el log en %APPDATA%\winslim-terminal\logs.'
         }
         if (Test-Path $logPath) {
@@ -444,6 +447,7 @@ try {
         }
     }
     if (-not $ready) {
+        if (Test-Path $logPath) { Get-Content $logPath -Tail 80 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray } }
         throw "La ventana siguio viva, pero frontend/xterm/PTY no confirmaron el arranque en 30 s. Revisa $logPath."
     }
     Write-Ok 'Frontend, terminal y PTY confirmaron el arranque'
@@ -455,6 +459,74 @@ try {
         Remove-Item Env:LTERMINAL_SMOKE_TOKEN -ErrorAction SilentlyContinue
     } else {
         $env:LTERMINAL_SMOKE_TOKEN = $previousSmokeToken
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 8b. Pruebas ampliadas opcionales
+# ---------------------------------------------------------------------------
+# El smoke ya comprobó ventana, frontend, xterm y PTY. Esta batería adicional
+# comprueba los ejecutables que la aplicación usa para preparar una sesión en
+# Windows. Se pregunta también con -NoRun: compilar sin lanzar la ventana no
+# debe esconder una validación que el usuario pidió explícitamente.
+$runExtendedTests = $FullTests.IsPresent
+if (-not $runExtendedTests -and -not $NonInteractive) {
+    $extendedReply = Read-Host '¿Ejecutar también la batería completa de shells y herramientas instaladas? [s/N]'
+    $runExtendedTests = $extendedReply -match '^(s|si|sí)$'
+}
+if ($runExtendedTests) {
+    Write-Step 'Pruebas ampliadas de Windows (shells, herramientas y E2E)'
+    $probes = @(
+        @{ Name = 'cmd'; Exe = 'cmd.exe'; Args = @('/d', '/c', 'exit 0') },
+        @{ Name = 'PowerShell'; Exe = 'powershell.exe'; Args = @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') },
+        @{ Name = 'Node.js'; Exe = 'node'; Args = @('-e', 'process.exit(0)') },
+        @{ Name = 'npm'; Exe = 'npm'; Args = @('--version') },
+        @{ Name = 'Git'; Exe = 'git'; Args = @('--version') },
+        @{ Name = 'Python'; Exe = 'python'; Args = @('-I', '-c', 'print("LTERMINAL_REPL_OK")') },
+        @{ Name = 'Ruby'; Exe = 'ruby'; Args = @('-e', 'puts "LTERMINAL_REPL_OK"') },
+        @{ Name = 'PHP'; Exe = 'php'; Args = @('-r', 'echo "LTERMINAL_REPL_OK";') },
+        @{ Name = 'Rust/Cargo'; Exe = 'cargo'; Args = @('--version') },
+        @{ Name = 'Rustc'; Exe = 'rustc'; Args = @('--version') },
+        @{ Name = 'SQLite'; Exe = 'sqlite3'; Args = @('--version') },
+        @{ Name = 'Docker'; Exe = 'docker'; Args = @('--version') },
+        @{ Name = 'kubectl'; Exe = 'kubectl'; Args = @('version', '--client=true') },
+        @{ Name = 'Wine'; Exe = 'wine'; Args = @('--version') },
+        @{ Name = 'QEMU'; Exe = 'qemu-system-x86_64'; Args = @('--version') },
+        @{ Name = 'MinGW'; Exe = 'x86_64-w64-mingw32-gcc'; Args = @('--version') }
+    )
+    foreach ($probe in $probes) {
+        if (-not (Test-Command $probe.Exe)) {
+            Write-Warn "$($probe.Name) no está instalado; se omite."
+            continue
+        }
+        $probeCode = Invoke-Native $probe.Exe $probe.Args
+        if ($probeCode -ne 0) {
+            throw "La prueba de $($probe.Name) falló (código $probeCode)."
+        }
+        Write-Ok "$($probe.Name) respondió correctamente"
+    }
+
+    if (-not (Test-Command 'tauri-driver') -and $InstallE2eDriver -and (Test-Command 'cargo')) {
+        Write-Warn 'Falta tauri-driver; se instalará con cargo para completar E2E.'
+        $driverCode = Invoke-Native 'cargo' @('install', 'tauri-driver', '--locked')
+        if ($driverCode -ne 0) { throw "No se pudo instalar tauri-driver (código $driverCode)." }
+        Refresh-EnvironmentPath
+    }
+    if (-not (Test-Command 'tauri-driver')) {
+        throw 'Falta tauri-driver. Reintenta con -InstallE2eDriver o instálalo con cargo.'
+    }
+    $previousE2eBinary = $env:E2E_BINARY
+    try {
+        $env:E2E_BINARY = Join-Path $distDir 'winslim-terminal.exe'
+        $e2eCode = Invoke-Native 'npm' @('run', 'e2e')
+        if ($e2eCode -ne 0) { throw "E2E falló (código $e2eCode). Revisa el log en $logPath." }
+        Write-Ok 'E2E confirmó ventana, terminal, barra y Ajustes'
+    } finally {
+        if ($null -eq $previousE2eBinary) {
+            Remove-Item Env:E2E_BINARY -ErrorAction SilentlyContinue
+        } else {
+            $env:E2E_BINARY = $previousE2eBinary
+        }
     }
 }
 
@@ -484,6 +556,6 @@ if (-not $NoRun) {
 }
 
 Write-Host ''
-Write-Host "Listo. LTerminal $version compilado y verificado." -ForegroundColor Green
+Write-Host "Listo. WinSlim Terminal $version compilado y verificado." -ForegroundColor Green
 Write-Host "  Carpeta: $distDir"
 Write-Host "  Release: $zipPath"

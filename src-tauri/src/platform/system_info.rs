@@ -459,9 +459,114 @@ fn parse_lspci_gpu(output: &str) -> String {
     model.trim_matches('"').trim().to_string()
 }
 
-// El esquema 2 invalida los modelos de GPU mal interpretados por el parser
-// antiguo de `lspci -mm`.
-const HARDWARE_CACHE_SCHEMA: u32 = 2;
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+/// Convierte la descripción técnica del driver en un nombre legible para el
+/// banner. Algunas versiones de `lspci` devuelven, por ejemplo,
+/// `NVidia Corporation TU116s`, mientras que otras incluyen el nombre
+/// comercial entre corchetes. No se debe mostrar el identificador interno del
+/// chip cuando el modelo comercial está disponible.
+fn clean_gpu_name(value: &str) -> String {
+    let normalized = clean_identity_value(value)
+        .replace("NVidia", "NVIDIA")
+        .replace("Nvidia", "NVIDIA")
+        .replace("nvidia", "NVIDIA");
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    let vendor = if lower.starts_with("nvidia") {
+        Some("NVIDIA")
+    } else if lower.starts_with("advanced micro devices") || lower.starts_with("amd") {
+        Some("AMD")
+    } else if lower.starts_with("intel") {
+        Some("Intel")
+    } else if lower.starts_with("matrox") {
+        Some("Matrox")
+    } else {
+        None
+    };
+
+    let commercial_model = normalized
+        .split('[')
+        .skip(1)
+        .filter_map(|part| part.split_once(']').map(|(candidate, _)| candidate.trim()))
+        .map(clean_identity_value)
+        .find(|candidate| {
+            let candidate_lower = candidate.to_ascii_lowercase();
+            !candidate.contains(':')
+                && [
+                    "geforce",
+                    "quadro",
+                    "tesla",
+                    "rtx",
+                    "gtx",
+                    "radeon",
+                    "arc",
+                    "iris",
+                    "uhd",
+                    "hd graphics",
+                    "vega",
+                    "firepro",
+                ]
+                .iter()
+                .any(|marker| candidate_lower.contains(marker))
+        });
+
+    let body = if let Some(model) = commercial_model {
+        model
+    } else if let Some(vendor_name) = vendor {
+        strip_prefix_ignore_ascii_case(&normalized, vendor_name)
+            .and_then(|rest| {
+                strip_prefix_ignore_ascii_case(rest.trim_start(), "Corporation")
+                    .or_else(|| strip_prefix_ignore_ascii_case(rest.trim_start(), "Inc."))
+                    .or_else(|| Some(rest.trim_start()))
+            })
+            .unwrap_or(normalized.as_str())
+            .trim()
+            .to_string()
+    } else {
+        normalized.clone()
+    };
+
+    let body = body
+        .replace("[AMD/ATI]", "")
+        .replace("Corporation", "")
+        .replace("Advanced Micro Devices, Inc.", "")
+        .split_whitespace()
+        .map(|token| {
+            // Hay salidas de pciutils que añaden una `s` al codename, por
+            // ejemplo `TU116s`. Solo se elimina en tokens alfanuméricos que
+            // contienen dígitos para no alterar palabras como `Graphics`.
+            if token.len() > 4 && token.ends_with('s') {
+                let stem = &token[..token.len() - 1];
+                if stem.chars().any(|ch| ch.is_ascii_digit())
+                    && stem.chars().all(|ch| ch.is_ascii_alphanumeric())
+                {
+                    return stem.to_string();
+                }
+            }
+            token.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    match (vendor, body.is_empty()) {
+        (Some(vendor), false) if !body.eq_ignore_ascii_case(vendor) => format!("{vendor} {body}"),
+        (Some(vendor), _) => vendor.to_string(),
+        (None, _) => body,
+    }
+}
+
+// El esquema 3 invalida las cachés que aún contienen nombres técnicos de GPU
+// como `NVidia Corporation TU116s`.
+const HARDWARE_CACHE_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -595,7 +700,7 @@ fn detect_static_hardware(fingerprint: String) -> StaticHardware {
         fingerprint,
         cpu_model,
         motherboard,
-        gpu,
+        gpu: clean_gpu_name(&gpu),
         ram,
     }
 }
@@ -721,7 +826,7 @@ fn read_motherboard() -> String {
 }
 
 pub fn gpu_info() -> String {
-    static_hardware().gpu.clone()
+    clean_gpu_name(&static_hardware().gpu)
 }
 
 #[cfg(windows)]
@@ -774,7 +879,7 @@ fn read_full_gpu() -> String {
         let vram_64bit = read_gpu_vram_bytes();
         let cim = windows_cim_snapshot();
         let from_registry = registry_gpu_name();
-        let clean = clean_identity_value(if cim.gpu_name.trim().is_empty() {
+        let clean = clean_gpu_name(if cim.gpu_name.trim().is_empty() {
             &from_registry
         } else {
             &cim.gpu_name
@@ -790,7 +895,7 @@ fn read_full_gpu() -> String {
 
     #[cfg(not(windows))]
     {
-        clean_identity_value(&read_gpu_model())
+        clean_gpu_name(&read_gpu_model())
     }
 
     #[cfg(windows)]
@@ -898,6 +1003,70 @@ fn used_percent(used: u64, total: u64) -> u64 {
     }
 }
 
+fn short_disk_identity(disk: &DiskRow) -> String {
+    let mount = disk.mount.trim_end_matches(['/', '\\']);
+    if disk.mount == "/" || disk.mount == "\\" {
+        return "/".to_string();
+    }
+    if let Some(name) = mount
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+    {
+        return name.to_string();
+    }
+    disk.device
+        .trim_start_matches("/dev/")
+        .trim_start_matches("\\\\.\\")
+        .to_string()
+}
+
+fn storage_rows(disks: &[DiskRow], compact: bool, storage_label: &str) -> Vec<(String, String)> {
+    if disks.is_empty() {
+        return Vec::new();
+    }
+    if compact {
+        let used: u64 = disks.iter().map(|disk| disk.used).sum();
+        let total: u64 = disks.iter().map(|disk| disk.total).sum();
+        return vec![(
+            storage_label.to_string(),
+            format!(
+                "{} unidades · {} / {} ({}%)",
+                disks.len(),
+                format_bytes(used),
+                format_bytes(total),
+                used_percent(used, total)
+            ),
+        )];
+    }
+
+    disks
+        .iter()
+        .enumerate()
+        .map(|(index, disk)| {
+            let identity = short_disk_identity(disk);
+            let label = if identity.is_empty() {
+                format!("{storage_label} {}", index + 1)
+            } else {
+                format!("{storage_label} {} [{identity}]", index + 1)
+            };
+            (
+                label,
+                format!(
+                    "{} / {} ({}%)",
+                    format_bytes(disk.used),
+                    format_bytes(disk.total),
+                    used_percent(disk.used, disk.total)
+                ),
+            )
+        })
+        .collect()
+}
+
+fn compact_storage(pane_count: usize, rows: u16) -> bool {
+    pane_count >= 4 || (if rows == 0 { 24 } else { rows as usize }) < 22
+}
+
 #[allow(dead_code)]
 fn username() -> String {
     std::env::var("USERNAME")
@@ -911,7 +1080,7 @@ fn username() -> String {
 /// el banner y borra todo lo demás: sin esto, una pestaña recién limpiada no
 /// dice en ningún sitio qué terminal se está usando. El nombre sale de la
 /// identidad de la plataforma, así que cada build enseña el suyo — «LTerminal
-/// Terminal» en Windows y «LTerminal» en Linux y macOS — sin nada que tocar
+/// WinSlim Terminal» en Windows y «LTerminal» en Linux y macOS — sin nada que tocar
 /// aquí al compilar para la otra.
 #[allow(dead_code)]
 fn title_line(display_name: &str, box_width: usize) -> String {
@@ -1066,7 +1235,8 @@ pub fn build_banner(
     env_label: &str,
     app_name: &str,
     columns: u16,
-    tab_count: usize,
+    rows: u16,
+    pane_count: usize,
     t: &Translator,
 ) -> String {
     let display_name = if app_name.trim().is_empty() {
@@ -1094,14 +1264,17 @@ pub fn build_banner(
     let mut system_rows: Vec<(String, String)> = Vec::new();
     system_rows.push((t.t("banner.system", "Sistema"), os_name));
     if let Some(host) = System::host_name().filter(|value| !value.trim().is_empty()) {
-        system_rows.push((t.t("banner.host", "Equipo"), host));
+        system_rows.push((t.t("banner.pc", "Equipo"), host));
     }
     let kernel = System::kernel_version()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| t.t("banner.notAvailable", "No disponible"));
+        .unwrap_or_else(|| t.t("banner.unknown", "No disponible"));
     system_rows.push((t.t("banner.kernel", "Kernel"), kernel));
     if !env_label.trim().is_empty() {
-        system_rows.push((t.t("banner.shell", "Entorno"), env_label.trim().to_string()));
+        system_rows.push((
+            t.t("banner.environment", "Entorno"),
+            env_label.trim().to_string(),
+        ));
     }
 
     let mut hardware_rows: Vec<(String, String)> = Vec::new();
@@ -1120,7 +1293,7 @@ pub fn build_banner(
     };
     hardware_rows.push((t.t("banner.cpu", "CPU"), cpu_desc));
 
-    let gpu = hardware.gpu.clone();
+    let gpu = clean_gpu_name(&hardware.gpu);
     if !gpu.is_empty() {
         hardware_rows.push((t.t("banner.gpu", "GPU"), gpu));
     }
@@ -1149,24 +1322,20 @@ pub fn build_banner(
     };
     hardware_rows.push((t.t("banner.memory", "Memoria"), memory_str));
 
-    for disk in read_disks()
+    // En un panel grande se conserva una línea por disco, pero se eliminan
+    // las rutas completas: saber qué unidad ocupa cuánto es más útil que leer
+    // /dev/... o el punto de montaje entero. Con cuatro paneles o poca altura
+    // se usa un único resumen para que el banner no empuje el prompt fuera de
+    // la zona visible.
+    let disks: Vec<_> = read_disks()
         .into_iter()
         .filter(|disk| disk.total >= 1_000_000_000)
-    {
-        let pct = used_percent(disk.used, disk.total);
-        let location = if disk.device.is_empty() || disk.device == disk.mount {
-            disk.mount
-        } else {
-            format!("{} · {}", disk.device, disk.mount)
-        };
-        hardware_rows.push((
-            format!("{} {}", t.t("banner.storage", "Disco"), location),
-            format!(
-                "{} / {} ({}%)",
-                format_bytes(disk.used),
-                format_bytes(disk.total),
-                pct
-            ),
+        .collect();
+    if !disks.is_empty() {
+        hardware_rows.extend(storage_rows(
+            &disks,
+            compact_storage(pane_count, rows),
+            &t.t("banner.storage", "Disco"),
         ));
     }
 
@@ -1176,9 +1345,10 @@ pub fn build_banner(
         columns as usize
     };
 
-    // Una pestaña única dispone de espacio para información útil; las ventanas
-    // divididas siguen usando un formato compacto para no partir las líneas.
-    let max_line_cols = std::cmp::min(available_cols, if tab_count > 1 { 48 } else { 88 });
+    // El ancho depende solo de las columnas reales del panel, no del orden en
+    // que se abrió o repintó la pestaña. Así todos los paneles iguales reciben
+    // exactamente la misma distribución.
+    let max_line_cols = std::cmp::min(available_cols, 88);
     let max_sep = std::cmp::min(46, max_line_cols.saturating_sub(2));
     let sep_len = max_sep.clamp(3, 46);
     let separator = "-".repeat(sep_len);
@@ -1191,9 +1361,9 @@ pub fn build_banner(
         (t.t("banner.datetime", "Fecha"), format_now()),
     ];
     let sections = [
-        (t.t("banner.systemSection", "Sistema"), system_rows),
-        (t.t("banner.hardwareSection", "Hardware"), hardware_rows),
-        (t.t("banner.sessionSection", "Sesión"), session_rows),
+        (t.t("banner.system", "Sistema"), system_rows),
+        (t.t("banner.hardware", "Hardware"), hardware_rows),
+        (t.t("banner.session", "Sesión"), session_rows),
     ];
 
     let max_label_len = sections
@@ -1246,6 +1416,62 @@ mod tests {
             gpu: "GPU de prueba (8 GB)".to_string(),
             ram: "DDR5 6000 MHz".to_string(),
         }
+    }
+
+    #[test]
+    fn cada_disco_se_muestra_con_su_capacidad_sin_ruta_completa() {
+        let gb = 1024u64.pow(3);
+        let disks = vec![
+            DiskRow {
+                device: "/dev/nvme0n1p1".into(),
+                mount: "/".into(),
+                used: 300 * gb,
+                total: 500 * gb,
+            },
+            DiskRow {
+                device: "/dev/sdb1".into(),
+                mount: "/mnt/JuegosLinux".into(),
+                used: 100 * gb,
+                total: 200 * gb,
+            },
+        ];
+        let rows = storage_rows(&disks, false, "Disco");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "Disco 1 [/]");
+        assert_eq!(rows[1].0, "Disco 2 [JuegosLinux]");
+        assert!(rows[0].1.contains("300.0 GB / 500.0 GB"));
+        assert!(!rows[1].1.contains("/dev/"));
+    }
+
+    #[test]
+    fn cuatro_pantallas_pueden_usar_un_resumen_de_discos() {
+        let gb = 1024u64.pow(3);
+        let disks = vec![
+            DiskRow {
+                device: "C:\\".into(),
+                mount: "C:\\".into(),
+                used: 300 * gb,
+                total: 500 * gb,
+            },
+            DiskRow {
+                device: "D:\\".into(),
+                mount: "D:\\".into(),
+                used: 100 * gb,
+                total: 200 * gb,
+            },
+        ];
+        let rows = storage_rows(&disks, true, "Disco");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].1.contains("2 unidades"));
+        assert!(rows[0].1.contains("400.0 GB / 700.0 GB"));
+    }
+
+    #[test]
+    fn el_espacio_vertical_tambien_activa_el_modo_compacto() {
+        assert!(compact_storage(4, 40));
+        assert!(compact_storage(1, 21));
+        assert!(!compact_storage(2, 22));
+        assert!(!compact_storage(1, 0));
     }
 
     #[test]
@@ -1386,6 +1612,21 @@ mod tests {
     }
 
     #[test]
+    fn gpu_quita_el_sufijo_tecnico_y_prefiere_el_modelo_comercial() {
+        assert_eq!(clean_gpu_name("NVidia Corporation TU116s"), "NVIDIA TU116");
+        assert_eq!(
+            clean_gpu_name("NVIDIA Corporation TU116 [GeForce GTX 1660]"),
+            "NVIDIA GeForce GTX 1660"
+        );
+        assert_eq!(
+            clean_gpu_name(
+                "Advanced Micro Devices, Inc. [AMD/ATI] Picasso [Radeon Vega 8 Graphics]"
+            ),
+            "AMD Radeon Vega 8 Graphics"
+        );
+    }
+
+    #[test]
     fn la_caja_alinea_las_columnas_y_cierra_a_la_misma_anchura() {
         let filas = vec![
             ("CPU".to_string(), "x86".to_string()),
@@ -1409,7 +1650,7 @@ mod tests {
     #[test]
     fn el_banner_real_se_genera_con_los_datos_universales_del_sistema() {
         let t = Translator::default();
-        let banner = build_banner("cmd.exe", "LTerminal", 120, 1, &t);
+        let banner = build_banner("cmd.exe", "LTerminal", 120, 40, 1, &t);
         assert!(banner.contains("Sistema"), "{banner}");
         assert!(banner.contains("CPU"), "{banner}");
         assert!(banner.contains("Memoria"), "{banner}");
@@ -1422,12 +1663,22 @@ mod tests {
         assert!(banner.ends_with("\r\n"));
     }
 
+    #[test]
+    fn el_banner_compacto_omite_las_rutas_de_disco() {
+        let t = Translator::default();
+        let banner = build_banner("fish", "LTerminal", 120, 40, 2, &t);
+        assert!(!banner.contains("/dev/"), "{banner}");
+        assert!(banner.contains("Disco"), "{banner}");
+        assert!(banner.contains("CPU"), "{banner}");
+        assert!(banner.contains("Memoria"), "{banner}");
+    }
+
     /// El nombre va ARRIBA DEL TODO y es el de la build que se está ejecutando.
     #[test]
     fn el_banner_abre_con_el_nombre_de_la_terminal() {
         let t = Translator::default();
         for nombre in [crate::identity::WINDOWS.name, crate::identity::LINUX.name] {
-            let banner = build_banner("cmd.exe", nombre, 120, 1, &t);
+            let banner = build_banner("cmd.exe", nombre, 120, 40, 1, &t);
             let primera = crate::current_dir::strip_ansi(banner.lines().next().unwrap());
             assert!(primera.contains(nombre), "{banner}");
         }
@@ -1435,7 +1686,7 @@ mod tests {
 
     #[test]
     fn el_nombre_abre_el_banner() {
-        let banner = build_banner("cmd.exe", "LTerminal", 120, 1, &Translator::default());
+        let banner = build_banner("cmd.exe", "LTerminal", 120, 40, 1, &Translator::default());
         let lineas: Vec<String> = banner.lines().map(crate::current_dir::strip_ansi).collect();
         let titulo = &lineas[0];
         assert!(titulo.contains("LTerminal"));
@@ -1448,7 +1699,7 @@ mod tests {
     fn ninguna_linea_del_banner_pasa_del_ancho_de_la_terminal() {
         let t = Translator::default();
         for columnas in [40u16, 55, 60, 80, 120, 200] {
-            let banner = build_banner("cmd.exe", "LTerminal", columnas, 1, &t);
+            let banner = build_banner("cmd.exe", "LTerminal", columnas, 40, 1, &t);
             for linea in banner.lines() {
                 let ancho = crate::current_dir::strip_ansi(linea).chars().count();
                 assert!(
@@ -1463,7 +1714,7 @@ mod tests {
     /// suspensivos no las lee nadie.
     #[test]
     fn en_una_casilla_muy_estrecha_el_banner_pierde_el_marco() {
-        let banner = build_banner("cmd.exe", "LTerminal", 30, 1, &Translator::default());
+        let banner = build_banner("cmd.exe", "LTerminal", 30, 20, 1, &Translator::default());
         assert!(!banner.contains('\u{250c}'), "{banner}");
         // Pero sigue diciendo lo mismo.
         assert!(banner.contains("CPU"), "{banner}");
@@ -1480,7 +1731,7 @@ mod tests {
     /// cualquiera que volviera a romper el marco.
     #[test]
     fn sin_saber_el_ancho_se_supone_una_terminal_de_ochenta() {
-        let banner = build_banner("cmd.exe", "LTerminal", 0, 1, &Translator::default());
+        let banner = build_banner("cmd.exe", "LTerminal", 0, 24, 1, &Translator::default());
         for linea in banner.lines() {
             assert!(
                 crate::current_dir::strip_ansi(linea).chars().count() <= 80,
@@ -1500,7 +1751,7 @@ mod tests {
 
     #[test]
     fn el_banner_traducido_usa_las_etiquetas_del_catalogo() {
-        let banner = build_banner("bash", "App", 120, 1, &Translator::new("en"));
+        let banner = build_banner("bash", "App", 120, 40, 1, &Translator::new("en"));
         assert!(banner.contains("Memory"), "{banner}");
     }
 

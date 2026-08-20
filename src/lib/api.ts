@@ -73,13 +73,16 @@ export const sendInput = (tabId: string, data: string) => invoke<void>('pty_inpu
 export const parseInternalCommand = (line: string) =>
     invoke<InternalCommand | null>('internal_command_parse', { line });
 
-export async function exportProfile(): Promise<ProfileTransferResult | null> {
-    const path = await save({ defaultPath: 'LTerminal.winslim-profile', filters: [{ name: 'Perfil de terminal', extensions: ['winslim-profile'] }] });
+export async function exportProfile(platform = 'linux'): Promise<ProfileTransferResult | null> {
+    const windows = platform === 'windows';
+    const extension = windows ? 'ps1' : 'sh';
+    const name = windows ? 'WinSlimTerminal-Perfil.ps1' : 'LTerminal-Perfil.sh';
+    const path = await save({ defaultPath: name, filters: [{ name: 'Script de perfil', extensions: [extension, 'winslim-profile', 'lterminal-profile'] }] });
     return path ? invoke<ProfileTransferResult>('profile_export', { path }) : null;
 }
 
 export async function importProfile(): Promise<ProfileTransferResult | null> {
-    const path = await open({ multiple: false, directory: false, filters: [{ name: 'Perfil de terminal', extensions: ['winslim-profile'] }] });
+    const path = await open({ multiple: false, directory: false, filters: [{ name: 'Perfil portable o script', extensions: ['winslim-profile', 'lterminal-profile', 'sh', 'ps1'] }] });
     return typeof path === 'string' ? invoke<ProfileTransferResult>('profile_import', { path }) : null;
 }
 
@@ -98,6 +101,14 @@ export const setWindowsIntegration = (enabled: boolean) =>
 
 export const resize = (tabId: string, cols: number, rows: number) =>
     invoke<void>('pty_resize', { tabId, cols, rows });
+
+export const refreshBanner = (
+    tabId: string,
+    cols: number,
+    rows: number,
+    paneCount: number,
+    cursorRow: number,
+) => invoke<void>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow });
 
 // ---- Entornos ----
 
@@ -319,9 +330,38 @@ export const reportFrontendError = (payload: unknown) =>
 // ---- Sistema ----
 // El portapapeles y "abrir con el sistema" los daba el proceso principal de
 // Electron; aquí los dan plugins de Tauri, que ya validan y piden permiso.
+//
+// Leer cuando no hay texto plano disponible no es un fallo de la aplicación:
+// puede ocurrir al pegar con el portapapeles vacío o cuando otra aplicación
+// solo ha publicado una imagen/HTML. El plugin lo devuelve como una promesa
+// rechazada; si la dejamos escapar, App.svelte lo registra como un error global
+// dos veces. Normalizamos ese caso aquí, en el único puente que lo conoce.
+export async function writeClipboard(text: string): Promise<boolean> {
+    try {
+        await writeText(text);
+        return true;
+    } catch (cause) {
+        console.warn('[clipboard] No se pudo escribir texto en el portapapeles', cause);
+        return false;
+    }
+}
 
-export const writeClipboard = (text: string) => writeText(text);
-export const readClipboard = () => readText();
+export async function readClipboard(): Promise<string | null> {
+    try {
+        return await readText();
+    } catch (cause) {
+        const message = String(cause).toLowerCase();
+        const expected = message.includes('clipboard') && (
+            message.includes('empty') ||
+            message.includes('not available') ||
+            message.includes('requested format')
+        );
+        if (!expected) {
+            console.warn('[clipboard] No se pudo leer el portapapeles', cause);
+        }
+        return null;
+    }
+}
 export const openInSystem = (path: string) => openPath(path);
 
 // ---- Eventos ----

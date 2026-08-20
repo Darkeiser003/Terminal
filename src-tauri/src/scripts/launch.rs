@@ -578,11 +578,23 @@ pub fn environment_kinds_for_script(script: &ScriptEntry) -> Vec<ShellKind> {
         ScriptType::Batch | ScriptType::Vbscript => vec![ShellKind::Cmd, ShellKind::Powershell],
         ScriptType::Fish => vec![ShellKind::Fish],
         ScriptType::Shell => match script.interpreter.as_deref().unwrap_or("bash") {
-            "zsh" => vec![ShellKind::Zsh],
+            // Fish puede invocar cualquier script POSIX; el intérprete que
+            // ejecuta el archivo sigue siendo el de su extensión/shebang.
+            "zsh" => vec![ShellKind::Zsh, ShellKind::Fish],
             // ksh no es una familia propia en el selector: cae a bash y sh.
-            "ksh" => vec![ShellKind::Bash, ShellKind::Sh],
-            "sh" => vec![ShellKind::Sh, ShellKind::Bash, ShellKind::Zsh],
-            _ => vec![ShellKind::Bash, ShellKind::Sh, ShellKind::Zsh],
+            "ksh" => vec![ShellKind::Bash, ShellKind::Sh, ShellKind::Fish],
+            "sh" => vec![
+                ShellKind::Sh,
+                ShellKind::Bash,
+                ShellKind::Zsh,
+                ShellKind::Fish,
+            ],
+            _ => vec![
+                ShellKind::Bash,
+                ShellKind::Sh,
+                ShellKind::Zsh,
+                ShellKind::Fish,
+            ],
         },
         ScriptType::Program => match script.ext.to_lowercase().as_str() {
             ".exe" | ".com" => vec![ShellKind::Cmd, ShellKind::Powershell],
@@ -1182,7 +1194,12 @@ mod tests {
         s.interpreter = Some("sh".into());
         assert_eq!(
             environment_kinds_for_script(&s),
-            vec![ShellKind::Sh, ShellKind::Bash, ShellKind::Zsh]
+            vec![
+                ShellKind::Sh,
+                ShellKind::Bash,
+                ShellKind::Zsh,
+                ShellKind::Fish
+            ]
         );
     }
 

@@ -8,6 +8,17 @@ const required = [
   "src-tauri/vendor/conpty/OpenConsole.exe",
   "src-tauri/default_settings.toml",
   "src-tauri/config/technology-catalog.json",
+  "src-tauri/resources/com.lterminal.terminal.metainfo.xml",
+  "scripts/operations/ssh-manager.sh",
+  "scripts/operations/ssh-manager.ps1",
+  "scripts/operations/service-manager.sh",
+  "scripts/operations/service-manager.ps1",
+  "scripts/operations/network-manager.sh",
+  "scripts/operations/network-manager.ps1",
+  "scripts/operations/adb-manager.sh",
+  "scripts/operations/adb-manager.ps1",
+  "scripts/operations/docker-manager.ps1",
+  "scripts/operations/kubernetes-manager.ps1",
 ];
 
 for (const relativePath of required) {
@@ -51,6 +62,30 @@ for (const resource of ["vendor/conpty/conpty.dll", "vendor/conpty/OpenConsole.e
     throw new Error(
       `El paquete de Windows no declara el recurso obligatorio: ${resource}`
     );
+  }
+}
+
+const linuxConfig = JSON.parse(
+  readFileSync(resolve(root, "src-tauri/tauri.linux.conf.json"), "utf8")
+);
+if (
+  linuxConfig.productName !== "LTerminal" ||
+  linuxConfig.mainBinaryName !== "lterminal" ||
+  linuxConfig.identifier !== "com.lterminal.terminal"
+) {
+  throw new Error("La configuración Linux no conserva la identidad de LTerminal.");
+}
+const linuxMetainfo = readFileSync(
+  resolve(root, "src-tauri/resources/com.lterminal.terminal.metainfo.xml"),
+  "utf8"
+);
+for (const marker of [
+  "<id>com.lterminal.terminal</id>",
+  "<name>LTerminal</name>",
+  "<launchable type=\"desktop-id\">LTerminal.desktop</launchable>",
+]) {
+  if (!linuxMetainfo.includes(marker)) {
+    throw new Error(`Metadatos Linux incompletos: falta ${marker}`);
   }
 }
 

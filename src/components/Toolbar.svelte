@@ -220,7 +220,7 @@
                                         <span class="env-check" aria-hidden="true">✓</span>
                                     {/if}
                                     {#if environment.repl && environment.available}
-                                        <button type="button" class="env-favorite" class:selected={favoriteIds.has(environment.id)} title="Fijar REPL" onclick={(event) => { event.stopPropagation(); void toggleFavorite(environment); }}>★</button>
+                                        <button type="button" class="env-favorite" class:selected={favoriteIds.has(environment.id)} title={app.t('env.favorite', 'Fijar REPL')} onclick={(event) => { event.stopPropagation(); void toggleFavorite(environment); }}>★</button>
                                     {/if}
                                 </div>
                             {/each}

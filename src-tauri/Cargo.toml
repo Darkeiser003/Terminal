@@ -1,6 +1,6 @@
 [package]
 name = "winslim-terminal"
-version = "1.4.3"
+version = "1.4.4"
 description = "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003"
 authors = ["Darkeiser003"]
 license = "UNLICENSED"

@@ -24,6 +24,7 @@ pub enum ScriptType {
     Lua,
     Rscript,
     Groovy,
+    Sql,
     Autohotkey,
     Registry,
     LinuxPackage,
@@ -56,6 +57,7 @@ pub enum FileCategory {
     Image,
     Audio,
     Video,
+    Database,
 }
 
 impl FileCategory {
@@ -77,6 +79,7 @@ impl FileCategory {
             FileCategory::Image => "image",
             FileCategory::Audio => "audio",
             FileCategory::Video => "video",
+            FileCategory::Database => "database",
         }
     }
 
@@ -103,17 +106,18 @@ pub static FILE_FILTERS: &[FileFilter] = &[
     FileFilter { id: FileCategory::Shell,       label: "SH / Bash / Zsh",             default: false },
     FileFilter { id: FileCategory::Fish,        label: "Fish",                        default: false },
     FileFilter { id: FileCategory::Python,      label: "Python",                      default: false },
-    FileFilter { id: FileCategory::Node,        label: "Node.js",                     default: false },
+    FileFilter { id: FileCategory::Node,        label: "Node.js / TypeScript",        default: false },
     FileFilter { id: FileCategory::Vbscript,    label: "VBScript",                    default: false },
     FileFilter { id: FileCategory::OtherScript, label: "Ruby / PHP / Perl / Lua / R", default: false },
     FileFilter { id: FileCategory::Autohotkey,  label: "AutoHotkey (.ahk)",            default: false },
     FileFilter { id: FileCategory::Registry,    label: "Registro (.reg)",              default: false },
     FileFilter { id: FileCategory::LinuxPackage,label: "Paquetes Linux",               default: false },
     FileFilter { id: FileCategory::Program,     label: "Programas (.exe)",             default: false },
-    FileFilter { id: FileCategory::Html,        label: "HTML",                        default: false },
+    FileFilter { id: FileCategory::Html,        label: "Contenido web y configuración", default: false },
     FileFilter { id: FileCategory::Image,       label: "Imágenes",                    default: false },
     FileFilter { id: FileCategory::Audio,       label: "Audio",                       default: false },
     FileFilter { id: FileCategory::Video,       label: "Vídeo",                       default: false },
+    FileFilter { id: FileCategory::Database,    label: "SQL / bases de datos",         default: false },
 ];
 
 const LINUX_ORDER: &[FileCategory] = &[
@@ -127,6 +131,7 @@ const LINUX_ORDER: &[FileCategory] = &[
     FileCategory::Image,
     FileCategory::Audio,
     FileCategory::Video,
+    FileCategory::Database,
     FileCategory::Batch,
     FileCategory::Powershell,
     FileCategory::Vbscript,
@@ -152,6 +157,7 @@ const WINDOWS_ORDER: &[FileCategory] = &[
     FileCategory::Image,
     FileCategory::Audio,
     FileCategory::Video,
+    FileCategory::Database,
 ];
 
 fn filter_for(category: FileCategory) -> &'static FileFilter {
@@ -229,6 +235,8 @@ pub fn normalize_categories(raw: Option<&[String]>) -> Vec<FileCategory> {
 #[rustfmt::skip]
 pub static SCRIPT_TYPES: &[(&str, ScriptType)] = &[
     (".ps1", ScriptType::Powershell),
+    (".psm1", ScriptType::Powershell),
+    (".psd1", ScriptType::Powershell),
     (".bat", ScriptType::Batch),
     (".cmd", ScriptType::Batch),
     (".sh", ScriptType::Shell),
@@ -239,6 +247,10 @@ pub static SCRIPT_TYPES: &[(&str, ScriptType)] = &[
     (".py", ScriptType::Python),
     (".js", ScriptType::Node),
     (".mjs", ScriptType::Node),
+    (".cjs", ScriptType::Node),
+    (".ts", ScriptType::Node),
+    (".tsx", ScriptType::Node),
+    (".jsx", ScriptType::Node),
     (".vbs", ScriptType::Vbscript),
     (".rb", ScriptType::Ruby),
     (".php", ScriptType::Php),
@@ -246,6 +258,7 @@ pub static SCRIPT_TYPES: &[(&str, ScriptType)] = &[
     (".lua", ScriptType::Lua),
     (".r", ScriptType::Rscript),
     (".groovy", ScriptType::Groovy),
+    (".sql", ScriptType::Sql),
     (".ahk", ScriptType::Autohotkey),
 ];
 
@@ -254,6 +267,7 @@ pub static SCRIPT_TYPES: &[(&str, ScriptType)] = &[
 pub static EXT_INTERPRETERS: &[(&str, &str)] = &[
     (".sh", "sh"), (".bash", "bash"), (".zsh", "zsh"), (".ksh", "ksh"),
     (".fish", "fish"), (".py", "python"), (".js", "node"), (".mjs", "node"),
+    (".cjs", "node"), (".ts", "node"), (".tsx", "node"), (".jsx", "node"),
     (".ps1", "powershell"), (".rb", "ruby"), (".php", "php"), (".pl", "perl"),
     (".lua", "lua"), (".r", "Rscript"), (".groovy", "groovy"),
 ];
@@ -288,6 +302,7 @@ impl ScriptType {
             | ScriptType::Lua
             | ScriptType::Rscript
             | ScriptType::Groovy => FileCategory::OtherScript,
+            ScriptType::Sql => FileCategory::Database,
             ScriptType::Autohotkey => FileCategory::Autohotkey,
             ScriptType::Registry => FileCategory::Registry,
             ScriptType::LinuxPackage => FileCategory::LinuxPackage,
@@ -315,6 +330,7 @@ impl ScriptType {
             ScriptType::Lua => "Requiere Lua.",
             ScriptType::Rscript => "Requiere Rscript.",
             ScriptType::Groovy => "Requiere Groovy.",
+            ScriptType::Sql => "Se abre con el cliente SQL o editor predeterminado.",
             ScriptType::Autohotkey => "Se abre con AutoHotkey si está instalado.",
             ScriptType::Registry => "Se abre con el editor del Registro del sistema.",
             ScriptType::LinuxPackage => "Se abre con el gestor de paquetes asociado del sistema.",
@@ -338,6 +354,7 @@ impl ScriptType {
                 | ScriptType::Image
                 | ScriptType::Audio
                 | ScriptType::Video
+                | ScriptType::Sql
         )
     }
 
@@ -352,6 +369,8 @@ impl ScriptType {
 #[rustfmt::skip]
 pub static RESOURCE_TYPES: &[(&str, ScriptType)] = &[
     (".exe", ScriptType::Program), (".com", ScriptType::Program),
+    (".msi", ScriptType::Program), (".msix", ScriptType::Program),
+    (".msixbundle", ScriptType::Program),
     (".reg", ScriptType::Registry),
     (".deb", ScriptType::LinuxPackage), (".udeb", ScriptType::LinuxPackage),
     (".rpm", ScriptType::LinuxPackage), (".appimage", ScriptType::LinuxPackage),
@@ -364,6 +383,16 @@ pub static RESOURCE_TYPES: &[(&str, ScriptType)] = &[
     (".pkg.tar.zst", ScriptType::LinuxPackage), (".pkg.tar.xz", ScriptType::LinuxPackage),
     (".jar", ScriptType::Java),
     (".html", ScriptType::Html), (".htm", ScriptType::Html),
+    (".css", ScriptType::Html), (".scss", ScriptType::Html), (".less", ScriptType::Html),
+    (".xml", ScriptType::Html), (".xsl", ScriptType::Html),
+    (".json", ScriptType::Html), (".jsonc", ScriptType::Html),
+    (".yaml", ScriptType::Html), (".yml", ScriptType::Html),
+    (".md", ScriptType::Html), (".markdown", ScriptType::Html),
+    (".toml", ScriptType::Html), (".ini", ScriptType::Html), (".conf", ScriptType::Html),
+    (".sql", ScriptType::Sql), (".sqlite", ScriptType::Sql), (".sqlite2", ScriptType::Sql),
+    (".sqlite3", ScriptType::Sql), (".db", ScriptType::Sql), (".mysql", ScriptType::Sql),
+    (".pgsql", ScriptType::Sql), (".psql", ScriptType::Sql), (".mariadb", ScriptType::Sql),
+    (".env", ScriptType::Html), (".properties", ScriptType::Html),
     (".png", ScriptType::Image), (".jpg", ScriptType::Image), (".jpeg", ScriptType::Image),
     (".gif", ScriptType::Image), (".webp", ScriptType::Image), (".bmp", ScriptType::Image),
     (".svg", ScriptType::Image), (".ico", ScriptType::Image),
@@ -391,6 +420,8 @@ mod tests {
         assert_eq!(script_type_for_ext(".ps1"), Some(ScriptType::Powershell));
         assert_eq!(script_type_for_ext(".cmd"), Some(ScriptType::Batch));
         assert_eq!(script_type_for_ext(".mjs"), Some(ScriptType::Node));
+        assert_eq!(script_type_for_ext(".ts"), Some(ScriptType::Node));
+        assert_eq!(script_type_for_ext(".sql"), Some(ScriptType::Sql));
         assert_eq!(script_type_for_ext(".ahk"), Some(ScriptType::Autohotkey));
         assert_eq!(script_type_for_ext(".txt"), None);
     }
@@ -425,6 +456,8 @@ mod tests {
         assert_eq!(resource_type_for_ext(".jar"), Some(ScriptType::Java));
         assert_eq!(resource_type_for_ext(".mkv"), Some(ScriptType::Video));
         assert_eq!(resource_type_for_ext(".reg"), Some(ScriptType::Registry));
+        assert_eq!(resource_type_for_ext(".yaml"), Some(ScriptType::Html));
+        assert_eq!(resource_type_for_ext(".sqlite"), Some(ScriptType::Sql));
         assert_eq!(
             resource_type_for_ext(".flatpakref"),
             Some(ScriptType::LinuxPackage)

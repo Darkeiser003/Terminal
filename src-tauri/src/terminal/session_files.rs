@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 
-use crate::alias_profiles::{self, InitOptions, ScriptAlias};
+use crate::alias_profiles::{
+    self, help_runner_path, help_topic_path, HelpTopic, InitOptions, ScriptAlias,
+};
 use crate::environments::Environment;
 use crate::i18n::Translator;
 use crate::paths;
@@ -196,6 +198,32 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
                 serde_json::json!({ "tabId": request.tab_id })
             );
         }
+        if let Some(topics) = &script.help_topics {
+            for (key, text) in topics {
+                let topic = HelpTopic::from_argument(Some(key)).unwrap_or(HelpTopic::General);
+                let topic_path = help_topic_path(&help_path.to_string_lossy(), topic);
+                let body = if needs_ascii {
+                    to_console_ascii(text)
+                } else {
+                    text.clone()
+                };
+                if std::fs::write(topic_path, body).is_err() {
+                    log_warn!(
+                        "No se pudo escribir una sección de ayuda de la pestaña",
+                        serde_json::json!({ "tabId": request.tab_id, "section": key })
+                    );
+                }
+            }
+        }
+        if let Some(runner) = &script.help_runner {
+            let runner_path = help_runner_path(&help_path.to_string_lossy(), request.env.kind);
+            if std::fs::write(runner_path, runner).is_err() {
+                log_warn!(
+                    "No se pudo escribir el selector de secciones de ayuda",
+                    serde_json::json!({ "tabId": request.tab_id })
+                );
+            }
+        }
     }
 
     let Some(dir) = dir else {
@@ -233,10 +261,10 @@ pub fn remove_for_tab(tab_id: &str) {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
-    let needle = format!("-{tab_id}.");
+    let needles = [format!("-{tab_id}."), format!("-{tab_id}-")];
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.contains(&needle) {
+        if needles.iter().any(|needle| name.contains(needle)) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -304,12 +332,14 @@ mod tests {
         let dir = dir().expect("la carpeta de sesión se crea");
         std::fs::write(dir.join("banner-tab-99.txt"), "x").unwrap();
         std::fs::write(dir.join("init-tab-99.cmd"), "x").unwrap();
+        std::fs::write(dir.join("help-tab-99-paquetes.txt"), "x").unwrap();
         std::fs::write(dir.join("banner-tab-98.txt"), "x").unwrap();
 
         remove_for_tab("tab-99");
 
         assert!(!dir.join("banner-tab-99.txt").exists());
         assert!(!dir.join("init-tab-99.cmd").exists());
+        assert!(!dir.join("help-tab-99-paquetes.txt").exists());
         assert!(dir.join("banner-tab-98.txt").exists());
 
         std::fs::remove_file(dir.join("banner-tab-98.txt")).unwrap();

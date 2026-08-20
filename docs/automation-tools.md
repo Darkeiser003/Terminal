@@ -1,6 +1,7 @@
 # Herramientas de automatización
 
-LTerminal incluye herramientas operativas reutilizables en `scripts/containers/`.
+LTerminal incluye herramientas operativas reutilizables en `scripts/containers/`
+y `scripts/operations/`.
 El panel **Scripts**, en el modo **Aquí**, las descubre como cualquier otro
 script del proyecto y las ejecuta en la terminal visible. También se pueden usar
 desde cualquier terminal convencional.
@@ -55,6 +56,43 @@ scripts/containers/kubernetes-manager.sh -n staging scale api 3
 
 `--dry-run` usa la simulación del cliente de Kubernetes en las acciones que la
 admiten. En Docker, `--dry-run` imprime el comando completo sin ejecutarlo.
+
+## SSH y acceso remoto
+
+`ssh-manager.sh` y `ssh-manager.ps1` reúnen el cliente SSH y la
+información de red que suele hacer falta justo antes de conectarse:
+
+- conecta a un alias de `~/.ssh/config` o pide un host nuevo;
+- lista los hosts guardados;
+- muestra direcciones locales, Tailscale, WireGuard y conexiones activas;
+- abre un menú interactivo con el botón de ejecución sin argumentos.
+
+Ejemplos:
+
+```bash
+scripts/operations/ssh-manager.sh connect
+scripts/operations/ssh-manager.sh hosts
+scripts/operations/ssh-manager.sh network
+```
+
+## Servicios, red y ADB
+
+El gestor de servicios usa `systemctl` en Linux y `Get-Service` en
+Windows. Permite consultar el estado, reiniciar un servicio concreto y revisar
+sus logs/eventos. Las acciones que pueden requerir elevación la piden en la
+terminal visible.
+
+`network-manager` muestra interfaces, rutas, VPN y túneles; `adb-manager`
+lista dispositivos, reinicia el servidor ADB y abre una shell del dispositivo.
+Estos gestores solo aparecen cuando la herramienta correspondiente está
+disponible, salvo el de red, que siempre ofrece información básica.
+
+```bash
+scripts/operations/service-manager.sh status
+scripts/operations/service-manager.sh restart docker.service
+scripts/operations/network-manager.sh vpn
+scripts/operations/adb-manager.sh devices
+```
 
 ## Criterio para nuevas herramientas
 

@@ -84,6 +84,11 @@ class AppStore {
         this.tabs = list.tabs;
         this.activeTabId = list.activeTabId;
         this.appInfo = info;
+        // El HTML inicial es compartido por las dos builds. La identidad real
+        // llega del backend, así que el título del documento también debe
+        // seguir la plataforma: LTerminal en Linux y WinSlim Terminal en
+        // Windows.
+        if (typeof document !== 'undefined') document.title = info.name;
         this.applyPayload(prefs);
 
         // La detección de entornos habla con el sistema (`where`, el PATH del

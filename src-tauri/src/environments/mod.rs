@@ -513,6 +513,7 @@ fn detect_pkg_manager() -> Option<String> {
 /// hay nada conectado, esa parte de la lista queda vacía y el resto de entornos
 /// funciona con normalidad.
 pub fn detect_environments(quick: bool) -> Inventory {
+    let detection_started = std::time::Instant::now();
     // Antes de detectar nada se re-sincroniza el PATH del proceso: si el
     // usuario acaba de instalar algo desde la propia terminal, la herramienta
     // ya está en el PATH persistente pero no en el que la app heredó al
@@ -522,9 +523,19 @@ pub fn detect_environments(quick: bool) -> Inventory {
         crate::android_env::ensure_adb_on_path();
     }
 
+    let shells_started = std::time::Instant::now();
     let mut envs = detect_system_shells();
+    let shells_ms = shells_started.elapsed().as_millis() as u64;
 
     if quick {
+        log_info!(
+            "Inventario rápido de entornos completado",
+            serde_json::json!({
+                "shells": envs.len(),
+                "shellsMs": shells_ms,
+                "durationMs": detection_started.elapsed().as_millis() as u64,
+            })
+        );
         return Inventory {
             envs,
             ..Default::default()
@@ -538,6 +549,7 @@ pub fn detect_environments(quick: bool) -> Inventory {
     // más lento, no la suma de WSL + lenguajes + Docker + ADB. Los resultados
     // se unen después en el mismo orden histórico para que la interfaz no
     // cambie visualmente.
+    let providers_started = std::time::Instant::now();
     let (wsl, languages, docker, android, pkg_manager) = std::thread::scope(|scope| {
         let wsl = scope.spawn(|| {
             if crate::platform::host().is_windows() {
@@ -577,6 +589,10 @@ pub fn detect_environments(quick: bool) -> Inventory {
             pkg_manager.join().unwrap_or_default(),
         )
     });
+    let providers_ms = providers_started.elapsed().as_millis() as u64;
+    let wsl_count = wsl.len();
+    let docker_count = docker.envs.len();
+    let android_count = android.envs.len();
 
     let language_count = languages.len();
     envs.extend(wsl);
@@ -600,6 +616,20 @@ pub fn detect_environments(quick: bool) -> Inventory {
     }
     envs.extend(docker.envs);
     envs.extend(android.envs);
+
+    log_info!(
+        "Sondas de entornos completadas",
+        serde_json::json!({
+            "shellsMs": shells_ms,
+            "providersMs": providers_ms,
+            "durationMs": detection_started.elapsed().as_millis() as u64,
+            "wsl": wsl_count,
+            "languages": language_count,
+            "docker": docker_count,
+            "android": android_count,
+            "packageManager": &pkg_manager,
+        })
+    );
 
     Inventory {
         envs,

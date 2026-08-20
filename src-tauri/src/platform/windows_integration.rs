@@ -138,3 +138,29 @@ pub fn windows_integration_status() -> WindowsIntegrationStatus {
 pub fn windows_integration_set(enabled: bool) -> Result<WindowsIntegrationStatus, String> {
     set_enabled(enabled)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn fuera_de_windows_la_integracion_se_declara_no_disponible() {
+        let integration = status();
+        assert!(!integration.supported);
+        assert!(!integration.context_menu_registered);
+        assert!(!integration.protocol_registered);
+        assert!(!integration.app_path_registered);
+        assert!(!integration.nsudo_available);
+        assert_eq!(integration.nsudo_path, None);
+        assert!(!integration.modern_default_terminal_supported);
+        assert!(integration.note.contains("únicamente en Windows"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn fuera_de_windows_no_intenta_escribir_el_registro() {
+        let error = set_enabled(true).expect_err("Linux no debe registrar integración Windows");
+        assert!(error.contains("solo existe en Windows"));
+    }
+}

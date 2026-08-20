@@ -34,7 +34,7 @@
         // Ctrl+U no limpia la línea. El espejo solo admite ASCII simple, así
         // que el número de DEL coincide exactamente con lo escrito.
         await api.sendInput(tabId, '\u007f'.repeat(line.length));
-        if (command.action === 'config' || command.action === 'alias') {
+        if (command.action === 'config') {
             window.dispatchEvent(new CustomEvent('winslim:open-settings'));
         } else if (command.action === 'reload') {
             await app.refreshEnvironments();
@@ -46,6 +46,27 @@
             );
             if (environment) await app.createTab(environment.id);
             else term?.writeln(`\r\n\x1b[33m[REPL no detectado: ${command.argument}]\x1b[0m`);
+        } else if (command.action === 'help' || command.action === 'alias') {
+            const topic = command.action === 'alias' ? 'alias' : command.argument;
+            const currentEnvironment = app.environments.find(
+                (environment) => environment.id === app.activeTab?.envId,
+            );
+            const canLoadHostAliases = currentEnvironment
+                ? ['native', 'msys', 'wsl'].includes(currentEnvironment.transport) && !currentEnvironment.repl
+                : true;
+            if (canLoadHostAliases) {
+                // La ayuda completa vive en el alias generado para ESTA shell.
+                // Ejecutarlo aquí mantiene el mismo contenido que `ayuda` y
+                // evita que :help se quede en una lista fija desactualizada.
+                await api.sendInput(tabId, topic ? 'ayuda ' + topic + '\r' : 'ayuda\r');
+            } else {
+                // Un REPL o un contenedor no puede cargar el archivo temporal
+                // de alias del host. :help sigue siendo útil y no inyecta
+                // `ayuda` en Python, Node, Docker o ADB como si fuera código
+                // de esa shell.
+                term?.writeln('\r\nAyuda' + (topic ? ' (' + topic + ')' : '') + ': usa :help desde la terminal o consulta los comandos internos.');
+                term?.writeln('Comandos internos: :config  :reload  :repl <nombre>  :alias  :help [sección]');
+            }
         } else {
             term?.writeln('\r\n:config  :reload  :repl <nombre>  :alias  :help');
         }
@@ -72,6 +93,16 @@
     /** Último tamaño enviado al backend. Evita mandar un resize por cada píxel
      *  mientras se arrastra el borde de la ventana. */
     let lastSize = { cols: 0, rows: 0 };
+    /** Número de repintado solicitado. Un ResizeObserver puede entregar varias
+     *  medidas seguidas; las respuestas antiguas no deben volver a pintar un
+     *  banner con las dimensiones anteriores. */
+    let bannerRefreshSerial = 0;
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    // El fastfetch es salida visual, pero la línea que el usuario está
+    // editando pertenece al PTY. Nunca se debe repintar el banner mientras esa
+    // línea está viva: si el banner crece al estrechar la ventana, podría
+    // ocupar justamente las filas donde xterm ha envuelto el texto escrito.
+    let userEditing = false;
 
     function fitAndReport(): void {
         if (!term || !fitAddon || !active) return;
@@ -110,7 +141,42 @@
         }
         if (term.cols === lastSize.cols && term.rows === lastSize.rows) return;
         lastSize = { cols: term.cols, rows: term.rows };
-        void api.resize(tabId, term.cols, term.rows);
+        const serial = ++bannerRefreshSerial;
+        const editingAtResize = userEditing;
+        // No resetear xterm antes del resize: la shell todavía conserva la
+        // posición real de su prompt y ConPTY la repinta al recibir SIGWINCH.
+        // Si se vacía solo el frontend aquí, ese prompt aparece en la fila
+        // actual y el repintado del banner puede restaurarlo dentro de sus
+        // secciones. `refresh_banner` limpia las filas antiguas de forma
+        // coordinada y conserva el historial posterior.
+        term.scrollToBottom();
+        if (resizeTimer) clearTimeout(resizeTimer);
+        const cols = term.cols;
+        const rows = term.rows;
+        resizeTimer = setTimeout(() => {
+            resizeTimer = undefined;
+            void api.resize(tabId, cols, rows).then(() => {
+                if (serial !== bannerRefreshSerial) return;
+                // Dar un pequeño margen a la shell para procesar el resize y
+                // repintar su prompt antes de guardar/restaurar el cursor del
+                // banner. Evita que la salida de SIGWINCH quede intercalada.
+                window.setTimeout(() => {
+                    if (serial !== bannerRefreshSerial) return;
+                    // También se conserva el estado capturado al empezar el
+                    // resize: si había texto en edición, no se repinta justo
+                    // después de Enter, cuando todavía puede estar saliendo
+                    // la respuesta del comando.
+                    if (editingAtResize || userEditing) return;
+                    void api.refreshBanner(
+                        tabId,
+                        cols,
+                        rows,
+                        Math.max(1, app.panes.length),
+                        term?.buffer.active.cursorY ?? 0,
+                    );
+                }, 120);
+            });
+        }, 60);
     }
 
     onMount(() => {
@@ -136,6 +202,14 @@
             // Si el usuario había desplazado el historial, cualquier entrada
             // nueva debe devolverle a la línea que está editando.
             term?.scrollToBottom();
+            // `onData` solo recibe teclas del usuario, no la salida de la
+            // shell. Mantener este estado separado del espejo ASCII también
+            // cubre nano, REPLs y entradas con teclas de control.
+            if (data.includes('\r') || data.includes('\n') || data.includes('\u0003')) {
+                userEditing = false;
+            } else if (data) {
+                userEditing = true;
+            }
             const mirroredData = data
                 .replaceAll('\x1b[200~', '')
                 .replaceAll('\x1b[201~', '');
@@ -214,6 +288,7 @@
 
     onDestroy(() => {
         observer?.disconnect();
+        if (resizeTimer) clearTimeout(resizeTimer);
         unregisterTerminal(tabId);
         term?.dispose();
     });
@@ -223,24 +298,51 @@
         if (text) void api.sendInput(tabId, text);
     }
 
-    /** La parte de la selección que la shell todavía puede borrar.
+    /** Convierte una selección xterm en teclas de edición para el proceso hijo.
      *
-     *  Solo es segura si la selección TERMINA exactamente en el cursor: lo que
-     *  el proceso ya ha emitido es historial inmutable, y mandar borrados por
-     *  encima de él dejaría la línea descuadrada. Tampoco vale si abarca varias
-     *  líneas: no hay forma de saber cuántos borrados hacen falta. */
-    function editableSelection(): { text: string; length: number } | null {
+     * xterm selecciona por pantalla, mientras que la shell o nano mantienen
+     * su propio cursor. Solo actuamos cuando uno de los extremos de la
+     * selección coincide con ese cursor; así una selección de historial nunca
+     * se convierte accidentalmente en cientos de retrocesos. Se admiten varias
+     * filas y ambos sentidos de selección cuando el programa se encuentra en
+     * el extremo seleccionado.
+     */
+    function editableSelection(): { text: string; input: string } | null {
         if (!term?.hasSelection()) return null;
         const text = term.getSelection();
         const range = term.getSelectionPosition();
-        if (!text || !range || /[\r\n]/.test(text)) return null;
+        // Una selección puede contener solo celdas vacías y xterm puede
+        // devolverla como una cadena vacía. El rango sigue siendo válido y la
+        // tecla de borrado debe poder actuar sobre él igualmente.
+        if (!range) return null;
         const buffer = term.buffer.active;
-        if (range.end.x !== buffer.cursorX + 1 || range.end.y !== buffer.baseY + buffer.cursorY + 1) {
-            return null;
+        const cursorX = buffer.cursorX;
+        const cursorY = buffer.baseY + buffer.cursorY;
+        const normalizeX = (x: number) => (x === cursorX + 1 ? cursorX : x);
+        const endX = normalizeX(range.end.x);
+        const startX = normalizeX(range.start.x);
+        const atEnd = range.end.y === cursorY && endX === cursorX;
+        const atStart = range.start.y === cursorY && startX === cursorX;
+        if (!atEnd && !atStart) return null;
+
+        const start = { x: range.start.x, y: range.start.y };
+        const end = { x: endX, y: range.end.y };
+        const distance = Math.max(
+            1,
+            (end.y - start.y) * Math.max(1, term.cols) + end.x - start.x,
+        );
+        if (distance > 4096) return null;
+
+        if (atEnd) {
+            // Llevar el cursor al comienzo y retroceder borra también saltos
+            // de línea en editores interactivos que los aceptan.
+            return {
+                text,
+                input: '\u001b[D'.repeat(distance) + '\u007f'.repeat(distance),
+            };
         }
-        const length = [...text].length;
-        if (length < 1 || length > 4096) return null;
-        return { text, length };
+        // Si el cursor está al principio, usar Delete en vez de Backspace.
+        return { text, input: '\u001b[3~'.repeat(distance) };
     }
 
     /** Borra la selección de la línea que se está editando mandando tantos
@@ -249,9 +351,15 @@
     function deleteEditableSelection(copyFirst: boolean): boolean {
         const editable = editableSelection();
         if (!editable) return false;
-        if (copyFirst) void api.writeClipboard(editable.text);
+        // Capturamos el texto y las teclas antes de tocar el portapapeles. El
+        // plugin de clipboard puede cambiar temporalmente el foco/selección
+        // de xterm; si se inicia primero esa operación, «Cortar» puede acabar
+        // copiando correctamente pero no llegar a enviar el borrado al PTY.
         term?.clearSelection();
-        void api.sendInput(tabId, '\x7f'.repeat(editable.length));
+        void api.sendInput(tabId, editable.input);
+        // El texto ya está guardado en `editable`, por lo que copiarlo después
+        // de enviar el borrado no pierde la selección ni retrasa la edición.
+        if (copyFirst) void api.writeClipboard(editable.text);
         return true;
     }
 

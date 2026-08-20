@@ -1,4 +1,4 @@
-# WinSlim Terminal / WS-LTerminal (1.4.3)
+# WinSlim Terminal / LTerminal (1.4.4)
 
 ---
 
@@ -18,7 +18,7 @@ identificador y rutas de datos propias por plataforma (`src-tauri/src/config/ide
 
 | | |
 |---|---|
-| Versión | 1.4.3 |
+| Versión | 1.4.4 |
 | Plataformas | Windows 10/11, Linux (x64), macOS (parcial) |
 | Runtime | Tauri 2 · Rust 1.77+ · Node.js ≥ 22.12.0 (solo para compilar) |
 | Licencia | UNLICENSED (privado) |
@@ -67,6 +67,14 @@ cualquier entorno gráfico ya tiene.
   comprueba antes de compilar y dice el comando de instalación de apt, dnf y
   pacman si falta alguna.
 - **Windows**: nada más. El toolchain MSVC lo instala `rustup`.
+
+Para seleccionar la batería E2E al final del build hace falta además
+`tauri-driver`, `WebKitWebDriver` y una sesión gráfica. El builder ofrece
+`--install-e2e-driver` para instalar ambos controladores cuando sea posible
+(en Windows se usa `-InstallE2eDriver`), y el paquete nativo disponible en la distribución,
+o `--e2e-driver /ruta/WebKitWebDriver` para indicar un ejecutable compatible
+cuando el paquete de WebKitGTK no lo incluye. Si falta cualquiera de ellos, el
+script lo indica y no marca la release como verificada.
 
 ### conpty.dll
 
@@ -142,7 +150,10 @@ linux/build.sh
 
 Argumentos: `-Clean`/`--clean` borra `node_modules` y `target` antes,
 `-SkipChecks`/`--skip-checks` salta las comprobaciones, `-NoRun`/`--no-run` no
-lanza la app al terminar.
+lanza la app al terminar. Para la batería completa usa `-FullTests` en Windows
+o `--full-tests`/`--extended-tests` en Linux; `--install-e2e-driver` permite
+que Linux intente instalar el driver nativo de WebKitGTK cuando la distribución
+lo ofrece.
 
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
@@ -277,7 +288,7 @@ Se inyectan al crear una pestaña, solo en shells reales.
 
 | Alias | Qué hace |
 |---|---|
-| `edit`, `ip`, `ll`, `ls`, `pwd` | Vocabulario de Windows traducido a cada familia de shell. En shells Unix solo se traduce lo que no es nativo. |
+| `edit`, `ip`, `ll`, `ls`, `pwd` | Vocabulario común a todas las shells reales. El nombre y la intención son iguales; cambia únicamente el comando nativo que hay detrás. |
 | `clear`, `cls` | Limpieza real de pantalla e historial, más el banner. |
 | `sysinfo` | Reimprime el banner del sistema. |
 | `ayuda` | Ayuda explicada: qué hace cada alias, qué gestor los atiende y qué scripts se han registrado. Se lee de un archivo generado por sesión, así que ocupa varias líneas y va traducida. |
@@ -326,7 +337,7 @@ ejecutarse, para que no se consuma como respuesta.
 
 **Anclados** incluye únicamente el perfil fijo
 [`Darkeiser003`](https://github.com/Darkeiser003), como referencia del proyecto.
-No importa scripts ni repositorios externos de WinSlim y el repositorio interno
+No importa scripts ni repositorios externos de la aplicación y el repositorio interno
 de actualización no forma parte de esta lista. Cada persona puede anclar sus
 propios perfiles y repositorios, y quitarlos después sin restricciones. Los
 créditos de **Ajustes › Información** se configuran por separado del listado de
@@ -392,7 +403,7 @@ compilar nada.
 Dos ámbitos:
 
 - **Biblioteca**: carpeta persistente elegida por el usuario, más las
-  utilidades WinSlim detectadas en el sistema. Solo estos se registran como
+  utilidades de la aplicación detectadas en el sistema. Solo estos se registran como
   alias.
 - **Aquí**: directorio actual de la pestaña y hasta tres niveles de
   subdirectorios por defecto, configurable entre 0 y 10. **No** crea alias ni
@@ -607,6 +618,26 @@ El botón **Logs** abre la ruta real. Los archivos de inicialización y banner d
 cada sesión van a una carpeta temporal por PID, de modo que dos instancias
 abiertas a la vez no se pisan ni se borran los archivos al salir.
 
+Los registros llevan hora UTC con milisegundos, identificador de sesión y
+metadatos JSON. Se anotan la migración, el arranque, cada PTY, duración de
+procesos y cierre. Para investigar una sesión concreta se puede usar
+`LTERMINAL_LOG_LEVEL=debug` en Linux o `WINSLIM_LOG_LEVEL=debug` en Windows.
+
+## Perfiles portables y plugins
+
+Desde Ajustes se puede exportar un perfil `.lterminal-profile` en Linux,
+`.winslim-profile` en Windows o un instalador
+reproducible `.sh`/`.ps1`. El script explica lo que guarda, no incluye
+contraseñas, tokens, claves privadas ni binarios, comprueba el sistema y la
+arquitectura, verifica la descarga cuando GitHub publica `SHA256SUMS.txt` y
+busca una instalación existente antes de instalar la aplicación. Después
+importa la configuración y los manifests de plugins declarativos.
+
+Los plugins actuales son una base segura para ampliar la terminal: solo
+declaran intérpretes y tecnologías, no cargan código nativo. Su formato,
+límites y flujo de creación están documentados en
+[`docs/plugins.md`](docs/plugins.md).
+
 ---
 
 ## Pruebas
@@ -615,8 +646,21 @@ abiertas a la vez no se pisan ni se borran los archivos al salir.
 npm run check
 ```
 
-Pasa `svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y los tests
-de Rust. Es lo que tiene que estar en verde antes de compilar.
+Pasa la verificación de versión, recursos, arquitectura, scripts de build,
+`svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y los tests de
+Rust. Es lo que tiene que estar en verde antes de compilar.
+
+Al terminar cada build, Linux y Windows preguntan si se quiere ejecutar la
+batería completa. Además del smoke test de ventana/frontend/PTY, comprueba
+shells y herramientas instaladas y ejecuta E2E con `tauri-driver`; si se pide
+esa batería y falta una precondición, el build falla indicando cuál es.
+En Linux se puede forzar con `linux/build.sh --full-tests` y en Windows con
+`windows/build.ps1 -FullTests`. Las herramientas opcionales ausentes se
+informan como omitidas: no se instalan silenciosamente ni se consideran un
+fallo. La falta del driver E2E sí detiene la batería gráfica. El smoke recorre
+Ajustes, Biblioteca, Proyectos, Entorno y dependencias, acordeones, explorador
+y menú contextual, comandos internos, respuesta de la shell, división y
+varios tamaños de ventana.
 
 Los tests viven junto al módulo que prueban, en su `mod tests`. Están escritos
 en español y sus nombres son frases que dicen qué garantiza cada uno, no qué

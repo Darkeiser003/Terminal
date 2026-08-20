@@ -94,7 +94,7 @@ static VIEWERS: &[ViewerRow] = &[
         macos: viewer("viewer-archive", "p7zip") },
     ViewerRow { category: "code",
         windows: viewer("viewer-code", "Visual Studio Code"),
-        linux: viewer("viewer-code", "Visual Studio Code"),
+        linux: viewer("viewer-code-oss", "Code - OSS"),
         macos: viewer("viewer-code", "Visual Studio Code") },
 ];
 
@@ -180,9 +180,9 @@ static MACOS_MANAGERS: &[FileManager] = &[
 
 #[rustfmt::skip]
 static LINUX_MANAGERS: &[FileManager] = &[
-    FileManager { id: "nautilus", cmd: "nautilus", app: "Archivos (GNOME)", action_id: Some("viewer-files-nautilus") },
+    FileManager { id: "nautilus", cmd: "nautilus", app: "Archivos (GNOME)", action_id: None },
     FileManager { id: "dolphin", cmd: "dolphin", app: "Dolphin (KDE)", action_id: Some("viewer-files-dolphin") },
-    FileManager { id: "thunar", cmd: "thunar", app: "Thunar (Xfce)", action_id: Some("viewer-files-thunar") },
+    FileManager { id: "thunar", cmd: "thunar", app: "Thunar (Xfce)", action_id: None },
     // Estos tres se reconocen si ya están, pero no se ofrecen para instalar:
     // son los gestores propios de un escritorio concreto y llenar el panel con
     // seis instaladores para elegir uno no ayuda.
@@ -490,6 +490,13 @@ mod tests {
     }
 
     #[test]
+    fn linux_propone_code_oss_para_codigo_y_texto() {
+        let suggestion = suggest_viewer(".rs", "linux").unwrap();
+        assert_eq!(suggestion.app, "Code - OSS");
+        assert_eq!(suggestion.action_id, "viewer-code-oss");
+    }
+
+    #[test]
     fn una_extension_desconocida_no_propone_nada() {
         assert_eq!(suggest_viewer(".qqq", "windows"), None);
     }
@@ -510,9 +517,10 @@ mod tests {
         let choices = file_manager_choices("linux", &solo_thunar);
         assert_eq!(choices.installed.len(), 1);
         assert_eq!(choices.installed[0].id, "thunar");
-        // Se ofrecen los otros dos que tienen acción de instalación.
+        // Solo Dolphin tiene acción de instalación; los demás se reconocen si
+        // ya están instalados, pero no llenan el panel con alternativas.
         let instalables: Vec<&str> = choices.installable.iter().map(|m| m.id).collect();
-        assert_eq!(instalables, vec!["nautilus", "dolphin"]);
+        assert_eq!(instalables, vec!["dolphin"]);
     }
 
     #[test]

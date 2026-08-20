@@ -362,13 +362,15 @@ struct Descriptor {
 
 fn describe(full: &Path, name: &str, ext: &str, categories: &[FileCategory]) -> Option<Descriptor> {
     let declared = script_type_for_ext(ext);
-    // Los archivos con extensión no reconocida son código/datos, no
-    // candidatos. Solo los que no tienen extensión pueden depender
-    // exclusivamente de un shebang.
-    let shebang = if declared.is_some() || ext.is_empty() {
-        read_shebang(full)
-    } else {
-        None
+    // Solo los scripts ejecutables necesitan leer los primeros bytes para que
+    // el shebang pueda corregir el intérprete de la extensión. Abrir también
+    // cada imagen, JSON, SQL o vídeo era I/O innecesario en carpetas grandes.
+    // Los archivos sin extensión sí dependen exclusivamente del shebang.
+    let shebang = match declared {
+        Some(kind) if kind.runnable() => read_shebang(full),
+        Some(_) => None,
+        None if ext.is_empty() => read_shebang(full),
+        None => None,
     };
 
     if let Some(kind) = declared.or(shebang.map(|(kind, _)| kind)) {
@@ -435,6 +437,18 @@ fn walk(
 
     let mut children: Vec<PathBuf> = Vec::new();
     for entry in entries.filter_map(Result::ok) {
+        // El límite de tiempo no debe depender de que la carpeta actual tenga
+        // pocas entradas. Una carpeta como ~/Descargas puede contener miles
+        // de archivos y, si solo comprobamos el reloj al cambiar de carpeta,
+        // un escaneo "rápido" acaba bloqueado varios segundos.
+        if walk.scope == Scope::Here
+            && walk
+                .deadline
+                .is_some_and(|deadline| Instant::now() > deadline)
+        {
+            walk.stop = Some(StopReason::Time);
+            break;
+        }
         if results.len() >= walk.max_results {
             break;
         }
@@ -465,6 +479,13 @@ fn walk(
         };
         let category = descriptor.kind.category();
         if !walk.categories.contains(&category) {
+            continue;
+        }
+        // «Aquí» es el lugar de acciones ejecutables del proyecto. Los
+        // recursos (HTML, JSON, imágenes, SQL, etc.) sí pertenecen a la
+        // Biblioteca cuando se habilita su categoría, pero no deben convertir
+        // cada archivo de configuración del proyecto en una acción rápida.
+        if walk.scope == Scope::Here && !descriptor.kind.runnable() {
             continue;
         }
         if walk.scope == Scope::Here

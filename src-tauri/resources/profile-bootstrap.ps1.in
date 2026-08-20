@@ -1,0 +1,74 @@
+#requires -Version 5.1
+$ErrorActionPreference = 'Stop'
+
+if ($env:OS -ne 'Windows_NT') { throw 'Este perfil .ps1 instala la edición Windows y necesita Windows.' }
+
+$ProfileRepository = 'Darkeiser003/Terminal'
+$ProfileFile = if ($args.Count -gt 0) { $args[0] } else { Join-Path (Get-Location) 'winslim-terminal-profile.winslim-profile' }
+$ProfileParent = Split-Path -Parent $ProfileFile
+if ($ProfileParent) { New-Item -ItemType Directory -Force -Path $ProfileParent | Out-Null }
+$ProfileJson = @'
+WINSLIM_PROFILE_JSON_BEGIN
+{{PROFILE_JSON}}
+WINSLIM_PROFILE_JSON_END
+'@
+$ProfileJson = $ProfileJson -replace '(?m)^WINSLIM_PROFILE_JSON_BEGIN\r?\n?', ''
+$ProfileJson = $ProfileJson -replace '(?m)^WINSLIM_PROFILE_JSON_END\r?\n?', ''
+[IO.File]::WriteAllText($ProfileFile, $ProfileJson.Trim(), [Text.UTF8Encoding]::new($false))
+
+function Find-Terminal {
+    $candidates = @()
+    try { $candidates += (Get-Command winslim-terminal.exe -ErrorAction Stop).Source } catch {}
+    $candidates += @(
+        (Join-Path $PSScriptRoot 'winslim-terminal.exe'),
+        (Join-Path $env:LOCALAPPDATA 'WinSlimTerminal\winslim-terminal.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\WinSlim Terminal\winslim-terminal.exe'),
+        (Join-Path $env:ProgramFiles 'WinSlim Terminal\winslim-terminal.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+    }
+    return $null
+}
+
+$AppPath = Find-Terminal
+if (-not $AppPath) {
+    $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'WinSlimTerminal-profile-bootstrap' }
+    $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$ProfileRepository/releases/latest"
+    $asset = $release.assets | Where-Object {
+        $_.name -match '\.zip$' -and $_.name -notmatch 'source|linux|macos|darwin'
+    } | Select-Object -First 1
+    if (-not $asset) { throw 'GitHub no publicó un ZIP de WinSlim Terminal para Windows.' }
+    $tempDir = Join-Path $env:TEMP ('winslim-profile-' + [guid]::NewGuid().ToString('N'))
+    $zipPath = Join-Path $tempDir $asset.name
+    $extractDir = Join-Path $tempDir 'payload'
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+    Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $zipPath
+    $checksumAsset = $release.assets | Where-Object { $_.name -eq 'SHA256SUMS.txt' } | Select-Object -First 1
+    if ($checksumAsset) {
+        $checksumText = (Invoke-WebRequest -Headers $headers -Uri $checksumAsset.browser_download_url).Content
+        $checksumLine = $checksumText -split "`r?`n" | Where-Object { $_ -match [regex]::Escape($asset.name) } | Select-Object -First 1
+        if ($checksumLine) {
+            $expected = (($checksumLine -split '\s+')[0]).ToLowerInvariant()
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+            if ($expected -ne $actual) { throw 'La huella SHA-256 del ZIP no coincide.' }
+        }
+    } else {
+        Write-Warning 'La release no publicó SHA256SUMS.txt; se continuará tras validar el ejecutable.'
+    }
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+    $downloadedExe = Get-ChildItem -LiteralPath $extractDir -Filter 'winslim-terminal.exe' -File -Recurse | Select-Object -First 1
+    if (-not $downloadedExe) { throw 'El ZIP descargado no contiene winslim-terminal.exe.' }
+    $installDir = Join-Path $env:LOCALAPPDATA 'WinSlimTerminal'
+    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+    Copy-Item -Path (Join-Path $downloadedExe.Directory.FullName '*') -Destination $installDir -Recurse -Force
+    $AppPath = Join-Path $installDir 'winslim-terminal.exe'
+    Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "WinSlim Terminal instalado en $installDir."
+}
+
+Write-Host "Importando configuración y complementos en: $AppPath"
+& $AppPath --import-profile $ProfileFile
+if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "La aplicación terminó con código $LASTEXITCODE." }
+Write-Host 'Perfil aplicado. Incluye preferencias saneadas, temas, opciones de terminal y manifests de plugins.'
+Write-Host 'No incluye sesiones, tokens, contraseñas, claves privadas ni binarios.'

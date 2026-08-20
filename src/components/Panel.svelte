@@ -267,7 +267,7 @@
             onpointerup={endResize}
             ondblclick={resetSize}
             role="presentation"
-            title="Arrastra para redimensionar · doble clic para restablecer"
+                    title={app.t('tabs.dragHint', 'Arrastra para reordenar; doble clic para restablecer.')}
         ></div>
 
         <!-- Solo este hijo se desplaza. Las asas son hermanas suyas y se

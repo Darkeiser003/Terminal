@@ -39,6 +39,17 @@ struct Manifest {
     technologies: Vec<PluginTechnology>,
 }
 
+/// Parte portable de un plugin. Se guarda el manifest, nunca los ejecutables
+/// del usuario: al restaurar se vuelve a comprobar que cada tecnología siga
+/// siendo declarativa y que sus binarios estén en el PATH.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTransfer {
+    pub id: String,
+    pub manifest: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginInfo {
@@ -94,7 +105,11 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
         return Err("manifest ausente o demasiado grande".into());
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    parse_manifest(&bytes)
+}
+
+fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
+    let manifest: Manifest = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     if manifest.schema_version != 1 || !valid_id(&manifest.id) {
         return Err("schemaVersion o id no válido".into());
     }
@@ -119,6 +134,55 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
         }
     }
     Ok(manifest)
+}
+
+pub fn export_bundle() -> Vec<PluginTransfer> {
+    let state = load_state();
+    manifests()
+        .into_iter()
+        .filter_map(|(path, result)| {
+            let manifest = result.ok()?;
+            let manifest_text = std::fs::read_to_string(path).ok()?;
+            let id = manifest.id;
+            Some(PluginTransfer {
+                enabled: state.get(&id).copied().unwrap_or(true),
+                id,
+                manifest: manifest_text,
+            })
+        })
+        .collect()
+}
+
+pub fn import_bundle(bundle: &[PluginTransfer]) -> Result<usize, String> {
+    if bundle.len() > MAX_PLUGINS {
+        return Err("El perfil contiene demasiados plugins".into());
+    }
+    let mut validated = Vec::with_capacity(bundle.len());
+    let mut ids = HashSet::new();
+    for item in bundle {
+        let manifest = parse_manifest(item.manifest.as_bytes())?;
+        if manifest.id != item.id || !ids.insert(manifest.id.clone()) {
+            return Err(
+                "El perfil contiene identificadores de plugin duplicados o inconsistentes".into(),
+            );
+        }
+        validated.push((manifest.id, item.manifest.clone(), item.enabled));
+    }
+
+    let root = plugins_dir();
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let mut state = load_state();
+    for (id, manifest, enabled) in validated {
+        let destination = root.join(&id);
+        std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+        let temporary = destination.join("plugin.json.tmp");
+        std::fs::write(&temporary, manifest).map_err(|error| error.to_string())?;
+        std::fs::rename(temporary, destination.join("plugin.json"))
+            .map_err(|error| error.to_string())?;
+        state.insert(id, enabled);
+    }
+    save_state(&state)?;
+    Ok(state.len())
 }
 
 fn manifests() -> Vec<(PathBuf, Result<Manifest, String>)> {
@@ -252,5 +316,34 @@ mod tests {
         assert!(valid_id("mi-plugin-2"));
         assert!(!valid_id("Mi Plugin"));
         assert!(!valid_id("-plugin"));
+    }
+
+    #[test]
+    fn un_manifest_declarativo_se_puede_validar_y_transportar() {
+        let json = br#"{
+            "schemaVersion": 1,
+            "id": "mi-repl",
+            "name": "Mi REPL",
+            "version": "1.0.0",
+            "technologies": [{
+                "id": "mi-lenguaje",
+                "label": "Mi lenguaje",
+                "category": "plugin",
+                "windowsExe": "mi-repl.exe",
+                "unixExe": "mi-repl",
+                "args": []
+            }]
+        }"#;
+        let manifest = parse_manifest(json).expect("manifest válido");
+        let transfer = PluginTransfer {
+            id: manifest.id.clone(),
+            manifest: String::from_utf8(json.to_vec()).unwrap(),
+            enabled: true,
+        };
+        assert_eq!(serde_json::to_value(&transfer).unwrap()["enabled"], true);
+        assert_eq!(
+            parse_manifest(transfer.manifest.as_bytes()).unwrap().id,
+            "mi-repl"
+        );
     }
 }

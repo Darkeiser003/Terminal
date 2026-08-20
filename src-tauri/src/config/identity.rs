@@ -27,7 +27,7 @@ pub const LINUX: Identity = Identity {
     slug: "lterminal",
     user_agent: "LTerminal",
     projects_folder_name: "LTerminal Projects",
-    desktop_file: Some("lterminal.desktop"),
+    desktop_file: Some("LTerminal.desktop"),
 };
 
 pub const MACOS: Identity = Identity {

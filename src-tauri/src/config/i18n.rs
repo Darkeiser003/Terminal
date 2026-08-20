@@ -206,6 +206,7 @@ static GROUP_KEYS: &[(&str, &str)] = &[
     ("Shells",                               "group.shells"),
     ("Sistema y herramientas",               "group.tools"),
     ("Lenguajes",                            "group.languages"),
+    ("Frameworks",                            "group.frameworks"),
     ("Visores de archivos",                  "group.viewers"),
     ("Compatibilidad Windows",               "group.windowsCompat"),
     ("WSL",                                  "group.wsl"),
@@ -216,7 +217,6 @@ static GROUP_KEYS: &[(&str, &str)] = &[
     ("Shells del sistema",                   "env.groupShells"),
     ("Lenguajes · intérprete interactivo",   "env.groupLanguages"),
     ("Docker · contenedores en ejecución",   "env.groupDockerContainers"),
-    ("Docker · imágenes (contenedor nuevo)", "env.groupDockerImages"),
     ("Android (ADB)",                        "env.groupAndroid"),
 ];
 
@@ -241,6 +241,7 @@ static VERB_KEYS: &[(&str, &str)] = &[
     ("Ver",         "verb.view"),
     ("Iniciar",     "verb.start"),
     ("Reiniciar",   "verb.restart"),
+    ("Abrir",       "verb.open"),
 ];
 
 pub fn verb_key_for(verb: &str) -> Option<&'static str> {

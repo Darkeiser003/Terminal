@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
@@ -105,6 +105,35 @@ pub fn pty_resize(state: State<'_, Arc<AppState>>, tab_id: String, cols: i64, ro
         return;
     };
     state.tabs.resize(&tab_id, viewport.cols, viewport.rows);
+}
+
+/// Redibuja la cabecera informativa sin enviar ningún comando a la shell.
+///
+/// El banner se generó antes de que xterm pudiera medir el panel. Después de
+/// dividir o redimensionar la ventana hay que volver a calcular sus anchos,
+/// pero hacerlo escribiendo en el PTY alteraría la entrada que el usuario esté
+/// editando. `TabManager` lo entrega como salida visual y conserva el cursor.
+#[tauri::command]
+pub fn pty_refresh_banner(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    cols: i64,
+    rows: i64,
+    pane_count: i64,
+    cursor_row: Option<i64>,
+) {
+    let Some(viewport) = crate::tabs::valid_viewport(cols, rows) else {
+        return;
+    };
+    state.tabs.refresh_banner(
+        &app,
+        &tab_id,
+        viewport.cols,
+        viewport.rows,
+        pane_count.max(1) as usize,
+        cursor_row.and_then(|row| u16::try_from(row).ok()),
+    );
 }
 
 // ---- Entornos (`env:*`) ----
@@ -264,19 +293,120 @@ pub struct ProfileTransferResult {
 fn valid_profile_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("winslim-profile"))
+        .is_some_and(|extension| {
+            ["winslim-profile", "lterminal-profile", "sh", "ps1"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
 }
 
-/// Exporta solo preferencias saneadas: nunca sesiones, tokens, rutas temporales
-/// ni estado interno de plugins. El contenedor versionado permite migrarlo en
-/// versiones futuras sin adivinar el formato.
+const PROFILE_BEGIN: &str = "WINSLIM_PROFILE_JSON_BEGIN";
+const PROFILE_END: &str = "WINSLIM_PROFILE_JSON_END";
+
+fn profile_script(path: &Path, document: &str) -> Option<String> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let template = match extension.as_str() {
+        "sh" => include_str!("../../resources/profile-bootstrap.sh.in"),
+        "ps1" => include_str!("../../resources/profile-bootstrap.ps1.in"),
+        _ => return None,
+    };
+    Some(template.replace("{{PROFILE_JSON}}", document))
+}
+
+fn embedded_profile(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if extension.eq_ignore_ascii_case("winslim-profile")
+        || extension.eq_ignore_ascii_case("lterminal-profile")
+    {
+        return Ok(bytes);
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|_| "El script exportado no es UTF-8".to_string())?;
+    let start = text
+        .find(PROFILE_BEGIN)
+        .ok_or_else(|| "El script no contiene un perfil portable".to_string())?;
+    let payload = &text[start + PROFILE_BEGIN.len()..];
+    let payload = payload
+        .split(PROFILE_END)
+        .next()
+        .ok_or_else(|| "El script no contiene el final del perfil".to_string())?;
+    Ok(payload.trim().as_bytes().to_vec())
+}
+
+fn read_profile_document(path: &Path) -> Result<Value, String> {
+    if !valid_profile_path(path) {
+        return Err(
+            "El perfil debe terminar en .winslim-profile, .lterminal-profile, .sh o .ps1".into(),
+        );
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    if bytes.len() > 1_048_576 {
+        return Err("El perfil supera 1 MiB".into());
+    }
+    let bytes = embedded_profile(path, bytes)?;
+    let document: Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("Perfil JSON inválido: {error}"))?;
+    if document.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+        || document.get("application").and_then(Value::as_str) != Some("winslim-terminal")
+    {
+        return Err("Formato o versión de perfil incompatible".into());
+    }
+    Ok(document)
+}
+
+/// Importa un perfil antes de crear la ventana. Lo usa tanto el comando de la
+/// interfaz como el script portable, de modo que ambos caminos tienen
+/// exactamente la misma validación y no hay una segunda lógica de instalación.
+pub fn import_profile_file(path: &Path) -> Result<Preferences, String> {
+    let document = read_profile_document(path)?;
+    let sanitized =
+        preferences::sanitize_preferences(document.get("preferences").unwrap_or(&Value::Null));
+    let Value::Object(patch) = serde_json::to_value(&sanitized)
+        .map_err(|error| format!("No se pudo serializar el perfil: {error}"))?
+    else {
+        return Err("El perfil saneado no es un objeto".into());
+    };
+    if let Some(raw_plugins) = document.get("plugins") {
+        let bundle: Vec<crate::config::plugins::PluginTransfer> =
+            serde_json::from_value(raw_plugins.clone())
+                .map_err(|error| format!("Plugins del perfil inválidos: {error}"))?;
+        crate::config::plugins::import_bundle(&bundle)?;
+    }
+    if settings::save_settings(&patch).is_none() {
+        return Err("No se pudo guardar el perfil importado".into());
+    }
+    Ok(sanitized)
+}
+
+/// Busca la opción usada por los scripts portables. Se mantiene aquí, junto a
+/// la validación del perfil, para que una versión futura pueda ampliar el
+/// protocolo sin que cada instalador tenga que conocer rutas internas.
+pub fn profile_import_argument() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--import-profile" {
+            return args.next().map(PathBuf::from);
+        }
+    }
+    None
+}
+
+/// Exporta preferencias saneadas como perfil JSON o como script reproducible.
+/// Los scripts informan explícitamente de lo que incluyen y excluyen: no se
+/// convierten en instaladores silenciosos ni transportan credenciales.
 #[tauri::command(async)]
 pub fn profile_export(path: String) -> ProfileTransferResult {
     let target = Path::new(&path);
     if !valid_profile_path(target) {
         return ProfileTransferResult {
             ok: false,
-            error: Some("El perfil debe terminar en .winslim-profile".into()),
+            error: Some(
+                "El perfil debe terminar en .winslim-profile, .lterminal-profile, .sh o .ps1"
+                    .into(),
+            ),
             preferences: None,
         };
     }
@@ -284,10 +414,14 @@ pub fn profile_export(path: String) -> ProfileTransferResult {
         "schemaVersion": 1,
         "application": "winslim-terminal",
         "preferences": preferences::current(),
+        "plugins": crate::config::plugins::export_bundle(),
     });
-    let result = serde_json::to_vec_pretty(&document)
+    let result = serde_json::to_string_pretty(&document)
         .map_err(|error| error.to_string())
-        .and_then(|bytes| std::fs::write(target, bytes).map_err(|error| error.to_string()));
+        .and_then(|json| {
+            let content = profile_script(target, &json).unwrap_or(json);
+            std::fs::write(target, content).map_err(|error| error.to_string())
+        });
     match result {
         Ok(()) => ProfileTransferResult {
             ok: true,
@@ -305,64 +439,17 @@ pub fn profile_export(path: String) -> ProfileTransferResult {
 #[tauri::command(async)]
 pub fn profile_import(path: String) -> ProfileTransferResult {
     let target = Path::new(&path);
-    if !valid_profile_path(target) {
-        return ProfileTransferResult {
+    match import_profile_file(target) {
+        Ok(sanitized) => ProfileTransferResult {
+            ok: true,
+            error: None,
+            preferences: Some(payload_for(sanitized)),
+        },
+        Err(error) => ProfileTransferResult {
             ok: false,
-            error: Some("El perfil debe terminar en .winslim-profile".into()),
+            error: Some(error),
             preferences: None,
-        };
-    }
-    let bytes = match std::fs::read(target) {
-        Ok(bytes) if bytes.len() <= 1_048_576 => bytes,
-        Ok(_) => {
-            return ProfileTransferResult {
-                ok: false,
-                error: Some("El perfil supera 1 MiB".into()),
-                preferences: None,
-            }
-        }
-        Err(error) => {
-            return ProfileTransferResult {
-                ok: false,
-                error: Some(error.to_string()),
-                preferences: None,
-            }
-        }
-    };
-    let document: Value = match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
-        Err(error) => {
-            return ProfileTransferResult {
-                ok: false,
-                error: Some(format!("Perfil JSON inválido: {error}")),
-                preferences: None,
-            }
-        }
-    };
-    if document.get("schemaVersion").and_then(Value::as_u64) != Some(1)
-        || document.get("application").and_then(Value::as_str) != Some("winslim-terminal")
-    {
-        return ProfileTransferResult {
-            ok: false,
-            error: Some("Formato o versión de perfil incompatible".into()),
-            preferences: None,
-        };
-    }
-    let sanitized =
-        preferences::sanitize_preferences(document.get("preferences").unwrap_or(&Value::Null));
-    if let Ok(Value::Object(patch)) = serde_json::to_value(&sanitized) {
-        if settings::save_settings(&patch).is_none() {
-            return ProfileTransferResult {
-                ok: false,
-                error: Some("No se pudo guardar el perfil importado".into()),
-                preferences: None,
-            };
-        }
-    }
-    ProfileTransferResult {
-        ok: true,
-        error: None,
-        preferences: Some(payload_for(sanitized)),
+        },
     }
 }
 
@@ -383,8 +470,18 @@ pub struct AppInfo {
     pub owners: Vec<String>,
     /// Creadores y responsables de la dirección del proyecto.
     pub project_leads: Vec<String>,
+    /// Créditos adicionales propios de la distribución. WinSlim puede
+    /// reconocer a sus colaboradores sin atribuirlos a LTerminal/Linux.
+    pub collaborators: Vec<CollaboratorCredit>,
     /// Dónde vive `settings.json`, para poder abrirlo o respaldarlo a mano.
     pub settings_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaboratorCredit {
+    pub login: &'static str,
+    pub role: &'static str,
 }
 
 /// Datos de identidad que el frontend pinta en el título y el panel de ajustes.
@@ -400,6 +497,12 @@ pub fn app_info(app: AppHandle) -> AppInfo {
         developers: catalog.developers,
         owners: catalog.owners,
         project_leads: catalog.project_leads,
+        collaborators: (identity.slug == "winslim-terminal")
+            .then_some(vec![CollaboratorCredit {
+                login: "Christianlg97",
+                role: "Colaborador y desarrollador de WinSlim",
+            }])
+            .unwrap_or_default(),
         settings_path: settings::settings_path().to_string_lossy().to_string(),
     }
 }
@@ -425,4 +528,33 @@ pub fn log_open_folder(app: AppHandle) -> Option<String> {
         return None;
     }
     Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_perfil_se_puede_extraer_de_los_dos_scripts() {
+        let document = r#"{"schemaVersion":1,"application":"winslim-terminal","preferences":{}}"#;
+        for extension in ["sh", "ps1"] {
+            let path = Path::new(if extension == "sh" {
+                "perfil.sh"
+            } else {
+                "perfil.ps1"
+            });
+            let script = profile_script(path, document).expect("script generado");
+            let extracted = embedded_profile(path, script.into_bytes()).expect("perfil extraído");
+            assert_eq!(String::from_utf8(extracted).unwrap(), document);
+        }
+    }
+
+    #[test]
+    fn los_perfiles_json_siguen_siendo_validos() {
+        assert!(valid_profile_path(Path::new("perfil.winslim-profile")));
+        assert!(valid_profile_path(Path::new("perfil.lterminal-profile")));
+        assert!(valid_profile_path(Path::new("perfil.sh")));
+        assert!(valid_profile_path(Path::new("perfil.ps1")));
+        assert!(!valid_profile_path(Path::new("perfil.exe")));
+    }
 }

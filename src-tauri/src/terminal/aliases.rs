@@ -5,9 +5,10 @@
 //!
 //! Port de `electron/main/aliasProfiles.js`.
 //!
-//! En Windows se mantienen los alias originales (edit, ip, ll, ls, pwd,
-//! clear). En shells unix, `ls`/`pwd`/`clear` ya son comandos nativos: solo se
-//! traduce el vocabulario específico de Windows.
+//! En todas las shells reales se mantiene el mismo vocabulario (edit, ip, ll,
+//! ls, pwd, clear). La sintaxis y el ejecutable subyacente se traducen por
+//! familia; así `help`, los comandos de paquetes y los alias canónicos no
+//! dependen del sistema que haya detrás.
 //!
 //! Todo esto NO se teclea en la shell: se escribe en un archivo temporal que la
 //! shell carga con una sola línea corta (`call` / dot-source / `source`). Así
@@ -68,6 +69,12 @@ pub const WINDOWS_ALIASES: [(&str, &str); 5] = [
     ("pwd",  "cd"),
 ];
 
+/// Vocabulario estable que debe existir en todas las shells que aceptan la
+/// inicialización de la aplicación. El comando que hay detrás cambia cuando
+/// corresponde (por ejemplo `dir` frente a `ls`), pero el nombre y la
+/// intención no cambian entre Windows, Linux, Bash, Fish o PowerShell.
+pub const CANONICAL_ALIAS_NAMES: [&str; 5] = ["edit", "ip", "ll", "ls", "pwd"];
+
 pub fn unix_aliases(kind: ShellKind) -> Vec<(&'static str, String)> {
     let ip_fallback = if kind == ShellKind::Fish {
         "ip addr 2>/dev/null; or ifconfig"
@@ -78,11 +85,32 @@ pub fn unix_aliases(kind: ShellKind) -> Vec<(&'static str, String)> {
         ("edit", "nano".to_string()),
         ("ip", ip_fallback.to_string()),
         ("ll", "ls -alh".to_string()),
+        ("ls", "command ls".to_string()),
+        ("pwd", "command pwd".to_string()),
     ]
 }
 
-fn is_windows_family(kind: ShellKind) -> bool {
-    matches!(kind, ShellKind::Cmd | ShellKind::Powershell)
+fn powershell_aliases(platform: &str) -> Vec<(&'static str, String)> {
+    if platform == "windows" || platform == "win32" {
+        return WINDOWS_ALIASES
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_string()))
+            .collect();
+    }
+    // PowerShell Core en Linux/macOS no entiende la sintaxis POSIX de
+    // `unix_aliases`, así que conserva los mismos nombres con comandos
+    // nativos de PowerShell. No se usa `||`: así también funciona en hosts
+    // con versiones antiguas de PowerShell.
+    vec![
+        ("edit", "nano".into()),
+        (
+            "ip",
+            "if (Get-Command ip -ErrorAction SilentlyContinue) { ip addr @args } else { ifconfig @args }".into(),
+        ),
+        ("ll", "Get-ChildItem -Force @args".into()),
+        ("ls", "Get-ChildItem @args".into()),
+        ("pwd", "Get-Location @args".into()),
+    ]
 }
 
 /// Comando de limpieza completo por familia de shell:
@@ -331,7 +359,243 @@ pub struct HelpOptions<'a> {
     pub script_names: &'a [String],
 }
 
-pub fn build_help_text(kind: ShellKind, t: &Translator, options: &HelpOptions<'_>) -> String {
+/// Secciones de la ayuda que se pueden pedir desde ayuda <seccion>,
+/// help <seccion> o :help <seccion>. Los nombres cortos son deliberados:
+/// deben poder escribirse igual desde cualquier shell y no dependen del
+/// idioma visible de la interfaz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTopic {
+    General,
+    Packages,
+    Session,
+    Internal,
+    Aliases,
+    Library,
+    Menus,
+    Plugins,
+    Support,
+    Credits,
+}
+
+impl HelpTopic {
+    pub const SECTIONS: [Self; 9] = [
+        Self::Packages,
+        Self::Session,
+        Self::Internal,
+        Self::Aliases,
+        Self::Library,
+        Self::Menus,
+        Self::Plugins,
+        Self::Support,
+        Self::Credits,
+    ];
+
+    pub const fn file_key(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Packages => "paquetes",
+            Self::Session => "sesion",
+            Self::Internal => "internos",
+            Self::Aliases => "alias",
+            Self::Library => "biblioteca",
+            Self::Menus => "menus",
+            Self::Plugins => "plugins",
+            Self::Support => "soporte",
+            Self::Credits => "creditos",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Packages => "paquetes",
+            Self::Session => "sesion",
+            Self::Internal => "comandos internos",
+            Self::Aliases => "alias",
+            Self::Library => "biblioteca",
+            Self::Menus => "menus",
+            Self::Plugins => "plugins",
+            Self::Support => "soporte",
+            Self::Credits => "creditos",
+        }
+    }
+
+    /// Acepta español e inglés, con y sin tilde, pero no interpreta palabras
+    /// arbitrarias. Así un error se puede explicar al usuario en vez de
+    /// imprimir una sección que no pidió.
+    pub fn from_argument(argument: Option<&str>) -> Option<Self> {
+        let value = argument.unwrap_or("").trim().to_ascii_lowercase();
+        match value.as_str() {
+            "" | "general" | "inicio" | "todo" | "all" | "help" | "ayuda" => Some(Self::General),
+            "paquete" | "paquetes" | "package" | "packages" | "pkg" => Some(Self::Packages),
+            "sesion" | "session" | "terminal" => Some(Self::Session),
+            "interno" | "internos" | "internal" | "internals" | "comando" | "comandos"
+            | "commands" => Some(Self::Internal),
+            "alias" | "aliases" => Some(Self::Aliases),
+            "biblioteca" | "library" | "scripts" => Some(Self::Library),
+            "menu" | "menus" | "panel" | "paneles" | "panels" | "interfaz" | "ui" => {
+                Some(Self::Menus)
+            }
+            "plugin" | "plugins" | "complementos" => Some(Self::Plugins),
+            "soporte" | "support" | "plataformas" | "platforms" | "shell" | "shells" => {
+                Some(Self::Support)
+            }
+            "credito" | "creditos" | "credits" | "autor" | "autores" => Some(Self::Credits),
+            _ => None,
+        }
+    }
+}
+
+pub fn help_topic_path(help_path: &str, topic: HelpTopic) -> String {
+    let base = help_path.strip_suffix(".txt").unwrap_or(help_path);
+    format!("{base}-{}.txt", topic.file_key())
+}
+
+fn sibling_path(help_path: &str, extension: &str) -> String {
+    let base = help_path.strip_suffix(".txt").unwrap_or(help_path);
+    format!("{base}.{extension}")
+}
+
+pub fn build_cmd_help_dispatcher(help_path: &str) -> String {
+    let mut lines = vec![
+        "@echo off".to_string(),
+        "set \"topic=%~1\"".to_string(),
+        format!("if \"%topic%\"==\"\" type \"{help_path}\" & exit /b 0"),
+    ];
+    for name in help_topic_names(HelpTopic::General) {
+        lines.push(format!(
+            "if /I \"%topic%\"==\"{name}\" type \"{help_path}\" & exit /b 0"
+        ));
+    }
+    for topic in HelpTopic::SECTIONS {
+        let path = help_topic_path(help_path, topic);
+        for name in help_topic_names(topic) {
+            lines.push(format!(
+                "if /I \"%topic%\"==\"{name}\" type \"{path}\" & exit /b 0"
+            ));
+        }
+    }
+    lines.push("echo Seccion desconocida: %topic%. Usa ayuda para ver las secciones.".to_string());
+    lines.push("exit /b 2".to_string());
+    lines.join("\r\n") + "\r\n"
+}
+
+pub fn help_runner_path(help_path: &str, kind: ShellKind) -> String {
+    let extension = match kind {
+        ShellKind::Cmd => "cmd",
+        ShellKind::Powershell => "ps1",
+        ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh | ShellKind::Fish => "sh",
+        ShellKind::Android | ShellKind::Repl => "txt",
+    };
+    sibling_path(help_path, extension)
+}
+
+pub fn build_help_runner(kind: ShellKind, help_path: &str, transport: Transport) -> String {
+    match kind {
+        ShellKind::Cmd => build_cmd_help_dispatcher(help_path),
+        ShellKind::Powershell => {
+            let mut lines = vec![
+                "param([string]$Topic)".to_string(),
+                "$path = $null".to_string(),
+                "if ([string]::IsNullOrWhiteSpace($Topic)) {".to_string(),
+                format!("    $path = '{}'", help_path.replace('\'', "''")),
+                "} else {".to_string(),
+                "    $path = switch ($Topic.ToLowerInvariant()) {".to_string(),
+            ];
+            for name in help_topic_names(HelpTopic::General) {
+                lines.push(format!(
+                    "        '{name}' {{ '{}'; break }}",
+                    help_path.replace('\'', "''")
+                ));
+            }
+            for topic in HelpTopic::SECTIONS {
+                let path = help_topic_path(help_path, topic).replace('\'', "''");
+                for name in help_topic_names(topic) {
+                    lines.push(format!("        '{name}' {{ '{path}'; break }}"));
+                }
+            }
+            lines.extend([
+                "        default { $null }".to_string(),
+                "    }".to_string(),
+                "}".to_string(),
+                "if ($null -eq $path) {".to_string(),
+                "    Write-Host ('Seccion desconocida: ' + $Topic + '. Usa ayuda para ver las secciones.') -ForegroundColor Yellow".to_string(),
+                "    exit 2".to_string(),
+                "}".to_string(),
+                "Write-Host (Get-Content -Raw -LiteralPath $path) -NoNewline".to_string(),
+            ]);
+            lines.join("\r\n") + "\r\n"
+        }
+        ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh | ShellKind::Fish => {
+            let shell_help_path = unix_path_for(help_path, transport);
+            let mut lines = vec![
+                "#!/bin/sh".to_string(),
+                "topic=\"$1\"".to_string(),
+                "case \"$topic\" in".to_string(),
+                format!(
+                    "\"\"|{}) cat \"{}\" ;;",
+                    help_topic_names(HelpTopic::General).join("|"),
+                    shell_help_path
+                ),
+            ];
+            for topic in HelpTopic::SECTIONS {
+                lines.push(format!(
+                    "{} ) cat \"{}\" ;;",
+                    help_topic_names(topic).join("|"),
+                    unix_path_for(&help_topic_path(help_path, topic), transport)
+                ));
+            }
+            lines.extend([
+                "*) printf 'Seccion desconocida: %s. Usa ayuda para ver las secciones.\\n' \"$topic\"; exit 2 ;;".to_string(),
+                "esac".to_string(),
+            ]);
+            lines.join("\n") + "\n"
+        }
+        ShellKind::Android | ShellKind::Repl => String::new(),
+    }
+}
+
+fn help_topic_names(topic: HelpTopic) -> &'static [&'static str] {
+    match topic {
+        HelpTopic::Packages => &["paquete", "paquetes", "package", "packages", "pkg"],
+        HelpTopic::Session => &["sesion", "session", "terminal"],
+        HelpTopic::Internal => &[
+            "interno",
+            "internos",
+            "internal",
+            "internals",
+            "comando",
+            "comandos",
+            "commands",
+        ],
+        HelpTopic::Aliases => &["alias", "aliases"],
+        HelpTopic::Library => &["biblioteca", "library", "scripts"],
+        HelpTopic::Menus => &[
+            "menu", "menus", "panel", "paneles", "panels", "interfaz", "ui",
+        ],
+        HelpTopic::Plugins => &["plugin", "plugins", "complementos"],
+        HelpTopic::Support => &[
+            "soporte",
+            "support",
+            "plataformas",
+            "platforms",
+            "shell",
+            "shells",
+        ],
+        HelpTopic::Credits => &["credito", "creditos", "credits", "autor", "autores"],
+        HelpTopic::General => &["general", "inicio", "todo", "all", "help", "ayuda"],
+    }
+}
+
+pub fn build_help_text(t: &Translator, options: &HelpOptions<'_>) -> String {
+    build_help_topic_text(t, options, HelpTopic::General)
+}
+
+pub fn build_help_topic_text(
+    t: &Translator,
+    options: &HelpOptions<'_>,
+    topic: HelpTopic,
+) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     lines.push(String::new());
@@ -344,17 +608,64 @@ pub fn build_help_text(kind: ShellKind, t: &Translator, options: &HelpOptions<'_
             "comandos añadidos a esta sesión ({shell})"
         )
     ));
+    if topic != HelpTopic::General {
+        lines.push(format!(
+            "{HELP_SECTION_COLOR}Sección: {}{HELP_RESET}",
+            topic.label()
+        ));
+    }
     lines.push(String::new());
 
+    if topic == HelpTopic::General || topic == HelpTopic::Packages {
+        render_packages(&mut lines, t, options);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Session {
+        render_session(&mut lines, t, options);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Internal {
+        render_internal(&mut lines);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Aliases {
+        render_aliases(&mut lines, options);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Library {
+        render_library(&mut lines, options);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Menus {
+        render_menus(&mut lines);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Plugins {
+        render_plugins(&mut lines);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Support {
+        render_support(&mut lines, options);
+    }
+    if topic == HelpTopic::General || topic == HelpTopic::Credits {
+        render_credits(&mut lines);
+    }
+
+    lines.push(format!("{HELP_SECTION_COLOR}Uso de esta ayuda{HELP_RESET}"));
+    lines.push("    ayuda                         ayuda completa".to_string());
+    lines.push("    ayuda <seccion>              solo esa sección".to_string());
+    lines.push("    secciones: paquetes, sesion, internos, alias, biblioteca, menus, plugins, soporte, creditos".to_string());
+
+    lines.join("\r\n") + "\r\n"
+}
+
+fn section(lines: &mut Vec<String>, title: &str) {
+    lines.push(format!("{HELP_SECTION_COLOR}{title}{HELP_RESET}"));
+}
+
+fn render_packages(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions<'_>) {
     let packages_note = match options.manager_label {
         Some(manager) => t.tp(
             "help.packagesManager",
             &[("manager", manager.to_string())],
-            "el mismo vocabulario en todas las shells; aquí lo atiende {manager}",
+            "mismo vocabulario en todas las shells; aquí lo atiende {manager}",
         ),
         None => t.t(
             "help.packagesAuto",
-            "el mismo vocabulario en todas las shells; el gestor se elige solo al ejecutarlo",
+            "mismo vocabulario en todas las shells; el gestor se elige al ejecutarlo",
         ),
     };
     lines.push(format!(
@@ -363,11 +674,14 @@ pub fn build_help_text(kind: ShellKind, t: &Translator, options: &HelpOptions<'_
     ));
     lines.push(help_row(
         "install <paquete>",
-        &t.t("help.install", "Instala un paquete."),
+        &t.t("help.install", "Instala uno o varios paquetes."),
     ));
     lines.push(help_row(
         "update [paquete]",
-        &t.t("help.update", "Sin argumentos actualiza todo el sistema."),
+        &t.t(
+            "help.update",
+            "Actualiza uno; sin argumentos actualiza todo.",
+        ),
     ));
     lines.push(help_row(
         "upgrade",
@@ -375,26 +689,37 @@ pub fn build_help_text(kind: ShellKind, t: &Translator, options: &HelpOptions<'_
     ));
     lines.push(help_row(
         "uninstall <paquete>",
-        &t.t("help.uninstall", "Desinstala. \"remove\" hace lo mismo."),
+        &t.t(
+            "help.uninstall",
+            "Desinstala. remove es un alias equivalente.",
+        ),
     ));
     lines.push(help_row(
         "search <texto>",
-        &t.t(
-            "help.search",
-            "Busca un paquete por nombre. No pide privilegios.",
-        ),
+        &t.t("help.search", "Busca paquetes sin pedir privilegios."),
     ));
-    lines.push(String::new());
-
     lines.push(format!(
-        "{HELP_SECTION_COLOR}{}{HELP_RESET}",
-        t.t("help.session", "Sesión")
+        "    Gestor detectado: {}",
+        options.manager_label.unwrap_or("automático en la shell")
     ));
+    lines.push(
+        "    Los comandos muestran la operación real y respetan la cancelación con Ctrl+C."
+            .to_string(),
+    );
+    lines.push(
+        "    En WSL, contenedores y PowerShell Unix se usa el gestor del entorno, no el del host."
+            .to_string(),
+    );
+    lines.push(String::new());
+}
+
+fn render_session(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions<'_>) {
+    section(lines, &t.t("help.session", "Sesión"));
     lines.push(help_row(
         "clear / cls",
         &t.t(
             "help.clear",
-            "Limpia pantalla e historial y repinta el banner.",
+            "Limpia pantalla, historial y repinta el banner.",
         ),
     ));
     lines.push(help_row(
@@ -404,7 +729,14 @@ pub fn build_help_text(kind: ShellKind, t: &Translator, options: &HelpOptions<'_
             "Vuelve a imprimir la información del sistema.",
         ),
     ));
-    lines.push(help_row("ayuda", &t.t("help.help", "Esta ayuda.")));
+    lines.push(help_row(
+        "ayuda [sección]",
+        &t.t("help.help", "Ayuda completa o solo una sección."),
+    ));
+    lines.push(help_row(
+        "help [sección]",
+        "Alias compatible de ayuda; acepta los mismos argumentos.",
+    ));
     if options.has_nsudo {
         lines.push(help_row(
             "nsudo <comando>",
@@ -414,42 +746,144 @@ pub fn build_help_text(kind: ShellKind, t: &Translator, options: &HelpOptions<'_
             ),
         ));
     }
+    lines.push(
+        "    Los nombres se traducen a la sintaxis de la shell actual; el vocabulario es común."
+            .to_string(),
+    );
     lines.push(String::new());
+}
 
-    let vocabulary: Vec<&str> = if is_windows_family(kind) {
-        WINDOWS_ALIASES.iter().map(|(name, _)| *name).collect()
-    } else {
-        unix_aliases(kind)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect()
-    };
-    lines.push(format!(
-        "{HELP_SECTION_COLOR}{}{HELP_RESET}",
-        t.t("help.vocabulary", "Vocabulario traducido a esta shell")
+fn render_internal(lines: &mut Vec<String>) {
+    section(lines, "Comandos internos de LTerminal");
+    lines.push("    Se reconocen únicamente al empezar la línea con : y no se envían al proceso de la shell.".to_string());
+    lines.push(help_row(
+        ":help [sección]",
+        "Muestra la ayuda completa o una sección concreta.",
     ));
-    lines.push(help_row(&vocabulary.join(", "), ""));
+    lines.push(help_row(":config", "Abre Ajustes de la aplicación."));
+    lines.push(help_row(
+        ":reload",
+        "Actualiza el inventario de entornos, shells y herramientas.",
+    ));
+    lines.push(help_row(
+        ":repl <nombre>",
+        "Abre una pestaña con el REPL detectado indicado.",
+    ));
+    lines.push(help_row(
+        ":alias",
+        "Muestra la sección de alias y su vocabulario estable.",
+    ));
+    lines.push(
+        "    Si una orden no aparece aquí, se deja intacta para que la interprete la shell."
+            .to_string(),
+    );
     lines.push(String::new());
+}
 
+fn render_aliases(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
+    section(lines, "Alias y comandos compartidos");
+    lines.push("    Estos nombres se conservan entre Linux, Windows, Git Bash, WSL, PowerShell y Fish; cambia solo el comando real.".to_string());
+    lines.push(help_row(
+        &CANONICAL_ALIAS_NAMES.join(", "),
+        "vocabulario canónico disponible en esta shell",
+    ));
+    lines.push(help_row(
+        "edit",
+        "Abre el editor configurado o nano como alternativa.",
+    ));
+    lines.push(help_row(
+        "ip",
+        "Muestra la configuración de red del entorno.",
+    ));
+    lines.push(help_row(
+        "ll / ls",
+        "Lista archivos; ll incluye ocultos y detalles.",
+    ));
+    lines.push(help_row("pwd", "Muestra la carpeta de trabajo actual."));
+    lines.push(help_row(
+        "install ...",
+        "Alias de paquetes; usa help paquetes.",
+    ));
+    lines.push(help_row(
+        "scripts de Biblioteca",
+        "Cada script ejecutable puede aparecer como alias, sin argumentos o con sus argumentos.",
+    ));
     lines.push(format!(
-        "{HELP_SECTION_COLOR}{}{HELP_RESET} ({})",
-        t.t("help.scripts", "Scripts de la Biblioteca"),
+        "    Alias de scripts detectados en esta sesión: {}",
         options.script_names.len()
     ));
-    lines.push(if options.script_names.is_empty() {
-        format!(
-            "    {}",
-            t.t(
-                "help.noScripts",
-                "Ninguno detectado. Elige una carpeta en el panel Scripts > Biblioteca."
-            )
-        )
-    } else {
-        help_row(&options.script_names.join(", "), "")
-    });
+    if !options.script_names.is_empty() {
+        lines.push(format!("    {}", options.script_names.join(", ")));
+    }
+    lines.push(
+        "    clear, cls, sysinfo, ayuda y help son comandos reservados de la aplicación."
+            .to_string(),
+    );
     lines.push(String::new());
+}
 
-    lines.join("\r\n") + "\r\n"
+fn render_library(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
+    section(lines, "Biblioteca");
+    lines.push("    Escanea scripts y archivos según los filtros activos, profundidad y carpeta seleccionada.".to_string());
+    lines.push("    Favoritos conserva accesos; Ruta actual muestra el contenido del directorio de la pestaña.".to_string());
+    lines.push("    Un script se puede ejecutar sin argumentos para abrir su propio menú, o con parámetros extra.".to_string());
+    lines.push("    Las acciones rápidas incluyen SSH, red, servicios, Docker, Kubernetes y ADB cuando la herramienta existe.".to_string());
+    lines.push(format!(
+        "    Esta pestaña tiene {} alias de scripts registrados.",
+        options.script_names.len()
+    ));
+    lines.push(String::new());
+}
+
+fn render_menus(lines: &mut Vec<String>) {
+    section(lines, "Menús y funciones de la aplicación");
+    lines.push(
+        "    Proyectos: repositorios locales, GitHub y herramientas del proyecto.".to_string(),
+    );
+    lines.push("    Biblioteca: filtros de archivos, favoritos, ejecución de scripts y operaciones rápidas.".to_string());
+    lines.push("    Entorno y dependencias: shells, intérpretes, lenguajes, frameworks, paquetes, editores y visores.".to_string());
+    lines.push("    Ajustes: apariencia, terminal, comportamiento, exportación/importación, plugins e integración del sistema.".to_string());
+    lines.push(
+        "    Logs: registros con tiempos de arranque, procesos, llamadas, operaciones y errores."
+            .to_string(),
+    );
+    lines.push("    Las secciones respetan la preferencia de apertura y el modo de un menú abierto a la vez.".to_string());
+    lines.push(String::new());
+}
+
+fn render_plugins(lines: &mut Vec<String>) {
+    section(lines, "Plugins");
+    lines.push("    Se instalan desde Ajustes -> Plugins -> Instalar plugin.json.".to_string());
+    lines.push("    Son declarativos: añaden REPLs y tecnologías detectables, no cargan DLL, JavaScript nativo, Rust ni comandos arbitrarios.".to_string());
+    lines.push("    El manifest usa schemaVersion, id, name, version, description y technologies con windowsExe/unixExe.".to_string());
+    lines.push("    Se pueden activar, desactivar y retirar; los retirados quedan respaldados y los manifests inválidos se conservan para corregirlos.".to_string());
+    lines.push("    La documentación y la plantilla están en docs/plugins.md y examples/plugins/custom-repl/plugin.json.".to_string());
+    lines.push(String::new());
+}
+
+fn render_support(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
+    section(lines, "Soporte y límites");
+    lines.push(
+        "    Plataformas principales: Linux/LTerminal y Windows/WinSlim Terminal.".to_string(),
+    );
+    lines.push("    Shells: Bash, Zsh, Fish, PowerShell y CMD; además WSL, Git Bash, contenedores, Android y REPLs detectados.".to_string());
+    lines.push("    Gestores: pacman, apt, dnf, zypper, apk, Homebrew, winget, Chocolatey y Scoop según disponibilidad.".to_string());
+    lines.push("    Los intérpretes, frameworks y herramientas solo aparecen como instalables si su plataforma y gestor los soportan.".to_string());
+    lines.push(format!("    Entorno activo: {}.", options.env_label));
+    lines.push(String::new());
+}
+
+fn render_credits(lines: &mut Vec<String>) {
+    section(lines, "Créditos");
+    lines.push("    Desarrollador principal: Darkeiser003".to_string());
+    lines.push(
+        "    Colaborador: Christianlg97 (colaborador y desarrollador de WinSlim)".to_string(),
+    );
+    lines.push(
+        "    Linux se presenta como LTerminal; Windows se presenta como WinSlim Terminal."
+            .to_string(),
+    );
+    lines.push(String::new());
 }
 
 /// Alias "ayuda": imprime el archivo anterior. Sin archivo (temporal no
@@ -490,19 +924,39 @@ fn help_alias_line(
         };
     };
 
+    let runner = help_runner_path(help_path, kind);
+    let runner_for_shell = match kind {
+        ShellKind::Cmd | ShellKind::Powershell => runner.clone(),
+        _ => unix_path_for(&runner, transport),
+    };
+
     match kind {
-        ShellKind::Cmd => format!("doskey ayuda=type \"{help_path}\""),
+        ShellKind::Cmd => format!("doskey ayuda=call \"{runner_for_shell}\" $*"),
+        ShellKind::Powershell => format!(
+            "function ayuda {{ & '{}' @args }}",
+            runner_for_shell.replace('\'', "''")
+        ),
+        ShellKind::Fish => format!("function ayuda; sh '{}' $argv; end", runner_for_shell),
+        _ => format!("ayuda() {{ sh '{}' \"$@\"; }}", runner_for_shell),
+    }
+}
+
+/// `help` es un alias de compatibilidad. La ayuda canónica se llama `ayuda`,
+/// pero reservar ambos nombres sin implementar el segundo hacía que el usuario
+/// recibiera «comando no encontrado» después de verlo en :help.
+fn help_compat_line(kind: ShellKind, help_path: Option<&str>) -> String {
+    match kind {
+        ShellKind::Cmd => help_path
+            .map(|path| format!("doskey help=call \"{}\" $*", help_runner_path(path, kind)))
+            .unwrap_or_else(|| "doskey help=ayuda $*".to_string()),
         ShellKind::Powershell => {
-            format!("function ayuda {{ Write-Host (Get-Content -Raw '{help_path}') -NoNewline }}")
+            // `help` es un alias integrado de Get-Help. Set-Alias -Force es
+            // necesario para que el nombre canónico de LTerminal gane en
+            // todas las versiones de Windows PowerShell y PowerShell Core.
+            "function Show-LTerminalHelp { ayuda @args }; Set-Alias -Name help -Value Show-LTerminalHelp -Option AllScope -Force -Scope Global".to_string()
         }
-        ShellKind::Fish => format!(
-            "function ayuda; cat '{}'; end",
-            unix_path_for(help_path, transport)
-        ),
-        _ => format!(
-            "ayuda() {{ cat '{}'; }}",
-            unix_path_for(help_path, transport)
-        ),
+        ShellKind::Fish => "function help; ayuda $argv; end".to_string(),
+        _ => "help() { ayuda \"$@\"; }".to_string(),
     }
 }
 
@@ -577,6 +1031,8 @@ pub struct InitScript {
     /// qué ruta lo va a escribir (se la pasó como `help_path`), pero solo aquí
     /// se sabe qué scripts han llegado a registrarse de verdad.
     pub help_text: Option<String>,
+    pub help_topics: Option<Vec<(String, String)>>,
+    pub help_runner: Option<String>,
 }
 
 /// Deja el carácter ESC en una variable de la sesión, para que las cabeceras
@@ -615,8 +1071,13 @@ pub fn build_init_script(
             }
         }
         ShellKind::Powershell => {
-            for (name, value) in WINDOWS_ALIASES {
-                lines.push(format!("function {name} {{ {value} @args }}"));
+            for (name, value) in powershell_aliases(options.platform) {
+                let body = if value.contains("@args") {
+                    value
+                } else {
+                    format!("{value} @args")
+                };
+                lines.push(format!("function {name} {{ {body} }}"));
             }
         }
         ShellKind::Fish => {
@@ -673,6 +1134,7 @@ pub fn build_init_script(
         &registered,
         options.transport,
     ));
+    lines.push(help_compat_line(kind, options.help_path));
 
     // Pantalla limpia + banner: lo último que hace el archivo, y la señal para
     // la app de que la pestaña ya puede mostrarse.
@@ -684,22 +1146,33 @@ pub fn build_init_script(
         options.app_name,
     ));
 
+    let help_options = HelpOptions {
+        app_name: options.app_name,
+        env_label: options.env_label,
+        manager_label: options.manager_label,
+        has_nsudo: options.nsudo_path.is_some(),
+        script_names: &registered,
+    };
     Some(InitScript {
         ext: format.ext,
         content: lines.join(format.eol) + format.eol,
-        help_text: options.help_path.map(|_| {
-            build_help_text(
-                kind,
-                t,
-                &HelpOptions {
-                    app_name: options.app_name,
-                    env_label: options.env_label,
-                    manager_label: options.manager_label,
-                    has_nsudo: options.nsudo_path.is_some(),
-                    script_names: &registered,
-                },
-            )
+        help_text: options
+            .help_path
+            .map(|_| build_help_topic_text(t, &help_options, HelpTopic::General)),
+        help_topics: options.help_path.map(|_| {
+            HelpTopic::SECTIONS
+                .into_iter()
+                .map(|topic| {
+                    (
+                        topic.file_key().to_string(),
+                        build_help_topic_text(t, &help_options, topic),
+                    )
+                })
+                .collect()
         }),
+        help_runner: options
+            .help_path
+            .map(|path| build_help_runner(kind, path, options.transport)),
     })
 }
 
@@ -848,22 +1321,49 @@ mod tests {
     }
 
     #[test]
-    fn windows_traduce_su_vocabulario_y_unix_solo_lo_que_le_falta() {
+    fn todas_las_shells_reciben_el_mismo_vocabulario_canonico() {
         let cmd = build(ShellKind::Cmd, &options(Transport::Native));
         assert!(cmd.content.contains("doskey ls=dir $*"));
         assert!(cmd.content.contains("doskey pwd=cd $*"));
 
         let bash = build(ShellKind::Bash, &options(Transport::Native));
-        // ls y pwd ya son nativos: no se tocan.
-        assert!(!bash.content.contains("alias ls="));
-        assert!(!bash.content.contains("alias pwd="));
+        assert!(bash.content.contains("alias ls='command ls'"));
+        assert!(bash.content.contains("alias pwd='command pwd'"));
         assert!(bash.content.contains("alias ll='ls -alh'"));
+
+        for name in CANONICAL_ALIAS_NAMES {
+            assert!(cmd.content.contains(name), "falta {name} en cmd");
+            assert!(bash.content.contains(name), "falta {name} en bash");
+        }
+    }
+
+    #[test]
+    fn powershell_core_en_linux_no_recibe_comandos_de_windows() {
+        let mut opts = options(Transport::Native);
+        opts.platform = "linux";
+        let script = build(ShellKind::Powershell, &opts);
+        assert!(script
+            .content
+            .contains("function ls { Get-ChildItem @args }"));
+        assert!(script
+            .content
+            .contains("function pwd { Get-Location @args }"));
+        assert!(!script.content.contains("function ls { dir @args }"));
+    }
+
+    #[test]
+    fn powershell_sobrescribe_help_integrado() {
+        let script = build(ShellKind::Powershell, &options(Transport::Native));
+        assert!(script.content.contains("Set-Alias -Name help"));
+        assert!(script.content.contains("-Option AllScope -Force"));
     }
 
     #[test]
     fn fish_usa_su_propia_sintaxis_de_alias() {
         let fish = build(ShellKind::Fish, &options(Transport::Native));
         assert!(fish.content.contains("alias edit 'nano'"));
+        assert!(fish.content.contains("alias ls 'command ls'"));
+        assert!(fish.content.contains("alias pwd 'command pwd'"));
         assert!(fish.content.contains("; or ifconfig"));
     }
 
@@ -1056,14 +1556,52 @@ mod tests {
         assert!(script.help_text.is_some());
         assert!(script
             .content
-            .contains("doskey ayuda=type \"C:\\t\\help.txt\""));
+            .contains("doskey ayuda=call \"C:\\t\\help.cmd\" $*"));
+        assert!(script
+            .help_topics
+            .as_ref()
+            .is_some_and(|topics| topics.len() == 9));
+        assert!(script
+            .help_runner
+            .as_ref()
+            .is_some_and(|runner| runner.contains("paquetes")));
+    }
+
+    #[test]
+    fn la_ayuda_admite_secciones_y_no_mezcla_su_contenido() {
+        let opciones = HelpOptions {
+            app_name: "App",
+            env_label: "bash",
+            manager_label: None,
+            has_nsudo: false,
+            script_names: &[],
+        };
+        let paquetes =
+            build_help_topic_text(&Translator::default(), &opciones, HelpTopic::Packages);
+        assert!(paquetes.contains("install <paquete>"));
+        assert!(!paquetes.contains("Desarrollador principal"));
+        assert_eq!(
+            HelpTopic::from_argument(Some("help")),
+            Some(HelpTopic::General)
+        );
+        assert_eq!(HelpTopic::from_argument(Some("frameworks")), None);
+    }
+
+    #[test]
+    fn los_runners_de_ayuda_aceptan_argumentos_en_cada_shell() {
+        let cmd = build_help_runner(ShellKind::Cmd, "C:\\t\\help.txt", Transport::Native);
+        assert!(cmd.contains("%topic%"));
+        let powershell =
+            build_help_runner(ShellKind::Powershell, "C:\\t\\help.txt", Transport::Native);
+        assert!(powershell.contains("param([string]$Topic)"));
+        let unix = build_help_runner(ShellKind::Bash, "/tmp/help.txt", Transport::Native);
+        assert!(unix.contains("paquete|paquetes"));
     }
 
     #[test]
     fn la_ayuda_nombra_el_gestor_concreto_cuando_se_conoce() {
         let t = Translator::default();
         let con_gestor = build_help_text(
-            ShellKind::Cmd,
             &t,
             &HelpOptions {
                 app_name: "App",
@@ -1076,7 +1614,6 @@ mod tests {
         assert!(con_gestor.contains("aquí lo atiende winget"));
 
         let sin_gestor = build_help_text(
-            ShellKind::Bash,
             &t,
             &HelpOptions {
                 app_name: "App",
@@ -1093,7 +1630,6 @@ mod tests {
     fn la_ayuda_cuenta_los_scripts_registrados() {
         let nombres = vec!["uno".to_string(), "dos".to_string()];
         let texto = build_help_text(
-            ShellKind::Cmd,
             &Translator::default(),
             &HelpOptions {
                 app_name: "App",
@@ -1103,14 +1639,13 @@ mod tests {
                 script_names: &nombres,
             },
         );
-        assert!(texto.contains("(2)"));
+        assert!(texto.contains("Alias de scripts detectados en esta sesión: 2"));
         assert!(texto.contains("uno, dos"));
     }
 
     #[test]
     fn la_ayuda_sin_scripts_dice_donde_elegirlos() {
         let texto = build_help_text(
-            ShellKind::Cmd,
             &Translator::default(),
             &HelpOptions {
                 app_name: "App",
@@ -1120,13 +1655,12 @@ mod tests {
                 script_names: &[],
             },
         );
-        assert!(texto.contains("Scripts > Biblioteca"));
+        assert!(texto.contains("Biblioteca"));
     }
 
     #[test]
     fn nsudo_solo_se_documenta_si_esta_disponible() {
         let con = build_help_text(
-            ShellKind::Cmd,
             &Translator::default(),
             &HelpOptions {
                 app_name: "App",
@@ -1139,7 +1673,6 @@ mod tests {
         assert!(con.contains("nsudo <comando>"));
 
         let sin = build_help_text(
-            ShellKind::Cmd,
             &Translator::default(),
             &HelpOptions {
                 app_name: "App",
@@ -1156,7 +1689,6 @@ mod tests {
     fn la_ayuda_lista_el_vocabulario_de_esta_shell() {
         let t = Translator::default();
         let windows = build_help_text(
-            ShellKind::Cmd,
             &t,
             &HelpOptions {
                 app_name: "A",
@@ -1169,7 +1701,6 @@ mod tests {
         assert!(windows.contains("edit, ip, ll, ls, pwd"));
 
         let unix = build_help_text(
-            ShellKind::Bash,
             &t,
             &HelpOptions {
                 app_name: "A",
@@ -1179,8 +1710,7 @@ mod tests {
                 script_names: &[],
             },
         );
-        assert!(unix.contains("edit, ip, ll"));
-        assert!(!unix.contains("edit, ip, ll, ls, pwd"));
+        assert!(unix.contains("edit, ip, ll, ls, pwd"));
     }
 
     #[test]
