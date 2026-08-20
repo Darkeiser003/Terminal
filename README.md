@@ -2,10 +2,6 @@
 
 ---
 
-<img width="1220" height="832" alt="image" src="https://github.com/user-attachments/assets/0b198f2c-4364-4cf8-97d1-eb7c6dfed722" />
-
----
-
 Terminal multipestaña de escritorio construida sobre Tauri 2, Rust y xterm.js.
 Detecta las shells, distribuciones WSL, contenedores Docker y dispositivos
 Android disponibles en la máquina y los ofrece como entornos intercambiables
