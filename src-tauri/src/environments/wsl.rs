@@ -237,8 +237,10 @@ fn package_manager_order(distro_name: &str) -> [&'static str; 5] {
 ///
 /// `wsl.exe ... sh -c <script>` altera algunas comillas al construir la línea
 /// de comandos de Windows. Se usan ejecutables directos: una sonda rápida para
-/// el selector y, solo al abrir Dependencias, un listado de `/bin` + `/usr/bin`
-/// con el que se resuelve todo el inventario de una vez.
+/// el selector y, solo al abrir Dependencias, un inventario de ejecutables de
+/// todos los directorios relevantes. No basta con listar `/bin` y `/usr/bin`:
+/// rustup, npm global, nvm, asdf/mise y las instalaciones de usuario viven
+/// normalmente fuera de esas carpetas.
 pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
     let Some(shell_path) = run_wsl(
         &["-d", name, "--", "printenv", "SHELL"],
@@ -271,9 +273,36 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
         };
     }
 
+    let listing_script = r#"
+emit_dir() {
+    [ -d "$1" ] || return 0
+    for entry in "$1"/*; do
+        [ -x "$entry" ] || continue
+        basename "$entry"
+    done
+}
+for directory in \
+    /bin /usr/bin /usr/local/bin \
+    "$HOME/.cargo/bin" "$HOME/go/bin" "$HOME/.local/bin" "$HOME/.npm-global/bin" \
+    "$HOME/.local/share/pnpm" "$HOME/.pub-cache/bin" \
+    "$HOME/.asdf/shims" "$HOME/.mise/shims" "$HOME/.local/share/mise/shims" \
+    "$HOME/.volta/bin" "$HOME/.bun/bin" "$HOME/.deno/bin"; do
+    emit_dir "$directory"
+done
+for directory in "$HOME/.nvm/versions/node"/*/bin \
+    "$HOME/.asdf/installs"/*/*/bin "$HOME/.mise/installs"/*/*/bin; do
+    emit_dir "$directory"
+done
+old_ifs="$IFS"
+IFS=:
+for directory in ${PATH:-}; do
+    emit_dir "$directory"
+done
+IFS="$old_ifs"
+"#;
     let Some(listing) = run_wsl(
-        &["-d", name, "--", "ls", "-1", "/bin", "/usr/bin"],
-        Duration::from_secs(5),
+        &["-d", name, "--", "sh", "-lc", listing_script],
+        Duration::from_secs(8),
     ) else {
         return InstalledDistro {
             name: name.to_string(),
@@ -287,6 +316,8 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
     };
 
     let commands = parse_command_listing(&listing);
+    let language_executables = crate::language_env::unix_language_executables();
+    let catalog_executables = crate::packages::actions::linux_tool_executables();
     InstalledDistro {
         name: name.to_string(),
         shells: KNOWN_SHELLS
@@ -299,10 +330,24 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
             .iter()
             .find(|candidate| commands.contains(**candidate))
             .map(|found| found.to_string()),
+        // Conserva las herramientas generales que usa el panel y añade todos
+        // los ejecutables del catálogo de REPL que estén presentes. La lista
+        // incluye PATH, rutas de usuario y gestores de versiones, por lo que
+        // una instalación de rustup/nvm/asdf no vuelve a aparecer como ausente.
         tools: TOOLS_OF_INTEREST
             .iter()
             .filter(|candidate| commands.contains(**candidate))
             .map(|candidate| candidate.to_string())
+            .chain(
+                language_executables
+                    .into_iter()
+                    .filter(|candidate| commands.contains(candidate.as_str())),
+            )
+            .chain(
+                catalog_executables
+                    .into_iter()
+                    .filter(|candidate| commands.contains(candidate.as_str())),
+            )
             .collect(),
         detailed: true,
         probe_error: false,

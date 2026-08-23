@@ -2,22 +2,26 @@
 <#
     Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
 
-    Produce UNA sola cosa: la carpeta desempaquetada con el .exe, conpty.dll y
-    OpenConsole.exe. Sin instalador NSIS, sin portable y sin accesos directos;
-    el porque esta en src-tauri/BUNDLE.md.
+    Produce por defecto la carpeta desempaquetada con el .exe, conpty.dll y
+    OpenConsole.exe. Con -Installer genera además un instalador NSIS con el
+    WebView2 offline incluido; el porqué está en src-tauri/BUNDLE.md.
 
-    Requisitos: Node.js >= 22.12 y el toolchain de Rust (rustup/cargo). WebView2
-    lo trae Windows 10/11 de serie.
+    Requisitos: Node.js >= 22.12 y el toolchain de Rust (rustup/cargo). La
+    carpeta desempaquetada necesita WebView2 ya instalado; el instalador
+    offline lo instala en el equipo destino.
 #>
 
 param(
     [switch]$Clean,
     [switch]$NoRun,
+    [switch]$Installer,
     [switch]$SkipChecks,
     [string]$Version,
     [switch]$InstallE2eDriver,
     [switch]$NonInteractive,
-    [switch]$FullTests
+    [switch]$FullTests,
+    [switch]$StrictTests,
+    [switch]$CrossLinux
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +56,81 @@ function Invoke-Native {
 
 function Test-Command ($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Get-WslDistros {
+    if (-not (Test-Command 'wsl.exe')) { return @() }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $lines = @(& wsl.exe --list --quiet 2>$null)
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return @($lines |
+        ForEach-Object { ([string]$_).Trim() } |
+        Where-Object { $_ -and $_ -notmatch '^(Windows Subsystem|NAME|DISTRIBUTION)' } |
+        ForEach-Object { $_ -replace '^\*\s*', '' })
+}
+
+function Ensure-Wsl {
+    if (-not (Test-Command 'wsl.exe')) {
+        if (-not (Test-Command 'winget')) {
+            throw 'No se encontró WSL ni winget. Instala WSL desde https://learn.microsoft.com/windows/wsl/install.'
+        }
+        Write-Step 'Instalando WSL mediante winget'
+        $wslCode = Invoke-Native 'winget' @(
+            'install', '--id', 'Microsoft.WSL', '--exact', '--source', 'winget',
+            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'
+        )
+        Refresh-EnvironmentPath
+        if ($wslCode -ne 0 -or -not (Test-Command 'wsl.exe')) {
+            throw 'No se pudo instalar WSL automáticamente con winget.'
+        }
+    }
+
+    $distros = @(Get-WslDistros)
+    if ($distros.Count -eq 0) {
+        Write-Step 'Instalando una distribución Ubuntu para las pruebas Linux'
+        $installCode = Invoke-Native 'wsl.exe' @('--install', '--distribution', 'Ubuntu', '--no-launch')
+        if ($installCode -ne 0) {
+            throw 'WSL está disponible, pero no se pudo instalar Ubuntu automáticamente.'
+        }
+        Start-Sleep -Seconds 2
+        $distros = @(Get-WslDistros)
+    }
+    if ($distros.Count -eq 0) {
+        throw 'Ubuntu para WSL quedó pendiente de instalación. Reinicia Windows y reintenta con -CrossLinux.'
+    }
+    return [string]$distros[0]
+}
+
+function Invoke-CrossLinuxTests {
+    $distro = Ensure-Wsl
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $wslRoot = ((& wsl.exe '--distribution' $distro '--' 'wslpath' '-a' $ProjectRoot 2>$null) -join '').Trim()
+        $pathCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($pathCode -ne 0 -or [string]::IsNullOrWhiteSpace($wslRoot)) {
+        throw "WSL no pudo convertir la ruta del proyecto Windows: $ProjectRoot"
+    }
+
+    # WSLg expone DISPLAY/WAYLAND_DISPLAY; build.sh instala WebKitGTK, Node,
+    # Rust, WebKitWebDriver y tauri-driver dentro de la distribución. El E2E
+    # ejecuta la aplicación Linux real y --no-run evita dejarla abierta al
+    # terminar las pruebas.
+    $escapedRoot = $wslRoot.Replace("'", "'\''")
+    $linuxCommand = "cd '$escapedRoot' && bash linux/build.sh --full-tests --install-e2e-driver --no-run --non-interactive"
+    Write-Step "Compilando y probando Linux dentro de WSL ($distro)"
+    $code = Invoke-Native 'wsl.exe' @('--distribution', $distro, '--', 'bash', '-lc', $linuxCommand)
+    if ($code -ne 0) {
+        throw "Las pruebas Linux en WSL fallaron (código $code). Comprueba WSLg y la distribución Ubuntu."
+    }
+    Write-Ok 'AppImage Linux compilado y probado desde Windows mediante WSL'
 }
 
 $WindowsDir  = $PSScriptRoot
@@ -367,12 +446,43 @@ if (-not $SkipChecks) {
 # ---------------------------------------------------------------------------
 # 6. Compilacion
 # ---------------------------------------------------------------------------
-Write-Step 'Compilando (tauri build --no-bundle)'
-# --no-bundle es redundante con bundle.active:false de tauri.windows.conf.json,
-# pero se pasa igualmente para que la intencion se lea aqui: esta build NO
-# genera instalador.
-$code = Invoke-Native 'npm' @('run', 'tauri', '--', 'build', '--no-bundle')
+if ($Installer) {
+    Write-Step 'Compilando (Tauri + instalador NSIS offline de WebView2)'
+    $buildArgs = @('run', 'tauri', '--', 'build', '--config', 'src-tauri/tauri.windows.installer.conf.json')
+} else {
+    Write-Step 'Compilando (tauri build --no-bundle)'
+    # --no-bundle es redundante con bundle.active:false de tauri.windows.conf.json,
+    # pero se pasa igualmente para que la intención se lea aquí.
+    $buildArgs = @('run', 'tauri', '--', 'build', '--no-bundle')
+}
+$previousSkipChecks = $env:LTERMINAL_SKIP_CHECKS
+try {
+    if ($SkipChecks) {
+        # Tauri ejecuta npm run build internamente. Este entorno llega también
+        # al prebuild y al build del frontend, de modo que --SkipChecks no
+        # vuelve a lanzar enlaces, fuentes externas ni svelte-check.
+        $env:LTERMINAL_SKIP_CHECKS = '1'
+    } else {
+        Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
+    }
+    $code = Invoke-Native 'npm' $buildArgs
+} finally {
+    if ($null -eq $previousSkipChecks) {
+        Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_SKIP_CHECKS = $previousSkipChecks
+    }
+}
 if ($code -ne 0) { throw "La compilacion fallo (codigo $code)." }
+
+if ($Installer) {
+    $nsisDir = Join-Path $TauriDir 'target\release\bundle\nsis'
+    $installers = @(Get-ChildItem $nsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+    if ($installers.Count -eq 0) {
+        throw "La compilacion termino sin generar instalador NSIS en $nsisDir."
+    }
+    Write-Ok "Instalador NSIS con WebView2 offline: $($installers[0].FullName)"
+}
 
 # Evita publicar por accidente un frontend anterior (por ejemplo, una copia
 # del proyecto sin los últimos cambios compartidos). Estos marcadores solo
@@ -414,6 +524,13 @@ foreach ($file in $payload) {
 }
 $sizeMb = [math]::Round(((Get-ChildItem $distDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Ok "Carpeta lista: $distDir ($sizeMb MB, $($payload.Count) archivos)"
+$artifactCode = Invoke-Native 'node' @(
+    'scripts/verify-release-artifacts.mjs',
+    '--windows', (Join-Path $distDir 'winslim-terminal.exe'),
+    '--windows-dir', $distDir
+)
+if ($artifactCode -ne 0) { throw "La validación PE/runtime de Windows falló (código $artifactCode)." }
+Write-Ok 'Estructura PE x64 y runtime Windows verificados'
 
 # ---------------------------------------------------------------------------
 # 8. Comprobacion de humo
@@ -469,7 +586,8 @@ try {
 # comprueba los ejecutables que la aplicación usa para preparar una sesión en
 # Windows. Se pregunta también con -NoRun: compilar sin lanzar la ventana no
 # debe esconder una validación que el usuario pidió explícitamente.
-$runExtendedTests = $FullTests.IsPresent
+$runExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
+$strictExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
 if (-not $runExtendedTests -and -not $NonInteractive) {
     $extendedReply = Read-Host '¿Ejecutar también la batería completa de shells y herramientas instaladas? [s/N]'
     $runExtendedTests = $extendedReply -match '^(s|si|sí)$'
@@ -479,24 +597,65 @@ if ($runExtendedTests) {
     $probes = @(
         @{ Name = 'cmd'; Exe = 'cmd.exe'; Args = @('/d', '/c', 'exit 0') },
         @{ Name = 'PowerShell'; Exe = 'powershell.exe'; Args = @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') },
+        @{ Name = 'PowerShell 7'; Exe = 'pwsh'; Args = @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') },
+        @{ Name = 'Nushell'; Exe = 'nu'; Args = @('--version') },
+        @{ Name = 'Windows Terminal'; Exe = 'wt.exe'; Args = @('--version') },
+        @{ Name = 'NSudo'; Exe = 'NSudoLC.exe'; Args = @('-?') },
         @{ Name = 'Node.js'; Exe = 'node'; Args = @('-e', 'process.exit(0)') },
         @{ Name = 'npm'; Exe = 'npm'; Args = @('--version') },
         @{ Name = 'Git'; Exe = 'git'; Args = @('--version') },
         @{ Name = 'Python'; Exe = 'python'; Args = @('-I', '-c', 'print("LTERMINAL_REPL_OK")') },
         @{ Name = 'Ruby'; Exe = 'ruby'; Args = @('-e', 'puts "LTERMINAL_REPL_OK"') },
         @{ Name = 'PHP'; Exe = 'php'; Args = @('-r', 'echo "LTERMINAL_REPL_OK";') },
+        @{ Name = 'MariaDB'; Exe = 'mariadb'; Args = @('--version') },
+        @{ Name = 'MySQL'; Exe = 'mysql'; Args = @('--version') },
+        @{ Name = 'PostgreSQL'; Exe = 'psql'; Args = @('--version') },
+        @{ Name = 'Kotlin'; Exe = 'kotlinc'; Args = @('-version') },
+        @{ Name = 'Dart'; Exe = 'dart'; Args = @('--version') },
+        @{ Name = 'Zig'; Exe = 'zig'; Args = @('version') },
+        @{ Name = 'Swift'; Exe = 'swift'; Args = @('--version') },
+        @{ Name = 'MongoDB Shell'; Exe = 'mongosh'; Args = @('--version') },
+        @{ Name = 'Redis CLI'; Exe = 'redis-cli'; Args = @('--version') },
         @{ Name = 'Rust/Cargo'; Exe = 'cargo'; Args = @('--version') },
         @{ Name = 'Rustc'; Exe = 'rustc'; Args = @('--version') },
+        @{ Name = 'Java'; Exe = 'java'; Args = @('-version') },
+        @{ Name = 'Go'; Exe = 'go'; Args = @('version') },
+        @{ Name = 'Perl'; Exe = 'perl'; Args = @('-e', 'print "LTERMINAL_REPL_OK\n"') },
+        @{ Name = 'Lua'; Exe = 'lua'; Args = @('-e', 'print("LTERMINAL_REPL_OK")') },
+        @{ Name = 'Deno'; Exe = 'deno'; Args = @('--version') },
+        @{ Name = 'Bun'; Exe = 'bun'; Args = @('--version') },
+        @{ Name = 'Julia'; Exe = 'julia'; Args = @('--version') },
+        @{ Name = 'R'; Exe = 'R.exe'; Args = @('--version') },
+        @{ Name = '.NET'; Exe = 'dotnet'; Args = @('--info') },
+        @{ Name = 'Clang'; Exe = 'clang'; Args = @('--version') },
+        @{ Name = 'CMake'; Exe = 'cmake'; Args = @('--version') },
+        @{ Name = 'Maven'; Exe = 'mvn'; Args = @('--version') },
+        @{ Name = 'Gradle'; Exe = 'gradle'; Args = @('--version') },
+        @{ Name = 'Ant'; Exe = 'ant'; Args = @('-version') },
+        @{ Name = 'Bazel'; Exe = 'bazel'; Args = @('--version') },
+        @{ Name = 'Ninja'; Exe = 'ninja'; Args = @('--version') },
+        @{ Name = 'Meson'; Exe = 'meson'; Args = @('--version') },
+        @{ Name = 'GDB'; Exe = 'gdb'; Args = @('--version') },
+        @{ Name = 'Groovy'; Exe = 'groovysh'; Args = @('--version') },
         @{ Name = 'SQLite'; Exe = 'sqlite3'; Args = @('--version') },
+        @{ Name = 'jq'; Exe = 'jq'; Args = @('--version') },
+        @{ Name = 'yq'; Exe = 'yq'; Args = @('--version') },
         @{ Name = 'Docker'; Exe = 'docker'; Args = @('--version') },
         @{ Name = 'kubectl'; Exe = 'kubectl'; Args = @('version', '--client=true') },
-        @{ Name = 'Wine'; Exe = 'wine'; Args = @('--version') },
+        @{ Name = 'Helm'; Exe = 'helm'; Args = @('version', '--short') },
+        @{ Name = 'k9s'; Exe = 'k9s'; Args = @('version', '--short') },
+        @{ Name = 'OpenVPN'; Exe = 'openvpn'; Args = @('--version') },
+        @{ Name = 'WireGuard'; Exe = 'wg.exe'; Args = @('--version') },
+        @{ Name = 'Tailscale'; Exe = 'tailscale'; Args = @('version') },
         @{ Name = 'QEMU'; Exe = 'qemu-system-x86_64'; Args = @('--version') },
-        @{ Name = 'MinGW'; Exe = 'x86_64-w64-mingw32-gcc'; Args = @('--version') }
+        @{ Name = 'VirtualBox'; Exe = 'VBoxManage.exe'; Args = @('--version') },
+        @{ Name = 'VMware'; Exe = 'vmrun.exe'; Args = @('-T', 'ws', 'version') }
     )
+    $missingProbes = @()
     foreach ($probe in $probes) {
         if (-not (Test-Command $probe.Exe)) {
-            Write-Warn "$($probe.Name) no está instalado; se omite."
+            Write-Warn "$($probe.Name) no está instalado o no está en PATH."
+            $missingProbes += $probe.Name
             continue
         }
         $probeCode = Invoke-Native $probe.Exe $probe.Args
@@ -504,6 +663,13 @@ if ($runExtendedTests) {
             throw "La prueba de $($probe.Name) falló (código $probeCode)."
         }
         Write-Ok "$($probe.Name) respondió correctamente"
+    }
+    Write-Host "    Resumen de herramientas: $($probes.Count - $missingProbes.Count)/$($probes.Count) disponibles." -ForegroundColor Cyan
+    if ($missingProbes.Count -gt 0) {
+        Write-Warn "Faltan $($missingProbes.Count) sondas: $($missingProbes -join ', ')"
+        if ($strictExtendedTests) {
+            throw 'La batería ampliada estricta detectó herramientas ausentes. Instálalas desde Entorno y componentes o ejecuta la build sin -StrictTests.'
+        }
     }
 
     if (-not (Test-Command 'tauri-driver') -and $InstallE2eDriver -and (Test-Command 'cargo')) {
@@ -528,6 +694,10 @@ if ($runExtendedTests) {
             $env:E2E_BINARY = $previousE2eBinary
         }
     }
+}
+
+if ($CrossLinux) {
+    Invoke-CrossLinuxTests
 }
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,9 @@
 //!
 //! Regla que atraviesa todo el módulo: el frontend nunca manda una ruta que el
 //! backend no le haya dado antes. Lo que se ejecuta, se abre o se borra tiene
-//! que estar en la lista blanca del último escaneo (`visible_item`) o dentro de
-//! la carpeta que el explorador está enseñando. Una ruta suelta se rechaza.
+//! que estar en la lista blanca del último escaneo (`visible_item`), dentro de
+//! la carpeta que el explorador está enseñando o ser una ruta que el panel
+//! acaba de mostrar. Una ruta suelta se rechaza.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -90,8 +91,8 @@ pub struct ScriptsPanel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Los scripts anclados, con su carpeta y su tipo. En Ruta actual se usan
-    /// para marcar correctamente las estrellas; su lista solo se renderiza en
-    /// Favoritos.
+    /// para marcar correctamente las estrellas; su lista se renderiza en
+    /// Acceso rápido, por encima de los dos ámbitos.
     pub pinned: Vec<ScriptEntry>,
 }
 
@@ -204,7 +205,7 @@ fn here_panel(
             "",
             Some(
                 "No se pudo traducir el directorio actual a una carpeta del host. \
-                 Puedes elegirla manualmente con el botón de carpeta."
+                 Puedes usar el Explorador para revisar la ruta disponible."
                     .into(),
             ),
         );
@@ -219,7 +220,7 @@ fn here_panel(
                 &dir,
                 Some(
                     "No se pudo traducir el directorio actual a una carpeta del host. \
-                     Puedes elegirla manualmente con el botón de carpeta."
+                     Puedes usar el Explorador para revisar la ruta disponible."
                         .into(),
                 ),
             )
@@ -227,6 +228,17 @@ fn here_panel(
     }
 
     state.tabs.set_here_dir(tab_id, &dir, false);
+    let scan_request = state.begin_script_scan();
+    let _scan_guard = state.script_scan_guard();
+    // Otra petición puede haber llegado mientras esperábamos el turno. No
+    // merece la pena tocar el disco para una respuesta que el frontend ya no
+    // mostrará.
+    if !state.script_scan_is_current(scan_request) {
+        return ScriptsPanel {
+            depth: Some(depth),
+            ..ScriptsPanel::empty("here", &dir, None)
+        };
+    }
     let total_started = std::time::Instant::now();
     let scan_started = std::time::Instant::now();
     let result = scripts::list_scripts(
@@ -236,8 +248,15 @@ fn here_panel(
             categories,
             max_depth: depth,
             source: "Aquí".to_string(),
+            cancel_generation: Some((state.script_scan_generation(), scan_request)),
         },
     );
+    if !state.script_scan_is_current(scan_request) {
+        return ScriptsPanel {
+            depth: Some(depth),
+            ..ScriptsPanel::empty("here", &dir, None)
+        };
+    }
     let scan_ms = scan_started.elapsed().as_millis() as u64;
     let whitelist_started = std::time::Instant::now();
     state.remember_visible_items(&result.scripts);
@@ -285,7 +304,12 @@ pub fn scripts_list_here(
     depth: Option<i64>,
 ) -> ScriptsPanel {
     if !state.tabs.exists(&tab_id) {
-        return ScriptsPanel::empty("here", "", Some("No hay una pestaña activa.".into()));
+        let translator = crate::i18n::Translator::new(&crate::i18n::active_language());
+        return ScriptsPanel::empty(
+            "here",
+            "",
+            Some(translator.t("error.noTab", "No hay una pestaña activa.")),
+        );
     }
     here_panel(
         &state,
@@ -311,48 +335,6 @@ fn pick_file(app: &AppHandle) -> Option<String> {
         .file()
         .blocking_pick_file()
         .map(|p| p.to_string())
-}
-
-/// `scripts:chooseFolder`
-#[tauri::command(async)]
-pub fn scripts_choose_folder(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    categories: Option<Vec<String>>,
-) -> ScriptsPanel {
-    let categories = categories_from(categories);
-    if let Some(chosen) = pick_folder(&app, None) {
-        crate::settings::save_key("scriptsFolder", serde_json::Value::String(chosen.clone()));
-        log_info!(
-            "Carpeta de scripts cambiada",
-            serde_json::json!({ "scriptsFolder": chosen })
-        );
-    }
-    library_panel(&app, &state, &categories)
-}
-
-/// `scripts:chooseHereFolder`
-#[tauri::command(async)]
-pub fn scripts_choose_here_folder(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    tab_id: String,
-    categories: Option<Vec<String>>,
-    depth: Option<i64>,
-) -> ScriptsPanel {
-    if !state.tabs.exists(&tab_id) {
-        return ScriptsPanel::empty("here", "", Some("No hay una pestaña activa.".into()));
-    }
-    let current = state.tabs.here_dir(&tab_id);
-    if let Some(chosen) = pick_folder(&app, current.as_deref()) {
-        state.tabs.set_here_dir(&tab_id, &chosen, true);
-    }
-    here_panel(
-        &state,
-        &tab_id,
-        &categories_from(categories),
-        selected_here_depth(depth),
-    )
 }
 
 /// `scripts:pickTarget`. Elegir el archivo o la carpeta sobre la que actuará un
@@ -400,6 +382,14 @@ impl ActionResult {
             ..Default::default()
         }
     }
+
+    /// Errores fijos que se muestran directamente en los paneles. Se
+    /// resuelven antes de cruzar IPC; los diagnósticos de procesos externos
+    /// siguen viajando tal cual porque no son frases del catálogo.
+    pub(crate) fn failed_t(key: &str, fallback: &str) -> ActionResult {
+        let translator = crate::i18n::Translator::new(&crate::i18n::active_language());
+        Self::failed(translator.t(key, fallback))
+    }
 }
 
 /// Abre una ruta con la aplicación predeterminada del sistema. Si no hay
@@ -436,12 +426,14 @@ pub fn scripts_open(
     item_path: String,
 ) -> ActionResult {
     let Some(item) = state.visible_item(&item_path) else {
-        return ActionResult::failed(
+        return ActionResult::failed_t(
+            "error.notAuthorised",
             "El archivo no está autorizado para abrirse desde este panel.",
         );
     };
     if !item.openable {
-        return ActionResult::failed(
+        return ActionResult::failed_t(
+            "error.notAuthorised",
             "El archivo no está autorizado para abrirse desde este panel.",
         );
     }
@@ -490,6 +482,71 @@ pub fn scripts_cd(state: State<'_, Arc<AppState>>, tab_id: String, item_path: St
         serde_json::json!({ "tabId": tab_id, "item": item.name })
     );
     write_command(&state, &tab_id, &command);
+}
+
+/// `scripts:cdDirectory`: lleva la terminal a la carpeta que el panel está
+/// mostrando. La ruta se valida en backend antes de escribir el comando para
+/// que el panel no pueda convertir una entrada arbitraria en una orden.
+#[tauri::command(async)]
+pub fn scripts_cd_directory(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    directory: String,
+) -> ActionResult {
+    if !state.tabs.has_session(&tab_id) {
+        return ActionResult::failed_t("error.noTab", "La pestaña activa ya no está disponible.");
+    }
+    let target = directory.trim();
+    let target_path = Path::new(target);
+    if target.is_empty() || !target_path.is_dir() {
+        return ActionResult::failed_t(
+            "error.folderNotInView",
+            "La ruta mostrada ya no existe o no es una carpeta.",
+        );
+    }
+    let normalized_target = target_path.canonicalize().ok();
+    let allowed = [
+        crate::tabs::scripts_folder().to_string_lossy().to_string(),
+        state.tabs.here_dir(&tab_id).unwrap_or_default(),
+    ]
+    .into_iter()
+    .filter(|candidate| !candidate.is_empty())
+    .filter_map(|candidate| Path::new(&candidate).canonicalize().ok())
+    .any(|candidate| Some(candidate) == normalized_target);
+    if !allowed {
+        return ActionResult::failed_t(
+            "error.notInView",
+            "La ruta no pertenece a una vista válida del panel.",
+        );
+    }
+    let Some(env) = state.tabs.environment_of(&tab_id) else {
+        return ActionResult::failed_t("error.noTab", "La pestaña activa ya no está disponible.");
+    };
+    if env.repl {
+        return ActionResult::failed_t(
+            "error.replNotShell",
+            "La pestaña activa es un intérprete, no una shell.",
+        );
+    }
+    let Some(command) = scripts::build_cd_command(target, env.kind, true, &launch_context(&env))
+    else {
+        return ActionResult::failed_t(
+            "error.folderNotInView",
+            "Esta ruta no se puede alcanzar desde este entorno.",
+        );
+    };
+    if !write_command(&state, &tab_id, &command) {
+        return ActionResult::failed_t("error.writeFailed", "No se pudo escribir en la terminal.");
+    }
+    log_info!(
+        "Cambio de carpeta desde la ruta del panel",
+        serde_json::json!({ "tabId": tab_id, "directory": target })
+    );
+    ActionResult {
+        ok: true,
+        command: Some(command),
+        ..Default::default()
+    }
 }
 
 /// `scripts:pin`
@@ -558,13 +615,8 @@ fn preferred_script_environment(state: &AppState, kinds: &[ShellKind]) -> Option
     let envs = state.environments();
 
     let preference = preferences::current().default_script_environment_id;
-    if !preference.is_empty() {
-        if let Some(env) = envs
-            .iter()
-            .find(|env| env.id == preference && env.available && !env.repl)
-        {
-            return Some(env.clone());
-        }
+    if let Some(env) = configured_script_environment(&envs, &preference) {
+        return Some(env);
     }
 
     let is_unix_family = |kind: &ShellKind| {
@@ -594,6 +646,15 @@ fn preferred_script_environment(state: &AppState, kinds: &[ShellKind]) -> Option
     environment_for_kinds(state, kinds)
 }
 
+fn configured_script_environment(envs: &[Environment], preference: &str) -> Option<Environment> {
+    if preference.is_empty() {
+        return None;
+    }
+    envs.iter()
+        .find(|env| env.id == preference && env.available && !env.repl && !env.no_auto_select)
+        .cloned()
+}
+
 /// `scripts:run`
 #[tauri::command(async)]
 pub fn scripts_run(
@@ -605,15 +666,18 @@ pub fn scripts_run(
     args: Option<String>,
 ) -> ActionResult {
     if !state.tabs.has_session(&tab_id) {
-        return ActionResult::failed("La pestaña activa ya no está disponible.");
+        return ActionResult::failed_t("error.noTab", "La pestaña activa ya no está disponible.");
     }
     // Solo se puede actuar sobre un archivo devuelto por el último escaneo
     // visible. La ruta no se acepta directamente del frontend.
     let Some(script) = state.visible_item(&path) else {
-        return ActionResult::failed("El script ya no pertenece a la vista actual.");
+        return ActionResult::failed_t(
+            "error.notInView",
+            "El script ya no pertenece a la vista actual.",
+        );
     };
     if !script.runnable {
-        return ActionResult::failed("Ese archivo no se ejecuta: se abre.");
+        return ActionResult::failed_t("scripts.openFailed", "Ese archivo no se ejecuta: se abre.");
     }
     let as_admin = as_admin.unwrap_or(false);
     let args: String = args
@@ -623,7 +687,7 @@ pub fn scripts_run(
         .collect();
 
     let Some(current_env) = state.tabs.environment_of(&tab_id) else {
-        return ActionResult::failed("La pestaña activa ya no está disponible.");
+        return ActionResult::failed_t("error.noTab", "La pestaña activa ya no está disponible.");
     };
 
     // Un REPL no puede lanzar el script: hace falta una shell de verdad.
@@ -647,7 +711,8 @@ pub fn scripts_run(
             }
             None => {
                 let Some(shell_env) = environment_for_kinds(&state, &shells) else {
-                    return ActionResult::failed(
+                    return ActionResult::failed_t(
+                        "error.noShell",
                         "No hay una shell disponible para lanzar el script.",
                     );
                 };
@@ -670,10 +735,10 @@ pub fn scripts_run(
             }
             None => {
                 let Some(shell_env) = preferred_script_environment(&state, &preferred) else {
-                    return ActionResult::failed(format!(
-                        "Este script necesita una shell que no está disponible en este sistema ({:?}).",
-                        preferred[0]
-                    ));
+                    return ActionResult::failed_t(
+                        "error.noShell",
+                        "Este script necesita una shell que no está disponible en este sistema.",
+                    );
                 };
                 let created = state.tabs.create_tab(&app, &shell_env, None);
                 target_tab = created.id;
@@ -685,7 +750,8 @@ pub fn scripts_run(
     let Some(command) =
         scripts::build_launch_command(&script, env.kind, as_admin, &args, &launch_context(&env))
     else {
-        return ActionResult::failed(
+        return ActionResult::failed_t(
+            "error.notAuthorised",
             "Este script no se puede lanzar desde el entorno de esta pestaña.",
         );
     };
@@ -713,7 +779,7 @@ pub fn scripts_run(
     let decorated = crate::console_ui::decorate(&command, &notice, env.kind, false, &t);
 
     if !write_command(&state, &target_tab, &decorated) {
-        return ActionResult::failed("No se pudo escribir en la terminal.");
+        return ActionResult::failed_t("error.writeFailed", "No se pudo escribir en la terminal.");
     }
     ActionResult {
         ok: true,
@@ -791,7 +857,10 @@ pub fn explorer_create(
     let Some(dir) = state.tabs.explorer_dir(&tab_id) else {
         return file_explorer::FsResult {
             ok: false,
-            error: Some("No hay una carpeta abierta.".into()),
+            error: Some(
+                crate::i18n::Translator::new(&crate::i18n::active_language())
+                    .t("error.noFolderOpen", "No hay una carpeta abierta."),
+            ),
             path: None,
             name: None,
             renamed: false,
@@ -826,7 +895,10 @@ pub fn explorer_open(
     item_path: String,
 ) -> ActionResult {
     if entry_in_current_dir(&state, &tab_id, &item_path).is_none() {
-        return ActionResult::failed("Ese elemento no pertenece a la carpeta abierta.");
+        return ActionResult::failed_t(
+            "error.notInView",
+            "Ese elemento no pertenece a la carpeta abierta.",
+        );
     }
     let path = Path::new(&item_path);
     if path.is_dir() {
@@ -851,7 +923,12 @@ pub fn explorer_rename(
     let Some((dir, _)) = entry_in_current_dir(&state, &tab_id, &item_path) else {
         return file_explorer::FsResult {
             ok: false,
-            error: Some("Ese elemento no pertenece a la carpeta abierta.".into()),
+            error: Some(
+                crate::i18n::Translator::new(&crate::i18n::active_language()).t(
+                    "error.notInView",
+                    "Ese elemento no pertenece a la carpeta abierta.",
+                ),
+            ),
             path: None,
             name: None,
             renamed: false,
@@ -876,7 +953,10 @@ pub fn explorer_clip(
     mode: String,
 ) -> ActionResult {
     if entry_in_current_dir(&state, &tab_id, &item_path).is_none() {
-        return ActionResult::failed("Ese elemento no pertenece a la carpeta abierta.");
+        return ActionResult::failed_t(
+            "error.notInView",
+            "Ese elemento no pertenece a la carpeta abierta.",
+        );
     }
     state.set_clipboard(&item_path, mode == "cut");
     ActionResult::ok()
@@ -885,6 +965,7 @@ pub fn explorer_clip(
 /// `explorer:paste`
 #[tauri::command(async)]
 pub fn explorer_paste(state: State<'_, Arc<AppState>>, tab_id: String) -> file_explorer::FsResult {
+    let translator = crate::i18n::Translator::new(&crate::i18n::active_language());
     let failed = |message: &str| file_explorer::FsResult {
         ok: false,
         error: Some(message.to_string()),
@@ -893,10 +974,10 @@ pub fn explorer_paste(state: State<'_, Arc<AppState>>, tab_id: String) -> file_e
         renamed: false,
     };
     let Some(item) = state.take_clipboard() else {
-        return failed("No hay nada que pegar.");
+        return failed(&translator.t("error.nothingCopied", "No hay nada que pegar."));
     };
     let Some(dir) = state.tabs.explorer_dir(&tab_id) else {
-        return failed("No hay una carpeta abierta.");
+        return failed(&translator.t("error.noFolderOpen", "No hay una carpeta abierta."));
     };
     let result = file_explorer::paste_entry(&item.path, &dir, item.cut);
     if result.ok {
@@ -925,7 +1006,10 @@ pub fn explorer_trash(
     item_path: String,
 ) -> ActionResult {
     if entry_in_current_dir(&state, &tab_id, &item_path).is_none() {
-        return ActionResult::failed("Ese elemento no pertenece a la carpeta abierta.");
+        return ActionResult::failed_t(
+            "error.notInView",
+            "Ese elemento no pertenece a la carpeta abierta.",
+        );
     }
     match crate::recycle::send_to_trash(&item_path) {
         Ok(()) => {
@@ -943,20 +1027,26 @@ pub fn explorer_trash(
 #[tauri::command(async)]
 pub fn explorer_cd(state: State<'_, Arc<AppState>>, tab_id: String) -> ActionResult {
     let Some(dir) = state.tabs.explorer_dir(&tab_id) else {
-        return ActionResult::failed("No hay una carpeta abierta.");
+        return ActionResult::failed_t("error.noFolderOpen", "No hay una carpeta abierta.");
     };
     let Some(env) = state.tabs.environment_of(&tab_id) else {
-        return ActionResult::failed("La pestaña activa ya no está disponible.");
+        return ActionResult::failed_t("error.noTab", "La pestaña activa ya no está disponible.");
     };
     if env.repl {
-        return ActionResult::failed("La pestaña activa es un intérprete, no una shell.");
+        return ActionResult::failed_t(
+            "error.replNotShell",
+            "La pestaña activa es un intérprete, no una shell.",
+        );
     }
     let Some(command) = scripts::build_cd_command(&dir, env.kind, true, &launch_context(&env))
     else {
-        return ActionResult::failed("Esa carpeta no se puede alcanzar desde este entorno.");
+        return ActionResult::failed_t(
+            "error.folderNotInView",
+            "Esa carpeta no se puede alcanzar desde este entorno.",
+        );
     };
     if !write_command(&state, &tab_id, &command) {
-        return ActionResult::failed("No se pudo escribir en la terminal.");
+        return ActionResult::failed_t("error.writeFailed", "No se pudo escribir en la terminal.");
     }
     ActionResult {
         ok: true,
@@ -994,7 +1084,10 @@ pub fn explorer_open_directory(
     if target.is_empty() || !Path::new(&target).is_dir() {
         return OpenDirectoryResult {
             ok: false,
-            error: Some("No hay una carpeta que abrir.".into()),
+            error: Some(
+                crate::i18n::Translator::new(&crate::i18n::active_language())
+                    .t("error.noFolderOpen", "No hay una carpeta que abrir."),
+            ),
             choices: None,
         };
     }
@@ -1063,7 +1156,12 @@ pub fn explorer_open_directory_with(
     let Some(manager) = file_viewers::file_manager_by_id(std::env::consts::OS, &manager_id) else {
         return OpenDirectoryResult {
             ok: false,
-            error: Some("Ese gestor de archivos no está en la lista.".into()),
+            error: Some(
+                crate::i18n::Translator::new(&crate::i18n::active_language()).t(
+                    "explorer.noManager",
+                    "Ese gestor de archivos no está en la lista.",
+                ),
+            ),
             choices: None,
         };
     };
@@ -1074,7 +1172,10 @@ pub fn explorer_open_directory_with(
     if target.is_empty() {
         return OpenDirectoryResult {
             ok: false,
-            error: Some("No hay una carpeta que abrir.".into()),
+            error: Some(
+                crate::i18n::Translator::new(&crate::i18n::active_language())
+                    .t("error.noFolderOpen", "No hay una carpeta que abrir."),
+            ),
             choices: None,
         };
     }
@@ -1104,6 +1205,13 @@ mod tests {
         assert!(ids.contains(&"other-script"));
         assert!(ids.contains(&"powershell"));
         assert_eq!(ids.len(), scripts::file_filters().len());
+    }
+
+    #[test]
+    fn el_entorno_de_scripts_no_elige_wine_ni_entornos_no_automaticos() {
+        let mut wine = Environment::new("wine-cmd", "Wine", ShellKind::Cmd, "wine", &[]);
+        wine.no_auto_select = true;
+        assert!(configured_script_environment(&[wine], "wine-cmd").is_none());
     }
 
     #[test]

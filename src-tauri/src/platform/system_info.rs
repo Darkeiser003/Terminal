@@ -9,6 +9,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -567,6 +568,7 @@ fn clean_gpu_name(value: &str) -> String {
 // El esquema 3 invalida las cachés que aún contienen nombres técnicos de GPU
 // como `NVidia Corporation TU116s`.
 const HARDWARE_CACHE_SCHEMA: u32 = 3;
+const DISK_CACHE_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -580,9 +582,23 @@ struct StaticHardware {
 }
 
 static STATIC_HARDWARE: OnceLock<StaticHardware> = OnceLock::new();
+static QUICK_CPU: OnceLock<String> = OnceLock::new();
+static HARDWARE_PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
+
+// Enumerar discos parece barato, pero puede consultar montajes FUSE, SMB o
+// unidades desconectadas. Nunca debe formar parte del primer frame de la
+// terminal: se calcula una sola vez en segundo plano y el siguiente repintado
+// lo incorpora si ya está disponible.
+static DISK_CACHE: Lazy<Mutex<Option<Vec<DiskRow>>>> = Lazy::new(|| Mutex::new(None));
+static DISK_PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
+static DISK_REFRESH_COMPLETED: AtomicBool = AtomicBool::new(false);
 
 fn hardware_cache_path() -> PathBuf {
     crate::paths::user_data_dir().join("hardware-cache.json")
+}
+
+fn disk_cache_path() -> PathBuf {
+    crate::paths::user_data_dir().join("disk-cache.json")
 }
 
 fn fingerprint_source() -> String {
@@ -671,13 +687,19 @@ fn save_hardware_cache(path: &Path, value: &StaticHardware) {
 }
 
 fn detect_cpu_model() -> String {
-    let mut system = System::new();
-    system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
-    system
-        .cpus()
-        .first()
-        .map(|cpu| clean_cpu_model(&cpu.brand().split_whitespace().collect::<Vec<_>>().join(" ")))
-        .unwrap_or_else(|| "desconocida".to_string())
+    QUICK_CPU
+        .get_or_init(|| {
+            let mut system = System::new();
+            system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+            system
+                .cpus()
+                .first()
+                .map(|cpu| {
+                    clean_cpu_model(&cpu.brand().split_whitespace().collect::<Vec<_>>().join(" "))
+                })
+                .unwrap_or_else(|| "desconocida".to_string())
+        })
+        .clone()
 }
 
 fn detect_static_hardware(fingerprint: String) -> StaticHardware {
@@ -721,14 +743,87 @@ fn static_hardware() -> &'static StaticHardware {
     })
 }
 
+fn start_hardware_prewarm() {
+    if HARDWARE_PREWARM_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("hardware-probe".into())
+        .spawn(|| {
+            let _ = os_identity();
+            let _ = static_hardware();
+        })
+        .ok();
+}
+
+fn start_disk_prewarm() {
+    if DISK_PREWARM_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Some(cached) = load_disk_cache(&disk_cache_path(), &machine_fingerprint()) {
+        *DISK_CACHE.lock() = Some(cached);
+    }
+    std::thread::Builder::new()
+        .name("disk-probe".into())
+        .spawn(|| {
+            let disks = read_disks();
+            save_disk_cache(&disk_cache_path(), &disks);
+            *DISK_CACHE.lock() = Some(disks);
+            DISK_REFRESH_COMPLETED.store(true, Ordering::Release);
+        })
+        .ok();
+}
+
+/// Snapshot rápido para el primer banner. Si la sonda completa aún está
+/// trabajando, solo se usa la CPU local y se deja que el repintado progresivo
+/// añada placa, GPU y RAM después. El banner no puede esperar a WMI, lspci o a
+/// un montaje remoto.
+fn banner_hardware() -> StaticHardware {
+    if let Some(hardware) = STATIC_HARDWARE.get() {
+        return hardware.clone();
+    }
+    start_hardware_prewarm();
+    StaticHardware {
+        schema: HARDWARE_CACHE_SCHEMA,
+        fingerprint: String::new(),
+        cpu_model: detect_cpu_model(),
+        ..StaticHardware::default()
+    }
+}
+
+// Los tests de integración del banner necesitan inspeccionar el sistema real
+// de forma determinista. El binario normal siempre usa el camino asíncrono y
+// no bloquea el primer frame.
+#[cfg(test)]
+fn cached_disks() -> Vec<DiskRow> {
+    read_disks()
+}
+
+#[cfg(not(test))]
+fn cached_disks() -> Vec<DiskRow> {
+    start_disk_prewarm();
+    DISK_CACHE.lock().clone().unwrap_or_default()
+}
+
+/// Indica si el repintado progresivo ya puede mostrar todos los datos lentos.
+pub fn banner_data_ready() -> bool {
+    hardware_data_ready() && disks_data_ready()
+}
+
+pub fn hardware_data_ready() -> bool {
+    STATIC_HARDWARE.get().is_some()
+}
+
+pub fn disks_data_ready() -> bool {
+    DISK_REFRESH_COMPLETED.load(Ordering::Acquire) && DISK_CACHE.lock().is_some()
+}
+
 /// Precarga el snapshot estático en segundo plano. Con una caché válida es una
 /// lectura local mínima; en el primer arranque las sondas se ejecutan en
 /// paralelo y el hilo que construya el banner comparte ese mismo resultado.
 pub fn prewarm_hardware_info() {
-    std::thread::spawn(|| {
-        let _ = os_identity();
-        let _ = static_hardware();
-    });
+    start_hardware_prewarm();
+    start_disk_prewarm();
 }
 
 pub fn motherboard_info() -> String {
@@ -961,12 +1056,48 @@ fn estimate_os_age() -> Option<u64> {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DiskRow {
     device: String,
     mount: String,
     used: u64,
     total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskCacheFile {
+    schema: u32,
+    fingerprint: String,
+    disks: Vec<DiskRow>,
+}
+
+fn load_disk_cache(path: &Path, fingerprint: &str) -> Option<Vec<DiskRow>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let cache: DiskCacheFile = serde_json::from_str(&text).ok()?;
+    (cache.schema == DISK_CACHE_SCHEMA && cache.fingerprint == fingerprint).then_some(cache.disks)
+}
+
+fn save_disk_cache(path: &Path, disks: &[DiskRow]) {
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let value = DiskCacheFile {
+        schema: DISK_CACHE_SCHEMA,
+        fingerprint: machine_fingerprint(),
+        disks: disks.to_vec(),
+    };
+    let Ok(text) = serde_json::to_string_pretty(&value) else {
+        return;
+    };
+    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    if std::fs::write(&temp, text).is_ok() {
+        let _ = std::fs::remove_file(path);
+        if std::fs::rename(&temp, path).is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+    }
 }
 
 /// Los discos montados que merece la pena enseñar. En Linux el original leía
@@ -1217,6 +1348,10 @@ fn clean_os_name(raw: &str) -> String {
 const MIN_BOXED_WIDTH: usize = 40;
 const ASSUMED_COLUMNS: usize = 80;
 
+fn banner_item_enabled(hidden_items: &str, item: &str) -> bool {
+    !hidden_items.split(',').any(|hidden| hidden == item)
+}
+
 fn hex_to_ansi(hex: &str) -> String {
     let hex = hex.trim().trim_start_matches('#');
     if hex.len() == 6 {
@@ -1247,7 +1382,8 @@ pub fn build_banner(
 
     let prefs = crate::preferences::current();
     let accent = hex_to_ansi(&prefs.fastfetch_color);
-    let hardware = static_hardware();
+    let hardware = banner_hardware();
+    let show = |item: &str| banner_item_enabled(&prefs.banner_hidden_items, item);
 
     let mut system = System::new();
     system.refresh_memory();
@@ -1262,15 +1398,21 @@ pub fn build_banner(
     let os_name = clean_os_name(&identity.name);
 
     let mut system_rows: Vec<(String, String)> = Vec::new();
-    system_rows.push((t.t("banner.system", "Sistema"), os_name));
-    if let Some(host) = System::host_name().filter(|value| !value.trim().is_empty()) {
-        system_rows.push((t.t("banner.pc", "Equipo"), host));
+    if show("system") {
+        system_rows.push((t.t("banner.system", "Sistema"), os_name));
     }
-    let kernel = System::kernel_version()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| t.t("banner.unknown", "No disponible"));
-    system_rows.push((t.t("banner.kernel", "Kernel"), kernel));
-    if !env_label.trim().is_empty() {
+    if show("host") {
+        if let Some(host) = System::host_name().filter(|value| !value.trim().is_empty()) {
+            system_rows.push((t.t("banner.pc", "Equipo"), host));
+        }
+    }
+    if show("kernel") {
+        let kernel = System::kernel_version()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| t.t("banner.unknown", "No disponible"));
+        system_rows.push((t.t("banner.kernel", "Kernel"), kernel));
+    }
+    if show("environment") && !env_label.trim().is_empty() {
         system_rows.push((
             t.t("banner.environment", "Entorno"),
             env_label.trim().to_string(),
@@ -1280,7 +1422,7 @@ pub fn build_banner(
     let mut hardware_rows: Vec<(String, String)> = Vec::new();
 
     let mobo = hardware.motherboard.clone();
-    if !mobo.is_empty() {
+    if show("motherboard") && !mobo.is_empty() {
         hardware_rows.push((t.t("banner.motherboard", "Placa"), mobo));
     }
 
@@ -1291,10 +1433,12 @@ pub fn build_banner(
     } else {
         format!("{cpu_model} ({logical_cpus}T)")
     };
-    hardware_rows.push((t.t("banner.cpu", "CPU"), cpu_desc));
+    if show("cpu") {
+        hardware_rows.push((t.t("banner.cpu", "CPU"), cpu_desc));
+    }
 
     let gpu = clean_gpu_name(&hardware.gpu);
-    if !gpu.is_empty() {
+    if show("gpu") && !gpu.is_empty() {
         hardware_rows.push((t.t("banner.gpu", "GPU"), gpu));
     }
 
@@ -1320,18 +1464,20 @@ pub fn build_banner(
             memory_pct
         )
     };
-    hardware_rows.push((t.t("banner.memory", "Memoria"), memory_str));
+    if show("memory") {
+        hardware_rows.push((t.t("banner.memory", "Memoria"), memory_str));
+    }
 
     // En un panel grande se conserva una línea por disco, pero se eliminan
     // las rutas completas: saber qué unidad ocupa cuánto es más útil que leer
     // /dev/... o el punto de montaje entero. Con cuatro paneles o poca altura
     // se usa un único resumen para que el banner no empuje el prompt fuera de
     // la zona visible.
-    let disks: Vec<_> = read_disks()
+    let disks: Vec<_> = cached_disks()
         .into_iter()
         .filter(|disk| disk.total >= 1_000_000_000)
         .collect();
-    if !disks.is_empty() {
+    if show("storage") && !disks.is_empty() {
         hardware_rows.extend(storage_rows(
             &disks,
             compact_storage(pane_count, rows),
@@ -1353,18 +1499,24 @@ pub fn build_banner(
     let sep_len = max_sep.clamp(3, 46);
     let separator = "-".repeat(sep_len);
 
-    let session_rows = vec![
-        (
+    let mut session_rows = Vec::new();
+    if show("uptime") {
+        session_rows.push((
             t.t("banner.uptime", "Tiempo activo"),
             format_uptime(System::uptime()),
-        ),
-        (t.t("banner.datetime", "Fecha"), format_now()),
-    ];
+        ));
+    }
+    if show("datetime") {
+        session_rows.push((t.t("banner.datetime", "Fecha"), format_now()));
+    }
     let sections = [
-        (t.t("banner.system", "Sistema"), system_rows),
-        (t.t("banner.hardware", "Hardware"), hardware_rows),
-        (t.t("banner.session", "Sesión"), session_rows),
-    ];
+        (t.t("banner.system", "Sistema"), &system_rows),
+        (t.t("banner.hardware", "Hardware"), &hardware_rows),
+        (t.t("banner.session", "Sesión"), &session_rows),
+    ]
+    .into_iter()
+    .filter(|(_, rows)| !rows.is_empty())
+    .collect::<Vec<_>>();
 
     let max_label_len = sections
         .iter()
@@ -1380,27 +1532,137 @@ pub fn build_banner(
     lines.push(format!("{BOLD}{accent}{title}{RESET}"));
     lines.push(format!("\x1b[90m{separator}{RESET}"));
 
-    for (section, rows) in sections {
+    // Una terminal con pocas filas no puede enseñar las tres secciones
+    // completas: el prompt desplazaría justo la CPU y la memoria fuera de la
+    // vista. Conservamos la identidad y los datos esenciales en una línea por
+    // campo; el modo normal sigue mostrando todas las secciones y discos.
+    // El inspector acoplado y el explorador pueden dejar una casilla de unas
+    // 20 filas aunque la ventana exterior parezca grande. Durante el primer
+    // frame tras un resize el PTY puede conservar temporalmente 40 filas; el
+    // umbral amplio evita que CPU o Memoria queden justo fuera del viewport en
+    // esa transición.
+    let compact_vertical = rows > 0 && usize::from(rows) <= 40;
+    // Una división de tres o cuatro paneles puede conservar muchas filas en
+    // el PTY, pero cada celda ya no tiene anchura suficiente para tres
+    // secciones completas. Compactar también por anchura evita que el banner
+    // empuje el prompt fuera de la vista durante un redimensionado.
+    let compact_layout = compact_vertical || available_cols < 88;
+    let compact_rows = if compact_layout {
+        let cpu_label = t.t("banner.cpu", "CPU");
+        let memory_label = t.t("banner.memory", "Memoria");
+        let storage_label = t.t("banner.storage", "Disco");
+        let uptime_label = t.t("banner.uptime", "Tiempo activo");
+        let datetime_label = t.t("banner.datetime", "Fecha");
+        let mut compact = Vec::new();
+        macro_rules! take_row {
+            ($source:expr, $label:expr) => {
+                if let Some(row) = $source.iter().find(|(row_label, _)| row_label == $label) {
+                    compact.push(row.clone());
+                }
+            };
+        }
+
+        // El orden es deliberado: en el mínimo real caben la cabecera, CPU y
+        // Uptime. El Uptime tiene su propia línea, así nunca se pega al final
+        // de Memoria ni provoca un salto visual por falta de anchura.
+        take_row!(hardware_rows, &cpu_label);
+        take_row!(session_rows, &uptime_label);
+        take_row!(hardware_rows, &memory_label);
+
+        // En modo estrecho se mantiene el resumen de discos; con más filas,
+        // `storage_rows` puede aportar una línea por unidad y se muestran de
+        // forma progresiva junto con el resto de datos configurables.
+        for row in hardware_rows.iter().filter(|(label, _)| {
+            label == &storage_label || label.starts_with(&format!("{storage_label} "))
+        }) {
+            compact.push(row.clone());
+        }
+
+        take_row!(system_rows, &t.t("banner.pc", "Equipo"));
+        take_row!(system_rows, &t.t("banner.kernel", "Kernel"));
+        take_row!(system_rows, &t.t("banner.environment", "Entorno"));
+        take_row!(hardware_rows, &t.t("banner.motherboard", "Placa"));
+        take_row!(hardware_rows, &t.t("banner.gpu", "GPU"));
+        take_row!(session_rows, &datetime_label);
+
+        Some(compact)
+    } else {
+        None
+    };
+
+    let format_row = |label: &str, value: &str| {
+        let label = ellipsize(label, max_label_len);
+        let label_pad = max_label_len.saturating_sub(label.chars().count());
+        let max_val_len = max_line_cols.saturating_sub(max_label_len + 3);
+        let val_trimmed = ellipsize(value, max_val_len);
+
+        format!(
+            "{accent}{label}{RESET}{}  {val_trimmed}",
+            " ".repeat(label_pad)
+        )
+    };
+
+    if let Some(rows) = compact_rows.as_ref() {
+        // En compacto cada dato ocupa su propia fila. Esto evita que Uptime,
+        // discos o una etiqueta traducida se peguen a otra información y
+        // hagan que xterm envuelva una línea. La lista se recorta al espacio
+        // real disponible al final de la función, dejando que el contenido
+        // aparezca por fases a medida que crece la ventana.
+        let title_text = ellipsize(&format!("{display_name} {version}"), max_line_cols);
+        let system = system_rows
+            .iter()
+            .find(|(label, _)| label == &t.t("banner.system", "Sistema"));
+        let header = system
+            .map(|(system_label, system_value)| {
+                let available_system = max_line_cols
+                    .saturating_sub(title_text.chars().count() + system_label.chars().count() + 3);
+                format!(
+                    "{title_text}  {system_label} {}",
+                    ellipsize(system_value, available_system)
+                )
+            })
+            .unwrap_or(title_text);
+        lines.clear();
         lines.push(format!(
-            "{BOLD}{accent}{}:{RESET}",
-            ellipsize(&section, max_line_cols)
+            "{BOLD}{accent}{}{RESET}",
+            ellipsize(&header, max_line_cols)
         ));
         for (label, value) in rows {
-            let label = ellipsize(&label, max_label_len);
-            let label_pad = max_label_len.saturating_sub(label.chars().count());
-            let max_val_len = max_line_cols.saturating_sub(max_label_len + 3);
-            let val_trimmed = ellipsize(&value, max_val_len);
-
+            if label == &t.t("banner.system", "Sistema") {
+                continue;
+            }
+            lines.push(format_row(label, value));
+        }
+    } else {
+        for (section, rows) in sections {
             lines.push(format!(
-                "{accent}{label}{RESET}{}  {val_trimmed}",
-                " ".repeat(label_pad)
+                "{BOLD}{accent}{}:{RESET}",
+                ellipsize(&section, max_line_cols)
             ));
+            for (label, value) in rows {
+                lines.push(format_row(label, value));
+            }
         }
     }
 
-    lines.push(format!("\x1b[90m{separator}{RESET}"));
+    if compact_rows.is_none() {
+        lines.push(format!("\x1b[90m{separator}{RESET}"));
+    }
 
-    lines.join("\r\n") + "\r\n"
+    // La entrada siempre conserva cinco filas después del banner. Es el
+    // espacio mínimo útil para ver el prompt y escribir uno o dos comandos,
+    // incluso cuando el inspector está acoplado o el explorador ha reducido
+    // la celda. Si no queda sitio, se oculta el banner temporalmente: nunca
+    // se sacrifica la zona de trabajo del usuario.
+    if rows > 0 {
+        let available_banner_rows = usize::from(rows).saturating_sub(5);
+        lines.truncate(available_banner_rows);
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\r\n") + "\r\n"
+    }
 }
 
 #[cfg(test)]
@@ -1472,6 +1734,25 @@ mod tests {
         assert!(compact_storage(1, 21));
         assert!(!compact_storage(2, 22));
         assert!(!compact_storage(1, 0));
+    }
+
+    #[test]
+    fn el_banner_vertical_compacto_conserva_la_informacion_esencial() {
+        let banner = build_banner("fish", "LTerminal", 60, 10, 2, &Translator::default());
+        assert!(banner.contains("LTerminal"), "{banner}");
+        assert!(banner.contains("Sistema"), "{banner}");
+        assert!(banner.contains("CPU"), "{banner}");
+        assert!(banner.contains("Memoria"), "{banner}");
+        assert!(
+            banner.contains("Tiempo activo") || banner.contains("Uptime"),
+            "{banner}"
+        );
+        for line in banner.lines() {
+            assert!(
+                crate::current_dir::strip_ansi(line).chars().count() <= 60,
+                "{line:?}"
+            );
+        }
     }
 
     #[test]
@@ -1650,7 +1931,7 @@ mod tests {
     #[test]
     fn el_banner_real_se_genera_con_los_datos_universales_del_sistema() {
         let t = Translator::default();
-        let banner = build_banner("cmd.exe", "LTerminal", 120, 40, 1, &t);
+        let banner = build_banner("cmd.exe", "LTerminal", 120, 80, 1, &t);
         assert!(banner.contains("Sistema"), "{banner}");
         assert!(banner.contains("CPU"), "{banner}");
         assert!(banner.contains("Memoria"), "{banner}");
@@ -1664,13 +1945,34 @@ mod tests {
     }
 
     #[test]
-    fn el_banner_compacto_omite_las_rutas_de_disco() {
+    fn el_banner_compacto_conserva_datos_esenciales_sin_rutas_de_disco() {
         let t = Translator::default();
-        let banner = build_banner("fish", "LTerminal", 120, 40, 2, &t);
+        let banner = build_banner("fish", "LTerminal", 120, 20, 2, &t);
         assert!(!banner.contains("/dev/"), "{banner}");
-        assert!(banner.contains("Disco"), "{banner}");
+        assert!(banner.contains("Sistema"), "{banner}");
         assert!(banner.contains("CPU"), "{banner}");
         assert!(banner.contains("Memoria"), "{banner}");
+    }
+
+    #[test]
+    fn el_uptime_y_los_discos_tienen_linea_propia_en_compacto() {
+        let t = Translator::default();
+        let banner = build_banner("fish", "LTerminal", 60, 20, 2, &t);
+        let uptime = t.t("banner.uptime", "Tiempo activo");
+        let memory = t.t("banner.memory", "Memoria");
+        let uptime_line = banner
+            .lines()
+            .map(crate::current_dir::strip_ansi)
+            .find(|line| line.contains(&uptime))
+            .unwrap_or_default();
+        assert!(!uptime_line.contains(&memory), "{banner}");
+        assert!(banner.contains("Disco"), "{banner}");
+    }
+
+    #[test]
+    fn cinco_filas_de_trabajo_dejan_el_banner_fuera() {
+        let banner = build_banner("fish", "LTerminal", 120, 5, 1, &Translator::default());
+        assert!(banner.is_empty(), "{banner}");
     }
 
     /// El nombre va ARRIBA DEL TODO y es el de la build que se está ejecutando.
@@ -1698,7 +2000,10 @@ mod tests {
     #[test]
     fn ninguna_linea_del_banner_pasa_del_ancho_de_la_terminal() {
         let t = Translator::default();
-        for columnas in [40u16, 55, 60, 80, 120, 200] {
+        // Cubre desde un panel estrecho hasta el viewport que puede producir
+        // una ventana 8K con una celda de unos 8px: no probamos solo tamaños
+        // de escritorio habituales, también los límites que usa el backend.
+        for columnas in [40u16, 55, 60, 80, 120, 200, 320, 480, 768, 960] {
             let banner = build_banner("cmd.exe", "LTerminal", columnas, 40, 1, &t);
             for linea in banner.lines() {
                 let ancho = crate::current_dir::strip_ansi(linea).chars().count();

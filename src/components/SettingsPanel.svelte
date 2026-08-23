@@ -13,6 +13,7 @@
 
     import * as api from "../lib/api";
     import { app } from "../lib/appState.svelte";
+    import { normalizeShortcut, SHORTCUT_PREFERENCE_KEYS } from "../lib/shortcuts";
     import type { PluginInfo, Preferences, ThemePreset, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
     import Panel from "./Panel.svelte";
 
@@ -35,6 +36,7 @@
     let windowsIntegration = $state<WindowsIntegrationStatus | null>(null);
     let environmentQuery = $state("");
     let environmentGroup = $state("all");
+    let loadSerial = 0;
 
     const PLATFORM_NAMES: Record<string, string> = {
         windows: "Windows",
@@ -43,14 +45,19 @@
     };
 
     export async function load(): Promise<void> {
+        const serial = ++loadSerial;
         status = "";
         statusError = false;
         section = "appearance";
         // Se piden al backend en vez de reutilizar las que ya hay en memoria:
         // el archivo puede haber cambiado por fuera.
         await app.reloadPreferences();
-        plugins = await api.listPlugins();
-        windowsIntegration = app.appInfo?.platform === "windows" ? await api.getWindowsIntegration() : null;
+        const nextPlugins = await api.listPlugins();
+        const nextWindowsIntegration =
+            app.appInfo?.platform === "windows" ? await api.getWindowsIntegration() : null;
+        if (serial !== loadSerial) return;
+        plugins = nextPlugins;
+        windowsIntegration = nextWindowsIntegration;
         draft = app.preferences ? { ...app.preferences } : null;
     }
 
@@ -111,14 +118,46 @@
         for (const environment of visibleEnvironments) setEnvironmentEnabled(environment.id, enabled);
     }
 
+    const bannerItems = [
+        { id: "system", label: "Sistema", description: "Distribución o versión de Windows." },
+        { id: "host", label: "Equipo", description: "Nombre del equipo." },
+        { id: "kernel", label: "Kernel", description: "Versión del kernel o de Windows." },
+        { id: "environment", label: "Entorno", description: "Shell o entorno activo." },
+        { id: "motherboard", label: "Placa", description: "Fabricante y modelo de placa." },
+        { id: "cpu", label: "CPU", description: "Procesador e hilos." },
+        { id: "gpu", label: "GPU", description: "Tarjeta gráfica." },
+        { id: "memory", label: "Memoria", description: "Uso de RAM y velocidad." },
+        { id: "storage", label: "Discos", description: "Uso de unidades." },
+        { id: "uptime", label: "Tiempo activo", description: "Tiempo desde el arranque." },
+        { id: "datetime", label: "Fecha", description: "Fecha y hora actuales." },
+    ] as const;
+
+    function bannerItemEnabled(id: string): boolean {
+        return !(draft?.bannerHiddenItems ?? "").split(",").filter(Boolean).includes(id);
+    }
+
+    function setBannerItemEnabled(id: string, enabled: boolean): void {
+        if (!draft) return;
+        const hidden = new Set(draft.bannerHiddenItems.split(",").filter(Boolean));
+        if (enabled) hidden.delete(id);
+        else hidden.add(id);
+        draft.bannerHiddenItems = [...hidden].join(",");
+    }
+
+    function setBannerPreset(preset: "full" | "compact"): void {
+        if (!draft) return;
+        draft.bannerHiddenItems = preset === "full"
+            ? ""
+            : ["host", "kernel", "environment", "motherboard", "gpu", "datetime"].join(",");
+    }
+
     async function save(event: SubmitEvent): Promise<void> {
         event.preventDefault();
         if (!draft || saving) return;
-        const shortcuts = [
-            draft.shortcutNewTab, draft.shortcutNextTab, draft.shortcutPreviousTab,
-            draft.shortcutCyclePanes, draft.shortcutToggleExplorer, draft.shortcutPaneLeft,
-            draft.shortcutPaneRight, draft.shortcutPaneUp, draft.shortcutPaneDown,
-        ].map((shortcut) => shortcut.trim().toLowerCase());
+        const currentDraft = draft;
+        const shortcuts = SHORTCUT_PREFERENCE_KEYS.map((key) =>
+            normalizeShortcut(currentDraft[key]) || currentDraft[key].trim().toLowerCase()
+        );
         if (new Set(shortcuts).size !== shortcuts.length) {
             statusError = true;
             status = app.t("settings.shortcutConflict", "Dos acciones no pueden usar el mismo atajo.");
@@ -126,7 +165,12 @@
         }
         saving = true;
         try {
-            await app.savePreferences(draft);
+            const normalizedDraft = { ...draft };
+            for (const key of SHORTCUT_PREFERENCE_KEYS) {
+                const normalized = normalizeShortcut(normalizedDraft[key]);
+                if (normalized) normalizedDraft[key] = normalized;
+            }
+            await app.savePreferences(normalizedDraft);
             // El backend devuelve lo que de verdad se guardó: el borrador se
             // rehace con eso para que un valor corregido se vea corregido.
             draft = app.preferences ? { ...app.preferences } : null;
@@ -175,7 +219,9 @@
         const result = await api.exportProfile(app.appInfo?.platform ?? "linux");
         if (!result) return;
         statusError = !result.ok;
-        status = result.ok ? "Perfil portable exportado como script." : (result.error ?? "No se pudo exportar el perfil.");
+        status = result.ok
+            ? app.t("settings.profileExported", "Perfil portable exportado como script.")
+            : (result.error ?? app.t("settings.profileExportFailed", "No se pudo exportar el perfil."));
     }
 
     async function importProfile(): Promise<void> {
@@ -183,12 +229,12 @@
         if (!result) return;
         statusError = !result.ok;
         if (!result.ok) {
-            status = result.error ?? "No se pudo importar el perfil.";
+            status = result.error ?? app.t("settings.profileImportFailed", "No se pudo importar el perfil.");
             return;
         }
         await app.reloadPreferences();
         draft = app.preferences ? { ...app.preferences } : null;
-        status = "Perfil importado, validado y aplicado.";
+        status = app.t("settings.profileImported", "Perfil importado, validado y aplicado.");
     }
 
     async function installPlugin(): Promise<void> {
@@ -196,7 +242,7 @@
             const installed = await api.installPlugin();
             if (installed) plugins = installed;
             statusError = false;
-            status = installed ? "Plugin instalado. Reescanea los entornos para aplicar sus aportaciones." : "";
+            status = installed ? app.t("settings.pluginInstalled", "Plugin instalado. Reescanea los entornos para aplicar sus aportaciones.") : "";
         } catch (cause) {
             statusError = true;
             status = String(cause);
@@ -218,7 +264,7 @@
             plugins = await api.removePlugin(plugin.id);
             await app.refreshEnvironments();
             statusError = false;
-            status = "Plugin retirado y conservado en la carpeta de respaldos.";
+            status = app.t("settings.pluginRemoved", "Plugin retirado y conservado en la carpeta de respaldos.");
         } catch (cause) {
             statusError = true;
             status = String(cause);
@@ -230,7 +276,7 @@
         try {
             windowsIntegration = await api.setWindowsIntegration(!windowsIntegration.contextMenuRegistered);
             statusError = false;
-            status = "Integración de Windows actualizada para el usuario actual.";
+            status = app.t("settings.windowsIntegrationUpdated", "Integración de Windows actualizada para el usuario actual.");
         } catch (cause) {
             statusError = true;
             status = String(cause);
@@ -394,13 +440,13 @@
                                 bind:value={draft.accentColor}
                             />
                         </label>
-                        <label class="field"><span>Fondo de la aplicación</span><input type="color" bind:value={draft.uiBackgroundColor} /></label>
-                        <label class="field"><span>Superficie principal</span><input type="color" bind:value={draft.uiSurfaceColor} /></label>
-                        <label class="field"><span>Superficie secundaria</span><input type="color" bind:value={draft.uiSurfaceAltColor} /></label>
-                        <label class="field"><span>Bordes</span><input type="color" bind:value={draft.uiBorderColor} /></label>
-                        <label class="field"><span>Texto de interfaz</span><input type="color" bind:value={draft.uiTextColor} /></label>
-                        <label class="field"><span>Texto atenuado</span><input type="color" bind:value={draft.uiMutedColor} /></label>
-                        <label class="field"><span>Selección de terminal</span><input type="color" bind:value={draft.terminalSelectionColor} /></label>
+                        <label class="field"><span>{app.t("settings.uiBackground", "Fondo de la aplicación")}</span><input type="color" bind:value={draft.uiBackgroundColor} /></label>
+                        <label class="field"><span>{app.t("settings.uiSurface", "Superficie principal")}</span><input type="color" bind:value={draft.uiSurfaceColor} /></label>
+                        <label class="field"><span>{app.t("settings.uiSurfaceAlt", "Superficie secundaria")}</span><input type="color" bind:value={draft.uiSurfaceAltColor} /></label>
+                        <label class="field"><span>{app.t("settings.uiBorder", "Bordes")}</span><input type="color" bind:value={draft.uiBorderColor} /></label>
+                        <label class="field"><span>{app.t("settings.uiText", "Texto de interfaz")}</span><input type="color" bind:value={draft.uiTextColor} /></label>
+                        <label class="field"><span>{app.t("settings.uiMuted", "Texto atenuado")}</span><input type="color" bind:value={draft.uiMutedColor} /></label>
+                        <label class="field"><span>{app.t("settings.terminalSelection", "Selección de terminal")}</span><input type="color" bind:value={draft.terminalSelectionColor} /></label>
                         <label class="field">
                             <span
                                 >{app.t(
@@ -697,6 +743,35 @@
                             >
                         </span>
                     </label>
+                    <div class="banner-settings">
+                        <div class="heading">
+                            <strong>{app.t("settings.bannerSections", "Información del banner")}</strong>
+                            <span>{app.t("settings.bannerSectionsHint", "El mínimo siempre reserva cinco filas para escribir. Guarda los cambios para repintar las pestañas.")}</span>
+                        </div>
+                        <div class="banner-presets">
+                            <button type="button" class="secondary" onclick={() => setBannerPreset("full")}>
+                                {app.t("settings.bannerFull", "Mostrar todo")}
+                            </button>
+                            <button type="button" class="secondary" onclick={() => setBannerPreset("compact")}>
+                                {app.t("settings.bannerCompact", "Solo esencial")}
+                            </button>
+                        </div>
+                        <div class="banner-items">
+                            {#each bannerItems as item (item.id)}
+                                <label class="check banner-item">
+                                    <input
+                                        type="checkbox"
+                                        checked={bannerItemEnabled(item.id)}
+                                        onchange={(event) => setBannerItemEnabled(item.id, (event.currentTarget as HTMLInputElement).checked)}
+                                    />
+                                    <span>
+                                        <strong>{app.t(`settings.banner.${item.id}`, item.label)}</strong>
+                                        <small>{item.description}</small>
+                                    </span>
+                                </label>
+                            {/each}
+                        </div>
+                    </div>
                 </section>
             {/if}
 
@@ -874,17 +949,17 @@
                     <label class="check"><input type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong></span></label>
                     <label class="check"><input data-testid="settings-show-explorer" type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong></span></label>
                     <div class="heading">
-                        <strong>Entornos habilitados</strong>
-                        <span>Oculta shells, contenedores, dispositivos o REPL concretos sin desinstalarlos.</span>
+                        <strong>{app.t("settings.enabledEnvironments", "Entornos habilitados")}</strong>
+                        <span>{app.t("settings.enabledEnvironmentsHint", "Oculta shells, contenedores, dispositivos o REPL concretos sin desinstalarlos.")}</span>
                     </div>
                     <div class="environment-controls">
                         <input type="search" bind:value={environmentQuery} placeholder={app.t("env.search", "Buscar shell, REPL o contenedor…")} aria-label={app.t("settings.environmentSearch", "Buscar entornos")} />
                         <select bind:value={environmentGroup} aria-label={app.t("settings.environmentFilter", "Filtrar entornos por grupo")}>
-                            <option value="all">Todos los grupos</option>
+                            <option value="all">{app.t("settings.allGroups", "Todos los grupos")}</option>
                             {#each environmentGroups as group (group)}<option value={group}>{group}</option>{/each}
                         </select>
-                        <button type="button" class="secondary" onclick={() => setVisibleEnvironmentsEnabled(true)}>Activar visibles</button>
-                        <button type="button" class="secondary" onclick={() => setVisibleEnvironmentsEnabled(false)}>Desactivar visibles</button>
+                        <button type="button" class="secondary" onclick={() => setVisibleEnvironmentsEnabled(true)}>{app.t("settings.enableVisible", "Activar visibles")}</button>
+                        <button type="button" class="secondary" onclick={() => setVisibleEnvironmentsEnabled(false)}>{app.t("settings.disableVisible", "Desactivar visibles")}</button>
                     </div>
                     <div class="environment-toggles">
                         {#each visibleEnvironments as environment (environment.id)}
@@ -906,66 +981,68 @@
                         <span>{app.t("settings.manualAliasesHint", "Uno por línea: nombre=comando. Admite comandos compuestos; Fish los convierte en functions y conserva $argv. Se aplican a pestañas nuevas.")}</span>
                     </div>
                     <label class="field wide alias-editor">
-                        <textarea rows="6" spellcheck="false" placeholder="serve=npm run dev&#10;gs=git status" bind:value={draft.manualAliasesText}></textarea>
+                        <textarea rows="6" spellcheck="false" placeholder={app.t("settings.aliasExample", "serve=npm run dev&#10;gs=git status")} bind:value={draft.manualAliasesText}></textarea>
                     </label>
                     <div class="heading">
                         <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
                         <span>{app.t("settings.shortcutsHint", "Usa combinaciones como Ctrl+Shift+T. Navegación directa: Control derecho + W/A/S/D, sin interferir con el Control izquierdo de la shell.")}</span>
                     </div>
                     <div class="shortcut-preset" aria-label={app.t("settings.shortcutsNavigation", "Navegación fija entre paneles")}>
-                        <span><kbd>Ctrl derecho</kbd> + <kbd>W</kbd> arriba</span>
-                        <span><kbd>Ctrl derecho</kbd> + <kbd>A</kbd> izquierda</span>
-                        <span><kbd>Ctrl derecho</kbd> + <kbd>S</kbd> abajo</span>
-                        <span><kbd>Ctrl derecho</kbd> + <kbd>D</kbd> derecha</span>
+                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>W</kbd> {app.t("settings.shortcutUp", "arriba")}</span>
+                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>A</kbd> {app.t("settings.shortcutLeft", "izquierda")}</span>
+                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>S</kbd> {app.t("settings.shortcutDown", "abajo")}</span>
+                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>D</kbd> {app.t("settings.shortcutRight", "derecha")}</span>
                     </div>
                     <div class="field-grid">
-                        <label class="field"><span>Nueva pestaña</span><input spellcheck="false" bind:value={draft.shortcutNewTab} /></label>
-                        <label class="field"><span>Pestaña siguiente</span><input spellcheck="false" bind:value={draft.shortcutNextTab} /></label>
-                        <label class="field"><span>Pestaña anterior</span><input spellcheck="false" bind:value={draft.shortcutPreviousTab} /></label>
-                        <label class="field"><span>Dividir terminales</span><input spellcheck="false" bind:value={draft.shortcutCyclePanes} /></label>
-                        <label class="field"><span>Mostrar explorador</span><input spellcheck="false" bind:value={draft.shortcutToggleExplorer} /></label>
-                        <label class="field"><span>Foco a la izquierda</span><input spellcheck="false" bind:value={draft.shortcutPaneLeft} /></label>
-                        <label class="field"><span>Foco a la derecha</span><input spellcheck="false" bind:value={draft.shortcutPaneRight} /></label>
-                        <label class="field"><span>Foco arriba</span><input spellcheck="false" bind:value={draft.shortcutPaneUp} /></label>
-                        <label class="field"><span>Foco abajo</span><input spellcheck="false" bind:value={draft.shortcutPaneDown} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutNewTab", "Nueva pestaña")}</span><input spellcheck="false" bind:value={draft.shortcutNewTab} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutNextTab", "Pestaña siguiente")}</span><input spellcheck="false" bind:value={draft.shortcutNextTab} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutPreviousTab", "Pestaña anterior")}</span><input spellcheck="false" bind:value={draft.shortcutPreviousTab} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutCyclePanes", "Dividir terminales")}</span><input spellcheck="false" bind:value={draft.shortcutCyclePanes} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutToggleExplorer", "Mostrar explorador")}</span><input spellcheck="false" bind:value={draft.shortcutToggleExplorer} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutPaneLeft", "Foco a la izquierda")}</span><input spellcheck="false" bind:value={draft.shortcutPaneLeft} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutPaneRight", "Foco a la derecha")}</span><input spellcheck="false" bind:value={draft.shortcutPaneRight} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutPaneUp", "Foco arriba")}</span><input spellcheck="false" bind:value={draft.shortcutPaneUp} /></label>
+                        <label class="field"><span>{app.t("settings.shortcutPaneDown", "Foco abajo")}</span><input spellcheck="false" bind:value={draft.shortcutPaneDown} /></label>
                     </div>
                     <div class="heading">
                         <strong>{app.t("settings.profiles", "Perfiles portables")}</strong>
-                        <span>Genera un .sh o .ps1 que detecta la aplicación, la instala desde GitHub si falta y restaura configuración y plugins declarativos. No incluye sesiones, tokens, contraseñas, claves privadas ni binarios.</span>
+                        <span>{app.t("settings.profilesHint", "Genera un .sh o .ps1 que detecta la aplicación, la instala desde GitHub si falta y restaura configuración y plugins declarativos. No incluye sesiones, tokens, contraseñas, claves privadas ni binarios.")}</span>
                     </div>
                     <div class="update-row">
-                        <button type="button" class="secondary" onclick={exportProfile}>Exportar perfil</button>
-                        <button type="button" class="secondary" onclick={importProfile}>Importar perfil</button>
+                        <button type="button" class="secondary" onclick={exportProfile}>{app.t("settings.exportProfile", "Exportar perfil")}</button>
+                        <button type="button" class="secondary" onclick={importProfile}>{app.t("settings.importProfile", "Importar perfil")}</button>
                     </div>
                     <div class="heading">
                         <strong>{app.t("settings.plugins", "Plugins")}</strong>
                         <span>{app.t("settings.pluginsHint", "Extensiones declarativas validadas; no cargan código dentro de la aplicación.")}</span>
                     </div>
                     <div class="update-row">
-                        <button type="button" class="secondary" onclick={installPlugin}>Instalar plugin.json</button>
+                        <button type="button" class="secondary" onclick={installPlugin}>{app.t("settings.installPlugin", "Instalar plugin.json")}</button>
                     </div>
                     {#if plugins.length === 0}
-                        <div class="field-hint">No hay plugins instalados.</div>
+                        <div class="field-hint">{app.t("settings.noPlugins", "No hay plugins instalados.")}</div>
                     {:else}
                         {#each plugins as plugin (plugin.id)}
                             <div class="check">
                                 <input type="checkbox" checked={plugin.enabled} disabled={Boolean(plugin.error)} onchange={() => togglePlugin(plugin)} />
                                 <span><strong>{plugin.name} {plugin.version}</strong><small>{plugin.error ?? plugin.description ?? `${plugin.technologyCount} tecnologías`}</small></span>
-                                <button type="button" class="secondary" onclick={() => removePlugin(plugin)}>Retirar</button>
+                                <button type="button" class="secondary" onclick={() => removePlugin(plugin)}>{app.t("settings.removePlugin", "Retirar")}</button>
                             </div>
                         {/each}
                     {/if}
                     {#if windowsIntegration?.supported}
                         <div class="heading">
-                            <strong>Integración de Windows</strong>
+                            <strong>{app.t("settings.windowsIntegration", "Integración de Windows")}</strong>
                             <span>{windowsIntegration.note}</span>
                         </div>
                         <label class="check">
                             <input type="checkbox" checked={windowsIntegration.contextMenuRegistered} onchange={toggleWindowsIntegration} />
-                            <span><strong>Menús «Abrir con WinSlim Terminal», App Paths y protocolo winslim://</strong><small>Se registra únicamente en HKCU para el usuario actual.</small></span>
+                            <span><strong>{app.t("settings.windowsContext", "Menús «Abrir con WinSlim Terminal», App Paths y protocolo winslim://")}</strong><small>{app.t("settings.windowsUserScope", "Se registra únicamente en HKCU para el usuario actual.")}</small></span>
                         </label>
                         <div class="field-hint">
-                            NSudo: {windowsIntegration.nsudoAvailable ? `detectado en ${windowsIntegration.nsudoPath}` : "no instalado; puede instalarse desde Entorno y dependencias"}.
+                            NSudo: {windowsIntegration.nsudoAvailable
+                                ? app.t("settings.nsudoDetected", "detectado en {path}").replace("{path}", windowsIntegration.nsudoPath ?? "")
+                                : app.t("settings.nsudoMissing", "no instalado; puede instalarse desde Entorno y dependencias")}.
                         </div>
                     {/if}
                 </section>
@@ -1050,8 +1127,13 @@
                         {#if updating && updateProgress}
                             <div class="field-hint" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={updateProgress.percent}>
                                 {updateProgress.stage === "download"
-                                    ? `Descargando: ${updateProgress.percent ?? "…"}% (${Math.round(updateProgress.bytes / 1048576)} MiB${updateProgress.total ? ` / ${Math.round(updateProgress.total / 1048576)} MiB` : ""})`
-                                    : updateProgress.stage === "extract" ? "Preparando los archivos…" : "Descarga completada."}
+                                    ? app.t("update.downloading", "Descargando: {percent}% ({current} MiB{total})")
+                                        .replace("{percent}", String(updateProgress.percent ?? "…"))
+                                        .replace("{current}", String(Math.round(updateProgress.bytes / 1048576)))
+                                        .replace("{total}", updateProgress.total ? ` / ${Math.round(updateProgress.total / 1048576)} MiB` : "")
+                                    : updateProgress.stage === "extract"
+                                        ? app.t("update.preparing", "Preparando los archivos…")
+                                        : app.t("update.downloaded", "Descarga completada.")}
                             </div>
                         {/if}
                         <div class="field-hint">
@@ -1062,7 +1144,7 @@
                     {/if}
 
                     <div class="heading">
-                        <strong>Desarrollador principal</strong>
+                        <strong>{app.t("settings.primaryDeveloper", "Desarrollador principal")}</strong>
                         <span
                             >{app.t(
                                 "settings.developersHint",
@@ -1083,7 +1165,7 @@
                                     )}
                                 onclick={() => api.openInGithub(primaryDeveloper)}
                             >
-                                @{primaryDeveloper} · Desarrollador principal
+                                    @{primaryDeveloper} · {app.t("settings.primaryDeveloper", "Desarrollador principal")}
                             </button>
                         {:else}
                             <span class="field-hint">
@@ -1096,8 +1178,8 @@
                     </div>
                     {#if (app.appInfo?.collaborators ?? []).length}
                         <div class="heading">
-                            <strong>Colaboradores</strong>
-                            <span>Personas que colaboran específicamente con esta distribución.</span>
+                            <strong>{app.t("settings.collaborators", "Colaboradores")}</strong>
+                            <span>{app.t("settings.collaboratorsHint", "Personas que colaboran específicamente con esta distribución.")}</span>
                         </div>
                         <div class="developers">
                             {#each app.appInfo?.collaborators ?? [] as collaborator (collaborator.login)}
@@ -1528,6 +1610,51 @@
         font-size: 10px;
         text-overflow: ellipsis;
         white-space: nowrap;
+    }
+
+    .banner-settings {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 8px;
+        padding: 9px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-alt);
+    }
+
+    .banner-presets {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .banner-presets button {
+        padding: 5px 10px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface);
+        color: var(--text);
+        font: inherit;
+        font-size: 10px;
+        cursor: pointer;
+    }
+
+    .banner-presets button:hover {
+        border-color: var(--accent);
+        background: var(--surface-hover);
+    }
+
+    .banner-items {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 4px 8px;
+    }
+
+    .banner-item {
+        min-width: 0;
+        margin: 0;
+        padding: 4px 0;
     }
 
     .footer {

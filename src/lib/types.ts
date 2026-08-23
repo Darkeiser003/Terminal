@@ -103,6 +103,7 @@ export interface Preferences {
     exclusiveAccordionGroups: boolean;
     autoOpenFirstGroup: boolean;
     showSystemBanner: boolean;
+    bannerHiddenItems: string;
     showDependenciesPanel: boolean;
     showProjectsPanel: boolean;
     showScriptsPanel: boolean;
@@ -193,7 +194,7 @@ export interface WindowsIntegrationStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'alias' | 'help';
+    action: 'config' | 'reload' | 'repl' | 'alias' | 'help' | 'banner';
     argument?: string;
 }
 
@@ -522,7 +523,11 @@ export interface InstallAction {
     groupKey: string | null;
     /** Plegable de segundo nivel: todas las acciones de una herramienta. */
     subgroup: string | null;
+    /** Descripción breve del programa que encabeza el plegable. */
+    subgroupDescription: string | null;
     verb: string | null;
+    /** Cierre específico para acciones que no son una instalación. */
+    done: string | null;
     hint: string | null;
     /** `powershell` si el comando necesita esa shell; el backend lo adapta a la
      *  de la pestaña antes de escribirlo. */
@@ -534,15 +539,8 @@ export interface InstallAction {
     installed: boolean | null;
 }
 
-/** Un dato del resumen de arriba del panel ("Docker: Listo (2 activos)"). */
-export interface InstallComponent {
-    label: string;
-    value: string;
-}
-
 export interface InstallList {
     actions: InstallAction[];
-    components: InstallComponent[];
 }
 
 export interface InstallRunResult {

@@ -81,6 +81,9 @@ pub struct InstallAction {
     pub group: String,
     pub subgroup: Option<String>,
     pub verb: Option<String>,
+    /// Texto específico de cierre para acciones que no instalan nada (por
+    /// ejemplo, abrir una descarga). Si falta, se usa el cierre genérico.
+    pub done: Option<String>,
     pub hint: Option<String>,
     pub shell: Option<String>,
     pub check_cmd: Option<String>,
@@ -92,6 +95,9 @@ pub struct InstallAction {
     /// La clave de traducción del apartado. La rellena `translated`, en la
     /// frontera con el frontend: el catálogo no conoce los idiomas.
     pub group_key: Option<&'static str>,
+    /// Explica qué hace la herramienta del acordeón. Solo se usa en los
+    /// apartados que necesitan distinguir varias utilidades parecidas.
+    pub subgroup_description: Option<String>,
 }
 
 impl InstallAction {
@@ -108,12 +114,14 @@ impl InstallAction {
             group: String::new(),
             subgroup: None,
             verb: None,
+            done: None,
             hint: None,
             shell: None,
             check_cmd: None,
             requires_cmd: None,
             installed: None,
             group_key: None,
+            subgroup_description: None,
         }
     }
 
@@ -154,6 +162,18 @@ impl InstallAction {
                 texto
             })
         };
+        let subgroup_description = self
+            .subgroup
+            .as_deref()
+            .zip(self.subgroup_description.as_deref())
+            .map(|(subgroup, description)| {
+                crate::i18n::translate(
+                    language,
+                    &format!("action.subgroupDescription.{subgroup}"),
+                    &[],
+                    description,
+                )
+            });
         InstallAction {
             label: campo("label", &Some(self.label.clone())).unwrap_or_default(),
             short_label: campo("shortLabel", &self.short_label),
@@ -174,6 +194,7 @@ impl InstallAction {
                 )
             }),
             group_key: crate::i18n::group_key_for(&self.group),
+            subgroup_description,
             ..self.clone()
         }
     }
@@ -193,8 +214,18 @@ impl InstallAction {
         self
     }
 
+    fn subgroup_description(mut self, description: impl Into<String>) -> Self {
+        self.subgroup_description = Some(description.into());
+        self
+    }
+
     fn verb(mut self, verb: &str) -> Self {
         self.verb = Some(verb.to_string());
+        self
+    }
+
+    fn done(mut self, done: impl Into<String>) -> Self {
+        self.done = Some(done.into());
         self
     }
 
@@ -237,6 +268,9 @@ pub struct InstallContext {
     pub pkg_manager: Option<String>,
     pub wsl: Option<WslContext>,
     pub has_snap: bool,
+    /// Flatpak permite ofrecer aplicaciones que no existen en los repositorios
+    /// de la distribución, como Bottles en Arch/CachyOS.
+    pub has_flatpak: bool,
     /// `paru` o `yay` si alguno está instalado (solo Arch).
     pub aur_helper: Option<String>,
     pub projects_folder: String,
@@ -387,6 +421,9 @@ struct WindowsTool {
     label: &'static str,
     cmd: &'static str,
     pkg: &'static str,
+    /// Sonda alternativa para aplicaciones que instalan el ejecutable fuera
+    /// del PATH (QEMU, VirtualBox y VMware).
+    detect: Option<&'static str>,
     verify: Option<&'static str>,
     group: &'static str,
     hint: Option<&'static str>,
@@ -407,6 +444,7 @@ const fn win(
         label,
         cmd,
         pkg,
+        detect: None,
         verify,
         group,
         hint: None,
@@ -470,6 +508,18 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-helm",    "Kubernetes · Helm", "helm", "Helm.Helm",                     Some("helm version --short"),          DOCKER_GROUP),
     win("winget-k9s",     "Kubernetes · k9s (interactivo)", "k9s", "Derailed.k9s",       Some("k9s version --short"),           DOCKER_GROUP),
     WindowsTool {
+        detect: Some("powershell:if (Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { exit 0 } else { exit 1 }"),
+        ..win("winget-qemu", "QEMU", "qemu-system-x86_64", "SoftwareFreedomConservancy.QEMU", Some("qemu-system-x86_64 --version"), WINDOWS_COMPAT_GROUP)
+    },
+    WindowsTool {
+        detect: Some("powershell:if (Get-Command VBoxManage.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { exit 0 } else { exit 1 }"),
+        ..win("winget-virtualbox", "Oracle VirtualBox", "VBoxManage", "Oracle.VirtualBox", Some("VBoxManage --version"), WINDOWS_COMPAT_GROUP)
+    },
+    WindowsTool {
+        detect: Some("powershell:if (Get-Command vmrun.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe')) { exit 0 } else { exit 1 }"),
+        ..win("winget-vmware", "VMware Workstation Pro", "vmrun", "VMware.WorkstationPro", Some("vmrun -T ws version"), WINDOWS_COMPAT_GROUP)
+    },
+    WindowsTool {
         hint: Some("Requiere WSL2 y normalmente pide reiniciar Windows antes de poder usarse."),
         ..win("winget-docker", "Docker Desktop", "docker", "Docker.DockerDesktop", Some("docker --version"), DOCKER_GROUP)
     },
@@ -529,7 +579,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
     let detect = if tool.no_detect || tool.cmd.is_empty() {
         None
     } else {
-        Some(tool.cmd)
+        tool.detect.or(Some(tool.cmd))
     };
     // Nombres como "VLC (audio y vídeo)" llevan una coletilla descriptiva que
     // sí se traduce; el nombre propio de dentro, no.
@@ -718,6 +768,10 @@ struct PkgTool {
     label: &'static str,
     cmd: &'static str,
     pkgs: &'static [(&'static str, &'static str)],
+    /// Paquete alternativo del AUR para Arch cuando no existe equivalente en
+    /// los repositorios oficiales. No es un respaldo silencioso de `pkgs`:
+    /// requiere un ayudante AUR detectado explícitamente.
+    aur_package: Option<&'static str>,
     verify: Option<&'static str>,
     group: &'static str,
     /// Medio sistema depende de él: su desinstalación no se automatiza.
@@ -739,6 +793,7 @@ const fn pkg(
         label,
         cmd,
         pkgs,
+        aur_package: None,
         verify,
         group,
         core: false,
@@ -778,7 +833,7 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-nasm", "Ensamblador · NASM", "nasm", &[("default", "nasm")], Some("nasm -version"), LANGUAGES_GROUP),
     pkg("pkg-yasm", "Ensamblador · YASM", "yasm", &[("default", "yasm")], Some("yasm --version"), LANGUAGES_GROUP),
     pkg("pkg-binutils", "Ensamblador · GNU binutils", "as", &[("default", "binutils")], Some("as --version"), LANGUAGES_GROUP),
-    pkg("pkg-gfortran", "Fortran · GNU", "gfortran", &[("default", "gfortran")], Some("gfortran --version"), LANGUAGES_GROUP),
+    pkg("pkg-gfortran", "Fortran · GNU", "gfortran", &[("default", "gfortran"), ("pacman", "gcc-fortran")], Some("gfortran --version"), LANGUAGES_GROUP),
     pkg("pkg-haxe", "Haxe", "haxe", &[("default", "haxe")], Some("haxe --version"), LANGUAGES_GROUP),
     pkg("pkg-guile", "Scheme · Guile", "guile", &[("default", "guile")], Some("guile --version"), LANGUAGES_GROUP),
     pkg("pkg-sbcl", "Common Lisp · SBCL", "sbcl", &[("default", "sbcl")], Some("sbcl --version"), LANGUAGES_GROUP),
@@ -786,19 +841,23 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-octave", "GNU Octave", "octave", &[("default", "octave")], Some("octave --version"), LANGUAGES_GROUP),
     pkg("pkg-maxima", "Maxima", "maxima", &[("default", "maxima")], Some("maxima --version"), LANGUAGES_GROUP),
     pkg("pkg-swipl", "Prolog · SWI", "swipl", &[("default", "swi-prolog")], Some("swipl --version"), LANGUAGES_GROUP),
-    pkg("pkg-gforth", "Forth · Gforth", "gforth", &[("default", "gforth")], Some("gforth --version"), LANGUAGES_GROUP),
+    PkgTool { aur_package: Some("gforth"), ..pkg("pkg-gforth", "Forth · Gforth", "gforth", &[], Some("gforth --version"), LANGUAGES_GROUP) },
     pkg("pkg-dotnet-sdk", "C#/F# · .NET SDK", "dotnet", &[("apt", "dotnet-sdk-8.0"), ("pacman", "dotnet-sdk"), ("dnf", "dotnet-sdk-8.0"), ("zypper", "dotnet-sdk-8.0")], Some("dotnet --info"), LANGUAGES_GROUP),
     PkgTool { label_key: Some("tool.nodeNpm"), ..pkg("pkg-node", "Node.js + npm", "node", &[("default", "nodejs npm")], Some("node -v; npm -v"), LANGUAGES_GROUP) },
     pkg("pkg-typescript", "TypeScript + ts-node", "tsc", &[("default", "node-typescript"), ("apt", "node-typescript"), ("dnf", "typescript"), ("pacman", "typescript"), ("zypper", "node-typescript"), ("apk", "typescript")], Some("tsc --version"), LANGUAGES_GROUP),
     pkg("pkg-deno", "Deno", "deno", &[("default", "deno")], Some("deno --version"), LANGUAGES_GROUP),
     pkg("pkg-bun", "Bun", "bun", &[("default", "bun")], Some("bun --version"), LANGUAGES_GROUP),
     pkg("pkg-kotlin", "Kotlin", "kotlinc", &[("default", "kotlin")], Some("kotlinc -version"), LANGUAGES_GROUP),
-    pkg("pkg-scala", "Scala", "scala", &[("default", "scala")], Some("scala -version"), LANGUAGES_GROUP),
+    // El paquete AUR `scala3` instala el launcher con ese mismo nombre en
+    // Arch; no crea el alias histórico `/usr/bin/scala`. Usar el binario
+    // real evita que el panel vuelva a ofrecer instalarlo después de una
+    // instalación correcta.
+    PkgTool { aur_package: Some("scala3"), ..pkg("pkg-scala", "Scala", "scala3", &[], Some("scala3 -version"), LANGUAGES_GROUP) },
     pkg("pkg-dart", "Dart", "dart", &[("default", "dart")], Some("dart --version"), LANGUAGES_GROUP),
     pkg("pkg-zig", "Zig", "zig", &[("default", "zig")], Some("zig version"), LANGUAGES_GROUP),
     pkg("pkg-nim", "Nim", "nim", &[("default", "nim")], Some("nim --version"), LANGUAGES_GROUP),
     pkg("pkg-crystal", "Crystal", "crystal", &[("default", "crystal")], Some("crystal --version"), LANGUAGES_GROUP),
-    pkg("pkg-swift", "Swift", "swift", &[("default", "swift")], Some("swift --version"), LANGUAGES_GROUP),
+    PkgTool { aur_package: Some("swift-bin"), ..pkg("pkg-swift", "Swift", "swift", &[], Some("swift --version"), LANGUAGES_GROUP) },
     pkg("pkg-maven", "Java · Maven", "mvn", &[("default", "maven")], Some("mvn --version"), LANGUAGES_GROUP),
     pkg("pkg-gradle", "JVM · Gradle", "gradle", &[("default", "gradle")], Some("gradle --version"), LANGUAGES_GROUP),
     pkg("pkg-ant", "Java · Ant", "ant", &[("default", "ant")], Some("ant -version"), LANGUAGES_GROUP),
@@ -837,7 +896,7 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-mysql", "MySQL + InnoDB", "mysql", &[("apt", "default-mysql-client"), ("dnf", "mysql"), ("pacman", "mariadb"), ("zypper", "mysql-client"), ("apk", "mysql-client")], Some("mysql --version"), LANGUAGES_GROUP),
     pkg("pkg-postgresql", "PostgreSQL + psql", "psql", &[("default", "postgresql"), ("apt", "postgresql-client"), ("dnf", "postgresql"), ("pacman", "postgresql"), ("zypper", "postgresql"), ("apk", "postgresql-client")], Some("psql --version"), LANGUAGES_GROUP),
     pkg("pkg-duckdb", "DuckDB", "duckdb", &[("default", "duckdb")], Some("duckdb --version"), LANGUAGES_GROUP),
-    pkg("pkg-mongosh", "MongoDB · mongosh", "mongosh", &[("default", "mongodb-mongosh")], Some("mongosh --version"), LANGUAGES_GROUP),
+    PkgTool { aur_package: Some("mongosh-bin"), ..pkg("pkg-mongosh", "MongoDB · mongosh", "mongosh", &[], Some("mongosh --version"), LANGUAGES_GROUP) },
     pkg("pkg-redis-cli", "Redis · redis-cli", "redis-cli", &[("default", "redis")], Some("redis-cli --version"), LANGUAGES_GROUP),
     pkg("pkg-openvpn", "OpenVPN", "openvpn", &[("default", "openvpn")], Some("openvpn --version"), SSH_GROUP),
     pkg("pkg-wireguard", "WireGuard", "wg", &[("default", "wireguard-tools")], Some("wg --version"), SSH_GROUP),
@@ -846,6 +905,27 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-k9s", "Kubernetes · k9s (interactivo)", "k9s", &[("pacman", "k9s")], Some("k9s version --short"), DOCKER_GROUP),
     pkg("pkg-tailscale", "Tailscale", "tailscale", &[("pacman", "tailscale"), ("apk", "tailscale")], Some("tailscale version"), SSH_GROUP),
 ]);
+
+/// Ejecutables que una distro WSL debe sondear para poder reutilizar este
+/// catálogo. WSL no debe tener una lista paralela de lenguajes y herramientas:
+/// cuando Linux incorpora una entrada, Windows la ve automáticamente dentro
+/// de la distro Linux. `paru` y `yay` no son herramientas del catálogo de
+/// usuario; se incluyen aparte porque habilitan los paquetes AUR.
+pub fn linux_tool_executables() -> Vec<String> {
+    let mut executables: Vec<String> = LINUX_TOOLS
+        .iter()
+        .map(|tool| tool.cmd.to_string())
+        .chain(
+            ["paru", "yay", "npm", "cargo", "g++", "clang++"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .filter(|executable| !executable.is_empty())
+        .collect();
+    executables.sort_unstable();
+    executables.dedup();
+    executables
+}
 
 #[rustfmt::skip]
 static LINUX_VIEWERS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
@@ -1003,6 +1083,129 @@ fn tool_lifecycle_actions(
     actions
 }
 
+/// Ciclo de vida de un paquete que vive en el AUR. No se mezcla con
+/// `PkgCommands`: pacman no puede instalarlo y `paru`/`yay` no deben invocarse
+/// con `sudo`, porque ellos mismos elevan solo las operaciones que lo
+/// necesitan y `makepkg` rechaza ejecutarse como root.
+fn aur_tool_lifecycle_actions(
+    tool: &PkgTool,
+    package: &str,
+    aur_helper: &str,
+    t: &Translator,
+) -> Vec<InstallAction> {
+    let label = match tool.label_key {
+        Some(key) => t.t(key, tool.label),
+        None => tool.label.to_string(),
+    };
+    let subgroup = label.clone();
+    let source = format!("AUR · {aur_helper}");
+    // `--noconfirm` no evita que paru abra el editor/revisión del PKGBUILD ni
+    // que busque proveedores alternativos. Eso dejaba el lote sin salida
+    // durante minutos detrás de `less` o esperando una respuesta invisible.
+    // Las acciones guiadas apuntan al paquete solicitado y son no interactivas.
+    let review_flags = if aur_helper == "paru" {
+        "--skipreview --noprovides"
+    } else {
+        // yay no tiene --skipreview: estas respuestas desactivan la revisión
+        // y edición interactivas del PKGBUILD y el menú de proveedores.
+        "--answerdiff=None --answeredit=None --noprovides"
+    };
+    let aur_install = format!("{aur_helper} -S {review_flags} --needed --noconfirm {package}");
+
+    let mut install = InstallAction::new(
+        tool.id,
+        t.tp(
+            "action.install",
+            &[("tool", label.clone()), ("source", source.clone())],
+            "Instalar {tool} ({source})",
+        ),
+        aur_install.clone(),
+    )
+    .short(t.tp(
+        "action.installShort",
+        &[("source", source.clone())],
+        "Instalar con {source}",
+    ))
+    .subgroup(&subgroup)
+    .group(tool.group)
+    .check(Some(tool.cmd));
+    if let Some(hint) = tool.hint {
+        install = install.hint(hint);
+    }
+    install = install.hint(format!(
+        "Este componente no está en los repositorios oficiales de Arch. Se instalará desde el AUR mediante {aur_helper} sin abrir el editor ni el paginador; se usará el paquete solicitado."
+    ));
+
+    let mut actions = vec![
+        install,
+        InstallAction::new(
+            format!("{}-update", tool.id),
+            t.tp(
+                "action.update",
+                &[("tool", label.clone())],
+                "Actualizar {tool}",
+            ),
+            aur_install,
+        )
+        .short(t.t("action.updateShort", "Actualizar a la última versión"))
+        .subgroup(&subgroup)
+        .group(tool.group)
+        .verb("Actualizar")
+        .requires(Some(tool.cmd)),
+        InstallAction::new(
+            format!("{}-uninstall", tool.id),
+            t.tp(
+                "action.uninstall",
+                &[("tool", label.clone())],
+                "Desinstalar {tool}",
+            ),
+            format!("{aur_helper} -Rns --noconfirm {package}"),
+        )
+        .short(t.t("action.uninstallShort", "Desinstalar del sistema"))
+        .subgroup(&subgroup)
+        .group(tool.group)
+        .verb("Desinstalar")
+        .requires(Some(tool.cmd))
+        .hint("Elimina el paquete AUR y sus dependencias huérfanas; revisa la lista antes de confirmar."),
+    ];
+    if let Some(verify) = tool.verify {
+        actions.push(
+            InstallAction::new(
+                format!("{}-version", tool.id),
+                t.tp(
+                    "action.version",
+                    &[("tool", label)],
+                    "Ver versión de {tool}",
+                ),
+                verify,
+            )
+            .short(t.t("action.versionShort", "Ver versión instalada"))
+            .subgroup(&subgroup)
+            .group(tool.group)
+            .verb("Versión")
+            .requires(Some(tool.cmd)),
+        );
+    }
+    actions
+}
+
+fn aur_helper_install_action(id: &str, group: &str) -> InstallAction {
+    InstallAction::new(
+        id,
+        "Instalar paru, asistente del AUR",
+        "sudo pacman -S --needed --noconfirm base-devel git \
+         && git clone https://aur.archlinux.org/paru-bin.git /tmp/paru-bin \
+         && cd /tmp/paru-bin && makepkg -si",
+    )
+    .short("Instalar el asistente del AUR")
+    .group(group)
+    .subgroup("AUR · paru")
+    .check(Some("paru"))
+    .hint(
+        "Varios componentes no existen en los repositorios oficiales de Arch y se publican en el AUR. Instala paru una vez, refresca el panel y aparecerán sus acciones reales de instalación, actualización y desinstalación.",
+    )
+}
+
 /// Editores de código como menú único. Son alternativas excluyentes de la
 /// misma función, no ocho visores distintos: el usuario puede desplegar el
 /// apartado y elegir el editor que prefiera sin que VS Code aparezca como
@@ -1041,6 +1244,15 @@ fn linux_code_editor_actions(
                 ("viewer-code", "pacman") => "visual-studio-code-bin",
                 _ => package,
             };
+            // Arch cambia los ejecutables de estos dos paquetes: Zed instala
+            // `zeditor` y Helix instala `helix`. Usar el nombre genérico aquí
+            // hacía que una instalación correcta volviera a aparecer como
+            // faltante tras actualizar la detección.
+            let check = match (id, pm) {
+                ("editor-zed", "pacman") => "zeditor",
+                ("editor-helix", "pacman") => "helix",
+                _ => command,
+            };
             InstallAction::new(
                 id,
                 format!("{label} (código y texto)"),
@@ -1052,7 +1264,7 @@ fn linux_code_editor_actions(
             .short(format!("{label} (código y texto)"))
             .group(VIEWER_GROUP)
             .subgroup(CODE_EDITORS_SUBGROUP)
-            .check(Some(command))
+            .check(Some(check))
             .hint("Alternativa de editor; la disponibilidad del paquete depende de la distribución y sus repositorios." )
         })
         .collect()
@@ -1258,11 +1470,271 @@ fn ecosystem_action(
     subgroup: &str,
     hint: &str,
 ) -> InstallAction {
-    InstallAction::new(id.to_string(), label.to_string(), command)
+    // El primer ejecutable es el runtime real del ecosistema (`python3`,
+    // `npm`, `composer`, `luarocks`, etc.). Declararlo aquí evita que el lote
+    // intente instalar cien herramientas sobre un runtime que todavía no
+    // existe; al refrescar el panel reaparecerán después de instalarlo.
+    let runtime = command.split_whitespace().next().map(str::to_string);
+    let requires = if command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|words| words == ["-m", "pip"])
+    {
+        runtime
+            .as_deref()
+            .map(|python| format!("module:{python}:pip"))
+    } else {
+        runtime
+    };
+    let probe = ecosystem_probe(&command);
+    let mut action = InstallAction::new(id.to_string(), label.to_string(), command)
         .short(format!("Instalar {label}"))
         .group(FRAMEWORKS_GROUP)
         .subgroup(subgroup)
-        .hint(hint)
+        .hint(hint);
+    action.requires_cmd = requires;
+    action.check_cmd = probe;
+    action
+}
+
+/// Devuelve una sonda estable para el paquete que instala una acción de
+/// ecosistema. No se comprueba el ejecutable final porque muchos frameworks
+/// (Django, React, SQLAlchemy...) no dejan uno en PATH.
+fn ecosystem_probe(command: &str) -> Option<String> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let package_after = |flag: &str| {
+        let index = tokens.iter().position(|token| *token == flag)?;
+        let packages = tokens.get(index + 1..)?.join(" ");
+        (!packages.is_empty()).then_some(packages)
+    };
+    let package = |flag: &str| {
+        package_after(flag).map(|value| {
+            value
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+    };
+
+    if tokens.get(1..4) == Some(["-m", "pip", "install"].as_slice()) {
+        return package_after("--user")
+            .or_else(|| tokens.get(4..).map(|items| items.join(" ")))
+            .map(|packages| format!("ecosystem:pip|{}|{packages}", tokens[0]));
+    }
+    if tokens.first() == Some(&"npm")
+        && tokens.get(1..3) == Some(["install", "--global"].as_slice())
+    {
+        return tokens
+            .get(3..)
+            .map(|items| format!("ecosystem:npm|npm|{}", items.join(" ")));
+    }
+    if tokens.first() == Some(&"cargo") && tokens.get(1) == Some(&"install") {
+        return package("--verbose")
+            .or_else(|| package("install"))
+            .map(|package| format!("ecosystem:cargo|cargo|{package}"));
+    }
+    if tokens.first() == Some(&"go") && tokens.get(1) == Some(&"install") {
+        return tokens
+            .last()
+            .and_then(|token| token.split('@').next())
+            .and_then(|path| {
+                path.rsplit('/')
+                    .next()
+                    .map(|binary| format!("ecosystem:path|go|{binary}"))
+            });
+    }
+    if tokens.get(0..3) == Some(["composer", "global", "require"].as_slice()) {
+        return tokens
+            .get(3)
+            .map(|package| format!("ecosystem:composer|composer|{package}"));
+    }
+    if tokens.first() == Some(&"gem") && tokens.get(1) == Some(&"install") {
+        return tokens
+            .last()
+            .map(|package| format!("ecosystem:gem|gem|{package}"));
+    }
+    if tokens.get(0..4) == Some(["dotnet", "tool", "install", "--global"].as_slice()) {
+        return tokens
+            .get(4)
+            .map(|package| format!("ecosystem:dotnet|dotnet|{package}"));
+    }
+    if tokens.first() == Some(&"mix") {
+        return tokens
+            .last()
+            .map(|package| format!("ecosystem:mix|mix|{package}"));
+    }
+    if tokens.get(0..4) == Some(["dart", "pub", "global", "activate"].as_slice()) {
+        return tokens
+            .get(4)
+            .map(|package| format!("ecosystem:dart|dart|{package}"));
+    }
+    if tokens.get(0..2) == Some(["luarocks", "install"].as_slice()) {
+        return tokens
+            .get(2)
+            .map(|package| format!("ecosystem:luarocks|luarocks|{package}"));
+    }
+    if tokens.get(0..2) == Some(["cabal", "install"].as_slice()) {
+        return tokens
+            .last()
+            .map(|package| format!("ecosystem:cabal|cabal|{package}"));
+    }
+    None
+}
+
+fn ecosystem_update_command(command: &str) -> Option<String> {
+    if command.contains(" -m pip install ") {
+        return Some(command.replacen(" -m pip install ", " -m pip install --upgrade ", 1));
+    }
+    if command.starts_with("dotnet tool install --global ") {
+        return Some(command.replacen("dotnet tool install", "dotnet tool update", 1));
+    }
+    if command.starts_with("composer global require ") {
+        return Some(command.replacen("composer global require", "composer global update", 1));
+    }
+    // npm, Cargo, Go, RubyGems, Mix, Dart y LuaRocks actualizan al repetir su
+    // operación de instalación; conservar el comando evita inventar flags que
+    // cambian entre versiones de cada gestor.
+    Some(command.to_string())
+}
+
+fn ecosystem_uninstall_command(probe: &str) -> Option<String> {
+    let mut fields = probe.strip_prefix("ecosystem:")?.splitn(3, '|');
+    let manager = fields.next()?;
+    let program = fields.next()?;
+    let packages = fields.next()?;
+    match manager {
+        "pip" => Some(format!(
+            "{program} -m pip uninstall -y {}",
+            packages
+                .split_whitespace()
+                .map(|package| package.split('[').next().unwrap_or(package))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )),
+        "npm" => Some(format!("{program} uninstall --global {packages}")),
+        "cargo" => Some(format!("cargo uninstall {packages}")),
+        "composer" => Some(format!("composer global remove {packages}")),
+        "gem" => Some(format!("gem uninstall -aIx {packages}")),
+        "dotnet" => Some(format!("dotnet tool uninstall --global {packages}")),
+        "dart" => Some(format!("dart pub global deactivate {packages}")),
+        "luarocks" => Some(format!("luarocks remove {packages}")),
+        // Go no tiene un desinstalador de módulos globales seguro: borrar a
+        // mano GOBIN podría eliminar binarios que no pertenecen al catálogo.
+        "go" | "mix" | "cabal" | "path" => None,
+        _ => None,
+    }
+}
+
+/// Convierte cada instalación de framework en un pequeño ciclo de vida. La
+/// acción de instalación desaparece cuando la sonda confirma el paquete y las
+/// acciones de actualizar/desinstalar pasan a ser visibles mediante
+/// `requires_cmd`. Así el contador de faltantes deja de contar frameworks ya
+/// instalados sin perder sus operaciones posteriores.
+fn ecosystem_lifecycle_actions(actions: Vec<InstallAction>) -> Vec<InstallAction> {
+    let mut lifecycle = Vec::with_capacity(actions.len() * 3);
+    for install in actions {
+        let Some(probe) = install.check_cmd.clone() else {
+            lifecycle.push(install);
+            continue;
+        };
+        let label = install.label.clone();
+        let subgroup = install.subgroup.clone();
+        let group = install.group.clone();
+        let hint = install.hint.clone();
+        let command = install.command.clone();
+        lifecycle.push(install);
+
+        let mut update = InstallAction::new(
+            format!("{}-update", lifecycle.last().expect("acción").id),
+            format!("Actualizar {label}"),
+            ecosystem_update_command(&command).unwrap_or(command.clone()),
+        )
+        .short("Actualizar a la última versión")
+        .group(group.clone())
+        .verb("Actualizar")
+        .requires(Some(&probe));
+        update.subgroup = subgroup.clone();
+        update.hint = hint.clone();
+        lifecycle.push(update);
+
+        if let Some(remove_command) = ecosystem_uninstall_command(&probe) {
+            let mut remove = InstallAction::new(
+                format!(
+                    "{}-uninstall",
+                    lifecycle[lifecycle.len() - 2]
+                        .id
+                        .trim_end_matches("-update")
+                ),
+                format!("Desinstalar {label}"),
+                remove_command,
+            )
+            .short("Desinstalar del sistema")
+            .group(group)
+            .verb("Desinstalar")
+            .requires(Some(&probe));
+            remove.subgroup = subgroup;
+            remove.hint = Some("Elimina este framework del gestor correspondiente; revisa el comando antes de confirmarlo.".to_string());
+            lifecycle.push(remove);
+        }
+    }
+    lifecycle
+}
+
+/// Pip es una capacidad del intérprete, no una herramienta que se pueda
+/// detectar solo con `command -v`. Se ofrece como paso explícito para que el
+/// panel no mande al usuario a instalar frameworks condenados a fallar.
+fn python_pip_action(platform: &str, pkg_manager: Option<&str>, python_cmd: &str) -> InstallAction {
+    let command = match platform {
+        "windows" => format!("{python_cmd} -m ensurepip --upgrade"),
+        "macos" => format!(
+            "{python_cmd} -m ensurepip --upgrade || {python_cmd} -m pip install --user --upgrade pip"
+        ),
+        _ => match pkg_manager.unwrap_or("apt") {
+            "dnf" => "sudo dnf install -y python3-pip".to_string(),
+            "pacman" => "sudo pacman -S --needed --noconfirm python-pip".to_string(),
+            "zypper" => "sudo zypper install -y python3-pip".to_string(),
+            "apk" => "sudo apk add py3-pip".to_string(),
+            _ => "sudo apt update && sudo apt install -y python3-pip".to_string(),
+        },
+    };
+    let capability = format!("module:{python_cmd}:pip");
+    InstallAction::new("pkg-python-pip", "Preparar pip para Python", command)
+        .short("Instalar la herramienta de paquetes de Python")
+        .group(LANGUAGES_GROUP)
+        .subgroup("Python")
+        .check(Some(&capability))
+        .requires(Some(python_cmd))
+        .hint(
+            "Python está instalado, pero pip no responde. Después de ejecutarlo, refresca Entorno y dependencias para habilitar los frameworks de Python.",
+        )
+}
+
+/// `mix` puede existir aunque a Erlang le falte la aplicación OTP
+/// `public_key`. Hex la necesita para descargar y verificar paquetes TLS;
+/// detectar solo `mix` dejaba Credo/ExDoc fallando después de empezar.
+fn elixir_otp_action(platform: &str, pkg_manager: Option<&str>) -> InstallAction {
+    let command = match platform {
+        "windows" => "winget install --id Erlang.Erlang --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity".to_string(),
+        "macos" => "brew install erlang".to_string(),
+        _ => match pkg_manager.unwrap_or("apt") {
+            "dnf" => "sudo dnf install -y erlang erlang-devel".to_string(),
+            "pacman" => "sudo pacman -S --needed --noconfirm erlang".to_string(),
+            "zypper" => "sudo zypper install -y erlang erlang-devel".to_string(),
+            "apk" => "sudo apk add erlang erlang-dev".to_string(),
+            _ => "sudo apt update && sudo apt install -y erlang-dev erlang-public-key".to_string(),
+        },
+    };
+    InstallAction::new("pkg-elixir-otp", "Preparar OTP para Mix (public_key)", command)
+        .short("Instalar la dependencia TLS de Erlang")
+        .group(LANGUAGES_GROUP)
+        .subgroup("Elixir")
+        .check(Some("elixir:public_key"))
+        .requires(Some("elixir"))
+        .hint(
+            "Mix necesita la aplicación OTP public_key para descargar paquetes Hex. Si ya está instalada, refresca el panel para que aparezcan Credo, ExDoc y el resto.",
+        )
 }
 
 fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<InstallAction> {
@@ -1556,7 +2028,10 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
         actions.push(ecosystem_action(
             id,
             &format!("{label} (Rust)"),
-            command.to_string(),
+            // Cargo puede tardar varios minutos compilando y, sin modo
+            // detallado, parece congelado dentro del lote. Mostrar cada
+            // crate hace visible que sigue trabajando.
+            command.replace("cargo install ", "cargo install --verbose "),
             "Rust · frameworks y herramientas",
             "Necesita Rust y Cargo. Se instala como herramienta global del usuario.",
         ));
@@ -1674,7 +2149,7 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
         actions.push(ecosystem_action(
             id,
             &format!("{label} (Ruby)"),
-            format!("gem install {package}"),
+            format!("gem install --user-install {package}"),
             "Ruby · frameworks y herramientas",
             "Necesita Ruby y RubyGems. Se instala en el perfil de gemas del usuario.",
         ));
@@ -1734,13 +2209,15 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
             "mix archive.install hex nerves_bootstrap",
         ),
     ] {
-        actions.push(ecosystem_action(
+        let mut action = ecosystem_action(
             id,
             &format!("{label} (Elixir)"),
             command.to_string(),
             "Elixir · frameworks y herramientas",
             "Necesita Elixir, Erlang y Mix. El comando instala la herramienta en el perfil de Mix.",
-        ));
+        );
+        action.requires_cmd = Some("elixir:public_key".to_string());
+        actions.push(action);
     }
 
     for (id, label, command) in [
@@ -1824,7 +2301,7 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
         ));
     }
 
-    actions
+    ecosystem_lifecycle_actions(actions)
 }
 
 // ---- WSL ----
@@ -1859,6 +2336,267 @@ fn wsl_package_update(distro: &str, pkg_manager: &str) -> Option<String> {
         )),
         _ => None,
     }
+}
+
+/// Actualiza un paquete concreto dentro de la distro. Se mantiene separado
+/// de la actualización global para que el submenú de cada herramienta tenga
+/// un ciclo de vida real y no actualice todo el sistema por accidente.
+fn wsl_package_update_one(distro: &str, pkg_manager: &str, package: &str) -> Option<String> {
+    let prefix = format!("wsl.exe -d {} --", ps_single(distro));
+    match pkg_manager {
+        "apt" => Some(format!(
+            "{prefix} sudo apt update; if ($LASTEXITCODE -eq 0) {{ {prefix} sudo apt install --only-upgrade -y {package} }}"
+        )),
+        "dnf" => Some(format!("{prefix} sudo dnf upgrade -y {package}")),
+        "pacman" => Some(format!(
+            "{prefix} sudo pacman -S --needed --noconfirm {package}"
+        )),
+        "zypper" => Some(format!("{prefix} sudo zypper update -y {package}")),
+        "apk" => Some(format!(
+            "{prefix} sudo apk update; if ($LASTEXITCODE -eq 0) {{ {prefix} sudo apk upgrade {package} }}"
+        )),
+        _ => None,
+    }
+}
+
+fn wsl_package_remove(distro: &str, pkg_manager: &str, package: &str) -> Option<String> {
+    let prefix = format!("wsl.exe -d {} --", ps_single(distro));
+    match pkg_manager {
+        "apt" => Some(format!("{prefix} sudo apt remove -y {package}")),
+        "dnf" => Some(format!("{prefix} sudo dnf remove -y {package}")),
+        "pacman" => Some(format!("{prefix} sudo pacman -Rns --noconfirm {package}")),
+        "zypper" => Some(format!("{prefix} sudo zypper remove -y {package}")),
+        "apk" => Some(format!("{prefix} sudo apk del {package}")),
+        _ => None,
+    }
+}
+
+fn wsl_aur_install(distro: &str, helper: &str, package: &str) -> String {
+    format!(
+        "wsl.exe -d {} -- {} -S --skipreview --noprovides --needed --noconfirm {}",
+        ps_single(distro),
+        helper,
+        package
+    )
+}
+
+fn wsl_aur_update(distro: &str, helper: &str, package: &str) -> String {
+    format!(
+        "wsl.exe -d {} -- {} -Syu --skipreview --noprovides --needed --noconfirm {}",
+        ps_single(distro),
+        helper,
+        package
+    )
+}
+
+fn wsl_aur_remove(distro: &str, helper: &str, package: &str) -> String {
+    format!(
+        "wsl.exe -d {} -- {} -Rns --noconfirm {}",
+        ps_single(distro),
+        helper,
+        package
+    )
+}
+
+/// Ejecuta una comprobación dentro de WSL usando bash como intérprete único.
+/// Esto evita que `;`, redirecciones o expresiones de REPL se interpreten en
+/// PowerShell antes de llegar a la distro.
+fn wsl_script(distro: &str, script: &str) -> String {
+    format!(
+        "wsl.exe -d {} -- bash -lc {}",
+        ps_single(distro),
+        ps_single(script)
+    )
+}
+
+fn wsl_tool_present(distro: &crate::wsl_env::InstalledDistro, tool: &PkgTool) -> bool {
+    let has = |command: &str| {
+        distro.shells.iter().any(|shell| shell == command)
+            || distro.tools.iter().any(|tool| tool == command)
+    };
+    match tool.id {
+        // Estos paquetes son deliberadamente compuestos: no se deben marcar
+        // como instalados si falta el ejecutable que completa el toolchain.
+        "pkg-node" => return has("node") && has("npm"),
+        "pkg-rust" => return has("rustc") && has("cargo"),
+        "pkg-gcc" => return has("gcc") && has("g++"),
+        "pkg-clang" => return has("clang") && has("clang++"),
+        _ => {}
+    }
+    if tool.cmd == "bash" || tool.cmd == "zsh" || tool.cmd == "fish" || tool.cmd == "sh" {
+        distro.shells.iter().any(|shell| shell == tool.cmd)
+    } else {
+        distro.tools.iter().any(|command| command == tool.cmd)
+    }
+}
+
+/// Crea el ciclo de vida de una entrada del catálogo Linux dentro de WSL. El
+/// mismo objeto describe la herramienta en Linux y aquí: nombre de paquete,
+/// ejecutable, verificación, grupo y si es segura de desinstalar.
+fn wsl_tool_actions(
+    distro: &crate::wsl_env::InstalledDistro,
+    tool: &PkgTool,
+    subgroup: &str,
+    aur_helper: Option<&str>,
+    t: &Translator,
+) -> Vec<InstallAction> {
+    let package = tool.package_for(distro.package_manager.as_deref().unwrap_or_default());
+    let aur_package = if distro.package_manager.as_deref() == Some("pacman") {
+        tool.aur_package.zip(aur_helper)
+    } else {
+        None
+    };
+    let Some((package, source)) = package
+        .map(|package| (package, "gestor de paquetes"))
+        .or_else(|| aur_package.map(|(package, _)| (package, "AUR")))
+    else {
+        // Un paquete AUR sin paru/yay no debe generar una acción que parezca
+        // instalable. El bloque de la distro ofrece el bootstrap del ayudante
+        // cuando procede.
+        return Vec::new();
+    };
+    let label = match tool.label_key {
+        Some(key) => t.t(key, tool.label),
+        None => tool.label.to_string(),
+    };
+    let present = wsl_tool_present(distro, tool);
+    let package_manager = distro.package_manager.as_deref().unwrap_or_default();
+    let is_aur = source == "AUR";
+    let install_command = if is_aur {
+        wsl_aur_install(distro.name.as_str(), aur_helper.unwrap_or("paru"), package)
+    } else {
+        wsl_package_install(distro.name.as_str(), package_manager, package)
+            .expect("package_for solo devuelve gestores soportados")
+    };
+    let update_command = if is_aur {
+        Some(wsl_aur_update(
+            distro.name.as_str(),
+            aur_helper.unwrap_or("paru"),
+            package,
+        ))
+    } else {
+        wsl_package_update_one(distro.name.as_str(), package_manager, package)
+    };
+    let remove_command = if tool.core {
+        None
+    } else if is_aur {
+        Some(wsl_aur_remove(
+            distro.name.as_str(),
+            aur_helper.unwrap_or("paru"),
+            package,
+        ))
+    } else {
+        wsl_package_remove(distro.name.as_str(), package_manager, package)
+    };
+    let base_id = tool.id.strip_prefix("pkg-").unwrap_or(tool.id);
+    let hint = if matches!(tool.cmd, "bash" | "zsh" | "fish" | "sh") {
+        t.tp(
+            "action.wslInsideInstall.shellHint",
+            &[
+                ("distro", distro.name.clone()),
+                ("command", tool.cmd.to_string()),
+            ],
+            "Se instala solo dentro de {distro}. Para convertirlo en shell predeterminada usa chsh -s $(command -v {command}).",
+        )
+    } else {
+        t.tp(
+            "action.wslInsideInstall.hint",
+            &[("distro", distro.name.clone())],
+            "Se instala solo dentro de {distro}.",
+        )
+    };
+    let mut actions = Vec::new();
+    if !present {
+        actions.push(
+            InstallAction::new(
+                format!("wsl-{}-{base_id}", safe_id(&distro.name)),
+                t.tp(
+                    "action.wslInsideInstall",
+                    &[("tool", label.clone()), ("distro", distro.name.clone())],
+                    "Instalar {tool} en {distro}",
+                ),
+                install_command,
+            )
+            .short(t.tp(
+                "action.wslInsideInstallShort",
+                &[("tool", label.clone())],
+                "Instalar {tool}",
+            ))
+            .powershell()
+            .group(WSL_GROUP)
+            .subgroup(subgroup)
+            .installed(false)
+            .hint(hint.clone()),
+        );
+    } else {
+        if let Some(command) = update_command {
+            actions.push(
+                InstallAction::new(
+                    format!("wsl-{}-{base_id}-update", safe_id(&distro.name)),
+                    format!("Actualizar {label} en {}", distro.name),
+                    command,
+                )
+                .short(format!("Actualizar {label}"))
+                .powershell()
+                .group(WSL_GROUP)
+                .subgroup(subgroup)
+                .verb("Actualizar")
+                .installed(true)
+                .hint(hint.clone()),
+            );
+        }
+        if let Some(command) = remove_command {
+            actions.push(
+                InstallAction::new(
+                    format!("wsl-{}-{base_id}-uninstall", safe_id(&distro.name)),
+                    format!("Desinstalar {label} de {}", distro.name),
+                    command,
+                )
+                .short(format!("Desinstalar {label}"))
+                .powershell()
+                .group(WSL_GROUP)
+                .subgroup(subgroup)
+                .verb("Desinstalar")
+                .installed(true)
+                .hint(hint.clone()),
+            );
+        }
+        if let Some(verify) = tool.verify {
+            actions.push(
+                InstallAction::new(
+                    format!("wsl-{}-{base_id}-version", safe_id(&distro.name)),
+                    format!("Ver versión de {label}"),
+                    wsl_script(distro.name.as_str(), verify),
+                )
+                .short(format!("Ver versión de {label}"))
+                .powershell()
+                .group(WSL_GROUP)
+                .subgroup(subgroup)
+                .verb("Ver")
+                .installed(true)
+                .hint(hint),
+            );
+        }
+    }
+    actions
+}
+
+fn wsl_aur_bootstrap_action(
+    distro: &crate::wsl_env::InstalledDistro,
+    subgroup: &str,
+) -> InstallAction {
+    let script = "sudo pacman -S --needed --noconfirm base-devel git && tmp=$(mktemp -d) && git clone https://aur.archlinux.org/paru-bin.git \"$tmp/paru-bin\" && cd \"$tmp/paru-bin\" && makepkg -si --noconfirm; status=$?; rm -rf \"$tmp\"; exit $status";
+    InstallAction::new(
+        format!("wsl-{}-aur-helper", safe_id(&distro.name)),
+        format!("Instalar ayudante AUR (paru) en {}", distro.name),
+        wsl_script(distro.name.as_str(), script),
+    )
+    .short("Instalar paru")
+    .powershell()
+    .group(WSL_GROUP)
+    .subgroup(subgroup)
+    .installed(false)
+    .hint("Necesario para instalar paquetes que solo están en AUR dentro de esta distro.")
 }
 
 /// Todo WSL vive bajo un único apartado; dentro, cada bloque (la plataforma, el
@@ -1959,15 +2697,34 @@ fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
         let subgroup = format!("{} · {}", distro.name, distro.shell);
         let pkg_manager = distro.package_manager.as_deref().unwrap_or_default();
 
-        // Lo que se puede instalar DENTRO de la distro. `presente` mira el
-        // inventario que trajo la sonda: si ya está, no se ofrece.
-        let python_pkg = if pkg_manager == "pacman" {
-            "python"
-        } else {
-            "python3"
-        };
-        #[rustfmt::skip]
-        let candidates: [(&str, &str, &str, bool, bool); 6] = [
+        // El inventario y el catálogo son compartidos con Linux; así WSL no
+        // se queda atrás cuando se añade un nuevo lenguaje o herramienta.
+        let aur_helper = ["paru", "yay"]
+            .iter()
+            .find(|helper| distro.tools.iter().any(|tool| tool == **helper))
+            .copied();
+        if pkg_manager == "pacman"
+            && aur_helper.is_none()
+            && LINUX_TOOLS
+                .iter()
+                .any(|tool| tool.aur_package.is_some() && tool.package_for(pkg_manager).is_none())
+        {
+            actions.push(wsl_aur_bootstrap_action(distro, &subgroup));
+        }
+        for tool in LINUX_TOOLS.iter() {
+            let tool_subgroup = match tool.label_key {
+                Some(key) => t.t(key, tool.label),
+                None => tool.label.to_string(),
+            };
+            actions.extend(wsl_tool_actions(
+                distro,
+                tool,
+                &tool_subgroup,
+                aur_helper,
+                t,
+            ));
+        }
+        /* Legacy implementation replaced by the shared catalog above.
             // clave,    etiqueta,        paquete,       ya presente,                                   es una shell
             ("bash",   "bash",           "bash",        distro.shells.iter().any(|s| s == "bash"),      true),
             ("zsh",    "zsh",            "zsh",         distro.shells.iter().any(|s| s == "zsh"),       true),
@@ -2027,6 +2784,7 @@ fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
                 .hint(hint),
             );
         }
+        */
 
         if let Some(command) = wsl_package_update(&distro.name, pkg_manager) {
             actions.push(
@@ -2068,6 +2826,7 @@ fn windows_actions(
         .flat_map(|tool| windows_tool_actions(tool, t))
         .collect();
     actions.extend(windows_code_editor_actions(t));
+    actions.extend(windows_virtualization_actions());
 
     // Mismo subgrupo que la herramienta 'docker' de WINDOWS_TOOLS: así
     // instalar, actualizar, verificar y arrancar Docker caen todas bajo un
@@ -2196,6 +2955,8 @@ fn windows_actions(
         ],
     ));
 
+    actions.push(python_pip_action("windows", None, "python"));
+    actions.push(elixir_otp_action("windows", None));
     actions.extend(ecosystem_actions("python", "npm"));
 
     actions.push(
@@ -2212,6 +2973,63 @@ fn windows_actions(
     actions.push(git_pull_projects_action(projects_folder));
     actions.extend(wsl_actions(wsl, t));
     actions
+}
+
+/// Capacidades de virtualización que pertenecen al propio Windows. No se
+/// mezclan con QEMU/libvirt/virt-manager: esos siguen siendo el stack Linux o
+/// WSL. En Windows el equivalente real es Hyper-V/Virtual Machine Platform,
+/// mientras que QEMU, VirtualBox y VMware se ofrecen como aplicaciones nativas
+/// de ciclo de vida completo en el grupo de compatibilidad.
+fn windows_virtualization_actions() -> Vec<InstallAction> {
+    const HYPERV: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -eq 'Enabled'";
+    const VMP: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -eq 'Enabled'";
+    const SANDBOX: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -eq 'Enabled'";
+    vec![
+        InstallAction::new(
+            "windows-hyperv-enable",
+            "Activar Hyper-V",
+            "Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart",
+        )
+        .short("Activar la plataforma Hyper-V")
+        .powershell()
+        .group(WINDOWS_COMPAT_GROUP)
+        .subgroup("Hyper-V")
+        .check(Some(HYPERV))
+        .hint("Disponible en Windows Pro, Enterprise y Education; requiere permisos de administrador y normalmente reinicio."),
+        InstallAction::new(
+            "windows-vmp-enable",
+            "Activar Virtual Machine Platform",
+            "Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -All -NoRestart",
+        )
+        .short("Activar soporte de máquinas virtuales y WSL2")
+        .powershell()
+        .group(WINDOWS_COMPAT_GROUP)
+        .subgroup("Virtual Machine Platform")
+        .check(Some(VMP))
+        .hint("Es el componente que necesitan WSL2 y varias herramientas de virtualización; puede requerir reinicio."),
+        InstallAction::new(
+            "windows-sandbox-enable",
+            "Activar Windows Sandbox",
+            "Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart",
+        )
+        .short("Activar entorno desechable de pruebas")
+        .powershell()
+        .group(WINDOWS_COMPAT_GROUP)
+        .subgroup("Windows Sandbox")
+        .check(Some(SANDBOX))
+        .hint("Requiere Windows Pro/Enterprise/Education y virtualización habilitada; necesita reinicio."),
+        InstallAction::new(
+            "windows-hyperv-check",
+            "Comprobar Hyper-V y virtualización",
+            "Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All; Get-CimInstance Win32_ComputerSystem | Select-Object HypervisorPresent",
+        )
+        .short("Ver estado de Hyper-V")
+        .powershell()
+        .group(WINDOWS_COMPAT_GROUP)
+        .subgroup("Hyper-V")
+        .verb("Comprobar")
+        .requires(Some(HYPERV)),
+    ]
 }
 
 fn mac_actions(projects_folder: &str, t: &Translator) -> Vec<InstallAction> {
@@ -2354,6 +3172,8 @@ fn mac_actions(projects_folder: &str, t: &Translator) -> Vec<InstallAction> {
     // Homebrew comparte los mismos ecosistemas de usuario que Linux: Python,
     // Node y las herramientas globales de cada lenguaje se mantienen en el
     // mismo catálogo para que el panel no pierda familias al cambiar de host.
+    actions.push(python_pip_action("macos", None, "python3"));
+    actions.push(elixir_otp_action("macos", None));
     actions.extend(ecosystem_actions("python3", "npm"));
     actions.push(
         InstallAction::new(
@@ -2454,31 +3274,74 @@ fn wine_hint(pkg_manager: &str) -> &'static str {
     }
 }
 
-const COMPAT_APPS: &str = "Aplicaciones Windows";
-const COMPAT_GAMES: &str = "Juegos Windows";
-const COMPAT_FULL_WINDOWS: &str = "Windows completo";
-const COMPAT_AUXILIARY: &str = "Herramientas auxiliares";
-const COMPAT_DEVELOPMENT: &str = "Desarrollo Windows";
+const COMPAT_BOTTLES: &str = "Bottles";
+const COMPAT_STEAM: &str = "Steam · Proton";
+const COMPAT_PROTONUP: &str = "Proton-GE · ProtonUp-Qt";
+const COMPAT_LUTRIS: &str = "Lutris";
+const COMPAT_QEMU: &str = "QEMU/KVM";
+const COMPAT_LIBVIRT: &str = "libvirt";
+const COMPAT_VIRT_MANAGER: &str = "virt-manager";
+const COMPAT_GNOME_BOXES: &str = "GNOME Boxes";
+const COMPAT_WINETRICKS: &str = "Winetricks";
+const COMPAT_DXVK: &str = "DXVK";
+const COMPAT_VKD3D: &str = "VKD3D-Proton";
+const COMPAT_CABEXTRACT: &str = "cabextract";
+const COMPAT_MSITOOLS: &str = "msitools";
+const COMPAT_MINGW: &str = "MinGW-w64";
+const COMPAT_CROSSOVER: &str = "CrossOver";
+const BOTTLES_FLATPAK_ID: &str = "com.usebottles.bottles";
+const CROSSOVER_INSTALLED: &str = "crossover:installed";
+const CROSSOVER_VERSION_COMMAND: &str = "sh -c 'for candidate in \"$HOME/cxoffice/bin/crossover\" \"$HOME/cxoffice/bin/cxoffice\" \"/opt/cxoffice/bin/crossover\" \"/opt/cxoffice/bin/cxoffice\"; do if [ -x \"$candidate\" ]; then \"$candidate\" --version; exit $?; fi; done; if command -v crossover >/dev/null 2>&1; then crossover --version; elif command -v cxoffice >/dev/null 2>&1; then cxoffice --version; else echo \"CrossOver no está instalado en ~/cxoffice, /opt/cxoffice ni en PATH.\"; fi'";
+const CROSSOVER_OPEN_COMMAND: &str = "sh -c 'for candidate in \"$HOME/cxoffice/bin/crossover\" \"$HOME/cxoffice/bin/cxoffice\" \"/opt/cxoffice/bin/crossover\" \"/opt/cxoffice/bin/cxoffice\"; do if [ -x \"$candidate\" ]; then exec \"$candidate\"; fi; done; echo \"No se encontró una instalación ejecutable de CrossOver.\" >&2; exit 1'";
+const CROSSOVER_UPDATE_COMMAND: &str = "sh -c 'if [ -z \"${DISPLAY:-}\" ] && [ -z \"${WAYLAND_DISPLAY:-}\" ]; then echo \"No hay una sesión gráfica disponible para abrir el navegador.\" >&2; exit 1; fi; exec xdg-open https://www.codeweavers.com/crossover/download-links/'";
+const CROSSOVER_UNINSTALL_COMMAND: &str = "sh -c 'for candidate in \"$HOME/cxoffice/bin/cxuninstall\" \"/opt/cxoffice/bin/cxuninstall\"; do if [ -x \"$candidate\" ]; then exec \"$candidate\"; fi; done; if command -v cxuninstall >/dev/null 2>&1; then exec cxuninstall; fi; echo \"No se encontró el desinstalador oficial de CrossOver.\" >&2; exit 1'";
+
+fn compatibility_description(subgroup: &str) -> &'static str {
+    match subgroup {
+        COMPAT_BOTTLES => "Gestiona prefijos de Wine, runners y dependencias por aplicación.",
+        COMPAT_STEAM => "Ejecuta juegos de Windows con Proton desde Steam.",
+        COMPAT_PROTONUP => "Instala y actualiza Proton-GE y otros runners para Steam y Lutris.",
+        COMPAT_LUTRIS => "Organiza juegos y launchers usando Wine, Proton y DOSBox.",
+        COMPAT_QEMU => "Proporciona la virtualización para ejecutar Windows completo.",
+        COMPAT_LIBVIRT => "Servicio y herramientas de administración para máquinas virtuales.",
+        COMPAT_VIRT_MANAGER => "Interfaz avanzada para crear y administrar máquinas QEMU/KVM.",
+        COMPAT_GNOME_BOXES => "Interfaz sencilla para crear y abrir máquinas virtuales.",
+        COMPAT_WINETRICKS => "Instala DLL, fuentes y componentes habituales en prefijos Wine.",
+        COMPAT_DXVK => "Traduce Direct3D 9/10/11 a Vulkan para aplicaciones y juegos Wine.",
+        COMPAT_VKD3D => "Traduce Direct3D 12 a Vulkan para juegos Windows con Wine o Proton.",
+        COMPAT_CABEXTRACT => "Extrae instaladores CAB usados por aplicaciones Windows.",
+        COMPAT_MSITOOLS => "Inspecciona y trabaja con paquetes instaladores MSI.",
+        COMPAT_MINGW => "Compila ejecutables Windows desde Linux con GCC y las herramientas GNU.",
+        COMPAT_CROSSOVER => "Alternativa comercial a Wine con soporte para aplicaciones Windows.",
+        _ => "Herramienta de compatibilidad para ejecutar o compilar software Windows.",
+    }
+}
 
 /// Herramientas Linux que amplían Wine con runners, juegos, máquinas virtuales
 /// y utilidades de desarrollo. Se mantienen fuera de `LINUX_TOOLS` para que no
 /// aparezcan mezcladas con los lenguajes y el apartado de sistema.
 #[rustfmt::skip]
 static LINUX_WINDOWS_COMPAT_TOOLS: Lazy<Vec<(PkgTool, &'static str)>> = Lazy::new(|| vec![
-    (PkgTool { hint: Some("En Debian/Ubuntu suele instalarse desde Flathub (com.usebottles.bottles) si no existe un paquete nativo."), ..pkg("compat-bottles", "Bottles", "bottles", &[("default", "bottles"), ("pacman", "bottles")], Some("bottles --version"), WINDOWS_COMPAT_GROUP) }, COMPAT_APPS),
-    (pkg("compat-steam", "Steam · Proton", "steam", &[("default", "steam"), ("apt", "steam-installer"), ("pacman", "steam")], Some("steam --version"), WINDOWS_COMPAT_GROUP), COMPAT_GAMES),
-    (PkgTool { hint: Some("ProtonUp-Qt suele distribuirse como Flatpak o AppImage cuando no aparece en los repositorios de la distribución."), ..pkg("compat-protonup", "Proton-GE · ProtonUp-Qt", "protonup-qt", &[("default", "protonup-qt"), ("pacman", "protonup-qt")], Some("protonup-qt --version"), WINDOWS_COMPAT_GROUP) }, COMPAT_GAMES),
-    (pkg("compat-lutris", "Lutris", "lutris", &[("default", "lutris"), ("apt", "lutris"), ("dnf", "lutris"), ("pacman", "lutris")], Some("lutris --version"), WINDOWS_COMPAT_GROUP), COMPAT_GAMES),
-    (pkg("compat-qemu", "QEMU/KVM", "qemu-system-x86_64", &[("default", "qemu-desktop"), ("apt", "qemu-system-x86"), ("dnf", "qemu-system-x86-core"), ("zypper", "qemu-x86"), ("apk", "qemu-system-x86_64")], Some("qemu-system-x86_64 --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
-    (pkg("compat-libvirt", "libvirt · daemon de virtualización", "virsh", &[("default", "libvirt"), ("apt", "libvirt-daemon-system libvirt-clients"), ("dnf", "libvirt"), ("pacman", "libvirt"), ("zypper", "libvirt"), ("apk", "libvirt")], Some("virsh --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
-    (pkg("compat-virt-manager", "virt-manager", "virt-manager", &[ ("default", "virt-manager") ], Some("virt-manager --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
-    (pkg("compat-gnome-boxes", "GNOME Boxes", "gnome-boxes", &[ ("default", "gnome-boxes") ], Some("gnome-boxes --version"), WINDOWS_COMPAT_GROUP), COMPAT_FULL_WINDOWS),
-    (pkg("compat-winetricks", "Winetricks", "winetricks", &[ ("default", "winetricks") ], Some("winetricks --version"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
-    (pkg("compat-dxvk", "DXVK", "setup_dxvk", &[("default", "dxvk")], Some("setup_dxvk"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
-    (pkg("compat-vkd3d", "VKD3D-Proton", "vkd3d", &[("default", "vkd3d")], Some("vkd3d"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
-    (pkg("compat-cabextract", "cabextract", "cabextract", &[ ("default", "cabextract") ], Some("cabextract --version"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
-    (pkg("compat-msitools", "msitools", "msiinfo", &[ ("default", "msitools") ], Some("msiinfo --version"), WINDOWS_COMPAT_GROUP), COMPAT_AUXILIARY),
-    (pkg("compat-mingw", "MinGW-w64", "x86_64-w64-mingw32-gcc", &[("default", "mingw-w64-gcc"), ("apt", "mingw-w64"), ("dnf", "mingw64-gcc"), ("zypper", "mingw64-cross-gcc")], Some("x86_64-w64-mingw32-gcc --version"), WINDOWS_COMPAT_GROUP), COMPAT_DEVELOPMENT),
+    // Arch/CachyOS no publica Bottles en los repositorios oficiales. Cuando
+    // no hay paquete para el gestor detectado, `bottles_flatpak_actions` crea
+    // una instalación reproducible desde Flathub.
+    (PkgTool { hint: Some("En Arch/CachyOS se instala como Flatpak (com.usebottles.bottles); en Debian/Fedora puede existir un paquete nativo."), ..pkg("compat-bottles", "Bottles", "bottles", &[("apt", "bottles"), ("dnf", "bottles")], Some("bottles --version"), WINDOWS_COMPAT_GROUP) }, COMPAT_BOTTLES),
+    (pkg("compat-steam", "Steam · Proton", "steam", &[("default", "steam"), ("apt", "steam-installer"), ("pacman", "steam")], Some("steam --version"), WINDOWS_COMPAT_GROUP), COMPAT_STEAM),
+    (PkgTool { hint: Some("ProtonUp-Qt suele distribuirse como Flatpak o AppImage cuando no aparece en los repositorios de la distribución."), ..pkg("compat-protonup", "Proton-GE · ProtonUp-Qt", "protonup-qt", &[("default", "protonup-qt"), ("pacman", "protonup-qt")], Some("protonup-qt --version"), WINDOWS_COMPAT_GROUP) }, COMPAT_PROTONUP),
+    (pkg("compat-lutris", "Lutris", "lutris", &[("default", "lutris"), ("apt", "lutris"), ("dnf", "lutris"), ("pacman", "lutris")], Some("lutris --version"), WINDOWS_COMPAT_GROUP), COMPAT_LUTRIS),
+    (pkg("compat-qemu", "QEMU/KVM", "qemu-system-x86_64", &[("default", "qemu-desktop"), ("apt", "qemu-system-x86"), ("dnf", "qemu-system-x86-core"), ("zypper", "qemu-x86"), ("apk", "qemu-system-x86_64")], Some("qemu-system-x86_64 --version"), WINDOWS_COMPAT_GROUP), COMPAT_QEMU),
+    (pkg("compat-libvirt", "libvirt", "virsh", &[("default", "libvirt"), ("apt", "libvirt-daemon-system libvirt-clients"), ("dnf", "libvirt"), ("pacman", "libvirt"), ("zypper", "libvirt"), ("apk", "libvirt")], Some("virsh --version"), WINDOWS_COMPAT_GROUP), COMPAT_LIBVIRT),
+    (pkg("compat-virt-manager", "virt-manager", "virt-manager", &[ ("default", "virt-manager") ], Some("virt-manager --version"), WINDOWS_COMPAT_GROUP), COMPAT_VIRT_MANAGER),
+    (pkg("compat-gnome-boxes", "GNOME Boxes", "gnome-boxes", &[ ("default", "gnome-boxes") ], Some("gnome-boxes --version"), WINDOWS_COMPAT_GROUP), COMPAT_GNOME_BOXES),
+    (pkg("compat-winetricks", "Winetricks", "winetricks", &[ ("default", "winetricks") ], Some("winetricks --version"), WINDOWS_COMPAT_GROUP), COMPAT_WINETRICKS),
+    (pkg("compat-dxvk", "DXVK", "setup_dxvk", &[("default", "dxvk")], Some("setup_dxvk"), WINDOWS_COMPAT_GROUP), COMPAT_DXVK),
+    // El paquete vkd3d instala `vkd3d-compiler`, no un binario llamado
+    // `vkd3d`. Usar el nombre del paquete como sonda dejaba la herramienta
+    // marcada como ausente aunque estuviera instalada correctamente.
+    (pkg("compat-vkd3d", "VKD3D-Proton", "vkd3d-compiler", &[("default", "vkd3d")], Some("vkd3d-compiler --version"), WINDOWS_COMPAT_GROUP), COMPAT_VKD3D),
+    (pkg("compat-cabextract", "cabextract", "cabextract", &[ ("default", "cabextract") ], Some("cabextract --version"), WINDOWS_COMPAT_GROUP), COMPAT_CABEXTRACT),
+    (pkg("compat-msitools", "msitools", "msiinfo", &[ ("default", "msitools") ], Some("msiinfo --version"), WINDOWS_COMPAT_GROUP), COMPAT_MSITOOLS),
+    (pkg("compat-mingw", "MinGW-w64", "x86_64-w64-mingw32-gcc", &[("default", "mingw-w64-gcc"), ("apt", "mingw-w64"), ("dnf", "mingw64-gcc"), ("zypper", "mingw64-cross-gcc")], Some("x86_64-w64-mingw32-gcc --version"), WINDOWS_COMPAT_GROUP), COMPAT_MINGW),
 ]);
 
 fn compatibility_open_action(
@@ -2492,68 +3355,192 @@ fn compatibility_open_action(
     InstallAction::new(id, label, command)
         .short("Abrir configuración")
         .subgroup(subgroup)
+        .subgroup_description(compatibility_description(subgroup))
         .group(WINDOWS_COMPAT_GROUP)
         .verb("Abrir")
         .requires(Some(requires))
         .hint(hint)
 }
 
+/// Bottles no está en los repositorios oficiales de Arch/CachyOS. En ese
+/// caso la vía mantenida es Flatpak; la acción instala también Flatpak si aún
+/// no existe y registra Flathub de forma idempotente. La detección usa el
+/// AppID, no un supuesto ejecutable `bottles` en PATH: las aplicaciones
+/// Flatpak no tienen por qué exportarlo ahí.
+fn bottles_flatpak_actions(commands: &PkgCommands, has_flatpak: bool) -> Vec<InstallAction> {
+    let install_flatpak = if has_flatpak {
+        String::new()
+    } else {
+        format!("{} flatpak && ", commands.install)
+    };
+    let install = format!(
+        "{install_flatpak}flatpak remote-add --if-not-exists --user flathub \
+         https://dl.flathub.org/repo/flathub.flatpakrepo && \
+         flatpak install --user -y flathub {BOTTLES_FLATPAK_ID}"
+    );
+    let probe = format!("flatpak:{BOTTLES_FLATPAK_ID}");
+    let subgroup = COMPAT_BOTTLES;
+    let description = compatibility_description(subgroup);
+    let source = if has_flatpak {
+        "Flatpak"
+    } else {
+        "Flatpak + gestor del sistema"
+    };
+
+    vec![
+        InstallAction::new(
+            "compat-bottles",
+            format!("Instalar Bottles ({source})"),
+            install,
+        )
+        .short(format!("Instalar Bottles con {source}"))
+        .subgroup(subgroup)
+        .subgroup_description(description)
+        .group(WINDOWS_COMPAT_GROUP)
+        .check(Some(&probe))
+        .hint(format!(
+            "Bottles se instala como Flatpak ({BOTTLES_FLATPAK_ID}) para funcionar también en Arch/CachyOS."
+        )),
+        InstallAction::new(
+            "compat-bottles-update",
+            "Actualizar Bottles",
+            format!("flatpak update -y {BOTTLES_FLATPAK_ID}"),
+        )
+        .short("Actualizar a la última versión")
+        .subgroup(subgroup)
+        .subgroup_description(description)
+        .group(WINDOWS_COMPAT_GROUP)
+        .verb("Actualizar")
+        .requires(Some(&probe)),
+        InstallAction::new(
+            "compat-bottles-uninstall",
+            "Desinstalar Bottles",
+            format!("flatpak uninstall -y --user {BOTTLES_FLATPAK_ID}"),
+        )
+        .short("Desinstalar del sistema")
+        .subgroup(subgroup)
+        .subgroup_description(description)
+        .group(WINDOWS_COMPAT_GROUP)
+        .verb("Desinstalar")
+        .requires(Some(&probe))
+        .hint("Solo elimina la aplicación Flatpak de Bottles; no borra tus prefijos ni datos de usuario."),
+        InstallAction::new(
+            "compat-bottles-version",
+            "Ver versión de Bottles",
+            format!("flatpak info {BOTTLES_FLATPAK_ID}"),
+        )
+        .short("Ver versión instalada")
+        .subgroup(subgroup)
+        .subgroup_description(description)
+        .group(WINDOWS_COMPAT_GROUP)
+        .verb("Versión")
+        .requires(Some(&probe)),
+        compatibility_open_action(
+            "compat-bottles-open",
+            "Abrir Bottles",
+            &format!("flatpak run {BOTTLES_FLATPAK_ID}"),
+            subgroup,
+            &probe,
+            "Gestiona prefijos separados, runners Wine/Proton, dependencias y configuración por aplicación.",
+        ),
+    ]
+}
+
 fn linux_windows_compatibility_actions(
     pm: &str,
     commands: &PkgCommands,
+    has_flatpak: bool,
     t: &Translator,
 ) -> Vec<InstallAction> {
     let mut actions = Vec::new();
+    let mut bottles_from_flatpak = false;
     for (tool, subgroup) in LINUX_WINDOWS_COMPAT_TOOLS.iter() {
         let Some(package) = tool.package_for(pm) else {
+            if *subgroup == COMPAT_BOTTLES {
+                actions.extend(bottles_flatpak_actions(commands, has_flatpak));
+                bottles_from_flatpak = true;
+            }
             continue;
         };
         let mut lifecycle = tool_lifecycle_actions(tool, package, commands, pm, t);
-        // En este apartado el segundo nivel representa la categoría, no cada
-        // paquete: así se puede desplegar «Juegos Windows» y ver todos sus
-        // runners sin fabricar un acordeón por herramienta.
+        // Cada herramienta tiene su propio acordeón: el nombre identifica el
+        // programa y la descripción explica qué aporta, sin mezclar Wine,
+        // Proton, virtualización y compiladores en categorías ambiguas.
         for action in &mut lifecycle {
             action.subgroup = Some((*subgroup).to_string());
+            action.subgroup_description = Some(compatibility_description(subgroup).to_string());
         }
         actions.extend(lifecycle);
     }
 
     // CrossOver no es un paquete libre de los repositorios: requiere descarga
-    // oficial y licencia. Se ofrece el enlace y una comprobación/configuración
-    // separadas, evitando inventar un comando de instalación que fallaría.
-    actions.extend([
+    // oficial y licencia. La descarga no se presenta como una instalación
+    // completada. El comprobador queda siempre visible para que el usuario
+    // pueda diagnosticar la ruta, y las acciones de abrir/actualizar/
+    // desinstalar aparecen solo cuando la instalación está detectada.
+    let mut open_actions = vec![
         InstallAction::new(
             "compat-crossover-download",
             "Descargar CrossOver",
-            "xdg-open https://www.codeweavers.com/download",
+            "sh -c 'if [ -z \"${DISPLAY:-}\" ] && [ -z \"${WAYLAND_DISPLAY:-}\" ]; then echo \"No hay una sesión gráfica disponible para abrir el navegador.\" >&2; exit 1; fi; exec xdg-open https://www.codeweavers.com/crossover/download-links/'",
         )
         .short("Abrir descarga oficial")
-        .subgroup(COMPAT_APPS)
+        .subgroup(COMPAT_CROSSOVER)
+        .subgroup_description(compatibility_description(COMPAT_CROSSOVER))
         .group(WINDOWS_COMPAT_GROUP)
+        .verb("Abrir")
+        .check(Some(CROSSOVER_INSTALLED))
+        .done("Descarga abierta; CrossOver todavía no está instalado.")
         .hint("Alternativa comercial a Wine con soporte técnico y buena integración de aplicaciones como Microsoft Office."),
         InstallAction::new(
             "compat-crossover-check",
             "Comprobar CrossOver",
-            "cxoffice --version",
+            CROSSOVER_VERSION_COMMAND,
         )
         .short("Ver versión instalada")
-        .subgroup(COMPAT_APPS)
+        .subgroup(COMPAT_CROSSOVER)
+        .subgroup_description(compatibility_description(COMPAT_CROSSOVER))
         .group(WINDOWS_COMPAT_GROUP)
         .verb("Verificar")
-        .requires(Some("cxoffice")),
+        .done("Comprobación de CrossOver terminada."),
         compatibility_open_action(
-            "compat-bottles-open",
-            "Abrir Bottles",
-            "bottles",
-            COMPAT_APPS,
-            "bottles",
-            "Gestiona prefijos separados, runners Wine/Proton, dependencias y configuración por aplicación.",
+            "compat-crossover-open",
+            "Abrir CrossOver",
+            CROSSOVER_OPEN_COMMAND,
+            COMPAT_CROSSOVER,
+            CROSSOVER_INSTALLED,
+            "Inicia la instalación de CrossOver detectada en ~/cxoffice, /opt/cxoffice o PATH.",
         ),
+        InstallAction::new(
+            "compat-crossover-update",
+            "Actualizar CrossOver",
+            CROSSOVER_UPDATE_COMMAND,
+        )
+        .short("Abrir descarga de la última versión")
+        .subgroup(COMPAT_CROSSOVER)
+        .subgroup_description(compatibility_description(COMPAT_CROSSOVER))
+        .group(WINDOWS_COMPAT_GROUP)
+        .verb("Actualizar")
+        .requires(Some(CROSSOVER_INSTALLED))
+        .done("Descarga de actualización abierta; ejecuta el instalador oficial para completar la actualización.")
+        .hint("CrossOver se actualiza mediante el instalador oficial de CodeWeavers; no se reemplaza silenciosamente ninguna instalación."),
+        InstallAction::new(
+            "compat-crossover-uninstall",
+            "Desinstalar CrossOver",
+            CROSSOVER_UNINSTALL_COMMAND,
+        )
+        .short("Abrir desinstalador oficial")
+        .subgroup(COMPAT_CROSSOVER)
+        .subgroup_description(compatibility_description(COMPAT_CROSSOVER))
+        .group(WINDOWS_COMPAT_GROUP)
+        .verb("Desinstalar")
+        .requires(Some(CROSSOVER_INSTALLED))
+        .hint("Abre el desinstalador oficial de CrossOver; podrás decidir allí si conservas las botellas."),
         compatibility_open_action(
             "compat-lutris-open",
             "Abrir Lutris",
             "lutris",
-            COMPAT_GAMES,
+            COMPAT_LUTRIS,
             "lutris",
             "Centraliza juegos, launchers y runners Wine, Proton y DOSBox.",
         ),
@@ -2561,7 +3548,7 @@ fn linux_windows_compatibility_actions(
             "compat-steam-open",
             "Abrir Steam",
             "steam",
-            COMPAT_GAMES,
+            COMPAT_STEAM,
             "steam",
             "Gestiona juegos Windows con Proton y permite seleccionar Proton-GE desde Steam.",
         ),
@@ -2569,7 +3556,7 @@ fn linux_windows_compatibility_actions(
             "compat-protonup-open",
             "Abrir ProtonUp-Qt",
             "protonup-qt",
-            COMPAT_GAMES,
+            COMPAT_PROTONUP,
             "protonup-qt",
             "Instala y gestiona Proton-GE y otros runners para Steam y Lutris.",
         ),
@@ -2577,7 +3564,7 @@ fn linux_windows_compatibility_actions(
             "compat-virt-manager-open",
             "Abrir virt-manager",
             "virt-manager",
-            COMPAT_FULL_WINDOWS,
+            COMPAT_VIRT_MANAGER,
             "virt-manager",
             "Gestiona máquinas virtuales QEMU/KVM; ofrece la compatibilidad más completa, con mayor consumo.",
         ),
@@ -2585,11 +3572,22 @@ fn linux_windows_compatibility_actions(
             "compat-gnome-boxes-open",
             "Abrir GNOME Boxes",
             "gnome-boxes",
-            COMPAT_FULL_WINDOWS,
+            COMPAT_GNOME_BOXES,
             "gnome-boxes",
             "Interfaz sencilla para crear y abrir máquinas virtuales QEMU/KVM.",
         ),
-    ]);
+    ];
+    if !bottles_from_flatpak {
+        open_actions.push(compatibility_open_action(
+            "compat-bottles-open",
+            "Abrir Bottles",
+            "bottles",
+            COMPAT_BOTTLES,
+            "bottles",
+            "Gestiona prefijos separados, runners Wine/Proton, dependencias y configuración por aplicación.",
+        ));
+    }
+    actions.extend(open_actions);
     actions
 }
 
@@ -2644,7 +3642,14 @@ fn power_shell_actions(
             InstallAction::new(
                 "pkg-pwsh-aur",
                 format!("Instalar PowerShell (AUR · {aur})"),
-                format!("{aur} -S --noconfirm powershell-bin"),
+                format!(
+                    "{aur} -S {} --noconfirm powershell-bin",
+                    if aur == "paru" {
+                        "--skipreview --noprovides"
+                    } else {
+                        "--answerdiff=None --answeredit=None --noprovides"
+                    }
+                ),
             )
             .short(format!("Instalar desde el AUR con {aur}"))
             .check(Some("pwsh"))
@@ -2772,7 +3777,14 @@ fn power_shell_actions(
             InstallAction::new(
                 "pkg-pwsh-update",
                 format!("Actualizar PowerShell (AUR · {aur})"),
-                format!("{aur} -S --noconfirm powershell-bin"),
+                format!(
+                    "{aur} -S {} --noconfirm powershell-bin",
+                    if aur == "paru" {
+                        "--skipreview --noprovides"
+                    } else {
+                        "--answerdiff=None --answeredit=None --noprovides"
+                    }
+                ),
             )
             .short("Actualizar a la última versión")
             .verb("Actualizar")
@@ -2841,6 +3853,7 @@ fn package_for(table: &[(&str, &'static str)], pkg_manager: &str) -> &'static st
 fn linux_actions(
     pkg_manager: Option<&str>,
     has_snap: bool,
+    has_flatpak: bool,
     projects_folder: &str,
     aur_helper: Option<&str>,
     t: &Translator,
@@ -2854,18 +3867,43 @@ fn linux_actions(
 
     let mut actions = vec![git_pull_projects_posix_action(projects_folder)];
 
+    // Estos componentes no tienen paquete oficial en Arch. Si no hay paru o
+    // yay, se ofrece primero el requisito dentro de "Lenguajes" y se omiten
+    // sus acciones de ciclo de vida: así el instalador guiado nunca genera un
+    // `pacman -S` condenado a responder "paquete no encontrado".
+    if pm == "pacman"
+        && aur_helper.is_none()
+        && LINUX_TOOLS.iter().any(|tool| tool.aur_package.is_some())
+    {
+        actions.push(aur_helper_install_action(
+            "pkg-paru-languages",
+            LANGUAGES_GROUP,
+        ));
+    }
+
     actions.extend(
         LINUX_TOOLS
             .iter()
             .chain(LINUX_VIEWERS.iter())
             .chain(FILE_MANAGER_TOOLS.iter())
             .flat_map(|tool| {
-                let package = tool.package_for(pm).unwrap_or_default();
+                if pm == "pacman" {
+                    if let Some(package) = tool.aur_package {
+                        return aur_helper
+                            .map(|helper| aur_tool_lifecycle_actions(tool, package, helper, t))
+                            .unwrap_or_default();
+                    }
+                }
+                let Some(package) = tool.package_for(pm) else {
+                    return Vec::new();
+                };
                 tool_lifecycle_actions(tool, package, commands, pm, t)
             }),
     );
     actions.extend(linux_code_editor_actions(pm, commands, t));
     actions.push(posix_sh_action());
+    actions.push(python_pip_action("linux", Some(pm), "python3"));
+    actions.push(elixir_otp_action("linux", Some(pm)));
     actions.extend(ecosystem_actions("python3", "npm"));
 
     // En Linux "Compatibilidad Windows" es lo que en Windows es WSL: la forma
@@ -2940,7 +3978,12 @@ fn linux_actions(
             .hint("El prefijo con los programas instalados (~/.wine) no se borra."),
         ],
     ));
-    actions.extend(linux_windows_compatibility_actions(pm, commands, t));
+    actions.extend(linux_windows_compatibility_actions(
+        pm,
+        commands,
+        has_flatpak,
+        t,
+    ));
 
     let docker_pkg = package_for(LINUX_DOCKER_PKG, pm);
     actions.extend(in_subgroup(
@@ -3185,6 +4228,7 @@ pub fn get_install_actions(context: &InstallContext, t: &Translator) -> Vec<Inst
         _ => linux_actions(
             context.pkg_manager.as_deref(),
             context.has_snap,
+            context.has_flatpak,
             &context.projects_folder,
             context.aur_helper.as_deref(),
             t,
@@ -3357,24 +4401,24 @@ mod tests {
     }
 
     #[test]
-    fn linux_expone_la_compatibilidad_windows_por_categorias() {
+    fn linux_expone_la_compatibilidad_windows_por_programa_y_descripcion() {
         let actions = get_install_actions(&contexto("linux"), &t());
         let expected = [
-            ("compat-bottles", COMPAT_APPS),
-            ("compat-crossover-download", COMPAT_APPS),
-            ("compat-steam", COMPAT_GAMES),
-            ("compat-protonup", COMPAT_GAMES),
-            ("compat-lutris", COMPAT_GAMES),
-            ("compat-qemu", COMPAT_FULL_WINDOWS),
-            ("compat-libvirt", COMPAT_FULL_WINDOWS),
-            ("compat-virt-manager", COMPAT_FULL_WINDOWS),
-            ("compat-gnome-boxes", COMPAT_FULL_WINDOWS),
-            ("compat-winetricks", COMPAT_AUXILIARY),
-            ("compat-dxvk", COMPAT_AUXILIARY),
-            ("compat-vkd3d", COMPAT_AUXILIARY),
-            ("compat-cabextract", COMPAT_AUXILIARY),
-            ("compat-msitools", COMPAT_AUXILIARY),
-            ("compat-mingw", COMPAT_DEVELOPMENT),
+            ("compat-bottles", COMPAT_BOTTLES),
+            ("compat-crossover-download", COMPAT_CROSSOVER),
+            ("compat-steam", COMPAT_STEAM),
+            ("compat-protonup", COMPAT_PROTONUP),
+            ("compat-lutris", COMPAT_LUTRIS),
+            ("compat-qemu", COMPAT_QEMU),
+            ("compat-libvirt", COMPAT_LIBVIRT),
+            ("compat-virt-manager", COMPAT_VIRT_MANAGER),
+            ("compat-gnome-boxes", COMPAT_GNOME_BOXES),
+            ("compat-winetricks", COMPAT_WINETRICKS),
+            ("compat-dxvk", COMPAT_DXVK),
+            ("compat-vkd3d", COMPAT_VKD3D),
+            ("compat-cabextract", COMPAT_CABEXTRACT),
+            ("compat-msitools", COMPAT_MSITOOLS),
+            ("compat-mingw", COMPAT_MINGW),
         ];
         for (id, category) in expected {
             let action = buscar(&actions, id);
@@ -3387,6 +4431,11 @@ mod tests {
                 Some(category),
                 "{id} en categoría incorrecta"
             );
+            assert_eq!(
+                action.subgroup_description.as_deref(),
+                Some(compatibility_description(category)),
+                "{id} sin descripción coherente"
+            );
         }
         assert_eq!(
             buscar(&actions, "compat-bottles-open").verb.as_deref(),
@@ -3395,10 +4444,104 @@ mod tests {
     }
 
     #[test]
-    fn las_categorias_y_acciones_de_compatibilidad_se_traducen() {
+    fn arch_no_intenta_instalar_bottles_con_un_paquete_que_no_existe() {
+        let actions = get_install_actions(
+            &InstallContext {
+                platform: "linux".to_string(),
+                pkg_manager: Some("pacman".to_string()),
+                has_flatpak: false,
+                ..contexto("linux")
+            },
+            &t(),
+        );
+        let install = buscar(&actions, "compat-bottles");
+        assert!(install.command.contains("pacman -S --noconfirm flatpak"));
+        assert!(install.command.contains(BOTTLES_FLATPAK_ID));
+        assert!(!install.command.ends_with(" bottles"));
+        assert_eq!(
+            install.check_cmd.as_deref(),
+            Some("flatpak:com.usebottles.bottles")
+        );
+        assert_eq!(
+            buscar(&actions, "compat-bottles-open").command,
+            "flatpak run com.usebottles.bottles"
+        );
+        assert_eq!(
+            buscar(&actions, "compat-bottles-open")
+                .requires_cmd
+                .as_deref(),
+            Some("flatpak:com.usebottles.bottles")
+        );
+    }
+
+    #[test]
+    fn bottles_con_flatpak_no_repite_la_instalacion_del_gestor() {
+        let actions = get_install_actions(
+            &InstallContext {
+                platform: "linux".to_string(),
+                pkg_manager: Some("pacman".to_string()),
+                has_flatpak: true,
+                ..contexto("linux")
+            },
+            &t(),
+        );
+        let install = buscar(&actions, "compat-bottles");
+        assert!(!install.command.contains("pacman"));
+        assert!(install.command.starts_with("flatpak remote-add"));
+    }
+
+    #[test]
+    fn descargar_crossover_no_se_presenta_como_instalacion_completada() {
+        let actions = get_install_actions(&contexto("linux"), &t());
+        let download = buscar(&actions, "compat-crossover-download");
+        assert!(download.command.contains("xdg-open"));
+        assert_eq!(download.check_cmd.as_deref(), Some(CROSSOVER_INSTALLED));
+        assert_eq!(
+            download.done.as_deref(),
+            Some("Descarga abierta; CrossOver todavía no está instalado.")
+        );
+        assert_eq!(download.verb.as_deref(), Some("Abrir"));
+        let check = buscar(&actions, "compat-crossover-check");
+        assert!(check.command.contains("$HOME/cxoffice/bin"));
+        assert_eq!(check.requires_cmd, None);
+        assert!(check.done.is_some());
+        assert_eq!(
+            buscar(&actions, "compat-crossover-open")
+                .requires_cmd
+                .as_deref(),
+            Some(CROSSOVER_INSTALLED)
+        );
+        assert_eq!(
+            buscar(&actions, "compat-crossover-update")
+                .requires_cmd
+                .as_deref(),
+            Some(CROSSOVER_INSTALLED)
+        );
+        assert!(buscar(&actions, "compat-crossover-uninstall")
+            .command
+            .contains("cxuninstall"));
+    }
+
+    #[test]
+    fn vkd3d_sondea_el_compilador_que_instala_el_paquete() {
+        let actions = get_install_actions(&contexto("linux"), &t());
+        let vkd3d = buscar(&actions, "compat-vkd3d");
+        assert_eq!(vkd3d.check_cmd.as_deref(), Some("vkd3d-compiler"));
+        assert_eq!(
+            buscar(&actions, "compat-vkd3d-version").command,
+            "vkd3d-compiler --version"
+        );
+    }
+
+    #[test]
+    fn los_programas_y_acciones_de_compatibilidad_se_traducen() {
         let actions = get_install_actions(&contexto("linux"), &t());
         let bottles = buscar(&actions, "compat-bottles-open").translated("en");
-        assert_eq!(bottles.subgroup.as_deref(), Some("Windows Applications"));
+        assert_eq!(bottles.subgroup.as_deref(), Some("Bottles"));
+        assert_eq!(
+            bottles.subgroup_description.as_deref(),
+            Some("Gestiona prefijos de Wine, runners y dependencias por aplicación.")
+        );
         assert_eq!(bottles.verb.as_deref(), Some("Open"));
         assert_eq!(bottles.label, "Open Bottles");
     }
@@ -3454,6 +4597,45 @@ mod tests {
             })
             .collect();
         assert!(subgrupos.iter().all(|s| *s == Some("Python")));
+    }
+
+    #[test]
+    fn windows_ofrece_virtualizacion_nativa_y_no_confunde_wsl_con_linux() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "windows-hyperv-enable",
+            "windows-vmp-enable",
+            "windows-sandbox-enable",
+            "winget-qemu",
+            "winget-virtualbox",
+            "winget-vmware",
+        ] {
+            assert!(actions.iter().any(|action| action.id == id), "falta {id}");
+        }
+        assert!(!actions
+            .iter()
+            .any(|action| action.id == "compat-virt-manager"));
+        assert!(!actions.iter().any(|action| action.id == "compat-libvirt"));
+        assert!(actions
+            .iter()
+            .find(|action| action.id == "windows-hyperv-enable")
+            .and_then(|action| action.check_cmd.as_deref())
+            .is_some_and(|check| check.starts_with("powershell:")));
+    }
+
+    #[test]
+    fn las_sondas_de_virtualizacion_no_dependen_de_un_exe_en_path() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in ["winget-qemu", "winget-virtualbox", "winget-vmware"] {
+            let action = buscar(&actions, id);
+            assert!(
+                action
+                    .check_cmd
+                    .as_deref()
+                    .is_some_and(|check| check.starts_with("powershell:")),
+                "{id} debe comprobar rutas instaladas fuera de PATH"
+            );
+        }
     }
 
     #[test]
@@ -3580,6 +4762,85 @@ mod tests {
     }
 
     #[test]
+    fn wsl_reutiliza_el_catalogo_linux_y_ofrece_ciclo_de_vida() {
+        let mut ubuntu = distro("Ubuntu", "apt");
+        ubuntu.tools = vec![
+            "git".to_string(),
+            "sqlite3".to_string(),
+            "python3".to_string(),
+        ];
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![ubuntu],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context, &t());
+
+        let gcc = buscar(&actions, "wsl-ubuntu-gcc");
+        assert!(gcc.command.contains("apt install -y build-essential"));
+        assert_eq!(gcc.group, WSL_GROUP);
+        assert_eq!(
+            gcc.subgroup.as_deref(),
+            Some("C/C++ · GCC y herramientas de compilación")
+        );
+
+        // Lo que la sonda marcó como instalado ya no ofrece instalación, pero
+        // sí actualización, desinstalación y versión dentro de WSL.
+        assert!(!actions
+            .iter()
+            .any(|action| action.id == "wsl-ubuntu-sqlite"));
+        for id in [
+            "wsl-ubuntu-sqlite-update",
+            "wsl-ubuntu-sqlite-uninstall",
+            "wsl-ubuntu-sqlite-version",
+        ] {
+            assert!(actions.iter().any(|action| action.id == id), "falta {id}");
+        }
+        assert!(buscar(&actions, "wsl-ubuntu-sqlite-version")
+            .command
+            .contains("bash -lc 'sqlite3 --version'"));
+    }
+
+    #[test]
+    fn wsl_arch_sin_ayudante_ofrece_bootstrap_aur_y_no_finge_instalarlo() {
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![distro("Arch", "pacman")],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context, &t());
+        let bootstrap = buscar(&actions, "wsl-arch-aur-helper");
+        assert!(bootstrap.command.contains("aur.archlinux.org/paru-bin.git"));
+        assert!(!actions.iter().any(|action| action.id == "wsl-arch-gforth"));
+    }
+
+    #[test]
+    fn wsl_arch_con_paru_habilita_paquetes_aur_y_sus_acciones() {
+        let mut arch = distro("Arch", "pacman");
+        arch.tools = vec!["paru".to_string()];
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![arch],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context, &t());
+        let gforth = buscar(&actions, "wsl-arch-gforth");
+        assert!(gforth.command.contains("paru -S --skipreview"));
+        assert!(!actions
+            .iter()
+            .any(|action| action.id == "wsl-arch-aur-helper"));
+    }
+
+    #[test]
     fn una_distro_que_no_respondio_a_la_sonda_no_genera_instalaciones_inventadas() {
         let mut ubuntu = distro("Ubuntu", "apt");
         ubuntu.probe_error = true;
@@ -3636,7 +4897,10 @@ mod tests {
         // El id estable lo lleva la vía recomendada en este sistema, que es a
         // la que apunta la sugerencia de "comando no encontrado".
         assert_eq!(actions[0].id, "pkg-pwsh");
-        assert_eq!(actions[0].command, "paru -S --noconfirm powershell-bin");
+        assert_eq!(
+            actions[0].command,
+            "paru -S --skipreview --noprovides --noconfirm powershell-bin"
+        );
         assert_eq!(
             buscar(&actions, "pkg-pwsh-uninstall").command,
             "sudo pacman -Rs --noconfirm powershell-bin"
@@ -3717,6 +4981,80 @@ mod tests {
         assert!(!buscar(&actions, "pkg-paru")
             .command
             .contains("sudo makepkg"));
+    }
+
+    #[test]
+    fn arch_sin_aur_no_genera_paquetes_oficiales_inexistentes() {
+        let actions = get_install_actions(
+            &InstallContext {
+                platform: "linux".to_string(),
+                pkg_manager: Some("pacman".to_string()),
+                ..contexto("linux")
+            },
+            &t(),
+        );
+
+        assert!(actions
+            .iter()
+            .any(|action| action.id == "pkg-paru-languages"));
+        for id in ["pkg-gforth", "pkg-mongosh", "pkg-scala", "pkg-swift"] {
+            assert!(
+                !actions.iter().any(|action| action.id == id),
+                "{id} no debe aparecer sin ayudante AUR"
+            );
+        }
+        for package in ["gforth", "mongodb-mongosh", "scala", "swift"] {
+            assert!(
+                !actions.iter().any(|action| action
+                    .command
+                    .contains(&format!("pacman -S --noconfirm {package}"))),
+                "pacman no debe recibir el paquete inexistente {package}"
+            );
+        }
+    }
+
+    #[test]
+    fn arch_con_paru_instala_los_cuatro_componentes_desde_el_aur() {
+        let actions = get_install_actions(
+            &InstallContext {
+                platform: "linux".to_string(),
+                pkg_manager: Some("pacman".to_string()),
+                aur_helper: Some("paru".to_string()),
+                ..contexto("linux")
+            },
+            &t(),
+        );
+
+        for (id, package) in [
+            ("pkg-gforth", "gforth"),
+            ("pkg-mongosh", "mongosh-bin"),
+            ("pkg-scala", "scala3"),
+            ("pkg-swift", "swift-bin"),
+        ] {
+            let install = buscar(&actions, id);
+            assert_eq!(
+                install.command,
+                format!("paru -S --skipreview --noprovides --needed --noconfirm {package}")
+            );
+            assert_eq!(
+                install.check_cmd.as_deref(),
+                Some(match id {
+                    "pkg-gforth" => "gforth",
+                    "pkg-mongosh" => "mongosh",
+                    "pkg-scala" => "scala3",
+                    "pkg-swift" => "swift",
+                    _ => unreachable!(),
+                })
+            );
+            assert!(install.label.contains("AUR · paru"));
+            assert_eq!(
+                buscar(&actions, &format!("{id}-update")).command,
+                install.command
+            );
+        }
+        assert!(!actions
+            .iter()
+            .any(|action| action.id == "pkg-paru-languages"));
     }
 
     #[test]
@@ -3907,7 +5245,11 @@ mod tests {
         let actions = get_install_actions(&contexto("windows"), &t());
         let lenguajes: Vec<&str> = actions
             .iter()
-            .filter(|a| a.group == LANGUAGES_GROUP && a.check_cmd.is_some())
+            .filter(|a| {
+                a.group == LANGUAGES_GROUP
+                    && a.check_cmd.is_some()
+                    && !matches!(a.id.as_str(), "pkg-python-pip" | "pkg-elixir-otp")
+            })
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(lenguajes.first(), Some(&"winget-node"));
@@ -3929,6 +5271,7 @@ mod tests {
             "Lua · frameworks y herramientas",
             "C / C++ · build y herramientas",
             "Haskell · herramientas y ecosistema",
+            "PureScript / Elm · ecosistema funcional",
         ];
 
         for platform in ["windows", "linux", "macos"] {
@@ -3945,10 +5288,139 @@ mod tests {
                 );
             }
             assert!(
-                subgroups.len() >= 12,
+                subgroups.len() >= 13,
                 "{platform}: el catálogo de frameworks no tiene suficientes familias"
             );
         }
+    }
+
+    #[test]
+    fn python_no_ofrece_frameworks_sin_declarar_la_capacidad_de_pip() {
+        for platform in ["windows", "linux", "macos"] {
+            let actions = get_install_actions(&contexto(platform), &t());
+            assert_eq!(
+                buscar(&actions, "framework-django").requires_cmd.as_deref(),
+                Some(if platform == "windows" {
+                    "module:python:pip"
+                } else {
+                    "module:python3:pip"
+                })
+            );
+            let pip = buscar(&actions, "pkg-python-pip");
+            assert_eq!(
+                pip.check_cmd.as_deref(),
+                Some(if platform == "windows" {
+                    "module:python:pip"
+                } else {
+                    "module:python3:pip"
+                })
+            );
+            assert_eq!(
+                pip.requires_cmd.as_deref(),
+                Some(if platform == "windows" {
+                    "python"
+                } else {
+                    "python3"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn los_frameworks_declaran_su_sonda_y_ciclo_de_vida() {
+        let actions = get_install_actions(&contexto("linux"), &t());
+        let django = buscar(&actions, "framework-django");
+        assert_eq!(
+            django.check_cmd.as_deref(),
+            Some("ecosystem:pip|python3|django")
+        );
+        assert_eq!(
+            buscar(&actions, "framework-django-update")
+                .requires_cmd
+                .as_deref(),
+            django.check_cmd.as_deref()
+        );
+        assert_eq!(
+            buscar(&actions, "framework-django-uninstall")
+                .requires_cmd
+                .as_deref(),
+            django.check_cmd.as_deref()
+        );
+
+        let vite = buscar(&actions, "framework-vite");
+        assert_eq!(vite.check_cmd.as_deref(), Some("ecosystem:npm|npm|vite"));
+        assert!(actions.iter().any(|action| {
+            action.id == "framework-vite-update"
+                && action.verb.as_deref() == Some("Actualizar")
+                && action.requires_cmd.as_deref() == vite.check_cmd.as_deref()
+        }));
+    }
+
+    #[test]
+    fn pip_usa_el_paquete_de_la_distribucion_y_no_un_nombre_generico() {
+        for (pm, expected) in [
+            ("apt", "python3-pip"),
+            ("dnf", "python3-pip"),
+            ("pacman", "python-pip"),
+            ("zypper", "python3-pip"),
+            ("apk", "py3-pip"),
+        ] {
+            let actions = get_install_actions(
+                &InstallContext {
+                    pkg_manager: Some(pm.to_string()),
+                    ..contexto("linux")
+                },
+                &t(),
+            );
+            assert!(
+                buscar(&actions, "pkg-python-pip")
+                    .command
+                    .contains(expected),
+                "{pm}: se esperaba el paquete {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn elixir_comprueba_public_key_antes_de_ofrecer_herramientas_hex() {
+        for platform in ["windows", "linux", "macos"] {
+            let actions = get_install_actions(&contexto(platform), &t());
+            assert_eq!(
+                buscar(&actions, "framework-credo").requires_cmd.as_deref(),
+                Some("elixir:public_key")
+            );
+            assert_eq!(
+                buscar(&actions, "pkg-elixir-otp").check_cmd.as_deref(),
+                Some("elixir:public_key")
+            );
+            assert_eq!(
+                buscar(&actions, "pkg-elixir-otp").requires_cmd.as_deref(),
+                Some("elixir")
+            );
+        }
+    }
+
+    #[test]
+    fn windows_y_linux_mantienen_la_misma_matriz_de_frameworks() {
+        use std::collections::BTreeMap;
+
+        let counts = |platform: &str| {
+            get_install_actions(&contexto(platform), &t())
+                .into_iter()
+                .filter(|action| action.group == FRAMEWORKS_GROUP && action.verb.is_none())
+                .fold(BTreeMap::<String, usize>::new(), |mut counts, action| {
+                    *counts
+                        .entry(action.subgroup.unwrap_or_default())
+                        .or_default() += 1;
+                    counts
+                })
+        };
+
+        let windows = counts("windows");
+        let linux = counts("linux");
+        assert_eq!(windows, linux);
+        assert_eq!(windows.values().sum::<usize>(), 227);
+        assert_eq!(windows.len(), 13);
     }
 
     #[test]

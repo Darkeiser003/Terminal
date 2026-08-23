@@ -65,6 +65,20 @@ for (const resource of ["vendor/conpty/conpty.dll", "vendor/conpty/OpenConsole.e
   }
 }
 
+const windowsInstallerConfig = JSON.parse(
+  readFileSync(resolve(root, "src-tauri/tauri.windows.installer.conf.json"), "utf8")
+);
+const webviewInstallMode = windowsInstallerConfig.bundle?.windows?.webviewInstallMode;
+if (
+  windowsInstallerConfig.bundle?.active !== true ||
+  !windowsInstallerConfig.bundle.targets?.includes("nsis") ||
+  webviewInstallMode?.type !== "offlineInstaller"
+) {
+  throw new Error(
+    "La configuración del instalador Windows debe activar NSIS con WebView2 offline."
+  );
+}
+
 const linuxConfig = JSON.parse(
   readFileSync(resolve(root, "src-tauri/tauri.linux.conf.json"), "utf8")
 );

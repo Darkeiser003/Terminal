@@ -8,12 +8,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "prebuild": "npm run check:workspace && npm run metadata:sync",
-    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "prebuild": "node scripts/prebuild.mjs",
+    "build": "node scripts/build-frontend.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "start": "tauri dev",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun",
+    "dist:win:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -Installer -NoRun",
+    "dist:win:linux": "bash linux/build-windows.sh",
     "dist:linux": "bash linux/build.sh --no-run",
     "e2e:build": "tauri build --debug --no-bundle",
     "e2e": "node tests/e2e/smoke.mjs",
@@ -26,9 +28,13 @@
     "check:workspace": "node scripts/verify-workspace.mjs",
     "metadata:sync": "node scripts/sync-package-metadata.mjs",
     "check:metadata": "node scripts/sync-package-metadata.mjs --check",
+    "check:docs": "node scripts/verify-docs.mjs",
+    "check:links": "node scripts/verify-links.mjs",
+    "check:install-sources": "node scripts/verify-install-sources.mjs",
+    "check:winget": "node scripts/verify-winget-catalog.mjs",
     "check:i18n": "node scripts/verify-i18n.mjs",
     "check:test-surface": "node scripts/verify-test-surface.mjs",
-    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:i18n && npm run check:test-surface && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
+    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:test-surface && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=22.12.0"

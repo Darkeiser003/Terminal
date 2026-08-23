@@ -29,15 +29,22 @@ LTERMINAL_SMOKE_TOKEN="$TOKEN" APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_
     "$APPIMAGE" >"$OUTPUT" 2>&1 &
 PID=$!
 
-for _ in $(seq 1 30); do
-    if ! kill -0 "$PID" 2>/dev/null; then
-        echo "ERROR: LTerminal terminó durante el arranque." >&2
-        sed 's/^/  /' "$OUTPUT" >&2
-        exit 1
-    fi
+SMOKE_READY_TIMEOUT="${LTERMINAL_SMOKE_READY_TIMEOUT:-45}"
+if ! [[ "$SMOKE_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+    SMOKE_READY_TIMEOUT=45
+fi
+for attempt in $(seq 1 "$SMOKE_READY_TIMEOUT"); do
     if grep -Fq "\"smokeToken\":\"$TOKEN\"" "$LOG" 2>/dev/null; then
         echo "OK: runtime, ventana, frontend, IPC, xterm y primera PTY operativos."
         exit 0
+    fi
+    # Con APPIMAGE_EXTRACT_AND_RUN el lanzador puede terminar después de
+    # delegar en el binario nativo. El token del log es la confirmación de que
+    # la aplicación ya alcanzó frontend, IPC y PTY; el PID del wrapper no lo es.
+    if ! kill -0 "$PID" 2>/dev/null; then
+        echo "ERROR: LTerminal terminó antes de confirmar el arranque." >&2
+        sed 's/^/  /' "$OUTPUT" >&2
+        exit 1
     fi
     sleep 1
 done

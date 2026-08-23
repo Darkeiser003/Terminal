@@ -11,6 +11,7 @@
 
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
+    import * as perf from '../lib/performance';
     import { cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
 
@@ -26,6 +27,72 @@
     let fitAddon: FitAddon | undefined;
     let observer: ResizeObserver | undefined;
     let mirroredLine: string | null = '';
+
+    const BANNER_ITEMS: Record<string, string> = {
+        system: 'Sistema',
+        host: 'Equipo',
+        kernel: 'Kernel',
+        environment: 'Entorno',
+        motherboard: 'Placa',
+        cpu: 'CPU',
+        gpu: 'GPU',
+        memory: 'Memoria',
+        storage: 'Discos',
+        uptime: 'Tiempo activo',
+        datetime: 'Fecha',
+    };
+
+    async function configureBanner(argument?: string): Promise<void> {
+        const tokens = (argument ?? 'list').trim().split(/\s+/).filter(Boolean);
+        const action = (tokens.shift() ?? 'list').toLocaleLowerCase();
+        const available = new Set(Object.keys(BANNER_ITEMS));
+        const current = new Set((app.preferences?.bannerHiddenItems ?? '').split(',').filter(Boolean));
+        const ids = tokens
+            .map((token) => token.toLocaleLowerCase())
+            .filter((token) => available.has(token));
+        const unknown = action === 'preset'
+            ? []
+            : tokens.filter((token) => !available.has(token.toLocaleLowerCase()));
+
+        if (action === 'list') {
+            const hidden = [...current].filter((id) => available.has(id));
+            term?.writeln(`\r\nBanner: ${hidden.length ? `ocultos: ${hidden.map((id) => BANNER_ITEMS[id]).join(', ')}` : 'perfil completo'}`);
+            term?.writeln('Uso: :banner hide|show|toggle <system|host|kernel|environment|motherboard|cpu|gpu|memory|storage|uptime|datetime>');
+            term?.writeln('Atajos: :banner preset compact | :banner preset full');
+            return;
+        }
+        if (unknown.length || (action !== 'preset' && !ids.length)) {
+            term?.writeln('\r\nUso: :banner hide|show|toggle <elementos>, :banner preset compact|full o :banner list');
+            return;
+        }
+
+        if (action === 'preset') {
+            const preset = (tokens[0] ?? '').toLocaleLowerCase();
+            if (preset === 'full' || preset === 'completo') current.clear();
+            else if (preset === 'compact' || preset === 'compacto') {
+                current.clear();
+                for (const id of ['host', 'kernel', 'environment', 'motherboard', 'gpu', 'datetime']) current.add(id);
+            } else {
+                term?.writeln('\r\nPerfiles disponibles: compact | full');
+                return;
+            }
+        } else if (action === 'hide') {
+            for (const id of ids) current.add(id);
+        } else if (action === 'show') {
+            for (const id of ids) current.delete(id);
+        } else if (action === 'toggle') {
+            for (const id of ids) {
+                if (current.has(id)) current.delete(id);
+                else current.add(id);
+            }
+        } else {
+            term?.writeln('\r\nAcciones disponibles: hide, show, toggle, preset, list');
+            return;
+        }
+
+        await app.savePreferences({ bannerHiddenItems: [...current].join(',') });
+        term?.writeln(`\r\nBanner actualizado: ${current.size ? `${current.size} elemento(s) oculto(s)` : 'perfil completo'}.`);
+    }
 
     async function runInternal(line: string): Promise<boolean> {
         const command = await api.parseInternalCommand(line);
@@ -46,6 +113,8 @@
             );
             if (environment) await app.createTab(environment.id);
             else term?.writeln(`\r\n\x1b[33m[REPL no detectado: ${command.argument}]\x1b[0m`);
+        } else if (command.action === 'banner') {
+            await configureBanner(command.argument);
         } else if (command.action === 'help' || command.action === 'alias') {
             const topic = command.action === 'alias' ? 'alias' : command.argument;
             const currentEnvironment = app.environments.find(
@@ -65,10 +134,10 @@
                 // `ayuda` en Python, Node, Docker o ADB como si fuera código
                 // de esa shell.
                 term?.writeln('\r\nAyuda' + (topic ? ' (' + topic + ')' : '') + ': usa :help desde la terminal o consulta los comandos internos.');
-                term?.writeln('Comandos internos: :config  :reload  :repl <nombre>  :alias  :help [sección]');
+                term?.writeln('Comandos internos: :config  :reload  :repl <nombre>  :alias  :help [sección]  :banner [opciones]');
             }
         } else {
-            term?.writeln('\r\n:config  :reload  :repl <nombre>  :alias  :help');
+            term?.writeln('\r\n:config  :reload  :repl <nombre>  :alias  :help  :banner');
         }
         return true;
     }
@@ -98,11 +167,23 @@
      *  banner con las dimensiones anteriores. */
     let bannerRefreshSerial = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastUsableWindowRequest = '';
     // El fastfetch es salida visual, pero la línea que el usuario está
     // editando pertenece al PTY. Nunca se debe repintar el banner mientras esa
     // línea está viva: si el banner crece al estrechar la ventana, podría
     // ocupar justamente las filas donde xterm ha envuelto el texto escrito.
     let userEditing = false;
+
+    function refreshBannerForSettings(): void {
+        if (!term || !active || userEditing) return;
+        void api.refreshBanner(
+            tabId,
+            term.cols,
+            term.rows,
+            Math.max(1, app.panes.length),
+            term.buffer.active.cursorY,
+        );
+    }
 
     function fitAndReport(): void {
         if (!term || !fitAddon || !active) return;
@@ -114,6 +195,20 @@
         // Un panel oculto mide 0: ajustarlo ahí daría un tamaño absurdo que
         // luego habría que deshacer.
         if (host.clientWidth === 0 || host.clientHeight === 0) return;
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const paneCount = Math.max(1, app.panes.length);
+        const layoutMinWidth = paneCount > 1 ? 960 : 480;
+        const layoutMinHeight = paneCount > 2 ? 540 : 270;
+        if (viewportWidth > 0 && viewportHeight > 0
+            && (viewportWidth < layoutMinWidth || viewportHeight < layoutMinHeight)) {
+            const requestKey = `${viewportWidth}x${viewportHeight}x${paneCount}`;
+            if (requestKey !== lastUsableWindowRequest) {
+                lastUsableWindowRequest = requestKey;
+                void api.ensureWindowUsableSize(viewportWidth, viewportHeight, paneCount)
+                    .catch((error) => console.error('[TerminalPane] usable window guard failed', error));
+            }
+        }
         try {
             const dims = fitAddon.proposeDimensions();
             if (dims) {
@@ -135,6 +230,12 @@
                 fitAddon.fit();
             }
             term.scrollToBottom();
+            // El inspector del WebView y algunos gestores de ventanas cambian
+            // el viewport sin emitir un resize convencional. Exponer las
+            // dimensiones efectivas ayuda a que el smoke compare el espacio
+            // pintado con el que recibió el backend.
+            host.dataset.terminalCols = String(term.cols);
+            host.dataset.terminalRows = String(term.rows);
         } catch (err) {
             console.error('[TerminalPane] fitAndReport error', err);
             return;
@@ -153,6 +254,7 @@
         if (resizeTimer) clearTimeout(resizeTimer);
         const cols = term.cols;
         const rows = term.rows;
+        const resizeStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
         resizeTimer = setTimeout(() => {
             resizeTimer = undefined;
             void api.resize(tabId, cols, rows).then(() => {
@@ -167,19 +269,39 @@
                     // después de Enter, cuando todavía puede estar saliendo
                     // la respuesta del comando.
                     if (editingAtResize || userEditing) return;
+                    const bannerStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
                     void api.refreshBanner(
                         tabId,
                         cols,
                         rows,
                         Math.max(1, app.panes.length),
                         term?.buffer.active.cursorY ?? 0,
-                    );
+                    ).then(() => {
+                        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                        perf.record('terminal.banner-refresh', 'duration', {
+                            durationMs: Math.round(Math.max(0, now - bannerStartedAt) * 100) / 100,
+                            status: 'ok',
+                            tabId,
+                            details: { cols, rows, paneCount: Math.max(1, app.panes.length) },
+                        });
+                    });
                 }, 120);
+            }).then(() => {
+                const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                perf.record('terminal.resize', 'duration', {
+                    durationMs: Math.round(Math.max(0, now - resizeStartedAt) * 100) / 100,
+                    status: 'ok',
+                    tabId,
+                    details: { cols, rows },
+                });
             });
         }, 60);
     }
 
     onMount(() => {
+        perf.startPoint(`terminal-mounted:${tabId}`);
+        const mountFinished = perf.start('terminal.xterm-mount', { tabId });
+        const handshakeFinished = perf.start('terminal.ready-handshake', { tabId });
         const preferences = app.preferences;
         term = new Terminal({
             cursorBlink: preferences?.terminalCursorBlink ?? true,
@@ -197,6 +319,7 @@
         fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
         term.open(host);
+        mountFinished('ok', { cols: term.cols, rows: term.rows });
 
         term.onData((data) => {
             // Si el usuario había desplazado el historial, cualquier entrada
@@ -275,20 +398,45 @@
 
         observer = new ResizeObserver(() => fitAndReport());
         observer.observe(host);
+        window.addEventListener('resize', fitAndReport);
 
         registerTerminal(tabId, term);
+        const fitStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
         fitAndReport();
+        const fitNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        perf.record('terminal.initial-fit', 'duration', {
+            durationMs: Math.round(Math.max(0, fitNow - fitStartedAt) * 100) / 100,
+            status: 'ok',
+            tabId,
+            details: { cols: term.cols, rows: term.rows },
+        });
+        window.addEventListener('winslim:banner-settings-changed', refreshBannerForSettings);
 
         // Solo ahora existe un xterm donde pintar: el backend suelta todo lo
         // que el pty escribió mientras tanto (banner + primer prompt).
         void api.markTabReady(tabId)
             .then(() => api.markFrontendReady(tabId))
-            .catch((error) => console.error('[TerminalPane] ready handshake failed', error));
+            .then(() => {
+                handshakeFinished('ok', { cols: term?.cols, rows: term?.rows });
+                perf.measureFrom(
+                    `terminal-mounted:${tabId}`,
+                    'terminal.ready-for-input-after-mount',
+                    { tabId },
+                    `ready-for-input-after-mount:${tabId}`,
+                );
+                perf.timeToOnce('app-ready-for-input', 'app.ready-for-input', { tabId });
+            })
+            .catch((error) => {
+                handshakeFinished('error', { error: String(error).slice(0, 300) });
+                console.error('[TerminalPane] ready handshake failed', error);
+            });
     });
 
     onDestroy(() => {
         observer?.disconnect();
+        window.removeEventListener('resize', fitAndReport);
         if (resizeTimer) clearTimeout(resizeTimer);
+        window.removeEventListener('winslim:banner-settings-changed', refreshBannerForSettings);
         unregisterTerminal(tabId);
         term?.dispose();
     });
@@ -384,9 +532,11 @@
             x: Math.min(event.clientX, window.innerWidth - 156),
             y: Math.min(event.clientY, window.innerHeight - 110)
         };
+        perf.mark('ui.context-menu.open', { tabId, x: event.clientX, y: event.clientY });
     }
 
     function runMenu(action: 'copy' | 'cut' | 'delete' | 'paste'): void {
+        perf.mark('ui.context-menu.action', { tabId, action });
         menu = null;
         if (action === 'copy' && term?.hasSelection()) void api.writeClipboard(term.getSelection());
         else if (action === 'cut') deleteEditableSelection(true);

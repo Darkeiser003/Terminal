@@ -14,6 +14,8 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -131,6 +133,9 @@ pub enum StopReason {
     Time,
     /// Se alcanzó el tope de resultados.
     Results,
+    /// Llegó una petición más reciente para la misma vista; se abandona el
+    /// recorrido actual para no competir por el disco con el resultado útil.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -169,6 +174,13 @@ struct Walk<'a> {
     declared_bins: HashSet<String>,
     root: PathBuf,
     source: String,
+    cancel_generation: Option<(Arc<AtomicU64>, u64)>,
+}
+
+fn is_cancelled(walk: &Walk<'_>) -> bool {
+    walk.cancel_generation
+        .as_ref()
+        .is_some_and(|(generation, request)| generation.load(Ordering::Relaxed) != *request)
 }
 
 /// Lee el shebang de un archivo para saber con qué se ejecuta. Solo se miran
@@ -413,6 +425,10 @@ fn walk(
     if depth > max_depth || results.len() >= walk.max_results || walk.stop.is_some() {
         return;
     }
+    if is_cancelled(walk) {
+        walk.stop = Some(StopReason::Cancelled);
+        return;
+    }
     if walk.scope == Scope::Here {
         if walk.visited >= walk.max_directories {
             walk.stop = Some(StopReason::Directories);
@@ -437,6 +453,10 @@ fn walk(
 
     let mut children: Vec<PathBuf> = Vec::new();
     for entry in entries.filter_map(Result::ok) {
+        if is_cancelled(walk) {
+            walk.stop = Some(StopReason::Cancelled);
+            break;
+        }
         // El límite de tiempo no debe depender de que la carpeta actual tenga
         // pocas entradas. Una carpeta como ~/Descargas puede contener miles
         // de archivos y, si solo comprobamos el reloj al cambiar de carpeta,
@@ -541,6 +561,9 @@ pub struct ScanOptions<'a> {
     pub categories: &'a [FileCategory],
     pub max_depth: u32,
     pub source: String,
+    /// Token compartido por el coordinador de escaneos. Si cambia mientras se
+    /// recorre el árbol, esta petición deja paso a la más reciente.
+    pub cancel_generation: Option<(Arc<AtomicU64>, u64)>,
 }
 
 /// Lista los scripts reconocibles de una carpeta.
@@ -566,6 +589,7 @@ pub fn list_scripts(dir: &Path, options: &ScanOptions<'_>) -> ScanResult {
         },
         root: dir.to_path_buf(),
         source: options.source.clone(),
+        cancel_generation: options.cancel_generation.clone(),
     };
 
     let mut results = Vec::new();
@@ -639,6 +663,7 @@ pub fn list_all_scripts(user_scripts_dir: &Path, categories: &[FileCategory]) ->
             categories,
             max_depth: DEFAULT_HERE_DEPTH,
             source: "scripts".to_string(),
+            cancel_generation: None,
         },
     )
     .scripts
@@ -674,6 +699,7 @@ mod tests {
                 ],
                 max_depth: DEFAULT_HERE_DEPTH,
                 source: "scripts".into(),
+                cancel_generation: None,
             },
         )
         .scripts
@@ -762,6 +788,7 @@ mod tests {
                 categories: &[FileCategory::Shell, FileCategory::Image],
                 max_depth: 1,
                 source: "scripts".into(),
+                cancel_generation: None,
             },
         );
         assert_eq!(con_imagenes.scripts.len(), 2);
@@ -788,6 +815,7 @@ mod tests {
                 categories: &super::super::types::all_categories(),
                 max_depth: 5,
                 source: "here".into(),
+                cancel_generation: None,
             },
         );
         let nombres: Vec<&str> = found.scripts.iter().map(|s| s.name.as_str()).collect();
@@ -807,6 +835,7 @@ mod tests {
                 categories: &super::super::types::all_categories(),
                 max_depth: 3,
                 source: "here".into(),
+                cancel_generation: None,
             },
         );
         let nombres: Vec<&str> = found.scripts.iter().map(|s| s.name.as_str()).collect();
@@ -824,6 +853,7 @@ mod tests {
                 categories: &super::super::types::all_categories(),
                 max_depth: 1,
                 source: "here".into(),
+                cancel_generation: None,
             },
         );
         assert_eq!(found.scripts.len(), 1);
@@ -847,6 +877,7 @@ mod tests {
                 categories: &super::super::types::all_categories(),
                 max_depth: 1,
                 source: "here".into(),
+                cancel_generation: None,
             },
         );
         let nombres: Vec<&str> = found.scripts.iter().map(|s| s.name.as_str()).collect();
@@ -900,11 +931,31 @@ mod tests {
                 categories: &super::super::types::all_categories(),
                 max_depth: 2,
                 source: "here".into(),
+                cancel_generation: None,
             },
         );
         assert_eq!(result.info.depth, 2);
         assert!(result.info.visited_directories >= 2);
         assert_eq!(result.info.stop_reason, None);
+    }
+
+    #[test]
+    fn una_peticion_antigua_se_cancela_antes_de_devolver_resultados() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "script.sh", "#!/bin/sh\n");
+        let generation = Arc::new(AtomicU64::new(2));
+        let result = list_scripts(
+            dir.path(),
+            &ScanOptions {
+                scope: Scope::Here,
+                categories: &super::super::types::all_categories(),
+                max_depth: 2,
+                source: "here".into(),
+                cancel_generation: Some((generation, 1)),
+            },
+        );
+        assert_eq!(result.info.stop_reason, Some(StopReason::Cancelled));
+        assert!(result.scripts.is_empty());
     }
 
     #[test]

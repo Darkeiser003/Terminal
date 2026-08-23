@@ -4,16 +4,16 @@ Una sola cosa por plataforma, a propósito:
 
 | Plataforma | Artefacto | Cómo |
 | --- | --- | --- |
-| Windows | carpeta desempaquetada (`.exe` + `conpty.dll` + `OpenConsole.exe`) | `npm run dist:win` |
+| Windows portable | carpeta desempaquetada (`.exe` + `conpty.dll` + `OpenConsole.exe`) | `npm run dist:win` |
+| Windows instalable | instalador NSIS con WebView2 offline | `npm run dist:win:installer` |
 | Linux | `.AppImage` | `npm run dist:linux` |
 
 Lo que **no** se genera, y por qué:
 
-- **Instalador NSIS en Windows.** Instalaba en `Program Files`, pedía permisos
-  de administrador y creaba accesos directos en el escritorio y en el menú
-  inicio. La app se distribuye como carpeta: se copia donde se quiera y se
-  ejecuta. `bundle.active: false` en `tauri.windows.conf.json` lo garantiza —
-  no depende de acordarse de pasar `--no-bundle`.
+- **Instalador NSIS en la build portable.** La build normal sigue sin instalar
+  nada ni tocar el registro. Cuando se necesite máxima compatibilidad en
+  equipos sin WebView2, `dist:win:installer` activa una configuración separada
+  que incluye el instalador offline de WebView2 y genera un NSIS.
 - **MSI**, **portable** de un solo archivo, **.deb** y **.rpm**. Ninguno estaba
   en `bundle.targets` y ninguno debe estar.
 - **Accesos directos.** Ni los del instalador ni los que creaban los scripts de
@@ -35,6 +35,11 @@ winslim-terminal.exe
 conpty.dll
 OpenConsole.exe
 ```
+
+La carpeta portable no instala WebView2: depende del runtime del sistema, como
+una aplicación Windows normal. El instalador NSIS es la distribución adecuada
+para equipos Windows recortados o sin conexión, porque instala WebView2 antes
+de dejar lista la aplicación.
 
 El resto de esa carpeta (`deps/`, `build/`, `.pdb`) son artefactos de cargo y
 no se distribuyen.

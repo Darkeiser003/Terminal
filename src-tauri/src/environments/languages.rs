@@ -83,7 +83,9 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "fsharp", label: "F#", windows_exe: "dotnet", unix_exe: "dotnet", args: &["fsi"],
         note: Some("Requiere .NET SDK con F# Interactive.") },
     LanguageDef { id: "haskell", label: "Haskell", windows_exe: "ghci", unix_exe: "ghci", args: &[], note: None },
-    LanguageDef { id: "scala", label: "Scala", windows_exe: "scala", unix_exe: "scala", args: &[], note: None },
+    // Arch empaqueta Scala 3 como `scala3`; en Windows el launcher habitual
+    // sigue siendo `scala`.
+    LanguageDef { id: "scala", label: "Scala", windows_exe: "scala", unix_exe: "scala3", args: &[], note: None },
     LanguageDef { id: "clojure", label: "Clojure", windows_exe: "clj", unix_exe: "clj", args: &[], note: None },
     LanguageDef { id: "elixir", label: "Elixir", windows_exe: "iex", unix_exe: "iex", args: &[], note: None },
     LanguageDef { id: "erlang", label: "Erlang", windows_exe: "erl", unix_exe: "erl", args: &[], note: None },
@@ -253,6 +255,95 @@ pub fn detect_language_environments(platform: &str, probe: &Probe<'_>) -> Vec<En
     detected
 }
 
+/// Ejecutables Unix que puede ofrecer una distro WSL. Se deriva del mismo
+/// catálogo que usa Linux para no mantener una lista paralela solo para WSL.
+pub fn unix_language_executables() -> Vec<String> {
+    let mut executables: Vec<String> = LANGUAGE_DEFS
+        .iter()
+        .map(|definition| definition.unix_exe.to_string())
+        .chain(
+            CATALOG_DEFS
+                .iter()
+                .map(|definition| definition.unix_exe.clone()),
+        )
+        .chain(
+            crate::config::plugins::enabled_technologies()
+                .into_iter()
+                .map(|definition| definition.unix_exe),
+        )
+        .filter(|executable| !executable.is_empty())
+        .collect();
+    executables.sort_unstable();
+    executables.dedup();
+    executables
+}
+
+/// Detecta los mismos REPL que Linux, pero lanzándolos a través de `wsl.exe`.
+/// `installed` procede de una única sonda de la distro; no se arranca un
+/// proceso por cada lenguaje.
+pub fn detect_wsl_language_environments(distro: &str, installed: &[String]) -> Vec<Environment> {
+    let is_installed = |exe: &str| installed.iter().any(|candidate| candidate == exe);
+    let mut detected = Vec::new();
+
+    let mut push = |id: &str, label: &str, exe: &str, args: &[String], note: Option<&str>| {
+        if !is_installed(exe) {
+            return;
+        }
+        let mut command_args = vec!["-d".to_string(), distro.to_string(), "--".to_string()];
+        command_args.push(exe.to_string());
+        command_args.extend(args.iter().cloned());
+        detected.push(Environment {
+            id: format!("wsl:{distro}:lang:{id}"),
+            label: format!("WSL {distro} · {label} · REPL"),
+            group: LANGUAGE_GROUP.to_string(),
+            kind: ShellKind::Repl,
+            transport: Transport::Wsl,
+            distro: Some(distro.to_string()),
+            exe: "wsl.exe".to_string(),
+            args: command_args,
+            note: note.map(str::to_string),
+            repl: true,
+            language: Some(id.to_string()),
+            ..Default::default()
+        });
+    };
+
+    for definition in LANGUAGE_DEFS {
+        let args: Vec<String> = definition
+            .args
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect();
+        push(
+            definition.id,
+            definition.label,
+            definition.unix_exe,
+            &args,
+            definition.note,
+        );
+    }
+    for definition in CATALOG_DEFS.iter() {
+        push(
+            &definition.id,
+            &definition.label,
+            &definition.unix_exe,
+            &definition.args,
+            definition.note.as_deref(),
+        );
+    }
+    for definition in crate::config::plugins::enabled_technologies() {
+        let id = format!("plugin:{}", definition.id);
+        push(
+            &id,
+            &definition.label,
+            &definition.unix_exe,
+            &definition.args,
+            definition.note.as_deref(),
+        );
+    }
+    detected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +384,41 @@ mod tests {
     }
 
     #[test]
+    fn scala_usa_el_launcher_real_de_arch_y_el_de_windows() {
+        let (is_installed, resolve_path) = probe_with(&["scala3"]);
+        let linux = detect_language_environments(
+            "linux",
+            &Probe {
+                is_installed: &is_installed,
+                resolve_path: &resolve_path,
+            },
+        );
+        assert_eq!(
+            linux
+                .iter()
+                .find(|env| env.language.as_deref() == Some("scala"))
+                .map(|env| env.exe.as_str()),
+            Some("/usr/bin/scala3")
+        );
+
+        let (is_installed, resolve_path) = probe_with(&["scala"]);
+        let windows = detect_language_environments(
+            "windows",
+            &Probe {
+                is_installed: &is_installed,
+                resolve_path: &resolve_path,
+            },
+        );
+        assert_eq!(
+            windows
+                .iter()
+                .find(|env| env.language.as_deref() == Some("scala"))
+                .map(|env| env.exe.as_str()),
+            Some("/usr/bin/scala")
+        );
+    }
+
+    #[test]
     fn un_repl_se_marca_como_tal_y_no_como_shell() {
         let (is_installed, resolve_path) = probe_with(&["node"]);
         let envs = detect_language_environments(
@@ -330,6 +456,19 @@ mod tests {
         let lua = envs.iter().find(|env| env.id == "lang:lua").unwrap();
         assert!(lua.args.is_empty());
         assert_eq!(lua.note, None);
+    }
+
+    #[test]
+    fn wsl_reutiliza_el_catalogo_linux_y_conserva_el_comando_completo() {
+        let envs = detect_wsl_language_environments("Ubuntu", &["python3".to_string()]);
+        let python = envs
+            .iter()
+            .find(|env| env.language.as_deref() == Some("python"))
+            .expect("Python debe detectarse dentro de WSL");
+        assert_eq!(python.transport, Transport::Wsl);
+        assert_eq!(python.exe, "wsl.exe");
+        assert_eq!(python.args, vec!["-d", "Ubuntu", "--", "python3"]);
+        assert_eq!(python.id, "wsl:Ubuntu:lang:python");
     }
 
     #[test]
@@ -390,6 +529,19 @@ mod tests {
                 .exe,
             "/bin/gswin64c"
         );
+    }
+
+    #[test]
+    fn todos_los_lenguajes_declarados_tienen_candidato_nativo_para_windows() {
+        assert!(LANGUAGE_DEFS
+            .iter()
+            .all(|definition| { !definition.windows_exe.is_empty() }));
+        assert!(CATALOG_DEFS
+            .iter()
+            .all(|definition| !definition.windows_exe.is_empty()));
+        // 82 definiciones base + 28 del catálogo modular; los plugins pueden
+        // ampliar esta cifra sin alterar la garantía de compatibilidad base.
+        assert!(LANGUAGE_DEFS.len() + CATALOG_DEFS.len() >= 100);
     }
 
     #[test]

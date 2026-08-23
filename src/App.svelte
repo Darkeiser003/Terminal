@@ -9,6 +9,8 @@
     import * as api from "./lib/api";
     import { app } from "./lib/appState.svelte";
     import { panels } from "./lib/panels.svelte";
+    import * as perf from "./lib/performance";
+    import { matchesShortcut } from "./lib/shortcuts";
     import { getTerminal } from "./lib/terminalRegistry";
     import DependenciesPanel from "./components/DependenciesPanel.svelte";
     import ExplorerSidebar from "./components/ExplorerSidebar.svelte";
@@ -67,39 +69,56 @@
         }
     }
 
-    function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
-        const parts = shortcut.toLowerCase().split("+");
-        const expectedKey = parts.at(-1);
-        const key = event.key === "\\" ? "backslash" : event.key.toLowerCase();
-        return key === expectedKey
-            && event.ctrlKey === parts.includes("ctrl")
-            && event.altKey === parts.includes("alt")
-            && event.shiftKey === parts.includes("shift")
-            && event.metaKey === parts.includes("meta");
-    }
-
     async function loadDeps(): Promise<void> {
+        const finish = perf.start('panel.load', { panel: 'dependencies' });
         depsMounted = true;
-        await tick();
-        await deps?.load();
+        try {
+            await tick();
+            await deps?.load();
+            finish('ok');
+        } catch (cause) {
+            finish('error', { error: String(cause).slice(0, 300) });
+            throw cause;
+        }
     }
 
     async function loadSettings(): Promise<void> {
+        const finish = perf.start('panel.load', { panel: 'settings' });
         settingsMounted = true;
-        await tick();
-        await settings?.load();
+        try {
+            await tick();
+            await settings?.load();
+            finish('ok');
+        } catch (cause) {
+            finish('error', { error: String(cause).slice(0, 300) });
+            throw cause;
+        }
     }
 
     async function loadScripts(): Promise<void> {
+        const finish = perf.start('panel.load', { panel: 'scripts' });
         scriptsMounted = true;
-        await tick();
-        await scripts?.load();
+        try {
+            await tick();
+            await scripts?.load();
+            finish('ok');
+        } catch (cause) {
+            finish('error', { error: String(cause).slice(0, 300) });
+            throw cause;
+        }
     }
 
     async function loadProjects(): Promise<void> {
+        const finish = perf.start('panel.load', { panel: 'projects' });
         projectsMounted = true;
-        await tick();
-        await projects?.load();
+        try {
+            await tick();
+            await projects?.load();
+            finish('ok');
+        } catch (cause) {
+            finish('error', { error: String(cause).slice(0, 300) });
+            throw cause;
+        }
     }
 
     /** Atajos globales. Son los de la versión Electron, y se eligieron para no
@@ -195,10 +214,24 @@
                 // destruida evita `_renderer.value.dimensions` al intentar
                 // desplazarla desde el callback tardío.
                 if (!term?.element?.isConnected) return;
+                const bannerLike = /LTerminal|WinSlim|Sistema|System|CPU|Memoria|Memory|Disco|Disk|Kernel/i.test(data);
                 try {
                     term.write(data, () => {
                         const current = getTerminal(tabId);
                         if (!current?.element?.isConnected) return;
+                        perf.markOnce(`terminal-output:${tabId}`, 'terminal.first-output', { tabId });
+                        if (bannerLike) {
+                            perf.timeToOnce(`fastfetch-visible:${tabId}`, 'fastfetch.banner-visible', {
+                                tabId,
+                                source: 'pty-output',
+                            });
+                            perf.measureFrom(
+                                `terminal-mounted:${tabId}`,
+                                'fastfetch.banner-visible-after-terminal',
+                                { tabId, source: 'pty-output' },
+                                `fastfetch-visible-after-terminal:${tabId}`,
+                            );
+                        }
                         try { current.scrollToBottom(); }
                         catch (error) { console.debug('[App] terminal closed while scrolling', error); }
                     });
@@ -246,11 +279,22 @@
             }),
         ];
 
+        perf.markOnce('frontend-mounted', 'frontend.mounted');
+        const initialLoad = perf.start('app.initial-load');
         void app.load()
-            .then(() => {
+            .then(async () => {
+                initialLoad('ok', {
+                    tabs: app.tabs.length,
+                    environments: app.environments.length,
+                });
                 ready = true;
+                await tick();
+                perf.timeToOnce('ui-shell-ready', 'app.ui-shell-visible', {
+                    tabs: app.tabs.length,
+                });
             })
             .catch((cause) => {
+                initialLoad('error', { error: String(cause).slice(0, 300) });
                 startupError = String(cause);
                 void api.reportFrontendError({
                     message: `No se pudo iniciar la interfaz: ${startupError}`,
@@ -296,9 +340,9 @@
 <main class:platform-linux={app.appInfo?.platform === "linux"}>
     {#if startupError}
         <section class="startup-error" role="alert">
-            <h1>LTerminal no pudo iniciar la interfaz</h1>
+            <h1>{app.t("startup.errorTitle", "LTerminal no pudo iniciar la interfaz")}</h1>
             <p>{startupError}</p>
-            <p>Consulta <code>~/.config/lterminal/logs/main.log</code>.</p>
+            <p>{app.t("startup.logHint", "Consulta la carpeta de logs desde Ajustes.")}</p>
         </section>
     {/if}
     <Toolbar

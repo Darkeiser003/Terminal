@@ -254,6 +254,30 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
     }
 }
 
+/// Actualiza los archivos que usa `sysinfo`/`clear` después de un resize o de
+/// cambiar el entorno. Sin esto la terminal podía mostrar el banner nuevo en
+/// xterm, pero el alias seguía leyendo el ancho y el aviso de la sesión vieja.
+pub fn refresh_banner_files(tab_id: &str, note: Option<&str>, banner: &str) {
+    let Some(dir) = dir() else {
+        return;
+    };
+    let note = note
+        .map(|value| format!("\x1b[33m{value}\x1b[0m\r\n\r\n"))
+        .unwrap_or_default();
+    let text = format!("\r\n{}{note}", banner);
+    let ascii = to_console_ascii(&text);
+    let normal = dir.join(format!("banner-{tab_id}.txt"));
+    let cleared = dir.join(format!("bannerclear-{tab_id}.txt"));
+    if std::fs::write(&normal, &ascii).is_err()
+        || std::fs::write(&cleared, format!("\x1b[H\x1b[2J\x1b[3J{ascii}")).is_err()
+    {
+        log_warn!(
+            "No se pudo actualizar el banner de la pestaña",
+            serde_json::json!({ "tabId": tab_id })
+        );
+    }
+}
+
 /// Borra los temporales de una pestaña que se cierra. Son archivos de usar y
 /// tirar: un fallo aquí (carpeta ya borrada, sin permisos) no importa.
 pub fn remove_for_tab(tab_id: &str) {
@@ -317,6 +341,24 @@ mod tests {
     fn las_secuencias_de_color_se_conservan() {
         let coloreado = "\x1b[33maviso\x1b[0m";
         assert_eq!(to_console_ascii(coloreado), coloreado);
+    }
+
+    #[test]
+    fn el_banner_actualizado_reemplaza_tambien_el_archivo_de_sysinfo() {
+        let tab_id = "banner-refresh-regression";
+        let dir = dir().expect("la carpeta de sesión se crea");
+        remove_for_tab(tab_id);
+
+        refresh_banner_files(tab_id, Some("Aviso de sesión"), "banner nuevo");
+
+        let normal = std::fs::read_to_string(dir.join(format!("banner-{tab_id}.txt"))).unwrap();
+        let cleared =
+            std::fs::read_to_string(dir.join(format!("bannerclear-{tab_id}.txt"))).unwrap();
+        assert!(normal.contains("banner nuevo"));
+        assert!(normal.contains("Aviso de sesion"));
+        assert!(cleared.starts_with("\x1b[H\x1b[2J\x1b[3J"));
+
+        remove_for_tab(tab_id);
     }
 
     #[test]

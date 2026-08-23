@@ -199,20 +199,32 @@ pub fn projects_cd(
     full_name: String,
 ) -> ActionResult {
     let Some(repository) = state.visible_repository(&full_name) else {
-        return ActionResult::failed("El repositorio no pertenece a la vista actual.");
+        return ActionResult::failed_t(
+            "error.repoNotInView",
+            "El repositorio no pertenece a la vista actual.",
+        );
     };
     let Some(env) = state.tabs.environment_of(&tab_id) else {
-        return ActionResult::failed("La pestaña activa ya no está disponible.");
+        return ActionResult::failed_t("error.noTab", "La pestaña activa ya no está disponible.");
     };
     if env.repl {
-        return ActionResult::failed("La pestaña activa es un REPL, no una shell.");
+        return ActionResult::failed_t(
+            "error.replNotShell",
+            "La pestaña activa es un REPL, no una shell.",
+        );
     }
     let Some(local) = github::local_repository_state(&github::projects_folder(), &repository)
     else {
-        return ActionResult::failed("No se pudo resolver la carpeta del repositorio.");
+        return ActionResult::failed_t(
+            "error.notInView",
+            "No se pudo resolver la carpeta del repositorio.",
+        );
     };
     if !local.repository_exists {
-        return ActionResult::failed("Ese repositorio ya no está clonado.");
+        return ActionResult::failed_t(
+            "projects.noDownloaded",
+            "Ese repositorio ya no está clonado.",
+        );
     }
     let Some(command) = crate::scripts::build_cd_command(
         &local.local_path,
@@ -225,14 +237,17 @@ pub fn projects_cd(
             windows_host: None,
         },
     ) else {
-        return ActionResult::failed("Este entorno no puede llegar a la carpeta de proyectos.");
+        return ActionResult::failed_t(
+            "error.folderNotInView",
+            "Este entorno no puede llegar a la carpeta de proyectos.",
+        );
     };
     log_info!(
         "cd a un repositorio descargado",
         serde_json::json!({ "tabId": tab_id, "repo": repository.full_name })
     );
     if !state.tabs.write_command(&tab_id, &command) {
-        return ActionResult::failed("No se pudo escribir en la terminal.");
+        return ActionResult::failed_t("error.writeFailed", "No se pudo escribir en la terminal.");
     }
     ActionResult {
         ok: true,
@@ -764,9 +779,10 @@ pub struct PinResult {
 }
 
 fn pin_failed(error: &str) -> PinResult {
+    let translator = translator();
     PinResult {
         ok: false,
-        error: Some(error.to_string()),
+        error: Some(translator.t("projects.pinFailed", error)),
         state: None,
     }
 }
@@ -929,9 +945,10 @@ pub struct GitRunResult {
 }
 
 fn git_failed(error: &str) -> GitRunResult {
+    let translator = translator();
     GitRunResult {
         ok: false,
-        error: Some(error.to_string()),
+        error: Some(translator.t("projects.gitFailed", error)),
         ..Default::default()
     }
 }

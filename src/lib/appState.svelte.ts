@@ -54,6 +54,20 @@ class AppStore {
     /** El explorador lateral está a la vista. */
     explorerVisible = $state(false);
 
+    /** Evita que un refresco lento de entornos pueda devolver la lista a un
+     *  estado anterior si el usuario pulsa refrescar varias veces. */
+    private environmentRequest = 0;
+    /** Las preferencias se guardan en orden: dos clics rápidos no deben hacer
+     *  que la respuesta vieja pise el cambio más reciente. */
+    private preferencesSaveQueue: Promise<void> = Promise.resolve();
+    /** Las aperturas rápidas de Ajustes no deben aplicar una respuesta vieja
+     *  después de una lectura más reciente del backend. */
+    private preferencesReloadRequest = 0;
+    /** Un ciclo de paneles en curso debe terminar antes de aceptar otro: abrir
+     *  pestañas faltantes es asíncrono y dos ciclos simultáneos duplicaban la
+     *  cantidad de terminales. */
+    private paneCyclePromise: Promise<void> | null = null;
+
     activeTab = $derived(this.tabs.find((tab) => tab.id === this.activeTabId) ?? null);
 
     /** Traduce una clave con su respaldo en español escrito en el propio
@@ -97,16 +111,35 @@ class AppStore {
     }
 
     async loadEnvironments(): Promise<void> {
-        const inventory = await api.listEnvironments(this.activeTabId ?? undefined);
-        this.environments = inventory.envs;
-        this.environmentsLoaded = true;
+        const request = ++this.environmentRequest;
+        try {
+            const inventory = await api.listEnvironments(this.activeTabId ?? undefined);
+            if (request !== this.environmentRequest) return;
+            this.environments = inventory.envs;
+            this.environmentsLoaded = true;
+        } catch (error) {
+            if (request === this.environmentRequest) {
+                this.environmentsLoaded = true;
+                console.error('[AppStore] environment load failed', error);
+            }
+        }
     }
 
     async refreshEnvironments(): Promise<void> {
+        const request = ++this.environmentRequest;
         this.environmentsLoaded = false;
-        const inventory = await api.refreshEnvironments(this.activeTabId ?? undefined);
-        this.environments = inventory.envs;
-        this.environmentsLoaded = true;
+        try {
+            const inventory = await api.refreshEnvironments(this.activeTabId ?? undefined);
+            if (request !== this.environmentRequest) return;
+            this.environments = inventory.envs;
+            this.environmentsLoaded = true;
+        } catch (error) {
+            if (request === this.environmentRequest) {
+                this.environmentsLoaded = true;
+                console.error('[AppStore] environment refresh failed', error);
+            }
+            throw error;
+        }
     }
 
     /** Lo llama el evento `envs-updated`, cuando la detección completa (WSL,
@@ -177,6 +210,19 @@ class AppStore {
      *  Volver a una casilla no cierra nada — las pestañas siguen en la barra,
      *  solo deja de verse más de una a la vez. */
     async cyclePanes(): Promise<void> {
+        if (this.paneCyclePromise) return this.paneCyclePromise;
+        const operation = this.cyclePanesOnce().catch((error) => {
+            console.error('[AppStore] pane cycle failed', error);
+        });
+        this.paneCyclePromise = operation;
+        try {
+            await operation;
+        } finally {
+            if (this.paneCyclePromise === operation) this.paneCyclePromise = null;
+        }
+    }
+
+    private async cyclePanesOnce(): Promise<void> {
         const actual = this.panes.length < 2 ? 1 : this.panes.length;
         const siguiente = (actual % MAX_PANES) + 1;
         if (siguiente < 2) {
@@ -320,8 +366,20 @@ class AppStore {
     }
 
     async savePreferences(patch: Partial<Preferences>): Promise<void> {
-        if (!this.preferences) return;
-        this.applyPayload(await api.savePreferences({ ...this.preferences, ...patch }));
+        const operation = this.preferencesSaveQueue.then(async () => {
+            if (!this.preferences) return;
+            this.applyPayload(await api.savePreferences({ ...this.preferences, ...patch }));
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed'));
+            }
+        });
+        // Dejar la cola viva después de un fallo permite que un segundo intento
+        // siga guardando, mientras la llamada concreta conserva su error para
+        // que el panel pueda mostrarlo.
+        this.preferencesSaveQueue = operation.catch((error) => {
+            console.error('[AppStore] preference save failed', error);
+        });
+        return operation;
     }
 
     /** Vuelve a los valores de fábrica. El backend es quien decide cuáles son:
@@ -333,7 +391,9 @@ class AppStore {
     /** Recarga las preferencias desde el backend, que es la única fuente: el
      *  panel de Ajustes las pide cada vez que se abre. */
     async reloadPreferences(): Promise<void> {
-        this.applyPayload(await api.getPreferences());
+        const request = ++this.preferencesReloadRequest;
+        const payload = await api.getPreferences();
+        if (request === this.preferencesReloadRequest) this.applyPayload(payload);
     }
 
     private applyPayload(payload: PreferencesPayload): void {

@@ -34,26 +34,34 @@
     let release = $state<{ fullName: string; release: Release | null } | null>(null);
     /** Qué fila tiene abierto el plegable de acciones. */
     let expanded = $state('');
+    let loadSerial = 0;
 
     export async function load(next?: Mode): Promise<void> {
         if (next) mode = next;
+        const serial = ++loadSerial;
         loading = true;
         statusError = false;
         status = '';
         try {
             if (mode === 'downloaded') {
-                downloaded = await api.listDownloadedProjects();
+                const nextDownloaded = await api.listDownloadedProjects();
                 // El estado hace falta igualmente: de ahí sale la carpeta que se
                 // enseña en la cabecera.
-                projects ??= await api.getProjectsState();
+                const nextProjects = projects ?? await api.getProjectsState();
+                if (serial !== loadSerial) return;
+                downloaded = nextDownloaded;
+                projects = nextProjects;
             } else {
-                projects = await api.getProjectsState();
+                const nextProjects = await api.getProjectsState();
+                if (serial !== loadSerial) return;
+                projects = nextProjects;
             }
         } catch (cause) {
+            if (serial !== loadSerial) return;
             statusError = true;
             status = String(cause);
         } finally {
-            loading = false;
+            if (serial === loadSerial) loading = false;
         }
     }
 

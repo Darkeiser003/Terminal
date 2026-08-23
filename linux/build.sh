@@ -56,9 +56,11 @@ NO_RUN=0
 SKIP_CHECKS=0
 AUTO_INSTALL=1
 VERSION_OVERRIDE=""
-EXTENDED_TESTS=-1
+EXTENDED_TESTS=1
 INSTALL_E2E_DRIVER=0
 E2E_DRIVER_PATH="${TAURI_NATIVE_DRIVER:-}"
+CROSS_WINDOWS=0
+NON_INTERACTIVE=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --clean)       CLEAN=1 ;;
@@ -68,6 +70,10 @@ while [ "$#" -gt 0 ]; do
         --extended-tests) EXTENDED_TESTS=1 ;;
         --full-tests)     EXTENDED_TESTS=1 ;;
         --no-extended-tests) EXTENDED_TESTS=0 ;;
+        --cross-windows|--windows-tests)
+            CROSS_WINDOWS=1
+            ;;
+        --non-interactive) NON_INTERACTIVE=1 ;;
         --install-e2e-driver) INSTALL_E2E_DRIVER=1 ;;
         --e2e-driver)
             shift
@@ -87,7 +93,7 @@ while [ "$#" -gt 0 ]; do
             VERSION_OVERRIDE="$1"
             ;;
         -h|--help)
-            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install] [--extended-tests|--full-tests|--no-extended-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
+            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
             exit 0
             ;;
         *)
@@ -121,6 +127,15 @@ graphical_session_available() {
         return 0
     fi
     if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        local wayland_socket="$WAYLAND_DISPLAY"
+        if [[ "$wayland_socket" != /* ]]; then
+            wayland_socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$wayland_socket"
+        fi
+        # Una variable Wayland puede quedar heredada por una shell aislada o
+        # por un terminal del editor aunque el socket ya no exista. En ese
+        # caso GTK solo devuelve un panic genérico; no se debe llamar a eso un
+        # fallo del AppImage ni bloquear la publicación.
+        [ -S "$wayland_socket" ] || return 1
         if command -v wayland-info >/dev/null 2>&1; then
             timeout 5 wayland-info >/dev/null 2>&1
             return $?
@@ -134,11 +149,34 @@ graphical_session_available() {
 # build de varios minutos no queda claro qué paso se quedó a medias. El
 # equivalente del "La build fallo con codigo N" de build.bat.
 CURRENT_STEP="inicio"
+SMOKE_PID=""
+
+# El smoke de arranque crea una aplicación real para verificar WebKit, IPC y la
+# primera PTY. AppImage puede delegar en un proceso nativo después de extraer
+# sus archivos, por lo que matar solo el PID del lanzador deja una ventana
+# huérfana abierta. Se ejecuta en una sesión/proceso propio y se limpia siempre
+# al salir de la build, incluso si falla una comprobación posterior.
+cleanup_smoke_process() {
+    local pid="${SMOKE_PID:-}"
+    [ -n "$pid" ] || return 0
+    kill -TERM -- "-$pid" >/dev/null 2>&1 || true
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5; do
+        kill -0 "$pid" >/dev/null 2>&1 || break
+        sleep 1
+    done
+    kill -KILL -- "-$pid" >/dev/null 2>&1 || true
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+    SMOKE_PID=""
+}
+
 on_error() {
     local code=$?
     printf '\n\033[31mLa build falló en: %s (código %s)\033[0m\n' "$CURRENT_STEP" "$code" >&2
     echo "Revisa los mensajes de arriba." >&2
 }
+trap cleanup_smoke_process EXIT
 trap on_error ERR
 
 # rustup, nvm y compañía instalan en el HOME y dejan el PATH preparado en un
@@ -181,6 +219,43 @@ run_as_root() {
     fi
 }
 
+# Evita que una actualización de la distribución o una instalación iniciada
+# desde la app compitan con esta build. Nunca elimina el lock: si no hay un
+# proceso que lo posea, el usuario debe revisar y retirar el resto manualmente.
+wait_for_pacman_lock() {
+    local lock_file=/var/lib/pacman/db.lck
+    local attempt=0
+    while [ -e "$lock_file" ] && [ "$attempt" -lt 30 ]; do
+        if ps -eo comm= 2>/dev/null | grep -Eq '^(pacman|yay|paru|pamac)$'; then
+            warn "pacman está ocupado; esperando a que termine (intento $((attempt + 1))/30)..."
+            sleep 2
+            attempt=$((attempt + 1))
+        else
+            err "Existe un bloqueo huérfano en $lock_file y no se encontró ningún gestor de paquetes activo. No se eliminará automáticamente; comprueba que no haya otra instalación y retíralo manualmente antes de continuar."
+            return 1
+        fi
+    done
+    if [ -e "$lock_file" ]; then
+        err "pacman sigue bloqueado tras 60 segundos ($lock_file)."
+        return 1
+    fi
+}
+
+# Una build no debe convertir la instalación de tres herramientas de prueba en
+# una actualización completa de CachyOS/Arch. `-Syu` puede descargar y revisar
+# cientos de paquetes y dejar la build aparentemente detenida durante mucho
+# tiempo. Por defecto se instalan solo los objetivos solicitados; quien quiera
+# actualizar todo el sistema antes puede hacerlo fuera de la build o habilitar
+# explícitamente esta ruta con LTERMINAL_ALLOW_SYSTEM_UPGRADE=1.
+pacman_install() {
+    wait_for_pacman_lock || return 1
+    if [ "${LTERMINAL_ALLOW_SYSTEM_UPGRADE:-0}" = "1" ]; then
+        run_as_root pacman -Syu --needed --noconfirm "$@"
+    else
+        run_as_root pacman -S --needed --noconfirm "$@"
+    fi
+}
+
 package_manager() {
     local manager
     for manager in apt-get dnf pacman zypper apk; do
@@ -212,9 +287,9 @@ install_system_dependencies() {
                 libappindicator-gtk3-devel librsvg2-devel libxdo-devel ibus
             ;;
         pacman)
-            # Arch/CachyOS no admite actualizaciones parciales: sincronizar sin
-            # actualizar puede mezclar bibliotecas incompatibles.
-            run_as_root pacman -Syu --needed --noconfirm \
+            # No se actualiza el sistema completo desde una build. La vía
+            # explícita sigue disponible con LTERMINAL_ALLOW_SYSTEM_UPGRADE=1.
+            pacman_install \
                 base-devel curl wget file pkgconf ca-certificates xz \
                 webkit2gtk-4.1 libsoup3 openssl appmenu-gtk-module \
                 libappindicator-gtk3 librsvg xdotool ibus
@@ -234,6 +309,106 @@ install_system_dependencies() {
             ;;
     esac
     ok "Dependencias nativas instaladas"
+}
+
+flatpak_app_installed() {
+    local app_id="$1"
+    command -v flatpak >/dev/null 2>&1 || return 1
+    flatpak info --user "$app_id" >/dev/null 2>&1 || flatpak info "$app_id" >/dev/null 2>&1
+}
+
+# Herramientas mínimas de la batería ampliada. No intenta instalar los cientos
+# de lenguajes y frameworks del catálogo: solo prepara lo que exercise-host.sh
+# prueba de forma determinista y que no forma parte del toolchain de Tauri.
+install_extended_test_tools() {
+    [ "$AUTO_INSTALL" -eq 1 ] || {
+        warn "La instalación automática está desactivada; se conservarán las herramientas de test ausentes."
+        return 0
+    }
+
+    local manager
+    manager="$(package_manager)" || {
+        err "No se reconoce el gestor de paquetes para preparar la batería ampliada."
+        return 1
+    }
+
+    local packages=()
+    local flatpak_needed=0
+    case "$manager" in
+        apt-get)
+            command -v dash >/dev/null 2>&1 || packages+=(dash)
+            command -v psql >/dev/null 2>&1 || packages+=(postgresql-client)
+            command -v gfortran >/dev/null 2>&1 || packages+=(gfortran)
+            flatpak_app_installed com.usebottles.bottles || flatpak_needed=1
+            [ "$flatpak_needed" -eq 0 ] || command -v flatpak >/dev/null 2>&1 || packages+=(flatpak)
+            ;;
+        dnf)
+            command -v dash >/dev/null 2>&1 || packages+=(dash)
+            command -v psql >/dev/null 2>&1 || packages+=(postgresql)
+            command -v gfortran >/dev/null 2>&1 || packages+=(gcc-gfortran)
+            flatpak_app_installed com.usebottles.bottles || flatpak_needed=1
+            [ "$flatpak_needed" -eq 0 ] || command -v flatpak >/dev/null 2>&1 || packages+=(flatpak)
+            ;;
+        pacman)
+            command -v dash >/dev/null 2>&1 || packages+=(dash)
+            command -v psql >/dev/null 2>&1 || packages+=(postgresql)
+            # En Arch/CachyOS el ejecutable gfortran lo proporciona gcc-fortran,
+            # no un paquete llamado gfortran.
+            command -v gfortran >/dev/null 2>&1 || packages+=(gcc-fortran)
+            flatpak_app_installed com.usebottles.bottles || flatpak_needed=1
+            [ "$flatpak_needed" -eq 0 ] || command -v flatpak >/dev/null 2>&1 || packages+=(flatpak)
+            ;;
+        zypper)
+            command -v dash >/dev/null 2>&1 || packages+=(dash)
+            command -v psql >/dev/null 2>&1 || packages+=(postgresql)
+            command -v gfortran >/dev/null 2>&1 || packages+=(gcc-fortran)
+            flatpak_app_installed com.usebottles.bottles || flatpak_needed=1
+            [ "$flatpak_needed" -eq 0 ] || command -v flatpak >/dev/null 2>&1 || packages+=(flatpak)
+            ;;
+        apk)
+            command -v dash >/dev/null 2>&1 || packages+=(dash)
+            command -v psql >/dev/null 2>&1 || packages+=(postgresql-client)
+            command -v gfortran >/dev/null 2>&1 || packages+=(gfortran)
+            flatpak_app_installed com.usebottles.bottles || flatpak_needed=1
+            [ "$flatpak_needed" -eq 0 ] || command -v flatpak >/dev/null 2>&1 || packages+=(flatpak)
+            ;;
+    esac
+
+    if [ "${#packages[@]}" -gt 0 ]; then
+        warn "Faltan herramientas para la batería ampliada: ${packages[*]}."
+        case "$manager" in
+            apt-get)
+                run_as_root apt-get update
+                run_as_root apt-get install -y --no-install-recommends "${packages[@]}"
+                ;;
+            dnf) run_as_root dnf install -y "${packages[@]}" ;;
+            pacman) pacman_install "${packages[@]}" ;;
+            zypper) run_as_root zypper --non-interactive install -y "${packages[@]}" ;;
+            apk) run_as_root apk add "${packages[@]}" ;;
+        esac
+    fi
+
+    if ! flatpak_app_installed com.usebottles.bottles; then
+        command -v flatpak >/dev/null 2>&1 || {
+            err "No se pudo instalar Flatpak para preparar Bottles."
+            return 1
+        }
+        warn "Bottles no está instalado; se instalará desde Flathub para la prueba de compatibilidad Windows."
+        flatpak remote-add --if-not-exists --user flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+        flatpak install --user -y flathub com.usebottles.bottles
+    fi
+
+    local missing=""
+    command -v dash >/dev/null 2>&1 || missing="$missing dash"
+    command -v psql >/dev/null 2>&1 || missing="$missing psql"
+    command -v gfortran >/dev/null 2>&1 || missing="$missing gfortran"
+    flatpak_app_installed com.usebottles.bottles || missing="$missing bottles-flatpak"
+    if [ -n "$missing" ]; then
+        err "Siguen faltando herramientas de la batería ampliada después de instalarlas:$missing"
+        return 1
+    fi
+    ok "Herramientas de batería ampliada disponibles: dash, PostgreSQL, Fortran y Bottles"
 }
 
 # WebKitGTK y WebKitWebDriver son paquetes distintos. En algunas distribuciones
@@ -291,6 +466,7 @@ install_e2e_driver() {
             run_as_root dnf install -y webkit2gtk-driver
             ;;
         pacman)
+            wait_for_pacman_lock || return 1
             # En Arch/CachyOS WebKitGTK y WebKitWebDriver suelen vivir en
             # paquetes distintos. Primero se consulta el repositorio oficial;
             # solo si no existe allí se ofrece el helper AUR que el usuario
@@ -564,11 +740,12 @@ ok "IBus disponible para linuxdeploy"
 CURRENT_VERSION="$(node -p "require('./package.json').version")"
 if [ -n "$VERSION_OVERRIDE" ]; then
     VERSION="$VERSION_OVERRIDE"
-elif [ -t 0 ]; then
+elif [ "$NON_INTERACTIVE" -eq 0 ] && [ -t 0 ]; then
     read -r -p "Versión a compilar [$CURRENT_VERSION]: " VERSION
     VERSION="${VERSION:-$CURRENT_VERSION}"
 else
     VERSION="$CURRENT_VERSION"
+    warn "Modo no interactivo: se conserva la versión $VERSION."
 fi
 
 node scripts/set-package-version.mjs "$VERSION" || {
@@ -614,6 +791,107 @@ if ! command -v "$APPIMAGETOOL" >/dev/null 2>&1; then
     fi
 else
     ok "appimagetool presente"
+fi
+
+# appimagetool puede traer su propio runtime AppImage, pero las versiones
+# recientes intentan descargarlo de GitHub si no se les pasa explícitamente.
+# Eso hace que una build offline falle al final, después de haber compilado
+# todo. Reutilizamos el runtime embebido en el propio appimagetool y lo
+# guardamos en caché; también se admite una ruta explícita para CI o mirrors.
+case "$(uname -m)" in
+    x86_64|amd64) APPIMAGE_ARCH="x86_64" ;;
+    aarch64|arm64) APPIMAGE_ARCH="aarch64" ;;
+    *) APPIMAGE_ARCH="$(uname -m)" ;;
+esac
+# El plugin AppImage de linuxdeploy usa Zstandard en sus versiones actuales.
+# Se puede sobrescribir para un toolchain antiguo que soporte otra compresión.
+# El plugin de Tauri/linuxdeploy actual solo genera Zstandard con el
+# mksquashfs que trae integrado. El appimagetool antiguo que suele estar en el
+# PATH puede no entender Zstandard, por eso el repaquetado final usa XZ.
+APPIMAGE_COMP="${LTERMINAL_APPIMAGE_COMP:-zstd}"
+# El appimagetool que distribuye Tauri es moderno y trae el mksquashfs que
+# necesita. Preferirlo evita que una versión antigua del PATH intente montar
+# su propio AppImage (fallando sin FUSE) o rechace Zstandard. Solo se usa XZ
+# como fallback cuando esa copia no está disponible.
+BUNDLED_APPIMAGETOOL="${XDG_CACHE_HOME:-$HOME/.cache}/tauri/squashfs-root/plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool"
+BUNDLED_APPIMAGE_BIN_DIR="$(dirname "$BUNDLED_APPIMAGETOOL")"
+if [ -x "$BUNDLED_APPIMAGETOOL" ] && [ -x "$BUNDLED_APPIMAGE_BIN_DIR/mksquashfs" ]; then
+    APPIMAGETOOL="$BUNDLED_APPIMAGETOOL"
+    export PATH="$BUNDLED_APPIMAGE_BIN_DIR:$PATH"
+    APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-zstd}"
+    ok "appimagetool moderno de Tauri seleccionado"
+else
+    APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-xz}"
+fi
+APPIMAGE_RUNTIME_FILE="${LTERMINAL_APPIMAGE_RUNTIME:-}"
+if [ -n "$APPIMAGE_RUNTIME_FILE" ]; then
+    if [ ! -f "$APPIMAGE_RUNTIME_FILE" ] || [ ! -s "$APPIMAGE_RUNTIME_FILE" ]; then
+        err "LTERMINAL_APPIMAGE_RUNTIME no apunta a un runtime válido: $APPIMAGE_RUNTIME_FILE"
+        exit 1
+    fi
+    ok "Runtime AppImage explícito: $APPIMAGE_RUNTIME_FILE"
+else
+    APPIMAGE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/lterminal/appimage"
+    if ! mkdir -p "$APPIMAGE_CACHE_DIR" 2>/dev/null; then
+        warn "No se puede escribir en la caché de usuario; se usará una caché temporal para esta build."
+        APPIMAGE_CACHE_DIR="${TMPDIR:-/tmp}/lterminal-appimage-cache"
+        if ! mkdir -p "$APPIMAGE_CACHE_DIR" 2>/dev/null; then
+            warn "No se pudo crear una caché local del runtime AppImage; se continuará sin caché."
+            APPIMAGE_CACHE_DIR=""
+        fi
+    fi
+    APPIMAGE_RUNTIME_CACHE="${APPIMAGE_CACHE_DIR:+$APPIMAGE_CACHE_DIR/runtime-$APPIMAGE_ARCH-$APPIMAGE_COMP}"
+    if [ -n "$APPIMAGE_RUNTIME_CACHE" ] && [ -s "$APPIMAGE_RUNTIME_CACHE" ]; then
+        APPIMAGE_RUNTIME_FILE="$APPIMAGE_RUNTIME_CACHE"
+        ok "Runtime AppImage reutilizado desde caché"
+    else
+        # El runtime embebido en algunas versiones antiguas de appimagetool no
+        # entiende Zstandard. Primero se intenta el runtime oficial actual,
+        # que es pequeño y se conserva para las siguientes builds.
+        RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-$APPIMAGE_ARCH"
+        RUNTIME_DOWNLOAD_TARGET="${APPIMAGE_RUNTIME_CACHE:-${TMPDIR:-/tmp}/lterminal-appimage-runtime-$APPIMAGE_ARCH-$APPIMAGE_COMP}"
+        RUNTIME_DOWNLOAD_TMP="$RUNTIME_DOWNLOAD_TARGET.tmp.$$"
+        if command -v curl >/dev/null 2>&1 && \
+            curl -L --fail --silent --show-error --retry 2 --connect-timeout 8 --max-time 60 \
+                "$RUNTIME_URL" -o "$RUNTIME_DOWNLOAD_TMP"; then
+            chmod +x "$RUNTIME_DOWNLOAD_TMP"
+            if [ -n "$APPIMAGE_RUNTIME_CACHE" ]; then
+                mv -f "$RUNTIME_DOWNLOAD_TMP" "$APPIMAGE_RUNTIME_CACHE"
+                APPIMAGE_RUNTIME_FILE="$APPIMAGE_RUNTIME_CACHE"
+            else
+                APPIMAGE_RUNTIME_FILE="$RUNTIME_DOWNLOAD_TMP"
+            fi
+            ok "Runtime AppImage oficial descargado y listo para el bundler"
+        else
+            rm -f "$RUNTIME_DOWNLOAD_TMP"
+        fi
+    fi
+    if [ -z "$APPIMAGE_RUNTIME_FILE" ]; then
+        if [ "$APPIMAGE_COMP" = "zstd" ]; then
+            err "No hay un runtime AppImage moderno disponible para la compresión Zstandard."
+            echo "    Con red se descarga automáticamente; sin red, usa LTERMINAL_APPIMAGE_RUNTIME=/ruta/runtime-$APPIMAGE_ARCH." >&2
+            exit 1
+        fi
+        APPIMAGETOOL_BIN="$(command -v "$APPIMAGETOOL" 2>/dev/null || true)"
+        RUNTIME_OFFSET=""
+        if [ -n "$APPIMAGETOOL_BIN" ] && [ -x "$APPIMAGETOOL_BIN" ]; then
+            RUNTIME_OFFSET="$(APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL_BIN" --appimage-offset 2>/dev/null || true)"
+        fi
+        if [[ "$RUNTIME_OFFSET" =~ ^[0-9]+$ ]] && [ "$RUNTIME_OFFSET" -ge 65536 ]; then
+            RUNTIME_TMP="${APPIMAGE_RUNTIME_CACHE:+$APPIMAGE_RUNTIME_CACHE.tmp.$$}"
+            if [ -n "$RUNTIME_TMP" ] && \
+                dd if="$APPIMAGETOOL_BIN" of="$RUNTIME_TMP" bs=1 count="$RUNTIME_OFFSET" status=none && \
+                chmod +x "$RUNTIME_TMP" && mv -f "$RUNTIME_TMP" "$APPIMAGE_RUNTIME_CACHE"; then
+                APPIMAGE_RUNTIME_FILE="$APPIMAGE_RUNTIME_CACHE"
+                ok "Runtime AppImage extraído del appimagetool y guardado en caché"
+            else
+                [ -z "$RUNTIME_TMP" ] || rm -f "$RUNTIME_TMP"
+                warn "No se pudo extraer el runtime embebido de appimagetool; se intentará el mecanismo remoto."
+            fi
+        else
+            warn "appimagetool no expone un runtime local; se intentará descargarlo si no hay caché."
+        fi
+    fi
 fi
 
 # --- 1.5.2 Verificar todas las rutas de configuración ---
@@ -753,7 +1031,15 @@ if [ "$CLEAN" -eq 1 ]; then
     cargo clean --manifest-path "$TAURI_DIR/Cargo.toml" || warn "cargo clean falló; se sigue igualmente."
 fi
 
-step "Instalando dependencias del frontend (npm ci)"
+if [ "$EXTENDED_TESTS" -eq 1 ]; then
+    step "Preparando herramientas de la batería ampliada"
+    install_extended_test_tools || {
+        err "No se pudieron preparar todas las herramientas mínimas de la batería ampliada."
+        exit 1
+    }
+fi
+
+step "Verificando dependencias del frontend"
 # `npm ci` borra y recrea enlaces en `.bin`. Comprobar la escritura antes da
 # una solución clara cuando una ejecución anterior con sudo dejó esos enlaces
 # a nombre de root/nobody, en vez de caer al genérico error EACCES de npm.
@@ -775,20 +1061,52 @@ assert_writable_directory() {
 
 assert_writable_directory "$PROJECT_ROOT/node_modules" || exit 1
 assert_writable_directory "$PROJECT_ROOT/node_modules/.bin" || exit 1
-# `npm ci` exige un package-lock.json coherente con package.json y aborta si no
-# lo es. Es lo que se quiere en una release —instala exactamente lo fijado— pero
-# no es motivo para no poder compilar: se avisa y se cae a `npm install`, que
-# resuelve y actualiza el lock.
-if [ ! -f "$PROJECT_ROOT/package-lock.json" ]; then
-    warn "No hay package-lock.json; se usa npm install en vez de npm ci."
+# No destruir un árbol sano: `npm ci` borra node_modules antes de reconstruirlo
+# y puede dejar un binario nativo de esbuild a medio instalar si la build se
+# interrumpe o el sistema de archivos rechaza el reemplazo. Si faltan las
+# piezas mínimas sí se instala de forma reproducible desde el lock.
+dependencies_ready() {
+    [ "$CLEAN" -eq 0 ] \
+        && [ -x "$PROJECT_ROOT/node_modules/.bin/vite" ] \
+        && [ -x "$PROJECT_ROOT/node_modules/esbuild/bin/esbuild" ] \
+        && node -e "require('./node_modules/vite/package.json'); require('./node_modules/esbuild/package.json')" >/dev/null 2>&1
+}
+if dependencies_ready; then
+    ok "Dependencias ya presentes; se conserva node_modules y se evita reinstalarlo"
+elif [ ! -f "$PROJECT_ROOT/package-lock.json" ]; then
+    warn "No hay package-lock.json; se usa npm install."
     npm install
 elif ! npm ci; then
-    warn "npm ci falló (lock desincronizado o red). Se reintenta con npm install."
+    warn "npm ci falló (lock desincronizado, red o binario nativo bloqueado). Se reintenta con npm install."
     npm install
 fi
 ok "Dependencias instaladas"
-npm audit --audit-level=high
-ok "Dependencias sin vulnerabilidades altas o críticas conocidas"
+if [ "$SKIP_CHECKS" -eq 0 ]; then
+    AUDIT_LOG="$(mktemp "${TMPDIR:-/tmp}/lterminal-npm-audit.XXXXXX")"
+    if npm audit --audit-level=high >"$AUDIT_LOG" 2>&1; then
+        ok "Dependencias sin vulnerabilidades altas o críticas conocidas"
+    else
+        AUDIT_CODE=$?
+        if grep -Eiq 'audit endpoint|EAI_AGAIN|ENETUNREACH|ECONNRESET|ECONNREFUSED|ETIMEDOUT|fetch failed|network' "$AUDIT_LOG"; then
+            if [ "${LTERMINAL_LINK_CHECK:-fail}" = "warn" ]; then
+                warn "No se pudo consultar npm audit por un problema de red; se continúa en modo warn."
+            else
+                cat "$AUDIT_LOG" >&2
+                err "npm audit no pudo consultar el registro. Reintenta con red o usa LTERMINAL_LINK_CHECK=warn solo si aceptas una auditoría diferida."
+                rm -f "$AUDIT_LOG"
+                exit "$AUDIT_CODE"
+            fi
+        else
+            cat "$AUDIT_LOG" >&2
+            rm -f "$AUDIT_LOG"
+            err "npm audit detectó vulnerabilidades altas/críticas o un error no relacionado con red."
+            exit "$AUDIT_CODE"
+        fi
+    fi
+    rm -f "$AUDIT_LOG"
+else
+    warn "Auditoría npm omitida por --skip-checks."
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Comprobaciones
@@ -836,6 +1154,28 @@ done
 # linuxdeploy's embedded strip can fail on newer ELF sections such as .relr.dyn.
 # Disable its internal binary stripping and keep the AppImage build compatible.
 export NO_STRIP=1
+# El build hook de Tauri vuelve a invocar `npm run build`. Propagar esta marca
+# evita que `--skip-checks` se cumpla en el script exterior pero falle dentro
+# del hook por enlaces o fuentes externas sin red.
+if [ "$SKIP_CHECKS" -eq 1 ]; then
+    export LTERMINAL_SKIP_CHECKS=1
+else
+    unset LTERMINAL_SKIP_CHECKS
+fi
+# linuxdeploy-plugin-appimage no recibe los argumentos del appimagetool que
+# ejecutamos después: los toma de LDAI_RUNTIME_FILE durante la pasada de Tauri.
+# Mantener la misma ruta en ambos caminos evita que el primer bundling vuelva a
+# intentar descargar runtime-x86_64 desde GitHub.
+if [ -n "${APPIMAGE_RUNTIME_FILE:-}" ]; then
+    export LDAI_RUNTIME_FILE="$APPIMAGE_RUNTIME_FILE"
+else
+    unset LDAI_RUNTIME_FILE
+fi
+# El runtime AppImage moderno se usa durante la pasada de linuxdeploy, que
+# necesita Zstandard. El repaquetado final puede usar XZ para seguir siendo
+# compatible con un appimagetool antiguo instalado en el PATH.
+export APPIMAGE_COMP
+export LDAI_COMP="$APPIMAGE_COMP"
 # Las herramientas de AppImage también son AppImages. En WSL, contenedores y
 # sistemas sin FUSE deben poder ejecutarse mediante extracción desde el propio
 # paso de bundling, no solo durante la comprobación de humo posterior.
@@ -923,7 +1263,18 @@ if [ -x "$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner" ] && \
     printf '\nexport GST_PLUGIN_SCANNER="${GST_PLUGIN_SCANNER:-$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner}"\n' \
         >> "$GTK_HOOK"
 fi
-ARCH="${APPIMAGE_ARCH:-$(uname -m)}" "$APPIMAGETOOL" "$APPDIR" \
+# Tauri usa el nombre técnico del binario en `Icon=`, mientras que algunas
+# versiones del bundler dejan en la raíz el nombre del producto. Mantener
+# ambos nombres hace que el icono funcione en AppStream y en appimagetool.
+if [ -f "$APPDIR/LTerminal.png" ] && [ ! -e "$APPDIR/lterminal.png" ]; then
+    ln -s LTerminal.png "$APPDIR/lterminal.png"
+fi
+APPIMAGETOOL_ARGS=(--comp "$APPIMAGE_POST_COMP")
+if [ -n "$APPIMAGE_RUNTIME_FILE" ]; then
+    APPIMAGETOOL_ARGS+=(--runtime-file "$APPIMAGE_RUNTIME_FILE")
+fi
+ARCH="${APPIMAGE_ARCH:-$(uname -m)}" APPIMAGE_EXTRACT_AND_RUN=1 \
+    "$APPIMAGETOOL" "${APPIMAGETOOL_ARGS[@]}" "$APPDIR" \
     "$BUNDLE_DIR/LTerminal_${VERSION}_amd64.AppImage"
 
 APPIMAGE="$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)"
@@ -990,15 +1341,6 @@ fi
 # comprobar, y eso no es un fallo de la build: se avisa y se sigue.
 step "Comprobación de humo"
 
-# Esta comprobación no requiere servidor gráfico y verifica primero que el
-# runtime AppImage es legible. Es una garantía reproducible incluso en CI o
-# cuando ya hay otra ventana de LTerminal abierta.
-if ! "$APPIMAGE" --appimage-version >/dev/null 2>&1; then
-    err "El runtime del AppImage no responde; no se publicará un artefacto dañado."
-    exit 1
-fi
-ok "Runtime AppImage verificable"
-
 # Un AppImage se monta con FUSE 2, que las distribuciones recientes ya no
 # instalan de serie. Sin él no arranca ni el «hola mundo», y el error
 # ("dlopen(): error loading libfuse.so.2") parece un fallo de la app cuando no
@@ -1010,8 +1352,19 @@ if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/nul
     export APPIMAGE_EXTRACT_AND_RUN=1
 fi
 
-if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    warn "Sin servidor gráfico: no se puede comprobar que arranque. El AppImage sí se generó."
+# Esta comprobación no requiere servidor gráfico y verifica primero que el
+# runtime AppImage es legible. Debe ejecutarse DESPUÉS de activar el modo de
+# extracción: en CI, WSL y escritorios donde FUSE no está disponible, el
+# runtime sigue siendo perfectamente válido y puede comprobarse sin montar.
+if ! APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
+    "$APPIMAGE" --appimage-version >/dev/null 2>&1; then
+    err "El runtime del AppImage no responde; no se publicará un artefacto dañado."
+    exit 1
+fi
+ok "Runtime AppImage verificable"
+
+if ! graphical_session_available; then
+    warn "La sesión gráfica no es accesible desde esta shell: no se ejecuta el smoke visual. El AppImage sí se generó."
 else
     SMOKE_LOG="$(mktemp)"
     SMOKE_TOKEN="build-$$-$(date +%s)"
@@ -1019,25 +1372,44 @@ else
     # directo puede heredar librerías/variables del host y producir un falso
     # fallo antes de crear la PTY; la extracción temporal es el camino
     # reproducible que también usa validate-release.sh.
-    APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
+    # `setsid` hace que también se pueda cerrar el binario nativo que el
+    # AppImage lanza internamente; matar solo este wrapper no es suficiente.
+    setsid env \
+        APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
         WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}" \
         LTERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
     SMOKE_PID=$!
     READY=0
-    for _ in $(seq 1 20); do
+    # El smoke puede esperar más que el usuario: una primera sonda de hardware
+    # en frío no debe convertir un AppImage válido en un falso fallo de build.
+    # La aplicación, en cambio, ya muestra el banner mínimo sin esperar esas
+    # sondas y lo completa progresivamente.
+    SMOKE_READY_TIMEOUT="${LTERMINAL_SMOKE_READY_TIMEOUT:-45}"
+    if ! [[ "$SMOKE_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        SMOKE_READY_TIMEOUT=45
+    fi
+    for attempt in $(seq 1 "$SMOKE_READY_TIMEOUT"); do
         if ! kill -0 "$SMOKE_PID" 2>/dev/null; then break; fi
         if grep -Fq "\"smokeToken\":\"$SMOKE_TOKEN\"" "$HOME/.config/lterminal/logs/main.log" 2>/dev/null; then
             READY=1
             break
         fi
+        if [ $((attempt % 5)) -eq 0 ]; then
+            warn "Smoke de arranque sigue esperando ($attempt/$(printf '%s' "$SMOKE_READY_TIMEOUT") s)..."
+        fi
         sleep 1
     done
-    if [ "$READY" -eq 1 ] && kill -0 "$SMOKE_PID" 2>/dev/null; then
-        kill "$SMOKE_PID" 2>/dev/null || true
+    # El lanzador AppImage puede terminar después de extraer el runtime y
+    # delegar en el binario nativo. En ese caso `SMOKE_PID` ya no representa a
+    # la aplicación, aunque el token confirma que frontend, IPC y PTY sí
+    # llegaron a estar preparados. Exigir que siga vivo daba falsos negativos
+    # justo en builds con APPIMAGE_EXTRACT_AND_RUN=1.
+    if [ "$READY" -eq 1 ]; then
+        cleanup_smoke_process
         ok "Backend, frontend, IPC, xterm y primera terminal preparados"
         rm -f "$SMOKE_LOG"
     else
-        kill "$SMOKE_PID" 2>/dev/null || true
+        cleanup_smoke_process
         err "El AppImage no completó el frontend y la primera terminal; no se publicará."
         if [ -s "$SMOKE_LOG" ]; then
             echo "    Salida de la aplicación:" >&2
@@ -1069,19 +1441,10 @@ chmod +x "$RELEASE_DIR/$RELEASE_NAME"
 ( cd "$RELEASE_DIR" && sha256sum "$RELEASE_NAME" > SHA256SUMS.txt )
 ok "Release: $RELEASE_DIR/$RELEASE_NAME"
 ok "SHA256: $(cut -d' ' -f1 < "$RELEASE_DIR/SHA256SUMS.txt")"
-
-if [ "$EXTENDED_TESTS" -lt 0 ]; then
-    if [ -t 0 ]; then
-        printf '¿Ejecutar también la batería completa de shells y REPL instalados? [s/N]: '
-        read -r EXTENDED_REPLY
-        case "$EXTENDED_REPLY" in
-            s|S|si|SI|sí|Sí) EXTENDED_TESTS=1 ;;
-            *) EXTENDED_TESTS=0 ;;
-        esac
-    else
-        EXTENDED_TESTS=0
-    fi
-fi
+node "$PROJECT_ROOT/scripts/verify-release-artifacts.mjs" \
+    --linux "$RELEASE_DIR/$RELEASE_NAME" \
+    --appdir "$APPDIR"
+ok "Estructura ELF/AppImage y AppDir Linux verificadas"
 
 if [ "$EXTENDED_TESTS" -eq 1 ]; then
     step "Pruebas ampliadas secuenciales (shells, herramientas y E2E)"
@@ -1119,6 +1482,15 @@ if [ "$EXTENDED_TESTS" -eq 1 ]; then
     fi
     TAURI_NATIVE_DRIVER="$E2E_DRIVER_PATH" E2E_BINARY="$RELEASE_DIR/$RELEASE_NAME" npm run e2e
     ok "E2E confirmó ventana, terminal, barra y Ajustes"
+fi
+
+if [ "$CROSS_WINDOWS" -eq 1 ]; then
+    step "Pruebas cruzadas Windows mediante MinGW y Wine"
+    cross_args=(--full-tests --wine-repeats 3 --non-interactive)
+    [ "$SKIP_CHECKS" -eq 1 ] && cross_args+=(--skip-checks)
+    [ "$AUTO_INSTALL" -eq 0 ] && cross_args+=(--no-install)
+    bash "$PROJECT_ROOT/linux/build-windows.sh" "${cross_args[@]}"
+    ok "Release Windows x64 compilada y ejecutada repetidamente bajo Wine"
 fi
 
 if [ "$NO_RUN" -eq 0 ] && graphical_session_available; then

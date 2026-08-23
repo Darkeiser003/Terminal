@@ -34,6 +34,12 @@
     let operationArgsFor = $state('');
     let operationArgs = $state('');
     let windowsAppPath = $state('');
+    let loadSerial = 0;
+    let scheduledLoad: ReturnType<typeof setTimeout> | undefined;
+    /** Categorías amplias que ya están presentes en `data`. Los subtipos se
+     *  pueden cambiar sin volver a tocar el disco mientras su segmento siga
+     *  cargado. */
+    let loadedCategories = $state<string[]>([]);
 
     type FilterLeaf = {
         id: string;
@@ -155,36 +161,81 @@
 
     const NIVELES = [0, 1, 2, 3, 4, 5, 6, 8, 10];
 
-    export async function load(next?: 'library' | 'here'): Promise<void> {
+    function scanCategoriesForSelection(filterIds: string[]): string[] {
+        return [...new Set(
+            FILTER_LEAVES
+                .filter((filter) => filterIds.includes(filter.id))
+                .map((filter) => filter.scan)
+        )];
+    }
+
+    function scheduleLoad(): void {
+        if (scheduledLoad !== undefined) clearTimeout(scheduledLoad);
+        scheduledLoad = setTimeout(() => {
+            scheduledLoad = undefined;
+            void load(undefined, true);
+        }, 140);
+    }
+
+    export async function load(
+        next?: 'library' | 'here',
+        preserveLoadedSegments = false
+    ): Promise<void> {
+        if (scheduledLoad !== undefined) {
+            clearTimeout(scheduledLoad);
+            scheduledLoad = undefined;
+        }
+        const modeChanged = next !== undefined && next !== mode;
         if (next) mode = next;
+        if (!preserveLoadedSegments || modeChanged) loadedCategories = [];
+        const serial = ++loadSerial;
         loading = true;
         statusError = false;
         try {
-            const categories = selected === null
+            const requestedCategories = selected === null
                 ? undefined
-                : [...new Set(FILTER_LEAVES.filter((filter) => selected?.includes(filter.id)).map((filter) => filter.scan))];
-            data =
+                : scanCategoriesForSelection(selected);
+            const categories = requestedCategories === undefined
+                ? undefined
+                : [...new Set([...loadedCategories, ...requestedCategories])];
+            const nextData =
                 mode === 'here' && app.activeTabId
                     ? await api.listScriptsHere(app.activeTabId, categories, depth)
                     : await api.listScripts(categories);
+            if (serial !== loadSerial) return;
+            data = nextData;
             if (selected === null) {
                 selected = defaultFilterIds(data.filters);
+                loadedCategories = scanCategoriesForSelection(selected);
+            } else if (categories !== undefined) {
+                loadedCategories = categories;
             }
             if (data.depth !== undefined) depth = data.depth;
         } catch (cause) {
+            if (serial !== loadSerial) return;
             statusError = true;
             status = String(cause);
         } finally {
-            loading = false;
+            if (serial === loadSerial) loading = false;
         }
     }
 
     /** Vuelve a escanear con los tipos marcados. El filtro de tipos SÍ obliga a
      *  volver al disco: el backend descarta por categoría mientras recorre, así
      *  que lo no escaneado no está en memoria para filtrarlo aquí. */
-    async function applyTypes(next: string[]): Promise<void> {
+    function applyTypes(next: string[]): void {
         selected = next;
-        await load();
+        const required = scanCategoriesForSelection(next);
+        if (
+            data?.mode === mode &&
+            required.every((category) => loadedCategories.includes(category))
+        ) {
+            return;
+        }
+        // Agrupa varios clics consecutivos en un único recorrido del disco.
+        // El backend también cancela la petición anterior si ya había
+        // empezado, pero esperar aquí evita iniciarla innecesariamente.
+        scheduleLoad();
     }
 
     function toggleType(id: string, on: boolean): void {
@@ -229,8 +280,22 @@
 
     function filterTitle(filter: FilterLeaf): string {
         return filter.extensions.length
-            ? `Extensiones incluidas: ${filter.extensions.join(', ')}`
-            : 'Incluye archivos ejecutables sin extensión';
+            ? app
+                  .t('scripts.filter.extensionsTitle', 'Extensiones incluidas: {extensions}')
+                  .replace('{extensions}', filter.extensions.join(', '))
+            : app.t('scripts.filter.noExtensionTitle', 'Incluye archivos ejecutables sin extensión');
+    }
+
+    function filterLabel(filter: FilterLeaf): string {
+        return app.t(`scripts.filter.${filter.id}.label`, filter.label);
+    }
+
+    function filterGroupLabel(group: FilterGroup): string {
+        return app.t(`scripts.filter.${group.id}.label`, group.label);
+    }
+
+    function filterGroupDescription(group: FilterGroup): string {
+        return app.t(`scripts.filter.${group.id}.description`, group.description);
     }
 
     function typeMatches(script: ScriptEntry): boolean {
@@ -273,7 +338,7 @@
                 tools.push({
                     script,
                     kind: 'docker',
-                    label: 'Docker Compose',
+                    label: app.t('scripts.operation.docker', 'Docker Compose'),
                     mark: 'D',
                     actions: [
                         { label: app.t('scripts.operation.status', 'Resumen'), args: 'status', title: app.t('scripts.operation.dockerStatus', 'Ver el estado global de Docker') },
@@ -287,7 +352,7 @@
                 tools.push({
                     script,
                     kind: 'kubernetes',
-                    label: 'Kubernetes',
+                    label: app.t('scripts.operation.kubernetes', 'Kubernetes'),
                     mark: 'K',
                     actions: [
                         { label: app.t('scripts.operation.pods', 'Pods'), args: 'status', title: app.t('scripts.operation.kubernetesStatus', 'Ver pods del namespace default') },
@@ -300,12 +365,12 @@
                 tools.push({
                     script,
                     kind: 'ssh',
-                    label: 'SSH y acceso remoto',
+                    label: app.t('scripts.operation.ssh', 'SSH y acceso remoto'),
                     mark: 'S',
                     actions: [
-                        { label: app.t('scripts.operation.connect', 'Conectar'), args: 'connect', title: 'Conectar a un host SSH guardado o introducir uno nuevo' },
-                        { label: app.t('scripts.operation.hosts', 'Hosts'), args: 'hosts', title: 'Listar los hosts guardados en la configuración SSH' },
-                        { label: app.t('scripts.operation.network', 'IPs / VPN'), args: 'network', title: 'Ver IPs, Tailscale, WireGuard y conexiones activas' }
+                        { label: app.t('scripts.operation.connect', 'Conectar'), args: 'connect', title: app.t('scripts.operation.connectTitle', 'Conectar a un host SSH guardado o introducir uno nuevo') },
+                        { label: app.t('scripts.operation.hosts', 'Hosts'), args: 'hosts', title: app.t('scripts.operation.hostsTitle', 'Listar los hosts guardados en la configuración SSH') },
+                        { label: app.t('scripts.operation.network', 'IPs / VPN'), args: 'network', title: app.t('scripts.operation.networkTitle', 'Ver IPs, Tailscale, WireGuard y conexiones activas') }
                     ]
                 });
                 seen.add(script.path);
@@ -313,12 +378,12 @@
                 tools.push({
                     script,
                     kind: 'services',
-                    label: 'Servicios',
+                    label: app.t('scripts.operation.services', 'Servicios'),
                     mark: '⚙',
                     actions: [
-                        { label: app.t('scripts.operation.status', 'Estado'), args: 'status', title: 'Ver servicios activos y fallidos' },
-                        { label: app.t('scripts.operation.restart', 'Reiniciar'), args: 'restart', title: 'Elegir y reiniciar un servicio' },
-                        { label: app.t('scripts.operation.logs', 'Logs'), args: 'logs', title: 'Ver los últimos logs o eventos del servicio' }
+                        { label: app.t('scripts.operation.status', 'Estado'), args: 'status', title: app.t('scripts.operation.serviceStatusTitle', 'Ver servicios activos y fallidos') },
+                        { label: app.t('scripts.operation.restart', 'Reiniciar'), args: 'restart', title: app.t('scripts.operation.serviceRestartTitle', 'Elegir y reiniciar un servicio') },
+                        { label: app.t('scripts.operation.logs', 'Logs'), args: 'logs', title: app.t('scripts.operation.serviceLogsTitle', 'Ver los últimos logs o eventos del servicio') }
                     ]
                 });
                 seen.add(script.path);
@@ -326,11 +391,11 @@
                 tools.push({
                     script,
                     kind: 'network',
-                    label: 'Red y VPN',
+                    label: app.t('scripts.operation.networkGroup', 'Red y VPN'),
                     mark: 'N',
                     actions: [
-                        { label: app.t('scripts.operation.interfaces', 'Interfaces'), args: 'interfaces', title: 'Ver interfaces, direcciones y rutas' },
-                        { label: app.t('scripts.operation.vpn', 'VPN'), args: 'vpn', title: 'Consultar Tailscale, WireGuard, OpenVPN y VPN del sistema' }
+                        { label: app.t('scripts.operation.interfaces', 'Interfaces'), args: 'interfaces', title: app.t('scripts.operation.interfacesTitle', 'Ver interfaces, direcciones y rutas') },
+                        { label: app.t('scripts.operation.vpn', 'VPN'), args: 'vpn', title: app.t('scripts.operation.vpnTitle', 'Consultar Tailscale, WireGuard, OpenVPN y VPN del sistema') }
                     ]
                 });
                 seen.add(script.path);
@@ -338,12 +403,12 @@
                 tools.push({
                     script,
                     kind: 'adb',
-                    label: 'Android · ADB',
+                    label: app.t('scripts.operation.adb', 'Android · ADB'),
                     mark: 'A',
                     actions: [
-                        { label: app.t('scripts.operation.devices', 'Dispositivos'), args: 'devices', title: 'Listar dispositivos y emuladores ADB' },
-                        { label: app.t('scripts.operation.restartAdb', 'Reiniciar ADB'), args: 'restart', title: 'Reiniciar el servidor ADB y volver a detectar dispositivos' },
-                        { label: app.t('scripts.operation.shell', 'Shell'), args: 'shell', title: 'Abrir una shell en el dispositivo elegido' }
+                        { label: app.t('scripts.operation.devices', 'Dispositivos'), args: 'devices', title: app.t('scripts.operation.devicesTitle', 'Listar dispositivos y emuladores ADB') },
+                        { label: app.t('scripts.operation.restartAdb', 'Reiniciar ADB'), args: 'restart', title: app.t('scripts.operation.restartAdbTitle', 'Reiniciar el servidor ADB y volver a detectar dispositivos') },
+                        { label: app.t('scripts.operation.shell', 'Shell'), args: 'shell', title: app.t('scripts.operation.shellTitle', 'Abrir una shell en el dispositivo elegido') }
                     ]
                 });
                 seen.add(script.path);
@@ -376,17 +441,52 @@
         }
     }
 
+    async function cdToCurrentDirectory(): Promise<void> {
+        const tabId = app.activeTabId;
+        const directory = data?.dir?.trim();
+        if (!tabId || !directory) return;
+        statusError = false;
+        try {
+            const result = await api.cdToDirectory(tabId, directory);
+            if (!result.ok) {
+                statusError = true;
+                status = result.error ?? app.t('error.writeFailed', 'No se pudo cambiar a esta carpeta.');
+            }
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
+    async function openCurrentDirectory(): Promise<void> {
+        const tabId = app.activeTabId;
+        const directory = data?.dir?.trim();
+        if (!tabId || !directory) return;
+        statusError = false;
+        try {
+            const result = await api.openDirectory(tabId, directory);
+            if (!result.ok) {
+                statusError = true;
+                status = result.error ?? app.t('explorer.errorOpenFolder', 'No se pudo abrir esta carpeta.');
+            }
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
     function operationPlaceholder(kind: OperationKind): string {
         if (kind === 'docker') return app.t('scripts.operation.dockerPlaceholder', 'Ej.: logs --follow nginx · compose up --build');
         if (kind === 'kubernetes') return app.t('scripts.operation.kubernetesPlaceholder', 'Ej.: -n staging logs --follow api-abc123');
-        if (kind === 'ssh') return 'Ej.: connect usuario@servidor · hosts · network';
-        if (kind === 'services') return 'Ej.: status · restart docker.service · logs ssh.service';
-        if (kind === 'network') return 'Ej.: interfaces · vpn';
-        return 'Ej.: devices · restart · shell';
+        if (kind === 'ssh') return app.t('scripts.operation.sshPlaceholder', 'Ej.: connect usuario@servidor · hosts · network');
+        if (kind === 'services') return app.t('scripts.operation.servicesPlaceholder', 'Ej.: status · restart docker.service · logs ssh.service');
+        if (kind === 'network') return app.t('scripts.operation.networkPlaceholder', 'Ej.: interfaces · vpn');
+        return app.t('scripts.operation.adbPlaceholder', 'Ej.: devices · restart · shell');
     }
-    // Los anclados forman la vista Favoritos. En Ruta actual solo deben verse
-    // los resultados de esa carpeta para no mezclar dos ámbitos distintos.
-    const pinned = $derived(mode === 'library' ? (data?.pinned ?? []).filter(typeMatches).filter(matches) : []);
+    // Acceso rápido es global: no desaparece al cambiar de ámbito ni al
+    // desactivar el tipo de archivo con el que se guardó. La búsqueda de texto
+    // sí se aplica, porque es una petición explícita del usuario.
+    const pinned = $derived((data?.pinned ?? []).filter(matches));
     const pinnedPaths = $derived(new Set((data?.pinned ?? []).map((s) => s.path)));
 
     /** Agrupado por origen y carpeta, y dentro de cada grupo por extensión y
@@ -489,7 +589,7 @@
                 title={app.t('scripts.libraryTitle', 'Carpeta de scripts persistente y utilidades del sistema')}
                 onclick={() => load('library')}
             >
-                {app.t('scripts.library', 'Favoritos')}
+                {app.t('scripts.library', 'Biblioteca')}
             </button>
             <button
                 type="button"
@@ -516,7 +616,7 @@
                     value={depth}
                     onchange={(event) => {
                         depth = Number((event.currentTarget as HTMLSelectElement).value);
-                        void load();
+                        scheduleLoad();
                     }}
                 >
                     {#each NIVELES as nivel (nivel)}
@@ -527,20 +627,22 @@
         {/if}
         <button
             type="button"
-            class="icon"
-            title={app.t('scripts.chooseFolder', 'Elegir carpeta para esta vista')}
-            onclick={async () => {
-                loading = true;
-                try {
-                    data =
-                        mode === 'here' && app.activeTabId
-                            ? await api.chooseHereFolder(app.activeTabId, selected ?? undefined, depth)
-                            : await api.chooseScriptsFolder(selected ?? undefined);
-                } finally {
-                    loading = false;
-                }
-            }}
-        >📁</button>
+            class="icon path-action"
+            data-testid="scripts-cd-path"
+            aria-label={app.t('scripts.cd', 'Llevar la terminal a esta carpeta')}
+            title={app.t('scripts.cdTitle', 'Ir a la carpeta mostrada en la terminal')}
+            disabled={!data?.dir || !app.activeTabId || loading}
+            onclick={() => void cdToCurrentDirectory()}
+        >cd</button>
+        <button
+            type="button"
+            class="icon path-action"
+            data-testid="scripts-open-path"
+            aria-label={app.t('explorer.openInSystem', 'Abrir en el explorador del sistema')}
+            title={app.t('explorer.openInSystem', 'Abrir la ruta mostrada en el explorador de archivos')}
+            disabled={!data?.dir || !app.activeTabId || loading}
+            onclick={() => void openCurrentDirectory()}
+        >↗</button>
         <button
             type="button"
             class="icon"
@@ -587,11 +689,11 @@
                             <button
                                 type="button"
                                 class="filter-group-name"
-                                title={group.description}
+                                title={filterGroupDescription(group)}
                                 onclick={() => toggleGroup(group)}
                             >
-                                <span>{group.label}</span>
-                                <small>{group.description}</small>
+                                <span>{filterGroupLabel(group)}</span>
+                                <small>{filterGroupDescription(group)}</small>
                             </button>
                             <button
                                 type="button"
@@ -612,11 +714,11 @@
                                                 <button
                                                     type="button"
                                                     class="filter-group-name"
-                                                    title={subgroup.description}
+                                                    title={filterGroupDescription(subgroup)}
                                                     onclick={() => toggleGroup(subgroup)}
                                                 >
-                                                    <span>{subgroup.label}</span>
-                                                    <small>{subgroup.description}</small>
+                                                    <span>{filterGroupLabel(subgroup)}</span>
+                                                    <small>{filterGroupDescription(subgroup)}</small>
                                                 </button>
                                                 <button
                                                     type="button"
@@ -640,7 +742,7 @@
                                                                 checked={(selected ?? []).includes(filter.id)}
                                                                 onchange={(event) => toggleType(filter.id, event.currentTarget.checked)}
                                                             />
-                                                            <span>{filter.label}</span>
+                                                            <span>{filterLabel(filter)}</span>
                                                         </label>
                                                     {/each}
                                                 </div>
@@ -657,7 +759,7 @@
                                                 checked={(selected ?? []).includes(filter.id)}
                                                 onchange={(event) => toggleType(filter.id, event.currentTarget.checked)}
                                             />
-                                            <span>{filter.label}</span>
+                                            <span>{filterLabel(filter)}</span>
                                         </label>
                                     {/each}
                                 </div>
@@ -669,7 +771,7 @@
         </details>
     {/if}
 
-    {#if operationTools.length || windowsCompatibilityQuickAction}
+    {#if mode === 'library' && (operationTools.length || windowsCompatibilityQuickAction)}
         <details class="operations" aria-label={app.t('scripts.operations', 'Operaciones rápidas')} ontoggle={onDetailsToggle}>
             <summary class="operations-title">
                 <span>{app.t('scripts.operations', 'Operaciones rápidas')}</span>
@@ -769,11 +871,11 @@
         </div>
     {/if}
 
-    <!-- Los anclados pertenecen exclusivamente a Favoritos. -->
+    <!-- Acceso rápido aparece antes de los resultados de cualquier ámbito. -->
     {#if pinned.length}
         <details class="group pinned" ontoggle={onDetailsToggle}>
             <summary class="group-title">
-                {app.t('scripts.pinned', 'Anclados')}
+                {app.t('scripts.quickAccess', 'Acceso rápido')}
                 <span class="count">{pinned.length}</span>
             </summary>
             {#each pinned as script (script.path)}

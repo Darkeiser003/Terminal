@@ -6,10 +6,11 @@
 //! inyecta en cada comando.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use tauri::{AppHandle, Emitter};
 
 use crate::environments::{self, Environment, Inventory};
@@ -53,6 +54,11 @@ pub struct AppState {
     /// La última release que se enseñó. La descarga solo acepta adjuntos de
     /// esta, nunca una URL que llegue del frontend.
     pending_release: Mutex<Option<(String, crate::github::Release)>>,
+    /// Impide que varios comandos que leen el mismo árbol compitan por el
+    /// disco. El token permite cancelar el recorrido anterior cuando llega
+    /// una petición más reciente (cambiar filtros, profundidad o carpeta).
+    script_scan_lock: Mutex<()>,
+    script_scan_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +87,27 @@ impl AppState {
             install_actions: Mutex::new(None),
             allowed_repositories: Mutex::new(HashMap::new()),
             pending_release: Mutex::new(None),
+            script_scan_lock: Mutex::new(()),
+            script_scan_generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Marca el comienzo de una petición de escaneo. Solo la petición con el
+    /// token más nuevo puede seguir recorriendo el disco.
+    pub fn begin_script_scan(&self) -> u64 {
+        self.script_scan_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn script_scan_guard(&self) -> MutexGuard<'_, ()> {
+        self.script_scan_lock.lock()
+    }
+
+    pub fn script_scan_generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.script_scan_generation)
+    }
+
+    pub fn script_scan_is_current(&self, request: u64) -> bool {
+        self.script_scan_generation.load(Ordering::Relaxed) == request
     }
 
     /// Añade a la lista blanca sin borrar lo anterior: el panel alterna entre

@@ -35,10 +35,28 @@ impl PathPlatform for LinuxPlatform {
     }
 
     fn persistent_path_entries(&self) -> Vec<String> {
-        // En Linux el PATH persistente depende de la shell y sus perfiles.
-        // Las pestañas interactivas lo recalculan al arrancar; no existe un
-        // almacén global equivalente al Registro de Windows.
-        Vec::new()
+        // Linux no tiene un almacén global equivalente al Registro de
+        // Windows, pero los gestores de usuario sí tienen ubicaciones
+        // convencionales. La app puede llevar horas abierta cuando el
+        // usuario instala una herramienta desde una terminal, así que no
+        // basta con confiar en el PATH que heredó al arrancar.
+        let Some(home) = std::env::var_os("HOME") else {
+            return Vec::new();
+        };
+        let home = PathBuf::from(home);
+        let candidates = [
+            home.join(".cargo/bin"),
+            home.join("go/bin"),
+            home.join(".mix/escripts"),
+            home.join(".dotnet/tools"),
+            home.join(".local/bin"),
+            home.join(".npm-global/bin"),
+        ];
+        candidates
+            .into_iter()
+            .filter(|path| path.is_dir())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
     }
 }
 

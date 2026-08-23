@@ -6,7 +6,7 @@
 // La mayoría de llamadas llevan un `tabId`: cada pestaña tiene su propio pty en
 // el backend, y hay que decirle a cuál se refiere cada una.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { openPath } from '@tauri-apps/plugin-opener';
@@ -50,57 +50,104 @@ import type {
     UpdateStatus
 } from './types';
 
+type InvokeArgs = Record<string, unknown>;
+
+const HIGH_FREQUENCY_COMMANDS = new Set([
+    'pty_input',
+    'pty_resize',
+    'internal_command_parse',
+]);
+
+/** Registra una métrica sin volver a instrumentar la propia llamada de log. */
+export const recordPerformance = (payload: Record<string, unknown>) =>
+    tauriInvoke<void>('log_frontend_performance', { payload }).catch(() => {
+        // Las métricas nunca deben bloquear ni romper una interacción.
+    });
+
+/** Puente común para medir el tiempo real de cada operación IPC relevante.
+ * Las tres rutas de alta frecuencia se dejan fuera para no convertir cada
+ * tecla y cada píxel de resize en una línea de log. El resto queda segmentado
+ * por comando, con éxito/error y duración backend+IPC. */
+async function invokeLogged<T>(command: string, args?: InvokeArgs): Promise<T> {
+    if (HIGH_FREQUENCY_COMMANDS.has(command)) {
+        return args === undefined ? tauriInvoke<T>(command) : tauriInvoke<T>(command, args);
+    }
+    const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    try {
+        const value = args === undefined ? await tauriInvoke<T>(command) : await tauriInvoke<T>(command, args);
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        void recordPerformance({
+            metric: `ipc.${command}`,
+            kind: 'ipc',
+            durationMs: Math.round(Math.max(0, now - startedAt) * 100) / 100,
+            status: 'ok',
+            details: { command },
+        });
+        return value;
+    } catch (cause) {
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        void recordPerformance({
+            metric: `ipc.${command}`,
+            kind: 'ipc',
+            durationMs: Math.round(Math.max(0, now - startedAt) * 100) / 100,
+            status: 'error',
+            details: { command, error: String(cause).slice(0, 300) },
+        });
+        throw cause;
+    }
+}
+
 // ---- Pestañas ----
 
-export const listTabs = () => invoke<TabList>('tabs_list');
+export const listTabs = () => invokeLogged<TabList>('tabs_list');
 
 export const createTab = (envId?: string) =>
-    invoke<TabSummary | null>('tabs_create', { envId: envId ?? null });
+    invokeLogged<TabSummary | null>('tabs_create', { envId: envId ?? null });
 
-export const closeTab = (tabId: string) => invoke<void>('tabs_close', { tabId });
+export const closeTab = (tabId: string) => invokeLogged<void>('tabs_close', { tabId });
 
-export const activateTab = (tabId: string) => invoke<void>('tabs_activate', { tabId });
+export const activateTab = (tabId: string) => invokeLogged<void>('tabs_activate', { tabId });
 
 /** Avisa al backend de que ya existe un xterm para esta pestaña, para que
  *  entregue la salida que el pty produjo antes de que estuviera listo. */
-export const markTabReady = (tabId: string) => invoke<void>('tabs_ready', { tabId });
-export const markFrontendReady = (tabId: string) => invoke<void>('frontend_ready', { tabId });
+export const markTabReady = (tabId: string) => invokeLogged<void>('tabs_ready', { tabId });
+export const markFrontendReady = (tabId: string) => invokeLogged<void>('frontend_ready', { tabId });
 
 // ---- pty ----
 
-export const sendInput = (tabId: string, data: string) => invoke<void>('pty_input', { tabId, data });
+export const sendInput = (tabId: string, data: string) => invokeLogged<void>('pty_input', { tabId, data });
 
 export const parseInternalCommand = (line: string) =>
-    invoke<InternalCommand | null>('internal_command_parse', { line });
+    invokeLogged<InternalCommand | null>('internal_command_parse', { line });
 
 export async function exportProfile(platform = 'linux'): Promise<ProfileTransferResult | null> {
     const windows = platform === 'windows';
     const extension = windows ? 'ps1' : 'sh';
     const name = windows ? 'WinSlimTerminal-Perfil.ps1' : 'LTerminal-Perfil.sh';
     const path = await save({ defaultPath: name, filters: [{ name: 'Script de perfil', extensions: [extension, 'winslim-profile', 'lterminal-profile'] }] });
-    return path ? invoke<ProfileTransferResult>('profile_export', { path }) : null;
+    return path ? invokeLogged<ProfileTransferResult>('profile_export', { path }) : null;
 }
 
 export async function importProfile(): Promise<ProfileTransferResult | null> {
     const path = await open({ multiple: false, directory: false, filters: [{ name: 'Perfil portable o script', extensions: ['winslim-profile', 'lterminal-profile', 'sh', 'ps1'] }] });
-    return typeof path === 'string' ? invoke<ProfileTransferResult>('profile_import', { path }) : null;
+    return typeof path === 'string' ? invokeLogged<ProfileTransferResult>('profile_import', { path }) : null;
 }
 
-export const listPlugins = () => invoke<PluginInfo[]>('plugins_list');
+export const listPlugins = () => invokeLogged<PluginInfo[]>('plugins_list');
 export const setPluginEnabled = (id: string, enabled: boolean) =>
-    invoke<PluginInfo[]>('plugins_set_enabled', { id, enabled });
+    invokeLogged<PluginInfo[]>('plugins_set_enabled', { id, enabled });
 export async function installPlugin(): Promise<PluginInfo[] | null> {
     const path = await open({ multiple: false, directory: false, filters: [{ name: 'Manifest de plugin', extensions: ['json'] }] });
-    return typeof path === 'string' ? invoke<PluginInfo[]>('plugins_install', { manifestPath: path }) : null;
+    return typeof path === 'string' ? invokeLogged<PluginInfo[]>('plugins_install', { manifestPath: path }) : null;
 }
-export const removePlugin = (id: string) => invoke<PluginInfo[]>('plugins_remove', { id });
+export const removePlugin = (id: string) => invokeLogged<PluginInfo[]>('plugins_remove', { id });
 export const getWindowsIntegration = () =>
-    invoke<WindowsIntegrationStatus>('windows_integration_status');
+    invokeLogged<WindowsIntegrationStatus>('windows_integration_status');
 export const setWindowsIntegration = (enabled: boolean) =>
-    invoke<WindowsIntegrationStatus>('windows_integration_set', { enabled });
+    invokeLogged<WindowsIntegrationStatus>('windows_integration_set', { enabled });
 
 export const resize = (tabId: string, cols: number, rows: number) =>
-    invoke<void>('pty_resize', { tabId, cols, rows });
+    invokeLogged<void>('pty_resize', { tabId, cols, rows });
 
 export const refreshBanner = (
     tabId: string,
@@ -108,42 +155,35 @@ export const refreshBanner = (
     rows: number,
     paneCount: number,
     cursorRow: number,
-) => invoke<void>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow });
+) => invokeLogged<void>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow });
+
+export const ensureWindowUsableSize = (viewportWidth: number, viewportHeight: number, paneCount: number) =>
+    invokeLogged<void>('window_ensure_usable_size', { viewportWidth, viewportHeight, paneCount });
 
 // ---- Entornos ----
 
 export const listEnvironments = (tabId?: string) =>
-    invoke<EnvironmentList>('env_list', { tabId: tabId ?? null });
+    invokeLogged<EnvironmentList>('env_list', { tabId: tabId ?? null });
 
 export const refreshEnvironments = (tabId?: string) =>
-    invoke<EnvironmentList>('env_refresh', { tabId: tabId ?? null });
+    invokeLogged<EnvironmentList>('env_refresh', { tabId: tabId ?? null });
 
 export const switchEnvironment = (tabId: string, envId: string) =>
-    invoke<boolean>('env_switch', { tabId, envId });
+    invokeLogged<boolean>('env_switch', { tabId, envId });
 
 // ---- Panel de scripts ----
 // `categories` son los filtros marcados; sin ellos, el backend usa los de
-// fábrica. Ninguna de estas llamadas acepta una ruta que no haya salido de un
-// escaneo anterior: el backend guarda la lista de lo que enseñó y rechaza lo
-// que no esté en ella.
+// fábrica. Las acciones sobre archivos solo aceptan elementos del último
+// escaneo; `cdToDirectory` acepta únicamente las rutas de Biblioteca o Ruta
+// actual que el backend acaba de exponer.
 
 export const listScripts = (categories?: string[]) =>
-    invoke<ScriptsPanel>('scripts_list', { categories: categories ?? null });
+    invokeLogged<ScriptsPanel>('scripts_list', { categories: categories ?? null });
 
 /** La carpeta de la pestaña, no la biblioteca. `depth` es cuántos niveles se
  *  bajan; el backend devuelve sus topes y por qué paró si se quedó corto. */
 export const listScriptsHere = (tabId: string, categories?: string[], depth?: number) =>
-    invoke<ScriptsPanel>('scripts_list_here', {
-        tabId,
-        categories: categories ?? null,
-        depth: depth ?? null
-    });
-
-export const chooseScriptsFolder = (categories?: string[]) =>
-    invoke<ScriptsPanel>('scripts_choose_folder', { categories: categories ?? null });
-
-export const chooseHereFolder = (tabId: string, categories?: string[], depth?: number) =>
-    invoke<ScriptsPanel>('scripts_choose_here_folder', {
+    invokeLogged<ScriptsPanel>('scripts_list_here', {
         tabId,
         categories: categories ?? null,
         depth: depth ?? null
@@ -151,24 +191,28 @@ export const chooseHereFolder = (tabId: string, categories?: string[], depth?: n
 
 /** Diálogo del sistema para elegir un archivo o una carpeta. */
 export const pickTarget = (mode: 'file' | 'folder') =>
-    invoke<string | null>('scripts_pick_target', { mode });
+    invokeLogged<string | null>('scripts_pick_target', { mode });
 
 export const openScript = (itemPath: string) =>
-    invoke<ActionResult>('scripts_open', { itemPath });
+    invokeLogged<ActionResult>('scripts_open', { itemPath });
 
 export const cdToScript = (tabId: string, itemPath: string) =>
-    invoke<void>('scripts_cd', { tabId, itemPath });
+    invokeLogged<void>('scripts_cd', { tabId, itemPath });
+
+/** Cambia la terminal activa a la carpeta que el panel está mostrando. */
+export const cdToDirectory = (tabId: string, directory: string) =>
+    invokeLogged<ActionResult>('scripts_cd_directory', { tabId, directory });
 
 /** Ancla o desancla un archivo y devuelve únicamente la colección actualizada
  *  de favoritos. Así no se reemplaza accidentalmente la vista Ruta actual. */
 export const pinScript = (itemPath: string, pinned: boolean) =>
-    invoke<ScriptEntry[]>('scripts_pin', { itemPath, pinned });
+    invokeLogged<ScriptEntry[]>('scripts_pin', { itemPath, pinned });
 
 /** Lanza el script en la terminal. Si la pestaña activa no habla la familia que
  *  necesita (PowerShell para .ps1, cmd para .bat), el backend busca o abre una
  *  que sí, y lo dice en `tabId`. */
 export const runScript = (tabId: string, path: string, asAdmin?: boolean, args?: string) =>
-    invoke<ActionResult>('scripts_run', {
+    invokeLogged<ActionResult>('scripts_run', {
         tabId,
         path,
         asAdmin: asAdmin ?? null,
@@ -180,37 +224,37 @@ export const runScript = (tabId: string, path: string, asAdmin?: boolean, args?:
 // carpeta que el explorador está enseñando para esa pestaña.
 
 export const listDirectory = (tabId: string, dir?: string) =>
-    invoke<Listing>('explorer_list', { tabId, dir: dir ?? null });
+    invokeLogged<Listing>('explorer_list', { tabId, dir: dir ?? null });
 
 /** Vuelve a la carpeta donde está la shell de la pestaña. */
-export const followTab = (tabId: string) => invoke<Listing>('explorer_follow', { tabId });
+export const followTab = (tabId: string) => invokeLogged<Listing>('explorer_follow', { tabId });
 
 export const createEntry = (tabId: string, name: string, kind: 'file' | 'directory') =>
-    invoke<FsResult>('explorer_create', { tabId, name, kind });
+    invokeLogged<FsResult>('explorer_create', { tabId, name, kind });
 
 export const openEntry = (tabId: string, itemPath: string) =>
-    invoke<ActionResult>('explorer_open', { tabId, itemPath });
+    invokeLogged<ActionResult>('explorer_open', { tabId, itemPath });
 
 export const renameEntry = (tabId: string, itemPath: string, newName: string) =>
-    invoke<FsResult>('explorer_rename', { tabId, itemPath, newName });
+    invokeLogged<FsResult>('explorer_rename', { tabId, itemPath, newName });
 
 /** Copiar o cortar. Lo recuerda el backend, no el frontend, para que la ruta de
  *  origen sea siempre una que se validó contra la carpeta abierta. */
 export const clipEntry = (tabId: string, itemPath: string, mode: 'copy' | 'cut') =>
-    invoke<ActionResult>('explorer_clip', { tabId, itemPath, mode });
+    invokeLogged<ActionResult>('explorer_clip', { tabId, itemPath, mode });
 
-export const pasteEntry = (tabId: string) => invoke<FsResult>('explorer_paste', { tabId });
+export const pasteEntry = (tabId: string) => invokeLogged<FsResult>('explorer_paste', { tabId });
 
 /** A la papelera del sistema, no un borrado definitivo. */
 export const trashEntry = (tabId: string, itemPath: string) =>
-    invoke<ActionResult>('explorer_trash', { tabId, itemPath });
+    invokeLogged<ActionResult>('explorer_trash', { tabId, itemPath });
 
-export const cdToExplorerDir = (tabId: string) => invoke<ActionResult>('explorer_cd', { tabId });
+export const cdToExplorerDir = (tabId: string) => invokeLogged<ActionResult>('explorer_cd', { tabId });
 
 /** Abre una carpeta en el gestor de archivos del sistema. Si no hay ninguno,
  *  devuelve con qué se puede abrir o instalar. */
 export const openDirectory = (tabId: string, itemPath?: string) =>
-    invoke<OpenDirectoryResult>('explorer_open_directory', { tabId, itemPath: itemPath ?? null });
+    invokeLogged<OpenDirectoryResult>('explorer_open_directory', { tabId, itemPath: itemPath ?? null });
 
 /** La elección vuelve con el identificador de la tabla de gestores, nunca con
  *  una ruta a un ejecutable. */
@@ -220,7 +264,7 @@ export const openDirectoryWith = (
     itemPath?: string,
     remember?: boolean
 ) =>
-    invoke<OpenDirectoryResult>('explorer_open_directory_with', {
+    invokeLogged<OpenDirectoryResult>('explorer_open_directory_with', {
         tabId,
         itemPath: itemPath ?? null,
         managerId,
@@ -232,42 +276,42 @@ export const openDirectoryWith = (
 // enseñado: un `owner/repo` que no salga de una consulta suya se rechaza, y una
 // descarga solo acepta adjuntos de la release que se acaba de pedir.
 
-export const getProjectsState = () => invoke<ProjectsState>('projects_state_get');
+export const getProjectsState = () => invokeLogged<ProjectsState>('projects_state_get');
 
 /** Los repositorios ya clonados en la carpeta de proyectos, lo más reciente
  *  primero. No consulta a GitHub: funciona sin red. */
 export const listDownloadedProjects = () =>
-    invoke<LocalRepository[]>('projects_downloaded');
+    invokeLogged<LocalRepository[]>('projects_downloaded');
 
 /** Lleva la terminal a la carpeta de un repositorio clonado. */
 export const cdToProject = (tabId: string, fullName: string) =>
-    invoke<ActionResult>('projects_cd', { tabId, fullName });
+    invokeLogged<ActionResult>('projects_cd', { tabId, fullName });
 
 /** Acepta un login, `owner/repo` o una URL de github.com. */
 export const lookupProject = (rawTarget: string) =>
-    invoke<LookupResult>('projects_lookup', { rawTarget });
+    invokeLogged<LookupResult>('projects_lookup', { rawTarget });
 
 export const getLatestRelease = (fullName: string) =>
-    invoke<ReleaseResult>('projects_release', { fullName });
+    invokeLogged<ReleaseResult>('projects_release', { fullName });
 
 /** Descarga el adjunto y, si es un comprimido, escribe el comando para
  *  desempaquetarlo en la terminal: se ve qué se ejecuta sobre el disco. */
 export const downloadRelease = (tabId: string, fullName: string, assetName: string) =>
-    invoke<DownloadResult>('projects_download_release', { tabId, fullName, assetName });
+    invokeLogged<DownloadResult>('projects_download_release', { tabId, fullName, assetName });
 
 export const pinProject = (kind: 'owner' | 'repo', value: string, pinned: boolean) =>
-    invoke<PinResult>('projects_pin', { kind, value, pinned });
+    invokeLogged<PinResult>('projects_pin', { kind, value, pinned });
 
-export const chooseProjectsFolder = () => invoke<ProjectsState>('projects_choose_folder');
+export const chooseProjectsFolder = () => invokeLogged<ProjectsState>('projects_choose_folder');
 
 /** Devuelve el mensaje de error, o una cadena vacía si se abrió bien. */
 export const openInGithub = (rawTarget: string) =>
-    invoke<string>('projects_open_github', { rawTarget });
+    invokeLogged<string>('projects_open_github', { rawTarget });
 
 /** Escribe `git clone` o `git pull` en la terminal, según lo que haya ya en la
  *  carpeta de proyectos. */
 export const runProject = (tabId: string, fullName: string) =>
-    invoke<GitRunResult>('projects_run', { tabId, fullName });
+    invokeLogged<GitRunResult>('projects_run', { tabId, fullName });
 
 // ---- Entorno y dependencias adicionales ----
 
@@ -275,28 +319,33 @@ export const runProject = (tabId: string, fullName: string) =>
  *  ordenado por apartados, más el resumen de arriba del panel. Vuelve a
  *  detectar los entornos por el camino: una herramienta recién instalada
  *  aparece sin reiniciar la app. */
-export const listInstallActions = () => invoke<InstallList>('install_list');
+export const listInstallActions = () => invokeLogged<InstallList>('install_list');
 
 /** Vuelve a detectarlo todo (WSL, daemon de Docker, adb, binarios del PATH) y
  *  devuelve la lista al día. Tarda segundos, así que el panel la pide DESPUÉS
  *  de haberse pintado con `listInstallActions`, nunca antes. */
-export const refreshInstallActions = () => invoke<InstallList>('install_refresh');
+export const refreshInstallActions = () => invokeLogged<InstallList>('install_refresh');
 
 /** Escribe la acción en la terminal. No la ejecuta por detrás: el comando se ve
  *  entero en la pestaña, y el usuario puede cancelarlo con Ctrl+C. */
 export const runInstallAction = (tabId: string, actionId: string) =>
-    invoke<InstallRunResult>('install_run', { tabId, actionId });
+    invokeLogged<InstallRunResult>('install_run', { tabId, actionId });
+
+/** Genera en la shell visible un lote construido desde el catálogo actual.
+ *  Cada categoría pregunta antes de ejecutar sus comandos. */
+export const runInstallBulk = (tabId: string, mode: 'install' | 'uninstall') =>
+    invokeLogged<InstallRunResult>('install_bulk', { tabId, mode });
 
 // ---- Actualización de la propia aplicación ----
 
 /** Consulta la última release del repositorio de la app y la compara con la
  *  versión que está corriendo. Un fallo de red no es un error: vuelve con el
  *  motivo dentro y sin ofrecer nada. */
-export const checkForUpdate = () => invoke<UpdateStatus>('update_check');
+export const checkForUpdate = () => invokeLogged<UpdateStatus>('update_check');
 
 /** Descarga la versión nueva DONDE la app está instalada, la aplica y reinicia.
  *  Si va bien no devuelve nada: el proceso muere durante la llamada. */
-export const installUpdate = () => invoke<UpdateResult>('update_install');
+export const installUpdate = () => invokeLogged<UpdateResult>('update_install');
 
 /** El backend ha encontrado una versión más reciente al arrancar. */
 export const onUpdateAvailable = (
@@ -309,21 +358,21 @@ export const onUpdateProgress = (callback: (progress: UpdateProgress) => void): 
 
 // ---- Preferencias ----
 
-export const getPreferences = () => invoke<PreferencesPayload>('settings_get');
+export const getPreferences = () => invokeLogged<PreferencesPayload>('settings_get');
 
 export const savePreferences = (preferences: Partial<Preferences>) =>
-    invoke<PreferencesPayload>('settings_save', { incoming: preferences });
+    invokeLogged<PreferencesPayload>('settings_save', { incoming: preferences });
 
-export const resetPreferences = () => invoke<PreferencesPayload>('settings_reset');
+export const resetPreferences = () => invokeLogged<PreferencesPayload>('settings_reset');
 
 // ---- Identidad y registro ----
 
-export const getAppInfo = () => invoke<AppInfo>('app_info');
+export const getAppInfo = () => invokeLogged<AppInfo>('app_info');
 
-export const openLogFolder = () => invoke<string | null>('log_open_folder');
+export const openLogFolder = () => invokeLogged<string | null>('log_open_folder');
 
 export const reportFrontendError = (payload: unknown) =>
-    invoke<void>('log_frontend_error', { payload }).catch(() => {
+    invokeLogged<void>('log_frontend_error', { payload }).catch(() => {
         // Si ni siquiera se puede registrar el error, no hay nada más que hacer.
     });
 

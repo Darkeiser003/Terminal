@@ -43,15 +43,15 @@ identificador y rutas de datos propias por plataforma (`src-tauri/src/config/ide
 - [Datos, logs y diagnóstico](#datos-logs-y-diagnóstico)
 - [Pruebas](#pruebas)
 - [Convenciones del código](#convenciones-del-código)
-- [Estructura del repositorio](docs/repository-layout.md)
 - [Problemas conocidos](#problemas-conocidos)
 
 ---
 
 ## Requisitos
 
-**Para usar la aplicación** no hace falta nada: el paquete trae todo lo que
-necesita. En Windows, WebView2 viene con el sistema desde Windows 10; en Linux,
+**Para usar la aplicación** no hace falta nada adicional en la distribución
+instalable. En Windows, WebView2 viene con el sistema desde Windows 10; la
+carpeta portable necesita que ese runtime ya exista. En Linux,
 el AppImage necesita las bibliotecas de escritorio habituales (WebKitGTK), que
 cualquier entorno gráfico ya tiene.
 
@@ -63,6 +63,9 @@ cualquier entorno gráfico ya tiene.
   comprueba antes de compilar y dice el comando de instalación de apt, dnf y
   pacman si falta alguna.
 - **Windows**: nada más. El toolchain MSVC lo instala `rustup`.
+- **Compilar Windows desde Linux**: además de lo anterior, MinGW x64
+  (`x86_64-w64-mingw32-gcc`) y, para el smoke opcional, Wine. El script puede
+  instalar esos paquetes con el gestor de la distribución.
 
 Para seleccionar la batería E2E al final del build hace falta además
 `tauri-driver`, `WebKitWebDriver` y una sesión gráfica. El builder ofrece
@@ -83,10 +86,14 @@ aborta si no están. El detalle completo, en `src-tauri/vendor/conpty/README.md`
 
 ## Instalación para usar la aplicación
 
-**Windows.** Se distribuye como carpeta desempaquetada: se descomprime donde se
-quiera y se ejecuta `winslim-terminal.exe`. No hay instalador, no toca el
-registro y no crea accesos directos. Los tres archivos de la carpeta
+**Windows portable.** Se distribuye como carpeta desempaquetada: se descomprime
+donde se quiera y se ejecuta `winslim-terminal.exe`. No instala WebView2, no
+toca el registro y no crea accesos directos. Los tres archivos de la carpeta
 (`winslim-terminal.exe`, `conpty.dll`, `OpenConsole.exe`) tienen que ir juntos.
+
+**Windows instalable.** `npm run dist:win:installer` genera un NSIS con el
+instalador offline de WebView2 incluido. Es la opción recomendada para equipos
+recortados, instalaciones limpias o despliegues sin Internet.
 
 **Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
 
@@ -117,18 +124,21 @@ ejecución anterior, hay que liberarlo antes.
 
 Todos se ejecutan desde la raíz del repositorio.
 
-Las herramientas operativas reutilizables para Docker Compose y Kubernetes se
-describen en [`docs/automation-tools.md`](docs/automation-tools.md). El panel
-**Scripts** puede descubrirlas y ejecutarlas directamente en la terminal.
+Las herramientas operativas reutilizables para Docker Compose y Kubernetes viven
+en `scripts/containers/`; las de red, SSH y servicios están en
+`scripts/operations/`. El panel **Scripts** puede descubrirlas y ejecutarlas
+directamente en la terminal.
 
 | Script | Qué hace |
 |---|---|
 | `npm start` | Arranca la aplicación en desarrollo (Vite + `cargo run`). |
-| `npm run check` | Ciclo completo: versión, metadatos, recursos, arquitectura, permisos, `svelte-check`, formato, análisis estático y pruebas Rust. **Es lo que hay que pasar antes de compilar.** |
+| `npm run check` | Ciclo completo: versión, metadatos, recursos, arquitectura, documentación, enlaces, fuentes de instalación, catálogo WinGet cuando se ejecuta en Windows, `svelte-check`, formato, análisis estático y pruebas Rust. **Es lo que hay que pasar antes de compilar.** |
 | `npm run check:workspace` | Comprueba que las cachés, salidas y directorio temporal se puedan leer y escribir; detecta un `chown`/`chmod` pendiente antes de una build. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
-| `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. |
+| `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run dist:win` | Ejecuta la build completa de Windows: comprueba recursos, valida, genera la carpeta desempaquetada y su ZIP. |
+| `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido. |
+| `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64 y verifica `conpty.dll`, `OpenConsole.exe` y WebView2Loader. `--wine-smoke` requiere `WINE_SMOKE_PREFIX` apuntando a un prefijo que ya tenga WebView2 Runtime. |
 | `npm run dist:linux` | Ejecuta la build Linux completa: solicita la versión, valida y genera el AppImage. |
 
 Para una build completa y verificada, con sus comprobaciones previas y su
@@ -144,12 +154,51 @@ windows\build.ps1          # o build.bat, para doble clic
 linux/build.sh
 ```
 
+Para validar la compatibilidad Windows desde Linux:
+
+```bash
+linux/build-windows.sh --wine-smoke
+```
+
+Esta ruta genera `src-tauri/target/windows-cross/x86_64-pc-windows-gnu/release/`
+por defecto y usa el enlazador MinGW en un target aislado de la build Linux.
+Es una comprobación reproducible de la aplicación y de sus recursos junto a
+Wine; la release oficial sigue siendo la carpeta producida por
+`windows/build.ps1` en Windows con MSVC. `--skip-checks` y `--no-install`
+tienen el mismo sentido que en la build Linux; `--clean` elimina únicamente la
+salida Windows cruzada. `LTERMINAL_WINDOWS_TARGET_DIR` permite cambiar esa
+carpeta sin compartir locks con otra compilación.
+
+Para hacer la validación cruzada completa desde Linux, incluyendo tres
+arranques aislados bajo Wine:
+
+```bash
+linux/build.sh --full-tests --cross-windows
+```
+
+En Windows, `-CrossLinux` utiliza WSL. Si no existe WSL o no hay una
+distribución instalada, intenta instalar WSL y Ubuntu con `winget`/`wsl.exe`;
+después ejecuta dentro de WSL `linux/build.sh --full-tests
+--install-e2e-driver --no-run`. Para que el E2E gráfico Linux funcione, Windows
+debe disponer de WSLg:
+
+```powershell
+windows\build.ps1 -NonInteractive -FullTests -CrossLinux
+```
+
 Argumentos: `-Clean`/`--clean` borra `node_modules` y `target` antes,
-`-SkipChecks`/`--skip-checks` salta las comprobaciones, `-NoRun`/`--no-run` no
-lanza la app al terminar. Para la batería completa usa `-FullTests` en Windows
+`-SkipChecks`/`--skip-checks` salta todas las comprobaciones, incluidas las que
+Tauri dispara dentro de `prebuild`, `-NoRun`/`--no-run` no lanza la app al
+terminar. Para la batería completa usa `-FullTests` en Windows
 o `--full-tests`/`--extended-tests` en Linux; `--install-e2e-driver` permite
 que Linux intente instalar el driver nativo de WebKitGTK cuando la distribución
-lo ofrece.
+lo ofrece. `-FullTests` y `-StrictTests` convierten las ausencias de herramientas
+de Windows en un fallo explícito, en vez de ocultarlas como omisiones. La build Linux ejecuta por defecto la batería ampliada y prepara
+automáticamente `dash`, PostgreSQL cliente, Fortran y Bottles (Flatpak); usa
+`--no-extended-tests` para una compilación rápida o `--no-install` para impedir
+instalaciones automáticas. En Arch/CachyOS instala solo esos paquetes y no
+actualiza todo el sistema; `LTERMINAL_ALLOW_SYSTEM_UPGRADE=1` habilita la
+actualización completa de `pacman` de forma explícita.
 
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
@@ -158,17 +207,28 @@ proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
 Cada script comprueba los requisitos, instala dependencias, pasa `npm run check`,
 compila, monta el artefacto, hace una comprobación de humo (abre la app y mira
 que no se cierre sola) y publica la release con su SHA-256 en `release/`.
+La comprobación estricta de enlaces distingue HTTP de repositorios Git: las
+URLs normales usan el timeout corto configurado y `git ls-remote` dispone de
+hasta 30 segundos y reintentos propios, para no rechazar una build porque la
+negociación de un repositorio grande tarde más que una petición web.
+
+Si el equipo está temporalmente sin DNS o sin acceso a Internet, se puede
+comprobar y compilar con `LTERMINAL_LINK_CHECK=warn npm run check` o anteponer
+`LTERMINAL_LINK_CHECK=warn` a `npm run build`, `npm run dist:linux` o
+`npm run dist:win:linux`. En ese modo las URLs y los registros externos quedan
+marcados como avisos y no se consideran validados; para publicar una release
+conviene repetir después el ciclo estricto con red disponible.
 
 ### Qué produce cada build
 
 | Plataforma | Artefacto |
 |---|---|
-| Windows | Carpeta desempaquetada + `WinSlimTerminal-Unpacked-<versión>.zip` |
+| Windows | Carpeta desempaquetada + `WinSlimTerminal-Unpacked-<versión>.zip`; opcionalmente instalador NSIS offline |
 | Linux | `LTerminal-<versión>-<arch>.AppImage` |
 
-Una sola cosa por plataforma, a propósito. **No** se genera instalador NSIS, ni
-MSI, ni portable, ni `.deb`, ni `.rpm`, ni accesos directos. El razonamiento
-está en `src-tauri/BUNDLE.md`.
+La build portable no genera instalador ni accesos directos. La build explícita
+`dist:win:installer` sí genera NSIS porque es la que garantiza la instalación
+del WebView2 Runtime.
 
 Si se configura actualización automática más adelante, el nombre del artefacto
 debe coincidir con `self_update::asset_for_platform`; de otro modo una release
@@ -419,6 +479,12 @@ El panel tiene el mismo **buscador con lupa** que Proyectos, y actúa sobre el
 último escaneo: filtra por nombre, subcarpeta o extensión sin volver a recorrer
 el disco, que en **Aquí** puede costar segundos.
 
+La sección **Acceso rápido** aparece encima de los resultados de la Biblioteca
+y de **Aquí**. La estrella conserva hasta 50 scripts, aunque estén en otra
+carpeta o el filtro de tipos actual no los incluya; los que ya no existen se
+retiran automáticamente. Así las herramientas de uso diario siguen a un clic
+sin convertir la Biblioteca en un segundo explorador.
+
 El filtro de tipos se adapta al sistema. En Linux aparecen primero
 SH/Bash/Zsh, Fish y paquetes Linux, que son los tres valores de fábrica; en
 Windows, CMD/BAT, PowerShell y VBScript ocupan esas posiciones. Python,
@@ -571,7 +637,7 @@ del sistema.
 
 ## Internacionalización
 
-La interfaz está en español e inglés. Por defecto sigue al idioma del sistema
+La interfaz está disponible en 15 idiomas. Por defecto sigue al idioma del sistema
 (`auto`); el desplegable de Ajustes permite fijar uno, y el cambio se aplica al
 instante sin reiniciar. Alcanza a los paneles, el menú contextual, el
 explorador, los mensajes de error y el banner de cada sesión.
@@ -580,16 +646,17 @@ explorador, los mensajes de error y el banner de cada sesión.
 rutas, comandos y su salida. Traducir un comando lo rompería, y la salida es de
 los programas que ejecuta el usuario.
 
-El catálogo vive en `main/i18n.js`. El español es el idioma de referencia: sus
-cadenas están escritas en el propio código y sirven de respaldo, de modo que
-una clave sin traducir se ve en español y nunca como un identificador.
+Los catálogos viven en `src-tauri/locales/*.json`. El español es el idioma de
+referencia y sirve de respaldo, de modo que una clave sin traducir se ve en
+español y nunca como un identificador.
 
 ### Añadir un idioma
 
-1. Añadir una entrada a `CATALOGS` en `main/i18n.js` con las mismas claves.
-2. Añadir el idioma a `LANGUAGES` para que aparezca en Ajustes.
-3. `npm run check` avisa de las claves que falten, de las que sobren y de las
-   que no usen los mismos parámetros que el original.
+1. Añadir un catálogo JSON a `src-tauri/locales/` con las mismas claves.
+2. Añadir el idioma a `LANGUAGES` en `src-tauri/src/config/i18n.rs` para que
+   aparezca en Ajustes.
+3. Ejecutar `npm run check:i18n`; avisa de las claves que falten, de las que
+   sobren y de los usos de interfaz sin respaldo en el catálogo español.
 
 Las etiquetas del panel de dependencias se traducen por dos vías: las generadas
 por molde (`action.install`, `action.updateShort`…), que cubren la mayor parte
@@ -619,6 +686,29 @@ metadatos JSON. Se anotan la migración, el arranque, cada PTY, duración de
 procesos y cierre. Para investigar una sesión concreta se puede usar
 `LTERMINAL_LOG_LEVEL=debug` en Linux o `WINSLIM_LOG_LEVEL=debug` en Windows.
 
+También se registran métricas segmentadas del WebView: `sinceStartMs` es el
+tiempo desde que cargó el frontend y `durationMs` la operación concreta.
+Incluyen `app.initial-load`, `app.ui-shell-visible`, disponibilidad para
+escribir, `fastfetch.banner-visible` y
+`fastfetch.banner-visible-after-terminal`, montaje y resize de cada terminal,
+repintado del banner, `ui.panel.visible` para cada menú/panel e `ipc.*` para
+cada llamada relevante al backend. Las entradas de teclado, parseo de cada
+tecla y cada píxel de resize se agrupan para no inundar el archivo.
+
+El smoke guarda además un informe JSON en `/tmp/lterminal-smoke-<token>.json`
+con las métricas agrupadas por operación: repeticiones, mínimo, máximo y
+media. Así se puede distinguir, por ejemplo, cuánto tardó en aparecer la
+ventana, cuánto tardó el banner de una pestaña concreta y cuánto tardó una
+descarga o un panel, sin mezclarlo con la duración total de las pruebas.
+
+El smoke espera eventos reales de WebDriver, del compositor y del repintado
+del banner, sin repetir comandos de shell después de cada resize. Esto reduce
+el tiempo de la batería sin quitar tamaños, paneles ni estados de ventana.
+Para investigar específicamente la ruta de teclado de `sysinfo` se puede usar
+`E2E_FORCE_SHELL_REFRESH=1 npm run e2e`; también admite `E2E_WM_TIMEOUT_MS`,
+`E2E_POLL_INTERVAL_MS`, `E2E_FOCUS_SETTLE_MS` y `E2E_COMMAND_SETTLE_MS` para
+diagnosticar máquinas especialmente lentas.
+
 ## Perfiles portables y plugins
 
 Desde Ajustes se puede exportar un perfil `.lterminal-profile` en Linux,
@@ -630,9 +720,10 @@ busca una instalación existente antes de instalar la aplicación. Después
 importa la configuración y los manifests de plugins declarativos.
 
 Los plugins actuales son una base segura para ampliar la terminal: solo
-declaran intérpretes y tecnologías, no cargan código nativo. Su formato,
-límites y flujo de creación están documentados en
-[`docs/plugins.md`](docs/plugins.md).
+declaran intérpretes y tecnologías, no cargan código nativo. El formato se
+valida al instalar `plugin.json` y sus límites están implementados en
+`src-tauri/src/config/plugins.rs`; se pueden instalar desde Ajustes ›
+Comportamiento.
 
 ---
 
@@ -643,20 +734,22 @@ npm run check
 ```
 
 Pasa la verificación de versión, recursos, arquitectura, scripts de build,
-`svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y los tests de
-Rust. Es lo que tiene que estar en verde antes de compilar.
+enlaces locales de documentación, `svelte-check`, `cargo fmt --check`,
+`cargo clippy -D warnings` y los tests de Rust. Es lo que tiene que estar en
+verde antes de compilar.
 
-Al terminar cada build, Linux y Windows preguntan si se quiere ejecutar la
-batería completa. Además del smoke test de ventana/frontend/PTY, comprueba
-shells y herramientas instaladas y ejecuta E2E con `tauri-driver`; si se pide
-esa batería y falta una precondición, el build falla indicando cuál es.
-En Linux se puede forzar con `linux/build.sh --full-tests` y en Windows con
-`windows/build.ps1 -FullTests`. Las herramientas opcionales ausentes se
-informan como omitidas: no se instalan silenciosamente ni se consideran un
-fallo. La falta del driver E2E sí detiene la batería gráfica. El smoke recorre
+La build Linux ejecuta por defecto la batería ampliada. Además del smoke test
+de ventana/frontend/PTY, comprueba shells y herramientas instaladas y ejecuta
+E2E con `tauri-driver`; si falta una precondición, el build falla indicando
+cuál es. Se puede omitir con `linux/build.sh --no-extended-tests`; en Windows
+se fuerza con `windows/build.ps1 -FullTests`. La falta del driver E2E sí detiene
+la batería gráfica. El smoke recorre
 Ajustes, Biblioteca, Proyectos, Entorno y dependencias, acordeones, explorador
 y menú contextual, comandos internos, respuesta de la shell, división y
-varios tamaños de ventana.
+varios tamaños de ventana. También repite refrescos de entornos, clics de
+división y aperturas de paneles para detectar carreras y estados residuales.
+La ruta Linux→Windows repite el arranque Wine con prefijos independientes; la
+ruta Windows→Linux repite el mismo build y E2E dentro de WSLg.
 
 Los tests viven junto al módulo que prueban, en su `mod tests`. Están escritos
 en español y sus nombres son frases que dicen qué garantiza cada uno, no qué
@@ -693,10 +786,25 @@ ejecutable. El ConPTY del sistema falla en algunos Windows recortados y tarda
 más de dos minutos en devolver el error. Los tres archivos de la carpeta
 desempaquetada tienen que ir juntos.
 
-**El inventario de WSL sale incompleto.** Sondear cada distro tiene un plazo de
-3 segundos, y en algunas máquinas `wsl.exe -d <distro> -- printenv SHELL` tarda
-más. La distro aparece igualmente en el selector, con la etiqueta «(sin
-comprobar)» y su shell por defecto, y se abre con normalidad.
+**El inventario de WSL sale incompleto.** La sonda rápida solo identifica la
+distro; al abrir Dependencias se enumeran también `/usr/local/bin`, las rutas de
+usuario, `~/.cargo/bin`, `~/.local/bin`, npm global, nvm, asdf/mise, Volta, Bun y
+Deno. Así los lenguajes instalados con gestores de versiones no vuelven a
+aparecer como faltantes. Si `wsl.exe -d <distro> -- printenv SHELL` no responde,
+la distro aparece igualmente en el selector como «(sin comprobar)».
+
+**Virtualización en Windows.** KVM, libvirt y virt-manager son componentes de
+Linux y, cuando procede, se ofrecen dentro de WSL. Windows nativo dispone de
+acciones separadas para Hyper-V, Virtual Machine Platform y Windows Sandbox,
+además de QEMU, VirtualBox y VMware Workstation Pro. No se presentan como si
+fueran KVM nativo: cada opción indica sus requisitos, edición de Windows y
+reinicio necesario.
+
+**Catálogo WinGet.** En Windows `npm run check:winget` consulta todos los
+identificadores del catálogo con `winget show --exact` antes de compilar. Esto
+detecta IDs retirados o mal escritos; la descarga real sigue dependiendo de que
+el manifiesto del editor esté vigente, por lo que un error HTTP del proveedor
+queda registrado por WinGet y no se confunde con un fallo de la aplicación.
 
 **El panel de dependencias tarda un par de segundos en abrir.** Refleja el
 estado actual del sistema, no el del arranque: consulta el PATH y comprueba unas

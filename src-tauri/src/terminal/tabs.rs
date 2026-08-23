@@ -44,6 +44,15 @@ fn banner_cursor_is_safe(cursor_row: Option<u16>, affected_rows: usize) -> bool 
     cursor_row.map_or(true, |cursor| usize::from(cursor) >= affected_rows)
 }
 
+fn banner_with_environment_note(env: &Environment, banner: &str) -> String {
+    let note = env
+        .note
+        .as_deref()
+        .map(|value| format!("\x1b[33m{value}\x1b[0m\r\n\r\n"))
+        .unwrap_or_default();
+    format!("{banner}{note}")
+}
+
 pub const MAX_PTY_INPUT_CHARS: usize = 4 * 1024 * 1024;
 
 // ---- Eventos hacia el frontend ----
@@ -360,6 +369,60 @@ impl TabManager {
 
     pub fn viewport(&self) -> Viewport {
         *self.viewport.lock()
+    }
+
+    /// Repinta el banner cuando terminan las sondas lentas. La primera versión
+    /// ya es utilizable; este trabajo completa la placa, GPU, RAM y discos sin
+    /// hacer esperar al xterm ni al primer prompt.
+    pub fn refresh_banner_when_system_info_ready(self: &Arc<Self>, app: &AppHandle, tab_id: &str) {
+        if crate::system_info::banner_data_ready() {
+            return;
+        }
+        let tabs = Arc::clone(self);
+        let app = app.clone();
+        let tab_id = tab_id.to_string();
+        std::thread::Builder::new()
+            .name("banner-refresh".into())
+            .spawn(move || {
+                let started = Instant::now();
+                let mut hardware_refreshed = false;
+                let mut disks_refreshed = false;
+                for _ in 0..100 {
+                    let hardware_ready = crate::system_info::hardware_data_ready();
+                    let disks_ready = crate::system_info::disks_data_ready();
+                    if (hardware_ready && !hardware_refreshed) || (disks_ready && !disks_refreshed)
+                    {
+                        let viewport = tabs.viewport();
+                        if tabs.registry.lock().find(&tab_id).is_none() {
+                            return;
+                        }
+                        tabs.refresh_banner(&app, &tab_id, viewport.cols, viewport.rows, 1, None);
+                        log_info!(
+                            "Banner progresivo completado",
+                            serde_json::json!({
+                                "tabId": tab_id,
+                                "cols": viewport.cols,
+                                "rows": viewport.rows,
+                                "durationMs": started.elapsed().as_millis(),
+                            })
+                        );
+                        hardware_refreshed |= hardware_ready;
+                        disks_refreshed |= disks_ready;
+                        if hardware_refreshed && disks_refreshed {
+                            return;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                log_debug!(
+                    "Banner progresivo sigue pendiente",
+                    serde_json::json!({
+                        "tabId": tab_id,
+                        "durationMs": started.elapsed().as_millis(),
+                    })
+                );
+            })
+            .ok();
     }
 
     pub fn list(&self) -> TabList {
@@ -694,6 +757,7 @@ impl TabManager {
                 // alias NSudo no puede filtrarse a builds Linux ni siquiera si
                 // existe un ejecutable con ese nombre en PATH.
                 let nsudo_path = crate::platform::nsudo_path();
+                let banner_started = Instant::now();
                 let banner = crate::system_info::build_banner(
                     &env.label,
                     crate::identity::current().name,
@@ -702,7 +766,17 @@ impl TabManager {
                     1,
                     &t,
                 );
-                let banner_rows = banner.lines().count().max(1);
+                let build_banner_ms = banner_started.elapsed().as_millis();
+                let show_banner = crate::preferences::current().show_system_banner;
+                let banner_rows = if show_banner {
+                    banner_with_environment_note(env, &banner)
+                        .lines()
+                        .count()
+                        .max(1)
+                } else {
+                    0
+                };
+                let session_files_started = Instant::now();
                 let session_files = crate::session_files::write_session_files(
                     &crate::session_files::SessionRequest {
                         tab_id,
@@ -714,12 +788,27 @@ impl TabManager {
                         manager_label: windows_package_manager()
                             .and_then(crate::package_aliases::windows_manager_by_id)
                             .map(|manager| manager.label),
-                        show_banner: crate::preferences::current().show_system_banner,
+                        show_banner,
                         // El ancho de la pestaña, para que el marco no salga
                         // más ancho que la casilla donde se va a leer.
                         banner: &banner,
                     },
                     &t,
+                );
+                log_info!(
+                    "Banner inicial preparado",
+                    serde_json::json!({
+                        "tabId": tab_id,
+                        "envId": env.id,
+                        "cols": viewport.cols,
+                        "rows": viewport.rows,
+                        "bannerRows": banner_rows,
+                        "visible": show_banner,
+                        "buildBannerMs": build_banner_ms,
+                        "bannerDataReady": crate::system_info::banner_data_ready(),
+                        "sessionFilesMs": session_files_started.elapsed().as_millis(),
+                        "durationMs": banner_started.elapsed().as_millis(),
+                    })
                 );
                 if let Some(tab) = self.registry.lock().find_mut(tab_id) {
                     tab.banner_rows = banner_rows;
@@ -1143,18 +1232,35 @@ impl TabManager {
             pane_count,
             &t,
         );
+        let show_banner = crate::preferences::current().show_system_banner;
+        let banner = if show_banner {
+            banner_with_environment_note(&env, &banner)
+        } else {
+            String::new()
+        };
+        // También se actualiza al desactivarlo: dejar el archivo anterior
+        // permitiría que `sysinfo` volviera a imprimir un banner que ya no se
+        // ve en la terminal.
+        crate::session_files::refresh_banner_files(tab_id, None, &banner);
 
         // El banner ocupa la parte superior de la pantalla. Se limpian solo
         // esas filas y se restaura el cursor; el historial posterior queda
         // intacto y no se envía ninguna orden a la shell.
-        let rows = banner.lines().count().max(1);
+        let rows = if banner.is_empty() {
+            0
+        } else {
+            banner.lines().count().max(1)
+        };
         let rows_to_clear = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
                 return;
             };
-            let previous = tab.banner_rows.max(1);
+            let previous = tab.banner_rows;
             let affected_rows = previous.max(rows);
+            if affected_rows == 0 {
+                return;
+            }
             if !banner_cursor_is_safe(cursor_row, affected_rows) {
                 log_debug!(
                     "Repintado del banner aplazado para proteger el cursor",

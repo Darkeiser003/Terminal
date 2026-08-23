@@ -4,12 +4,13 @@
 //! Electron. La correspondencia es uno a uno y está anotada en cada comando,
 //! para poder cotejarlos con `electron/preload.js` mientras dure la migración.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, State};
 
 use crate::environments::Environment;
 use crate::preferences::{
@@ -60,6 +61,9 @@ pub fn tabs_activate(state: State<'_, Arc<AppState>>, tab_id: String) {
 #[tauri::command]
 pub fn tabs_ready(app: AppHandle, state: State<'_, Arc<AppState>>, tab_id: String) {
     state.tabs.mark_ready(&app, &tab_id);
+    state
+        .tabs
+        .refresh_banner_when_system_info_ready(&app, &tab_id);
     // La detección completa habla con WSL, Docker y adb. Se inicia únicamente
     // cuando xterm ya puede recibir y pintar la salida de la primera pestaña,
     // para que esas sondas no compitan con el camino crítico del arranque.
@@ -126,6 +130,7 @@ pub fn pty_refresh_banner(
     let Some(viewport) = crate::tabs::valid_viewport(cols, rows) else {
         return;
     };
+    let started = Instant::now();
     state.tabs.refresh_banner(
         &app,
         &tab_id,
@@ -133,6 +138,16 @@ pub fn pty_refresh_banner(
         viewport.rows,
         pane_count.max(1) as usize,
         cursor_row.and_then(|row| u16::try_from(row).ok()),
+    );
+    log_info!(
+        "Repintado de banner solicitado",
+        serde_json::json!({
+            "tabId": tab_id,
+            "cols": viewport.cols,
+            "rows": viewport.rows,
+            "paneCount": pane_count.max(1),
+            "durationMs": started.elapsed().as_millis(),
+        })
     );
 }
 
@@ -514,6 +529,60 @@ pub fn log_frontend_error(payload: Value) {
     log_error!("Error en el frontend", payload);
 }
 
+/// Una métrica que nace en el WebView, con el reloj monotónico del navegador.
+/// `sinceStartMs` permite reconstruir el camino visible desde el arranque y
+/// `durationMs` mide una operación concreta sin depender de la hora del sistema.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendPerformancePayload {
+    pub metric: String,
+    pub kind: String,
+    pub since_start_ms: Option<f64>,
+    pub duration_ms: Option<f64>,
+    pub status: Option<String>,
+    pub tab_id: Option<String>,
+    pub details: Option<Value>,
+}
+
+/// `log:frontend-performance`: une las métricas del navegador al mismo
+/// `main.log` que usa el backend. Se descartan nombres imposibles o tiempos no
+/// finitos para que un WebView corrupto no genere líneas inanalizables.
+#[tauri::command]
+pub fn log_frontend_performance(payload: FrontendPerformancePayload) {
+    if payload.metric.trim().is_empty()
+        || payload.metric.len() > 120
+        || payload.kind.len() > 40
+        || payload
+            .since_start_ms
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        || payload
+            .duration_ms
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return;
+    }
+    let mut meta = serde_json::json!({
+        "metric": payload.metric,
+        "kind": payload.kind,
+    });
+    if let Some(value) = payload.since_start_ms {
+        meta["sinceStartMs"] = serde_json::json!(value);
+    }
+    if let Some(value) = payload.duration_ms {
+        meta["durationMs"] = serde_json::json!(value);
+    }
+    if let Some(value) = payload.status {
+        meta["status"] = serde_json::json!(value);
+    }
+    if let Some(value) = payload.tab_id {
+        meta["tabId"] = serde_json::json!(value);
+    }
+    if let Some(value) = payload.details {
+        meta["details"] = value;
+    }
+    log_info!("Métrica de rendimiento frontend", meta);
+}
+
 /// `log:open-folder`
 #[tauri::command(async)]
 pub fn log_open_folder(app: AppHandle) -> Option<String> {
@@ -528,6 +597,85 @@ pub fn log_open_folder(app: AppHandle) -> Option<String> {
         return None;
     }
     Some(path)
+}
+
+/// Mantiene un área útil mínima cuando el WebView pierde espacio frente al
+/// inspector acoplado u otro panel externo. El tamaño nativo de la ventana
+/// puede seguir siendo válido mientras el terminal queda con una fracción de
+/// esa altura; en ese caso se amplía, nunca se reduce.
+#[tauri::command]
+pub fn window_ensure_usable_size(
+    app: AppHandle,
+    viewport_width: i64,
+    viewport_height: i64,
+    pane_count: i64,
+) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let (min_width, min_height) = crate::responsive_window_min_size(&window);
+    let layout_factor = if pane_count > 1 { 2.0 } else { 1.0 };
+    let vertical_layout_factor = if pane_count >= 3 { 2.0 } else { 1.0 };
+    let layout_min_width = (min_width * layout_factor).min(crate::MAX_WINDOW_WIDTH);
+    let layout_min_height = (min_height * vertical_layout_factor).min(crate::MAX_WINDOW_HEIGHT);
+    let scale_factor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or(1.0);
+    let Ok(outer) = window.outer_size() else {
+        return;
+    };
+    let outer = outer.to_logical::<f64>(scale_factor);
+    let width_deficit = (layout_min_width - viewport_width.max(0) as f64).max(0.0);
+    let height_deficit = (layout_min_height - viewport_height.max(0) as f64).max(0.0);
+    if let Err(error) =
+        window.set_min_size(Some(LogicalSize::new(layout_min_width, layout_min_height)))
+    {
+        log_error!(
+            "No se pudo fijar el mínimo del área útil dividida",
+            serde_json::json!({
+                "error": error.to_string(),
+                "minWidth": layout_min_width,
+                "minHeight": layout_min_height,
+                "paneCount": pane_count,
+            })
+        );
+    }
+    if width_deficit <= 0.0 && height_deficit <= 0.0 {
+        return;
+    }
+    let target = LogicalSize::new(
+        (outer.width + width_deficit).max(layout_min_width),
+        (outer.height + height_deficit).max(layout_min_height),
+    );
+    if let Err(error) = window.set_size(target) {
+        log_error!(
+            "No se pudo ampliar la ventana para conservar el área útil mínima",
+            serde_json::json!({
+                "error": error.to_string(),
+                "viewportWidth": viewport_width,
+                "viewportHeight": viewport_height,
+                "minWidth": layout_min_width,
+                "minHeight": layout_min_height,
+                "paneCount": pane_count,
+            })
+        );
+    } else {
+        log_info!(
+            "Área útil mínima de la ventana reforzada",
+            serde_json::json!({
+                "viewportWidth": viewport_width,
+                "viewportHeight": viewport_height,
+                "targetWidth": target.width,
+                "targetHeight": target.height,
+                "minWidth": layout_min_width,
+                "minHeight": layout_min_height,
+                "paneCount": pane_count,
+            })
+        );
+    }
 }
 
 #[cfg(test)]

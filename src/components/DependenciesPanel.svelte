@@ -1,9 +1,9 @@
 <script lang="ts">
     // Panel de entorno y dependencias adicionales.
     //
-    // Port de `renderDepsPanel` de `electron/renderer/renderer.js`. Enseña el
-    // resumen de qué hay en el sistema y las acciones que tienen sentido aquí,
-    // agrupadas en dos niveles: el apartado (Shells, Lenguajes, Docker...) y,
+    // Port de `renderDepsPanel` de `electron/renderer/renderer.js`. Enseña las
+    // acciones aplicables a este sistema, agrupadas en dos niveles: el
+    // apartado (Shells, Lenguajes, Docker...) y,
     // dentro, cada herramienta con sus cuatro acciones plegadas bajo su nombre.
     //
     // Ninguna acción se ejecuta aquí: el backend escribe el comando en la
@@ -13,18 +13,29 @@
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
     import { panels } from '../lib/panels.svelte';
-    import type { InstallAction, InstallComponent, UpdateStatus } from '../lib/types';
+    import type { InstallAction, UpdateStatus } from '../lib/types';
     import Panel from './Panel.svelte';
 
     let actions = $state<InstallAction[]>([]);
-    let components = $state<InstallComponent[]>([]);
     let error = $state('');
     let loading = $state(false);
     /** La acción que se está preparando, para dejar su botón en marcha sin
      *  bloquear el resto del panel. */
     let running = $state('');
+    let bulkRunning = $state<'install' | 'uninstall' | ''>('');
     let query = $state('');
     let statusFilter = $state<'all' | 'installed' | 'missing'>('all');
+
+    const bulkInstallCount = $derived(
+        actions.filter((action) => action.verb === null && action.installed === false).length
+    );
+    const bulkUninstallCount = $derived(
+        actions.filter(
+            (action) =>
+                (action.id.endsWith('-uninstall') || action.id.endsWith('-remove')) &&
+                (action.requiresCmd !== null || action.installed === true)
+        ).length
+    );
 
     /** Estado de la actualización de la PROPIA terminal. Null mientras no se ha
      *  consultado. No es una acción del catálogo: no se escribe ningún comando
@@ -39,6 +50,7 @@
      *  todas las suyas plegadas bajo su nombre. */
     interface Entry {
         name: string;
+        description: string | null;
         installed: boolean;
         actions: InstallAction[];
     }
@@ -68,27 +80,6 @@
         return rawGroup;
     }
 
-    function translateComponentLabel(label: string): string {
-        if (label === 'Virtualización') return app.t('group.virt', 'Virtualización');
-        if (label === 'Lenguajes') return app.t('group.languagesShort', 'Lenguajes');
-        if (label === 'Sistema y herramientas') return app.t('group.tools', 'Sistema y herramientas');
-        if (label === 'Frameworks') return app.t('group.frameworks', 'Frameworks y ecosistemas');
-        return label;
-    }
-
-    function translateComponentValue(val: string): string {
-        return val
-            .replace('No instalado', app.t('deps.notInstalled', 'No instalado'))
-            .replace('No instalada', app.t('deps.notInstalled', 'No instalada'))
-            .replace('Listo', app.t('deps.ready', 'Listo'))
-            .replace('Desactivada en Windows', app.t('deps.disabledWin', 'Desactivada en Windows'))
-            .replace(/(\d+)\s+dispositivos/, (_, n) => app.t('deps.devices', '{count} dispositivos').replace('{count}', n))
-            .replace(/1\s+distro/, app.t('deps.distro', '1 distro'))
-            .replace(/(\d+)\s+distros/, (_, n) => app.t('deps.distros', '{count} distros').replace('{count}', n))
-            .replace(/1\s+REPL/, app.t('deps.repl', '1 REPL'))
-            .replace(/(\d+)\s+REPLs/, (_, n) => app.t('deps.repls', '{count} REPLs').replace('{count}', n));
-    }
-
     const groups = $derived.by(() => {
         const byGroup = new Map<string, InstallAction[]>();
         for (const action of actions) {
@@ -111,6 +102,7 @@
                 if (!action.subgroup) {
                     entries.push({
                         name: action.label,
+                        description: null,
                         installed: action.installed === true,
                         actions: [action]
                     });
@@ -118,11 +110,19 @@
                 }
                 let entry = subgroups.get(action.subgroup);
                 if (!entry) {
-                    entry = { name: action.subgroup, installed: false, actions: [] };
+                    entry = {
+                        name: action.subgroup,
+                        description: action.subgroupDescription,
+                        installed: false,
+                        actions: []
+                    };
                     subgroups.set(action.subgroup, entry);
                     entries.push(entry);
                 }
                 entry.actions.push(action);
+                if (!entry.description && action.subgroupDescription) {
+                    entry.description = action.subgroupDescription;
+                }
                 // Basta con que UNA acción del subgrupo requiera la herramienta
                 // para saber que está presente.
                 if (action.installed === true) entry.installed = true;
@@ -134,7 +134,12 @@
                 if (statusFilter === 'installed' && !entry.installed) return false;
                 if (statusFilter === 'missing' && entry.installed) return false;
                 if (!needle) return true;
-                return [entry.name, name, ...entry.actions.flatMap((action) => [action.label, action.hint ?? ''])]
+                return [
+                    entry.name,
+                    entry.description ?? '',
+                    name,
+                    ...entry.actions.flatMap((action) => [action.label, action.hint ?? ''])
+                ]
                     .some((text) => text.toLocaleLowerCase('es').includes(needle));
             });
             return {
@@ -151,51 +156,81 @@
         });
     });
 
+    // El catálogo contiene varias acciones por herramienta (instalar,
+    // actualizar, comprobar y desinstalar). El contador de la cabecera debe
+    // reflejar las entradas que el usuario ve, igual que los contadores de cada
+    // apartado, no el número interno de comandos del catálogo.
+    const visibleComponentCount = $derived(
+        groups.reduce(
+            (total, group) => total + group.entries.length + (group.key === 'group.updates' ? 1 : 0),
+            0
+        )
+    );
+
     /** Se está re-detectando el entorno en segundo plano. La lista ya está a la
      *  vista; esto solo marca que los contadores pueden cambiar. */
     let refreshing = $state(false);
+    /** No se permite preparar un lote con la detección rápida inicial: esa
+     *  instantánea puede no incluir todavía WSL, Docker, ADB o los PATH que
+     *  acaba de crear un instalador. */
+    let detectionReady = $state(false);
+    /** Evita que una detección lenta de una apertura anterior pise la lista de
+     *  una apertura posterior del panel. */
+    let loadSerial = 0;
 
     export async function load(): Promise<void> {
+        const serial = ++loadSerial;
         // Primero lo YA detectado, que no toca el sistema y llega al instante.
         // Antes se pedía la detección completa antes de pintar nada y el panel
         // tardaba segundos en abrirse, con la ventana aparentemente colgada.
         loading = actions.length === 0;
+        detectionReady = false;
         error = '';
         try {
             const list = await api.listInstallActions();
+            if (serial !== loadSerial) return;
             actions = list.actions;
-            components = list.components;
         } catch (cause) {
+            if (serial !== loadSerial) return;
             actions = [];
-            components = [];
             error = app
                 .t('deps.detectFailed', 'No se pudo detectar el entorno: {error}')
                 .replace('{error}', String(cause));
         } finally {
-            loading = false;
+            if (serial === loadSerial) loading = false;
         }
-        // Las dos consultas lentas van detrás y sin esperarlas: la re-detección
-        // habla con WSL, Docker y adb, y la de versión con GitHub. Ninguna tiene
-        // por qué retrasar que el panel se vea.
-        void refresh();
+        // La detección completa sí se espera antes de habilitar los botones de
+        // lote. Antes se podía pulsar mientras la instantánea rápida aún estaba
+        // siendo sustituida, de ahí el salto engañoso de 20/30 a 100+.
+        await refresh();
         void checkSelf();
     }
 
     /** Re-detecta el entorno y sustituye la lista si algo ha cambiado. Un fallo
      *  aquí no borra lo que ya se está enseñando: lo de antes sigue siendo
      *  válido, solo puede estar desactualizado. */
-    async function refresh(): Promise<void> {
-        if (refreshing) return;
+    async function refresh(): Promise<boolean> {
+        if (refreshing) return false;
+        const serial = loadSerial;
         refreshing = true;
+        detectionReady = false;
+        let ok = true;
         try {
             const list = await api.refreshInstallActions();
+            if (serial !== loadSerial) return false;
             actions = list.actions;
-            components = list.components;
         } catch {
-            // Sin ruido: el panel ya tiene contenido utilizable.
+            // La instantánea rápida no se considera suficientemente fiable
+            // para ejecutar un lote si la detección completa ha fallado.
+            ok = false;
+            error = app.t('deps.detectFailed', 'No se pudo completar la detección del entorno.');
         } finally {
-            refreshing = false;
+            if (serial === loadSerial) {
+                refreshing = false;
+                detectionReady = ok;
+            }
         }
+        return ok;
     }
 
     /** Consulta si hay una versión nueva publicada. Un fallo de red no es un
@@ -257,8 +292,28 @@
         }
     }
 
+    async function runBulk(mode: 'install' | 'uninstall'): Promise<void> {
+        const tabId = app.activeTabId;
+        if (!tabId || running || bulkRunning) return;
+        bulkRunning = mode;
+        error = '';
+        try {
+            const result = await api.runInstallBulk(tabId, mode);
+            if (!result.ok) {
+                error = result.error ?? app.t('deps.bulkFailed', 'No se pudo preparar el lote.');
+                return;
+            }
+            panels.close();
+            if (result.tabId) await app.adoptTab(result.tabId, result.created);
+        } catch (cause) {
+            error = String(cause);
+        } finally {
+            bulkRunning = '';
+        }
+    }
+
     /** El primer apartado se abre solo si el usuario lo ha pedido en Ajustes.
-     *  Con veinte apartados, abrir uno por defecto tapa el resumen de arriba. */
+     *  Con veinte apartados, abrir uno por defecto ocupa espacio innecesario. */
     const autoOpenFirst = $derived(app.preferences?.autoOpenFirstGroup ?? false);
 
     /** Con el acordeón exclusivo, abrir un apartado cierra sus hermanos. Se
@@ -280,11 +335,14 @@
     id="deps"
     title={app.t('deps.header', 'Entorno y componentes')}
     subtitle={error ||
-        (loading
+        (loading || refreshing
             ? app.t('deps.loading', 'Detectando…')
             : app.t('deps.onlyApplicable', 'Solo se muestran acciones aplicables a este sistema.'))}
     error={Boolean(error)}
-    count={actions.length}
+    count={loading || refreshing ? undefined : visibleComponentCount}
+    countLabel={app
+        .t('deps.visibleComponents', '{count} visible components')
+        .replace('{count}', String(visibleComponentCount))}
 >
     <div class="filters" role="search">
         <input
@@ -299,16 +357,51 @@
             <option value="missing">{app.t('deps.filterMissing', 'No instaladas')}</option>
         </select>
     </div>
-    {#if components.length}
-        <div class="summary">
-            {#each components as component (component.label)}
-                <div class="chip">
-                    <span>{translateComponentLabel(component.label)}</span>
-                    <strong>{translateComponentValue(component.value)}</strong>
-                </div>
-            {/each}
+    <div class="bulk-actions" data-testid="dependency-bulk-actions">
+        <div class="bulk-copy">
+            <strong>{app.t('deps.bulkTitle', 'Acciones por categorías')}</strong>
+            <span>{app.t('deps.bulkHint', 'Genera un script visible y pregunta antes de cada categoría.')}</span>
         </div>
-    {/if}
+        <div class="bulk-buttons">
+            <button
+                type="button"
+                class="run secondary"
+                data-testid="dependency-refresh"
+                disabled={refreshing || bulkRunning !== '' || running !== ''}
+                onclick={() => void refresh()}
+            >
+                {refreshing ? app.t('deps.refreshing', 'Actualizando…') : app.t('deps.refresh', 'Actualizar detección')}
+            </button>
+            <button
+                type="button"
+                class="run"
+                data-testid="dependency-bulk-install"
+                disabled={
+                    !detectionReady || bulkInstallCount === 0 || running !== '' || bulkRunning !== '' || !app.activeTabId
+                }
+                onclick={() => runBulk('install')}
+            >
+                {bulkRunning === 'install'
+                    ? app.t('deps.bulkPreparing', 'Preparando…')
+                    : app.t('deps.bulkInstall', 'Instalar faltantes')}
+                <span class="count">{bulkInstallCount}</span>
+            </button>
+            <button
+                type="button"
+                class="run danger"
+                data-testid="dependency-bulk-uninstall"
+                disabled={
+                    !detectionReady || bulkUninstallCount === 0 || running !== '' || bulkRunning !== '' || !app.activeTabId
+                }
+                onclick={() => runBulk('uninstall')}
+            >
+                {bulkRunning === 'uninstall'
+                    ? app.t('deps.bulkPreparing', 'Preparando…')
+                    : app.t('deps.bulkUninstall', 'Desinstalar instalados')}
+                <span class="count">{bulkUninstallCount}</span>
+            </button>
+        </div>
+    </div>
 
     {#if !loading && actions.length === 0}
         <div class="empty">
@@ -352,7 +445,12 @@
                 {:else}
                     <details class="subgroup" class:installed={entry.installed} data-testid="dependency-subgroup" ontoggle={onToggle}>
                         <summary class="subgroup-title">
-                            {entry.name}
+                            <span class="subgroup-heading">
+                                <span>{entry.name}</span>
+                                {#if entry.description}
+                                    <small>{entry.description}</small>
+                                {/if}
+                            </span>
                             <span class="count">{entry.actions.length}</span>
                         </summary>
                         {#each entry.actions as action (action.id)}
@@ -449,6 +547,8 @@
             <button
                 type="button"
                 class="run"
+                data-testid="dependency-action"
+                data-action-id={action.id}
                 disabled={running !== '' || !app.activeTabId}
                 onclick={() => run(action)}
             >
@@ -483,33 +583,64 @@
         font: inherit;
     }
 
-    /* `auto-fit` con un minimo real: las fichas se reparten en las columnas
-       que quepan y bajan a una sola cuando el panel se estrecha, en vez de
-       encogerse hasta que el valor no se lee. */
-    .summary {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-        gap: 6px;
-        padding: 6px;
+    .bulk-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px;
         border-bottom: 1px solid var(--border);
+        background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
     }
 
-    .chip {
+    .bulk-copy {
         display: flex;
         flex-direction: column;
+        min-width: 0;
         gap: 2px;
-        padding: 6px 8px;
-        border: 1px solid var(--border);
-        border-radius: 5px;
-        background: var(--surface-alt);
-        color: var(--muted);
-        font-size: 10px;
     }
 
-    .chip strong {
+    .bulk-copy strong {
         color: var(--text);
         font-size: 11px;
-        font-weight: 600;
+    }
+
+    .bulk-copy span {
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.35;
+    }
+
+    .bulk-buttons {
+        display: flex;
+        flex: 0 0 auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 5px;
+    }
+
+    .bulk-buttons .run {
+        margin-left: 0;
+    }
+
+    .bulk-buttons .run.danger {
+        border-color: color-mix(in srgb, #e06c75 55%, var(--border));
+        color: #f0b5b9;
+    }
+
+    @media (max-width: 620px) {
+        .bulk-actions {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .bulk-buttons {
+            justify-content: stretch;
+        }
+
+        .bulk-buttons .run {
+            flex: 1 1 170px;
+        }
     }
 
     .group {
@@ -569,6 +700,20 @@
         font-weight: 600;
         list-style: none;
         transition: background 0.15s ease;
+    }
+
+    .subgroup-heading {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        gap: 2px;
+    }
+
+    .subgroup-heading small {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 400;
+        line-height: 1.25;
     }
 
     .subgroup-title:hover {

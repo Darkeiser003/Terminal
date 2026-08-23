@@ -23,6 +23,7 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "repl" if argument.is_some() => "repl",
         "alias" if argument.is_none() => "alias",
         "help" => "help",
+        "banner" => "banner",
         _ => return None,
     };
     Some(InternalCommand {
@@ -48,6 +49,11 @@ mod tests {
             Some("paquetes")
         );
         assert_eq!(parse(":alias").unwrap().action, "alias");
+        assert_eq!(parse(":banner preset compact").unwrap().action, "banner");
+        assert_eq!(
+            parse(":banner preset compact").unwrap().argument.as_deref(),
+            Some("preset compact")
+        );
     }
 
     #[test]

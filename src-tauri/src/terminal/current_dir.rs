@@ -5,7 +5,7 @@
 //! No existe una API portable para consultar el cwd de un proceso hijo (en
 //! especial con ConPTY), así que se reconocen los prompts por defecto de las
 //! shells que la aplicación crea. Si el usuario personaliza el prompt se
-//! conserva el último cwd válido y la UI permite elegir una carpeta a mano.
+//! conserva el último cwd válido y la UI ofrece acciones sobre la ruta detectada.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -107,11 +107,19 @@ pub fn map_remote_path(raw_path: &str, env: &Environment) -> Option<String> {
     if value.is_empty() {
         return None;
     }
+    // Los entornos nativos creados por plugins o por configuraciones antiguas
+    // pueden no traer `host_home`. En Linux Bash suele imprimir `~/carpeta` y,
+    // sin esta resolución, el panel recibe una ruta literal relativa que no
+    // existe y conserva silenciosamente el home inicial de la pestaña.
+    let prompt_home = env.host_home.clone().or_else(|| {
+        matches!(env.transport, Transport::Native | Transport::Msys)
+            .then(|| crate::paths::home_cwd().to_string_lossy().to_string())
+    });
     if value == "~" {
-        return env.host_home.clone();
+        return prompt_home;
     }
     if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = env.host_home.as_deref() {
+        if let Some(home) = prompt_home.as_deref() {
             return Some(join_host_path(home, rest));
         }
     }
@@ -319,6 +327,16 @@ mod tests {
         assert_eq!(
             detect_current_directory("[ana@pc ~/proyectos/app]$ ", &native, None),
             Some("/home/ana/proyectos/app".to_string())
+        );
+    }
+
+    #[test]
+    fn el_prompt_linux_resuelve_la_virgulilla_sin_metadatos_extra() {
+        let native = env(Transport::Native);
+        let home = crate::paths::home_cwd();
+        assert_eq!(
+            detect_current_directory("ana@pc:~/proyectos/app$ ", &native, None),
+            Some(home.join("proyectos/app").to_string_lossy().to_string())
         );
     }
 

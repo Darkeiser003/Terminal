@@ -23,10 +23,12 @@
     --terminal-font: 'Cascadia Code', Consolas, 'Courier New', monospace;
 }
 
-/* En WebKitGTK la apariencia nativa de los <select> ignora el fondo declarado
-   por cada componente y acaba mostrando cajas blancas. La clase se aplica solo
-   a la build Linux, de modo que los controles de Windows conservan su aspecto. */
-.platform-linux select {
+/* Los dos WebView (WebKitGTK y WebView2) dejan que el sistema pinte una parte
+   distinta del <select>. Sin esta base compartida Linux puede acabar con una
+   caja clara y Windows con otra altura/flecha. El menú desplegable sigue siendo
+   nativo en cada sistema, pero el control cerrado que forma parte del layout es
+   el mismo en ambas builds. */
+select {
     appearance: none;
     -webkit-appearance: none;
     padding-right: 24px !important;
@@ -42,13 +44,13 @@
     color: var(--text) !important;
 }
 
-.platform-linux select option,
-.platform-linux select optgroup {
+select option,
+select optgroup {
     background: var(--surface);
     color: var(--text);
 }
 
-.platform-linux input[type='number'] {
+input[type='number'] {
     color-scheme: dark;
 }
 

@@ -81,9 +81,12 @@ pub fn check(app: &AppHandle) -> UpdateStatus {
 }
 
 /// `update:check`
-#[tauri::command(async)]
-pub fn update_check(app: AppHandle) -> UpdateStatus {
-    check(&app)
+#[tauri::command]
+pub async fn update_check(app: AppHandle) -> UpdateStatus {
+    let fallback_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || check(&app))
+        .await
+        .unwrap_or_else(|_| local_status(&fallback_app))
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

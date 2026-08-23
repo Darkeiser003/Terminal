@@ -117,7 +117,21 @@ probe Libvirt virsh --version
 probe cabextract cabextract --version
 probe msiinfo msiinfo --version
 probe MinGW x86_64-w64-mingw32-gcc --version
-probe_path Bottles bottles
+probe_bottles() {
+    if command -v bottles >/dev/null 2>&1; then
+        tested=$((tested + 1))
+        echo "OK: Bottles ($(command -v bottles))"
+    elif command -v flatpak >/dev/null 2>&1 && \
+        (flatpak info --user com.usebottles.bottles >/dev/null 2>&1 || \
+            flatpak info com.usebottles.bottles >/dev/null 2>&1); then
+        tested=$((tested + 1))
+        echo "OK: Bottles (Flatpak com.usebottles.bottles)"
+    else
+        skipped=$((skipped + 1))
+        echo "OMITIDO: Bottles no está instalado"
+    fi
+}
+probe_bottles
 probe_path Lutris lutris
 probe_path Steam steam
 probe_path ProtonUp protonup-qt

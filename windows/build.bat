@@ -7,9 +7,11 @@ REM Todo el trabajo lo hace build.ps1; aqui solo se comprueba que PowerShell
 REM este disponible y se le pasan los argumentos tal cual:
 REM
 REM   build.bat                lo normal
+REM   build.bat -Installer     genera NSIS e incluye WebView2 offline
 REM   build.bat -Clean         borra node_modules y target antes
 REM   build.bat -SkipChecks    salta pruebas, clippy y svelte-check
 REM   build.bat -NoRun         no lanza la app al terminar
+REM   build.bat -CrossLinux     compila y prueba tambien la release Linux en WSL
 
 set "SCRIPT_DIR=%~dp0"
 

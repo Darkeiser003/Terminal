@@ -67,6 +67,16 @@ for (const [relative, pattern] of hardcodedUi) {
     if (pattern.test(source)) errors.push(`${relative}: contiene texto visible hardcodeado fuera de app.t()`);
 }
 
+// Los errores fijos de los paneles cruzan IPC y llegan directamente a la
+// interfaz; si se dejan como `ActionResult::failed("...")`, el idioma del
+// backend puede quedarse en español aunque el usuario haya elegido otro.
+for (const relative of ['src-tauri/src/app/panel_commands.rs', 'src-tauri/src/projects/commands.rs']) {
+    const source = fs.readFileSync(path.join(root, relative), 'utf8').split('#[cfg(test)]')[0];
+    if (/ActionResult::failed\(\s*"/.test(source)) {
+        errors.push(`${relative}: contiene un error fijo de panel sin Translator`);
+    }
+}
+
 if (errors.length) {
     console.error(['Comprobación de traducciones fallida:', ...errors.map((error) => `- ${error}`)].join('\n'));
     process.exit(1);

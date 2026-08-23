@@ -463,6 +463,14 @@ fn detect_wsl_environments(options: wsl_env::ContextOptions) -> Vec<Environment>
                 ..Default::default()
             });
         }
+
+        // Los runtimes que solo están dentro de WSL deben aparecer como REPL
+        // igual que aparecen en Linux. La lista procede de una única sonda de
+        // la distro y reutiliza el catálogo común de lenguajes.
+        envs.extend(crate::language_env::detect_wsl_language_environments(
+            &distro.name,
+            &distro.tools,
+        ));
     }
     envs
 }
@@ -555,7 +563,10 @@ pub fn detect_environments(quick: bool) -> Inventory {
             if crate::platform::host().is_windows() {
                 detect_wsl_environments(wsl_env::ContextOptions {
                     online: false,
-                    details: false,
+                    // Esta fase ya ocurre después del primer pintado. Una
+                    // enumeración detallada permite exponer también los REPL
+                    // Linux presentes dentro de WSL.
+                    details: true,
                     probe: true,
                 })
             } else {
@@ -594,7 +605,8 @@ pub fn detect_environments(quick: bool) -> Inventory {
     let docker_count = docker.envs.len();
     let android_count = android.envs.len();
 
-    let language_count = languages.len();
+    let wsl_language_count = wsl.iter().filter(|env| env.repl).count();
+    let language_count = languages.len() + wsl_language_count;
     envs.extend(wsl);
     envs.extend(languages);
     // k9s sí es una interfaz interactiva persistente para Kubernetes (kubectl

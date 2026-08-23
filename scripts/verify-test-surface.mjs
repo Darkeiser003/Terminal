@@ -17,15 +17,18 @@ function check(name, condition) {
 
 const packageJson = JSON.parse(read('package.json'));
 const scripts = packageJson.scripts ?? {};
+const links = read('scripts/verify-links.mjs');
 const requiredFiles = [
     'tests/e2e/smoke.mjs',
     'linux/exercise-host.sh',
     'linux/build.sh',
+    'linux/build-windows.sh',
     'windows/build.ps1',
     'scripts/verify-i18n.mjs',
     'scripts/verify-runtime-assets.mjs',
     'scripts/verify-build-scripts.mjs',
-    'scripts/verify-test-surface.mjs'
+    'scripts/verify-test-surface.mjs',
+    'scripts/verify-release-artifacts.mjs'
 ];
 for (const file of requiredFiles) {
     try {
@@ -36,16 +39,19 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'check:i18n', 'check:metadata', 'check:architecture', 'check:build-scripts']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'check:i18n', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
+check('npm check incluye la verificación de documentación', scripts.check.includes('check:docs'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));
 check('npm check incluye clippy con warnings como errores', scripts.check.includes('clippy') && scripts.check.includes('-D warnings'));
+check('Verificador de enlaces da más margen a Git y reintenta', links.includes('gitTimeoutMs') && links.includes('gitRetries') && links.includes('git ls-remote'));
 
 const api = read('src/lib/api.ts');
 const lib = read('src-tauri/src/lib.rs');
-const invoked = new Set([...api.matchAll(/invoke(?:<[\s\S]*?>)?\(\s*['"]([^'"]+)['"]/g)].map((match) => match[1]));
+const shortcuts = read('src/lib/shortcuts.ts');
+const invoked = new Set([...api.matchAll(/(?:invoke|invokeLogged)(?:<[\s\S]*?>)?\(\s*['"]([^'"]+)['"]/g)].map((match) => match[1]));
 const handlerStart = lib.indexOf('.invoke_handler(tauri::generate_handler![');
 const handlerEnd = lib.indexOf('])', handlerStart);
 const handlerSource = handlerStart >= 0 && handlerEnd >= 0 ? lib.slice(handlerStart, handlerEnd) : '';
@@ -62,6 +68,7 @@ for (const command of handlers) {
 const toolbar = read('src/components/Toolbar.svelte');
 const app = read('src/App.svelte');
 const panels = read('src/lib/panels.svelte.ts');
+const appCss = read('src/styles/app.css');
 for (const id of ['deps', 'projects', 'scripts', 'settings']) {
     check(`Toolbar tiene el panel ${id}`, toolbar.includes(`panels.toggle('${id}')`));
     check(`App carga el panel ${id}`, app.includes(`load${id[0].toUpperCase()}${id.slice(1)}`));
@@ -73,9 +80,34 @@ check('Panel común implementa cierre, Escape y foco', ['panels.close()', "event
 check('Panel común implementa acordeón exclusivo en los paneles', read('src/components/DependenciesPanel.svelte').includes('exclusiveAccordionGroups'));
 check('Biblioteca conserva ejecución directa sin argumentos', read('src/components/ScriptsPanel.svelte').includes('scripts.operation.runMenuTitle'));
 check('Biblioteca conserva ejecución Windows mediante Wine', read('src/components/ScriptsPanel.svelte').includes('runWindowsApplication'));
+check('Biblioteca conserva Acceso rápido global y traducido', ['scripts.quickAccess', 'const pinned = $derived((data?.pinned ?? []).filter(matches))'].every((marker) => read('src/components/ScriptsPanel.svelte').includes(marker)));
 check('Explorador contiene copiar, cortar, eliminar y pegar', ['explorer.copy', 'explorer.cut', 'explorer.trash', 'explorer.paste'].every((marker) => read('src/components/ExplorerSidebar.svelte').includes(marker)));
 check('Terminal intercepta cortar y eliminar sobre selección editable', ['deleteEditableSelection(true)', 'deleteEditableSelection(false)'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
 check('Terminal reajusta xterm y banner tras resize', ['ResizeObserver', 'refreshBanner', 'fitAndReport'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
+check('Frontend registra métricas segmentadas', ['recordPerformance', 'app.initial-load', 'fastfetch.banner-visible'].every((marker) => read('src/lib/performance.ts').includes(marker) || app.includes(marker) || api.includes(marker)) && read('src/components/TerminalPane.svelte').includes('app.ready-for-input'));
+check('Paneles registran apertura hasta geometría visible', ['ui.panel.visible', 'requestAnimationFrame'].every((marker) => read('src/components/Panel.svelte').includes(marker)));
+check('Backend expone el comando de métricas frontend', lib.includes('log_frontend_performance') && read('src-tauri/src/app/commands.rs').includes('Métrica de rendimiento frontend'));
+check('Atajos usan un contrato compartido', shortcuts.includes('SHORTCUT_PREFERENCE_KEYS') && shortcuts.includes('matchesShortcut') && app.includes('from "./lib/shortcuts"'));
+check('Atajo de división usa la tecla física Backslash', shortcuts.includes("event.code === 'Backslash'") && shortcuts.includes('backslash'));
+check('Controles select y numéricos tienen estilo compartido en ambas builds', /^select\s*\{/m.test(appCss) && /^input\[type='number'\]\s*\{/m.test(appCss) && !appCss.includes('.platform-linux select'));
+check('Linux y Windows comparten la geometría base de ventana', (() => {
+    const base = JSON.parse(read('src-tauri/tauri.conf.json'));
+    const linux = JSON.parse(read('src-tauri/tauri.linux.conf.json'));
+    const windows = JSON.parse(read('src-tauri/tauri.windows.conf.json'));
+    const baseWindow = base.app?.windows?.[0] ?? {};
+    const inheritedGeometry = (platformWindow) => ['width', 'height', 'minWidth', 'minHeight', 'maxWidth', 'maxHeight', 'resizable', 'visible', 'dragDropEnabled']
+        .every((key) => platformWindow?.[key] === undefined || platformWindow[key] === baseWindow[key]);
+    return linux.app?.windows?.[0]?.title
+        && windows.app?.windows?.[0]?.title
+        && inheritedGeometry(linux.app.windows[0])
+        && inheritedGeometry(windows.app.windows[0]);
+})());
+check('Ajustes normaliza atajos antes de guardarlos', read('src/components/SettingsPanel.svelte').includes('normalizeShortcut') && read('src/components/SettingsPanel.svelte').includes('normalizedDraft'));
+check('El entorno de scripts respeta noAutoSelect', read('src-tauri/src/app/panel_commands.rs').includes('!env.no_auto_select'));
+const dependenciesPanel = read('src/components/DependenciesPanel.svelte');
+const commonPanel = read('src/components/Panel.svelte');
+check('Contador de dependencias cuenta entradas visibles y no acciones internas', dependenciesPanel.includes('visibleComponentCount') && dependenciesPanel.includes('groups.reduce') && !dependenciesPanel.includes('count={refreshing ? undefined : actions.length}'));
+check('Contador de dependencias explica su significado al usuario', dependenciesPanel.includes("deps.visibleComponents") && commonPanel.includes('countLabel') && commonPanel.includes('aria-label={countLabel}'));
 
 const smoke = read('tests/e2e/smoke.mjs');
 for (const marker of [
@@ -91,16 +123,20 @@ for (const marker of [
 ]) check(`Smoke E2E cubre ${marker}`, smoke.includes(marker));
 check('Smoke E2E prueba los comandos internos', smoke.includes(':help') && smoke.includes(':alias'));
 check('Smoke E2E valida una respuesta real de la shell', smoke.includes('LTERMINAL_E2E_COMMAND_OK') && smoke.includes('xterm-rows'));
-check('Smoke E2E registra tiempos por fase', smoke.includes('phaseTimings') && smoke.includes('E2E tiempos'));
+check('Smoke E2E prueba refrescos consecutivos de entornos', smoke.includes('refresh-environments') && smoke.includes('for (let attempt') && smoke.includes('fin de refrescos concurrentes'));
+check('Smoke E2E prueba clics concurrentes de división', smoke.includes('burstCount') && smoke.includes('crearon demasiados paneles'));
+check('Smoke E2E registra tiempos por fase y métricas de aplicación', smoke.includes('phaseTimings') && smoke.includes('E2E tiempos') && smoke.includes('performance'));
+check('Smoke E2E evita refrescos de shell innecesarios y permite forzarlos', smoke.includes('FORCE_SHELL_REFRESH') && smoke.includes('E2E_FORCE_SHELL_REFRESH') && smoke.includes('POLL_INTERVAL_MS'));
 check('Smoke E2E prueba los cuatro estados de panel', [
     /Ajustes\|Settings/.test(smoke),
     /Biblioteca\|Library/.test(smoke),
     /Proyectos\|Projects/.test(smoke),
     /Entorno y dependencias\|Dependencies/.test(smoke)
 ].every(Boolean));
-check('Smoke E2E prueba el explorador y su menú contextual', smoke.includes('.explorer') && smoke.includes('rightClick') && smoke.includes('[role="menu"]'));
+check('Smoke E2E prueba el explorador y su menú contextual', smoke.includes('.explorer') && smoke.includes('rightClick') && smoke.includes('dispatchContextMenu') && smoke.includes('[role="menu"]'));
 check('Smoke E2E prueba los acordeones cerrados y exclusivos', smoke.includes('.operations') && smoke.includes('.types') && smoke.includes('settingsText') && smoke.includes('acordeones exclusivos'));
 check('Smoke E2E prueba las acciones de dependencias sin ejecutarlas', smoke.includes('Compatibilidad Windows') && smoke.includes('data-testid="dependency-action"') && smoke.includes('aparece abierto antes'));
+check('Smoke E2E comprueba nombres y descripciones de compatibilidad Windows', smoke.includes('hasNamedTool') && smoke.includes('hasDescription') && smoke.includes('programa y descripción'));
 
 const host = read('linux/exercise-host.sh');
 for (const marker of ['LTERMINAL_SHELL_OK', 'PowerShell', 'Nushell', 'Python', 'Node', 'Ruby', 'PHP', 'SQLite', 'MariaDB', 'Docker', 'Kubernetes']) {
@@ -109,7 +145,16 @@ for (const marker of ['LTERMINAL_SHELL_OK', 'PowerShell', 'Nushell', 'Python', '
 check('Host smoke soporta modo estricto', host.includes('--strict'));
 
 const linuxBuild = read('linux/build.sh');
+const linuxWindowsBuild = read('linux/build-windows.sh');
 const windowsBuild = read('windows/build.ps1');
+check('Build cruzada Linux→Windows ofrece smoke repetido bajo Wine', linuxWindowsBuild.includes('--wine-repeats') && linuxWindowsBuild.includes('for attempt in'));
+check('Build Linux tiene ruta no interactiva', linuxBuild.includes('--non-interactive') && linuxBuild.includes('NON_INTERACTIVE'));
+check('Build WSL pasa modo no interactivo', windowsBuild.includes('--non-interactive'));
+check('Build Linux valida artefactos ELF/AppImage', linuxBuild.includes('verify-release-artifacts.mjs') && linuxBuild.includes('--appdir'));
+check('Build Windows cruzada valida artefactos PE/runtime', linuxWindowsBuild.includes('verify-release-artifacts.mjs') && linuxWindowsBuild.includes('--windows-dir'));
+check('Build Windows nativa valida artefactos PE/runtime', windowsBuild.includes('verify-release-artifacts.mjs') && windowsBuild.includes('--windows-dir'));
+check('Build Linux expone opción Windows cruzada', linuxBuild.includes('--cross-windows') && linuxBuild.includes('build-windows.sh'));
+check('Build Windows expone opción Linux mediante WSL', windowsBuild.includes('$CrossLinux') && windowsBuild.includes('Invoke-CrossLinuxTests'));
 for (const [name, source] of [['Linux', linuxBuild], ['Windows', windowsBuild]]) {
     check(`${name} ofrece modo de tests ampliados`, source.includes('extended') || source.includes('Extended'));
     check(`${name} no publica si falla el smoke`, source.includes('SMOKE') || source.includes('smoke'));
@@ -117,6 +162,9 @@ for (const [name, source] of [['Linux', linuxBuild], ['Windows', windowsBuild]])
         ? source.includes('$frontendText') && source.includes('$marker')
         : source.includes('frontend') && source.includes('ControlRight') && source.includes('environment-controls'));
     check(`${name} conserva logs en errores`, source.includes('log') && (source.includes('tail') || source.includes('Get-Content')));
+}
+for (const marker of ['x86_64-pc-windows-gnu', 'exclude-all-symbols', 'conpty.dll', 'OpenConsole.exe', 'WebView2Loader.dll', 'wine-smoke']) {
+    check(`Build Windows cruzada conserva ${marker}`, linuxWindowsBuild.includes(marker));
 }
 
 if (failures.length) {

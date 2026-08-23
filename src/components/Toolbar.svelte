@@ -233,6 +233,7 @@
         <button
             type="button"
             class="icon"
+            data-testid="refresh-environments"
             title={app.t('env.refresh', 'Volver a detectar entornos')}
             onclick={() => app.refreshEnvironments()}
         >⟳</button>

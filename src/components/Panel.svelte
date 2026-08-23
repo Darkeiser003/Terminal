@@ -16,6 +16,7 @@
 
     import { app } from '../lib/appState.svelte';
     import { panels, type PanelId } from '../lib/panels.svelte';
+    import * as perf from '../lib/performance';
 
     interface Props {
         id: PanelId;
@@ -25,6 +26,9 @@
         error?: boolean;
         /** Contador de la derecha de la cabecera (cuántas entradas hay). */
         count?: number;
+        /** Explicación accesible del contador; evita que un número sin contexto
+         *  se confunda con acciones, componentes o elementos instalados. */
+        countLabel?: string;
         width?: number;
         height?: number;
         children: Snippet;
@@ -38,6 +42,7 @@
         subtitle = '',
         error = false,
         count,
+        countLabel,
         width = 410,
         height,
         children,
@@ -223,6 +228,22 @@
             previousFocus = null;
         };
     });
+
+    // Medir después de un frame evita confundir el clic con el momento en que
+    // el diálogo ya tiene geometría, contenido y foco utilizables.
+    $effect(() => {
+        if (!panels.isOpen(id)) return;
+        const finish = perf.start('ui.panel.visible', { panel: id });
+        const frame = requestAnimationFrame(() => {
+            const rect = box?.getBoundingClientRect();
+            finish('ok', {
+                width: rect?.width ?? 0,
+                height: rect?.height ?? 0,
+                focused: document.activeElement === closeButton,
+            });
+        });
+        return () => cancelAnimationFrame(frame);
+    });
 </script>
 
 <svelte:window
@@ -281,7 +302,7 @@
                     {/if}
                 </div>
                 {#if count !== undefined}
-                    <span class="panel-count">{count}</span>
+                    <span class="panel-count" title={countLabel} aria-label={countLabel}>{count}</span>
                 {/if}
                 <button
                     type="button"

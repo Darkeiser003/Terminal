@@ -142,6 +142,9 @@ pub struct Preferences {
     pub exclusive_accordion_groups: bool,
     pub auto_open_first_group: bool,
     pub show_system_banner: bool,
+    /// Identificadores del banner que no se muestran, separados por comas.
+    /// Vacío conserva el perfil completo de fábrica.
+    pub banner_hidden_items: String,
     pub show_dependencies_panel: bool,
     pub show_projects_panel: bool,
     pub show_scripts_panel: bool,
@@ -285,7 +288,28 @@ fn safe_shortcut(value: Option<&Value>, fallback: &str) -> String {
                 | "arrowdown"
         );
     if modifiers_are_unique && valid_key && text.len() <= 64 {
-        text.to_string()
+        let mut canonical: Vec<String> = ["ctrl", "alt", "shift", "meta"]
+            .iter()
+            .filter(|modifier| {
+                modifiers
+                    .iter()
+                    .any(|part| part.eq_ignore_ascii_case(modifier))
+            })
+            .map(|modifier| (*modifier).to_string())
+            .collect();
+        let lower_key = key.to_ascii_lowercase();
+        let canonical_key = match lower_key.as_str() {
+            "esc" => "escape",
+            "return" => "enter",
+            "del" => "delete",
+            "left" => "arrowleft",
+            "right" => "arrowright",
+            "up" => "arrowup",
+            "down" => "arrowdown",
+            other => other,
+        };
+        canonical.push(canonical_key.to_string());
+        canonical.join("+")
     } else {
         fallback.to_string()
     }
@@ -369,6 +393,32 @@ fn bool_or_default(value: Option<&Value>, fallback: bool) -> bool {
     value.and_then(Value::as_bool).unwrap_or(fallback)
 }
 
+const BANNER_ITEMS: [&str; 11] = [
+    "system",
+    "host",
+    "kernel",
+    "environment",
+    "motherboard",
+    "cpu",
+    "gpu",
+    "memory",
+    "storage",
+    "uptime",
+    "datetime",
+];
+
+fn sanitize_banner_hidden_items(value: Option<&Value>, fallback: &str) -> String {
+    let Some(text) = value.and_then(Value::as_str) else {
+        return fallback.to_string();
+    };
+    let mut seen = std::collections::HashSet::new();
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| BANNER_ITEMS.contains(item) && seen.insert(*item))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub fn theme_by_id(id: &str) -> &'static ThemePreset {
     THEME_PRESETS
         .iter()
@@ -411,6 +461,10 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             defaults.auto_open_first_group,
         ),
         show_system_banner: bool_or_default(get("showSystemBanner"), defaults.show_system_banner),
+        banner_hidden_items: sanitize_banner_hidden_items(
+            get("bannerHiddenItems"),
+            &defaults.banner_hidden_items,
+        ),
         show_dependencies_panel: bool_or_default(
             get("showDependenciesPanel"),
             defaults.show_dependencies_panel,
@@ -599,6 +653,14 @@ mod tests {
     }
 
     #[test]
+    fn los_elementos_del_banner_se_validan_sin_duplicados_ni_valores_desconocidos() {
+        let prefs = sanitize_preferences(&json!({
+            "bannerHiddenItems": "gpu, cpu, gpu, inventado,storage"
+        }));
+        assert_eq!(prefs.banner_hidden_items, "gpu,cpu,storage");
+    }
+
+    #[test]
     fn un_id_desconocido_cae_al_valor_por_defecto() {
         let prefs = sanitize_preferences(&json!({
             "themeId": "no-existe",
@@ -683,6 +745,16 @@ mod tests {
         assert_eq!(parsed["showProjectsPanel"], json!(true));
         assert_eq!(parsed["showScriptsPanel"], json!(true));
         assert_eq!(parsed["showExplorerPanel"], json!(true));
+    }
+
+    #[test]
+    fn los_atajos_se_normalizan_para_todos_los_teclados() {
+        let prefs = sanitize_preferences(&json!({
+            "shortcutNewTab": " SHIFT + CTRL + T ",
+            "shortcutCyclePanes": "ctrl+shift+backslash"
+        }));
+        assert_eq!(prefs.shortcut_new_tab, "ctrl+shift+t");
+        assert_eq!(prefs.shortcut_cycle_panes, "ctrl+shift+backslash");
     }
 
     #[test]

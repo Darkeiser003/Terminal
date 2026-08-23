@@ -730,6 +730,10 @@ fn render_session(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions
         ),
     ));
     lines.push(help_row(
+        ":banner ...",
+        "Configura qué datos muestra el banner y conserva cinco filas para escribir.",
+    ));
+    lines.push(help_row(
         "ayuda [sección]",
         &t.t("help.help", "Ayuda completa o solo una sección."),
     ));
@@ -772,6 +776,10 @@ fn render_internal(lines: &mut Vec<String>) {
     lines.push(help_row(
         ":alias",
         "Muestra la sección de alias y su vocabulario estable.",
+    ));
+    lines.push(help_row(
+        ":banner hide|show|toggle <elemento>",
+        "Activa u oculta información del banner; también admite preset compact, full y list.",
     ));
     lines.push(
         "    Si una orden no aparece aquí, se deja intacta para que la interprete la shell."
@@ -857,7 +865,7 @@ fn render_plugins(lines: &mut Vec<String>) {
     lines.push("    Son declarativos: añaden REPLs y tecnologías detectables, no cargan DLL, JavaScript nativo, Rust ni comandos arbitrarios.".to_string());
     lines.push("    El manifest usa schemaVersion, id, name, version, description y technologies con windowsExe/unixExe.".to_string());
     lines.push("    Se pueden activar, desactivar y retirar; los retirados quedan respaldados y los manifests inválidos se conservan para corregirlos.".to_string());
-    lines.push("    La documentación y la plantilla están en docs/plugins.md y examples/plugins/custom-repl/plugin.json.".to_string());
+    lines.push("    El formato se valida al instalar plugin.json; los límites están en la sección Plugins de la documentación del proyecto.".to_string());
     lines.push(String::new());
 }
 
