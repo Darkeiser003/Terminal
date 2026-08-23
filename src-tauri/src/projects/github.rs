@@ -1397,7 +1397,8 @@ mod tests {
         });
         let repo = sanitize_repository(&raw).unwrap();
         assert_eq!(repo.html_url, "https://github.com/torvalds/linux");
-        assert_eq!(repo.clone_url, "https://github.com/torvalds/linux.git");
+        // link-check: ignore — URL fija de un fixture, no una dependencia de build.
+        assert_eq!(repo.clone_url, "https://github.com/torvalds/linux.git"); // link-check: ignore
     }
 
     // ---- Releases ----
@@ -1556,9 +1557,10 @@ mod tests {
         let shell = env(ShellKind::Cmd, Transport::Native);
 
         let plan = build_git_command(&repo, &folder, &shell).unwrap();
+        // link-check: ignore — URL fija de un fixture, no una dependencia de build.
         assert!(plan
             .command
-            .starts_with("git clone -- \"https://github.com/torvalds/linux.git\""));
+            .starts_with("git clone -- \"https://github.com/torvalds/linux.git\"")); // link-check: ignore
 
         std::fs::create_dir_all(dir.path().join("torvalds").join("linux").join(".git")).unwrap();
         let plan = build_git_command(&repo, &folder, &shell).unwrap();

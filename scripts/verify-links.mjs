@@ -6,6 +6,10 @@ import { promisify } from 'node:util';
 
 const root = process.cwd();
 const mode = (process.env.LTERMINAL_LINK_CHECK ?? 'strict').toLowerCase();
+const requestedPlatform = (process.env.LTERMINAL_LINK_CHECK_PLATFORM ?? process.platform).toLowerCase();
+const runtimePlatform = requestedPlatform === 'win32' ? 'windows'
+    : requestedPlatform === 'darwin' ? 'macos'
+        : requestedPlatform;
 const timeoutMs = Math.max(1000, Number(process.env.LTERMINAL_LINK_CHECK_TIMEOUT_MS ?? 8000));
 const retries = Math.max(1, Number(process.env.LTERMINAL_LINK_CHECK_RETRIES ?? 2));
 // `git ls-remote` necesita abrir una conexión y negociar el protocolo Git;
@@ -43,25 +47,44 @@ function isDynamic(url) {
     return url.includes('$') || url.includes('{') || url.includes('}') || url.includes('\\');
 }
 
-function shouldSkip(url) {
+function skipReason(url) {
+    if (isDynamic(url)) return 'URL dinámica';
     try {
         const parsed = new URL(url);
         const hostname = parsed.hostname;
-        return hostname === 'localhost'
+        if (hostname === 'localhost'
             || hostname.endsWith('.localhost')
             || hostname === '127.0.0.1'
             || hostname === '::1'
             || hostname.includes('*')
             || hostname.endsWith('.example')
             || url.includes('@')
-            || parsed.port !== ''
-            // Valores deliberadamente falsos usados por los tests de
-            // validación de GitHub, no enlaces de producción.
-            || (hostname === 'github.com' && (/^\/(x|owner)(\/|$)/.test(parsed.pathname)))
-            || (hostname === 'objects.githubusercontent.com' && parsed.pathname.startsWith('/x'));
+            || parsed.port !== '') return 'host local o URL no verificable';
+        // Valores deliberadamente falsos usados por los tests de
+        // validación de GitHub, no enlaces de producción.
+        if (hostname === 'github.com' && (/^\/(x|owner)(\/|$)/.test(parsed.pathname))) return 'fixture de validación';
+        if (hostname === 'objects.githubusercontent.com' && parsed.pathname.startsWith('/x')) return 'fixture de validación';
+        // El esquema lo usa el editor/validador de JSON, no la compilación ni
+        // la aplicación. Su disponibilidad externa no debe bloquear un build.
+        if (hostname === 'schema.tauri.app') return 'esquema externo no necesario para compilar';
+        // AUR solo es una fuente de instalación de Linux/Arch. En Windows la
+        // aplicación puede mostrar acciones WSL, pero la build nativa no usa
+        // este repositorio; WSL ejecuta su propio check dentro de Linux.
+        if (hostname === 'aur.archlinux.org' && runtimePlatform !== 'linux') return 'fuente AUR exclusiva de Linux';
+        return null;
     } catch {
-        return true;
+        return 'URL inválida';
     }
+}
+
+function isLinkCheckIgnored(content, index) {
+    const lineStart = content.lastIndexOf('\n', index - 1) + 1;
+    const lineEnd = content.indexOf('\n', index) === -1 ? content.length : content.indexOf('\n', index);
+    const previousLineEnd = lineStart > 0 ? lineStart - 1 : 0;
+    const previousLineStart = previousLineEnd > 0 ? content.lastIndexOf('\n', previousLineEnd - 1) + 1 : 0;
+    const currentLine = content.slice(lineStart, lineEnd);
+    const previousLine = content.slice(previousLineStart, previousLineEnd);
+    return /link-check:\s*ignore/i.test(currentLine) || /link-check:\s*ignore/i.test(previousLine);
 }
 
 function networkErrorText(error) {
@@ -134,11 +157,16 @@ const locations = new Map([
     ['https://github.com', ['manifesto de enlaces críticos']],
     ['https://api.github.com', ['manifesto de enlaces críticos']],
 ]);
+const skipped = new Map();
 for (const file of files) {
     const content = await readFile(file, 'utf8').catch(() => '');
     for (const match of content.matchAll(urlPattern)) {
         const url = match[0].replace(trailingPunctuation, '');
-        if (isDynamic(url) || shouldSkip(url)) continue;
+        const reason = skipReason(url);
+        if (reason || isLinkCheckIgnored(content, match.index)) {
+            if (reason && reason !== 'URL dinámica' && reason !== 'host local o URL no verificable') skipped.set(url, reason);
+            continue;
+        }
         const list = locations.get(url) ?? [];
         list.push(relative(root, file));
         locations.set(url, list);
@@ -147,11 +175,14 @@ for (const file of files) {
 
 const urls = [...locations.keys()].sort();
 if (mode === 'off') {
-    console.warn(`Enlaces: comprobación desactivada; ${urls.length} URLs encontradas.`);
+    console.warn(`Enlaces: comprobación desactivada; ${urls.length} URLs encontradas (${skipped.size} omitidas por contexto).`);
     process.exit(0);
 }
 
-console.log(`Enlaces: comprobando ${urls.length} URLs (${mode}, HTTP ${timeoutMs} ms/${retries} intentos, Git ${gitTimeoutMs} ms/${gitRetries} intentos)...`);
+console.log(`Enlaces: comprobando ${urls.length} URLs (${mode}, plataforma ${runtimePlatform}, HTTP ${timeoutMs} ms/${retries} intentos, Git ${gitTimeoutMs} ms/${gitRetries} intentos)...`);
+if (skipped.size > 0) {
+    for (const [url, reason] of skipped) console.log(`  ↷ omitido: ${url} — ${reason}`);
+}
 const results = [];
 let next = 0;
 const workers = Array.from({ length: Math.min(6, urls.length) }, async () => {

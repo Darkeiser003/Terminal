@@ -189,7 +189,9 @@ windows\build.ps1 -NonInteractive -FullTests -CrossLinux
 Argumentos: `-Clean`/`--clean` borra `node_modules` y `target` antes,
 `-SkipChecks`/`--skip-checks` salta todas las comprobaciones, incluidas las que
 Tauri dispara dentro de `prebuild`, `-NoRun`/`--no-run` no lanza la app al
-terminar. Para la batería completa usa `-FullTests` en Windows
+terminar. Si Windows no tiene DNS o acceso temporal a Internet, usa
+`-AllowOfflineChecks`: convierte solo los enlaces y fuentes externas en avisos,
+pero conserva `svelte-check`, clippy y las pruebas Rust. Para la batería completa usa `-FullTests` en Windows
 o `--full-tests`/`--extended-tests` en Linux; `--install-e2e-driver` permite
 que Linux intente instalar el driver nativo de WebKitGTK cuando la distribución
 lo ofrece. `-FullTests` y `-StrictTests` convierten las ausencias de herramientas
@@ -211,13 +213,19 @@ La comprobación estricta de enlaces distingue HTTP de repositorios Git: las
 URLs normales usan el timeout corto configurado y `git ls-remote` dispone de
 hasta 30 segundos y reintentos propios, para no rechazar una build porque la
 negociación de un repositorio grande tarde más que una petición web.
+También respeta la plataforma: las fuentes AUR no bloquean una build nativa de
+Windows y sí se comprueban en Linux o dentro de WSL; las URLs fijas de fixtures
+de tests y el esquema remoto de Tauri no se consideran dependencias de red del
+build.
 
 Si el equipo está temporalmente sin DNS o sin acceso a Internet, se puede
 comprobar y compilar con `LTERMINAL_LINK_CHECK=warn npm run check` o anteponer
 `LTERMINAL_LINK_CHECK=warn` a `npm run build`, `npm run dist:linux` o
 `npm run dist:win:linux`. En ese modo las URLs y los registros externos quedan
 marcados como avisos y no se consideran validados; para publicar una release
-conviene repetir después el ciclo estricto con red disponible.
+conviene repetir después el ciclo estricto con red disponible. En Windows
+nativo, `windows\build.ps1 -AllowOfflineChecks` aplica este modo a toda la
+build, incluidas las comprobaciones que lanza `prebuild`.
 
 ### Qué produce cada build
 

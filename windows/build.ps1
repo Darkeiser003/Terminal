@@ -16,6 +16,7 @@ param(
     [switch]$NoRun,
     [switch]$Installer,
     [switch]$SkipChecks,
+    [switch]$AllowOfflineChecks,
     [string]$Version,
     [switch]$InstallE2eDriver,
     [switch]$NonInteractive,
@@ -140,6 +141,16 @@ $ReleaseDir  = Join-Path $TauriDir 'target\release'
 $VendorDir   = Join-Path $TauriDir 'vendor\conpty'
 
 Set-Location $ProjectRoot
+
+# Las comprobaciones locales siguen siendo obligatorias. Este modo solo relaja
+# las comprobaciones que dependen de red (enlaces y fuentes externas), para que
+# una caída temporal de DNS no se confunda con un fallo de compilación. Se deja
+# en el entorno durante todo el proceso porque prebuild vuelve a ejecutar check.
+if ($AllowOfflineChecks) {
+    $env:LTERMINAL_LINK_CHECK = 'warn'
+    $env:LTERMINAL_INSTALL_SOURCE_CHECK = 'warn'
+    Write-Warn 'Comprobaciones externas en modo aviso: se mantienen svelte-check, clippy y las pruebas Rust.'
+}
 
 # ---------------------------------------------------------------------------
 # 1. Requisitos
