@@ -190,8 +190,9 @@ Argumentos: `-Clean`/`--clean` borra `node_modules` y `target` antes,
 `-SkipChecks`/`--skip-checks` salta todas las comprobaciones, incluidas las que
 Tauri dispara dentro de `prebuild`, `-NoRun`/`--no-run` no lanza la app al
 terminar. Si Windows no tiene DNS o acceso temporal a Internet, usa
-`-AllowOfflineChecks`: convierte solo los enlaces y fuentes externas en avisos,
-pero conserva `svelte-check`, clippy y las pruebas Rust. Para la batería completa usa `-FullTests` en Windows
+`-AllowOfflineChecks`: convierte en avisos los enlaces, fuentes externas,
+catálogo WinGet y registros externos, pero conserva
+`svelte-check`, clippy y las pruebas Rust. Para la batería completa usa `-FullTests` en Windows
 o `--full-tests`/`--extended-tests` en Linux; `--install-e2e-driver` permite
 que Linux intente instalar el driver nativo de WebKitGTK cuando la distribución
 lo ofrece. `-FullTests` y `-StrictTests` convierten las ausencias de herramientas
@@ -812,7 +813,9 @@ reinicio necesario.
 identificadores del catálogo con `winget show --exact` antes de compilar. Esto
 detecta IDs retirados o mal escritos; la descarga real sigue dependiendo de que
 el manifiesto del editor esté vigente, por lo que un error HTTP del proveedor
-queda registrado por WinGet y no se confunde con un fallo de la aplicación.
+queda registrado por WinGet y no se confunde con un fallo de la aplicación. Las
+consultas se hacen en serie para evitar locks de la caché de WinGet y, si alguna
+falla, se actualiza la fuente una vez y se reintenta antes de detener la build.
 
 **El panel de dependencias tarda un par de segundos en abrir.** Refleja el
 estado actual del sistema, no el del arranque: consulta el PATH y comprueba unas

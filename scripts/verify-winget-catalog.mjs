@@ -6,6 +6,11 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const mode = (process.env.LTERMINAL_WINGET_CHECK ?? 'strict').toLowerCase();
 const timeout = Math.max(5000, Number(process.env.LTERMINAL_WINGET_TIMEOUT_MS ?? 30000));
+// WinGet no es un cliente seguro para lanzar en paralelo: varias consultas
+// contra la fuente local pueden compartir locks/cache y devolver falsos
+// fallos. Se deja 1 por defecto; quien tenga una fuente estable puede elevarlo
+// explícitamente sin cambiar el resultado del chequeo.
+const concurrency = Math.max(1, Number(process.env.LTERMINAL_WINGET_CONCURRENCY ?? 1));
 
 if (mode === 'off') {
     console.warn('WinGet: comprobación del catálogo desactivada.');
@@ -30,26 +35,69 @@ const ids = [...source.matchAll(/\bwin\(\s*"[^"]+"\s*,\s*"[^"]+"\s*,\s*"[^"]*"\s
 const uniqueIds = [...new Set(ids)].sort();
 console.log(`WinGet: validando ${uniqueIds.length} identificadores del catálogo Windows...`);
 
-let next = 0;
-const results = [];
-const workers = Array.from({ length: Math.min(6, uniqueIds.length) }, async () => {
-    while (next < uniqueIds.length) {
-        const index = next++;
-        const id = uniqueIds[index];
-        try {
-            const { stdout } = await execFileAsync('winget', [
-                'show', '--id', id, '--exact', '--source', 'winget',
-                '--accept-source-agreements', '--disable-interactivity',
-            ], { timeout, maxBuffer: 1024 * 1024 });
-            results[index] = { id, ok: /\bId\s*:/i.test(stdout) || stdout.includes(id) };
-        } catch (error) {
-            results[index] = { id, ok: false, error: error?.killed ? `timeout de ${timeout} ms` : 'winget show falló' };
-        }
-    }
-});
-await Promise.all(workers);
+function failureReason(error) {
+    const output = [error?.stderr, error?.stdout]
+        .filter(Boolean)
+        .join('\n')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .at(-1);
+    return error?.killed
+        ? `timeout de ${timeout} ms`
+        : output
+            ? `winget show falló (${output.slice(0, 180)})`
+            : `winget show falló${error?.code !== undefined ? ` (código ${error.code})` : ''}`;
+}
 
-const failures = results.filter((result) => !result.ok);
+async function checkId(id) {
+    try {
+        const { stdout } = await execFileAsync('winget', [
+            'show', '--id', id, '--exact', '--source', 'winget',
+            '--accept-source-agreements', '--disable-interactivity',
+        ], { timeout, maxBuffer: 1024 * 1024 });
+        const ok = /\bId\s*:/i.test(stdout) || stdout.includes(id);
+        return ok ? { id, ok: true } : { id, ok: false, error: 'respuesta sin identificador de paquete' };
+    } catch (error) {
+        return { id, ok: false, error: failureReason(error) };
+    }
+}
+
+async function checkIds(idsToCheck) {
+    let next = 0;
+    const checked = [];
+    const workers = Array.from({ length: Math.min(concurrency, idsToCheck.length) }, async () => {
+        while (next < idsToCheck.length) {
+            const index = next++;
+            checked[index] = await checkId(idsToCheck[index]);
+        }
+    });
+    await Promise.all(workers);
+    return checked;
+}
+
+let results = await checkIds(uniqueIds);
+let failures = results.filter((result) => !result.ok);
+
+// Una fuente WinGet obsoleta produce falsos "no encontrado" aunque el
+// identificador siga existiendo. Solo se actualiza y reintenta cuando hay
+// fallos; así el caso normal no añade tiempo a cada build.
+if (failures.length && process.env.LTERMINAL_WINGET_SOURCE_UPDATE !== '0') {
+    console.warn(`WinGet: ${failures.length} consultas fallaron; actualizando la fuente winget y reintentando una vez...`);
+    try {
+        await execFileAsync('winget', [
+            'source', 'update', '--name', 'winget',
+            '--accept-source-agreements', '--disable-interactivity',
+        ], { timeout, maxBuffer: 1024 * 1024 });
+        const retried = await checkIds(failures.map((result) => result.id));
+        const retriedById = new Map(retried.map((result) => [result.id, result]));
+        results = results.map((result) => retriedById.get(result.id) ?? result);
+        failures = results.filter((result) => !result.ok);
+    } catch (error) {
+        console.warn(`WinGet: no se pudo actualizar la fuente (${failureReason(error)}); se conservan los diagnósticos originales.`);
+    }
+}
+
 for (const result of results) {
     if (result.ok) console.log(`  ✔ ${result.id}`);
     else console.error(`  ✘ ${result.id}: ${result.error}`);
