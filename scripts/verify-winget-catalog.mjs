@@ -42,12 +42,11 @@ function failureReason(error, command = 'winget show') {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter(Boolean)
+        .filter((line) => !/^Puedes encontrar más ayuda en:/i.test(line))
         .at(-1);
-    return error?.killed
-        ? `timeout de ${timeout} ms`
-        : output
-            ? `${command} falló (${output.slice(0, 180)})`
-            : `${command} falló${error?.code !== undefined ? ` (código ${error.code})` : ''}`;
+    if (error?.killed) return `timeout de ${timeout} ms`;
+    const detail = output ? `${command} falló (${output.slice(0, 180)})` : `${command} falló`;
+    return error?.code !== undefined ? `${detail}; código ${error.code}` : detail;
 }
 
 async function checkId(id) {
@@ -107,7 +106,7 @@ for (const result of results) {
 console.log(`WinGet: ${results.length - failures.length} válidos, ${failures.length} inválidos.`);
 if (failures.length && mode === 'strict') {
     console.error(sourceRefreshFailed
-        ? 'WinGet: la fuente no pudo actualizarse; no se puede confirmar si los IDs están retirados o si la caché está incompleta. Se detiene el build.'
+        ? 'WinGet: la fuente no pudo actualizarse; no se puede confirmar si los IDs están retirados o si la caché está incompleta. Ejecuta `winget source reset --force` y después `winget source update` para reparar la fuente. Se detiene el build.'
         : 'WinGet: hay identificadores que no existen en la fuente actual; se detiene el build.');
     process.exit(1);
 }

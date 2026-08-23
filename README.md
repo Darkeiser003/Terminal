@@ -816,6 +816,11 @@ el manifiesto del editor esté vigente, por lo que un error HTTP del proveedor
 queda registrado por WinGet y no se confunde con un fallo de la aplicación. Las
 consultas se hacen en serie para evitar locks de la caché de WinGet y, si alguna
 falla, se actualiza la fuente una vez y se reintenta antes de detener la build.
+Si también falla esa actualización, la comprobación no inventa un diagnóstico:
+en Windows hay que revisar `winget source list` y, si la fuente está dañada,
+ejecutar `winget source reset --force` seguido de `winget source update`. El
+reset devuelve las fuentes a las predeterminadas y puede quitar fuentes
+personalizadas.
 Maven, Gradle, Ant y el compilador de Kotlin ya no se anuncian con esos IDs en
 WinGet; sus acciones de Windows usan Chocolatey como vía alternativa y preparan
 el gestor si todavía no está instalado. El panel lo indica expresamente porque
