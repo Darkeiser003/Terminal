@@ -816,6 +816,10 @@ el manifiesto del editor esté vigente, por lo que un error HTTP del proveedor
 queda registrado por WinGet y no se confunde con un fallo de la aplicación. Las
 consultas se hacen en serie para evitar locks de la caché de WinGet y, si alguna
 falla, se actualiza la fuente una vez y se reintenta antes de detener la build.
+Maven, Gradle, Ant y el compilador de Kotlin ya no se anuncian con esos IDs en
+WinGet; sus acciones de Windows usan Chocolatey como vía alternativa y preparan
+el gestor si todavía no está instalado. El panel lo indica expresamente porque
+son paquetes comunitarios, no manifiestos oficiales de WinGet.
 
 **El panel de dependencias tarda un par de segundos en abrir.** Refleja el
 estado actual del sistema, no el del arranque: consulta el PATH y comprueba unas

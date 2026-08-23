@@ -458,12 +458,10 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-nushell", "Nushell",        "nu",     "Nushell.Nushell",                Some("nu --version"),                  SHELLS_GROUP),
     WindowsTool { label_key: Some("tool.gitBash"), ..win("winget-git", "Git + Git Bash", "git", "Git.Git", Some("git --version"), TOOLS_GROUP) },
     win("winget-wt",     "Windows Terminal", "wt",    "Microsoft.WindowsTerminal",      None,                                 TOOLS_GROUP),
-    win("winget-nsudo",  "NSudo · elevación avanzada", "NSudoLC", "M2Team.NSudo",       Some("$n = @('C:\\WSCore\\Components\\Hooks\\NSudo\\NSudoLC.exe', 'C:\\Program Files\\NSudo\\NSudoLC.exe', 'C:\\Program Files\\NSudo Launcher\\NSudoLC.exe', 'C:\\Program Files (x86)\\NSudo\\NSudoLC.exe', 'C:\\Tools\\NSudo\\NSudoLC.exe') | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1; if (-not $n) { $n = (Get-Command NSudoLC.exe -ErrorAction Stop).Source }; & $n -?"), TOOLS_GROUP),
     WindowsTool { label_key: Some("tool.nodeLts"), ..win("winget-node", "Node.js LTS", "node", "OpenJS.NodeJS.LTS", Some("node -v; npm -v"), LANGUAGES_GROUP) },
     win("winget-mariadb", "MariaDB + InnoDB", "mariadb", "MariaDB.Server", Some("mariadb --version"), LANGUAGES_GROUP),
     win("winget-mysql", "MySQL + InnoDB", "mysql", "Oracle.MySQL", Some("mysql --version"), LANGUAGES_GROUP),
     win("winget-postgresql", "PostgreSQL + psql", "psql", "PostgreSQL.PostgreSQL", Some("psql --version"), LANGUAGES_GROUP),
-    win("winget-kotlin", "Kotlin", "kotlinc", "JetBrains.Kotlin.Compiler", Some("kotlinc -version"), LANGUAGES_GROUP),
     win("winget-dart", "Dart", "dart", "Dart.Dart", Some("dart --version"), LANGUAGES_GROUP),
     win("winget-zig", "Zig", "zig", "zig.zig", Some("zig version"), LANGUAGES_GROUP),
     win("winget-swift", "Swift", "swift", "Swift.Toolchain", Some("swift --version"), LANGUAGES_GROUP),
@@ -491,12 +489,9 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-dotnet", "C#/F# · .NET SDK", "dotnet", "Microsoft.DotNet.SDK.8",        Some("dotnet --info"),                LANGUAGES_GROUP),
     win("winget-llvm",   "C/C++ · Clang/LLVM", "clang", "LLVM.LLVM",                    Some("clang --version; clang++ --version"), LANGUAGES_GROUP),
     win("winget-cmake",  "C/C++ · CMake",   "cmake",  "Kitware.CMake",                  Some("cmake --version"),               LANGUAGES_GROUP),
-    win("winget-maven",  "Java · Maven",   "mvn",    "Apache.Maven",                    Some("mvn --version"),                 LANGUAGES_GROUP),
-    win("winget-gradle", "JVM · Gradle",   "gradle", "Gradle.Gradle",                   Some("gradle --version"),              LANGUAGES_GROUP),
-    win("winget-ant",    "Java · Ant",     "ant",    "Apache.Ant",                      Some("ant -version"),                   LANGUAGES_GROUP),
     win("winget-bazel",  "C/C++ · Bazel",  "bazel",  "Bazel.Bazel",                     Some("bazel --version"),               LANGUAGES_GROUP),
     win("winget-ninja",  "C/C++ · Ninja",  "ninja",  "Ninja-build.Ninja",               Some("ninja --version"),               LANGUAGES_GROUP),
-    win("winget-meson",  "C/C++ · Meson",  "meson",  "MesonBuild.Meson",                Some("meson --version"),               LANGUAGES_GROUP),
+    win("winget-meson",  "C/C++ · Meson",  "meson",  "mesonbuild.meson",                Some("meson --version"),               LANGUAGES_GROUP),
     win("winget-gdb",    "C/C++ · GDB",    "gdb",    "MSYS2.MSYS2",                     Some("gdb --version"),                 LANGUAGES_GROUP),
     win("winget-groovy", "Groovy",          "groovysh", "Apache.Groovy.4",              Some("groovy --version"),              LANGUAGES_GROUP),
     win("winget-jq",     "jq · JSON",        "jq",     "jqlang.jq",                      Some("jq --version"),                  TOOLS_GROUP),
@@ -537,6 +532,126 @@ static WINDOWS_VIEWERS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     WindowsTool { label_key: Some("tool.viewerDocumentWin"), no_detect: true, ..win("viewer-document", "SumatraPDF (PDF y libros)",            "", "SumatraPDF.SumatraPDF",    None, VIEWER_GROUP) },
     WindowsTool { label_key: Some("tool.viewerArchiveWin"),  no_detect: true, ..win("viewer-archive",  "7-Zip (comprimidos)",                  "", "7zip.7zip",                None, VIEWER_GROUP) },
 ]);
+
+/// Herramientas cuyo manifiesto dejó de estar en el catálogo público de
+/// WinGet. Chocolatey mantiene paquetes utilizables para ellas, pero no se da
+/// por instalado: cada comando prepara Chocolatey si hace falta y luego
+/// comprueba el ejecutable resultante al refrescar el panel.
+struct ChocolateyTool {
+    install_id: &'static str,
+    label: &'static str,
+    cmd: &'static str,
+    pkg: &'static str,
+    verify: &'static str,
+    group: &'static str,
+}
+
+#[rustfmt::skip]
+static WINDOWS_CHOCOLATEY_TOOLS: &[ChocolateyTool] = &[
+    ChocolateyTool { install_id: "choco-nsudo",  label: "NSudo · elevación avanzada", cmd: "NSudoLC", pkg: "nsudo", verify: "NSudoLC -?", group: TOOLS_GROUP },
+    ChocolateyTool { install_id: "choco-kotlin", label: "Kotlin",       cmd: "kotlinc", pkg: "kotlinc", verify: "kotlinc -version", group: LANGUAGES_GROUP },
+    ChocolateyTool { install_id: "choco-maven",  label: "Java · Maven", cmd: "mvn",     pkg: "maven",  verify: "mvn --version",    group: LANGUAGES_GROUP },
+    ChocolateyTool { install_id: "choco-gradle", label: "JVM · Gradle", cmd: "gradle",  pkg: "gradle", verify: "gradle --version", group: LANGUAGES_GROUP },
+    ChocolateyTool { install_id: "choco-ant",    label: "Java · Ant",   cmd: "ant",     pkg: "ant",    verify: "ant -version",     group: LANGUAGES_GROUP },
+];
+
+/// Chocolatey se instala desde su procedimiento oficial y queda invocable en
+/// la misma sesión. El comando es visible en la terminal y se puede cancelar
+/// antes de aceptarlo, igual que el resto del catálogo.
+fn chocolatey_command(arguments: &str) -> String {
+    format!(
+        "$choco = Get-Command choco.exe -ErrorAction SilentlyContinue; \
+         if (-not $choco) {{ Set-ExecutionPolicy Bypass -Scope Process -Force; \
+         [System.Net.ServicePointManager]::SecurityProtocol = \
+         [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; \
+         Invoke-Expression ((New-Object Net.WebClient).DownloadString(\
+         'https://community.chocolatey.org/install.ps1')); \
+         $env:Path = \"$env:ChocolateyInstall\\bin;$env:Path\"; \
+         $choco = Get-Command choco.exe -ErrorAction SilentlyContinue }}; \
+         if (-not $choco) {{ throw 'Chocolatey no se pudo instalar o no está disponible en PATH.' }}; \
+         & $choco.Source {arguments}"
+    )
+}
+
+fn chocolatey_tool_actions(tool: &ChocolateyTool, t: &Translator) -> Vec<InstallAction> {
+    let subgroup = tool.label;
+    let install = InstallAction::new(
+        tool.install_id,
+        t.tp(
+            "action.install",
+            &[
+                ("tool", tool.label.to_string()),
+                ("source", "Chocolatey".to_string()),
+            ],
+            "Instalar {tool} ({source})",
+        ),
+        chocolatey_command(&format!("install {} -y --no-progress", tool.pkg)),
+    )
+    .short(t.tp(
+        "action.installShort",
+        &[("source", "Chocolatey".to_string())],
+        "Instalar con {source}",
+    ))
+    .subgroup(subgroup)
+    .powershell()
+    .group(tool.group)
+    .check(Some(tool.cmd))
+    .hint(
+        "Usa un paquete de la comunidad de Chocolatey porque este componente no tiene un \
+         manifiesto actual de WinGet. Revisa el comando y acepta la instalación solo si \
+         confías en esa fuente.",
+    );
+    let update = InstallAction::new(
+        format!("{}-update", tool.install_id),
+        t.tp(
+            "action.update",
+            &[("tool", tool.label.to_string())],
+            "Actualizar {tool}",
+        ),
+        chocolatey_command(&format!("upgrade {} -y --no-progress", tool.pkg)),
+    )
+    .short(t.t("action.updateShort", "Actualizar a la última versión"))
+    .subgroup(subgroup)
+    .powershell()
+    .group(tool.group)
+    .verb("Actualizar")
+    .requires(Some(tool.cmd));
+    let uninstall = InstallAction::new(
+        format!("{}-uninstall", tool.install_id),
+        t.tp(
+            "action.uninstall",
+            &[("tool", tool.label.to_string())],
+            "Desinstalar {tool}",
+        ),
+        chocolatey_command(&format!("uninstall {} -y --no-progress", tool.pkg)),
+    )
+    .short(t.t("action.uninstallShort", "Desinstalar del sistema"))
+    .subgroup(subgroup)
+    .powershell()
+    .group(tool.group)
+    .verb("Desinstalar")
+    .requires(Some(tool.cmd))
+    .hint(
+        "Quita el paquete de Chocolatey. Si lo instalaste por otra vía, revisa el origen antes \
+         de confirmar.",
+    );
+    let version = InstallAction::new(
+        format!("{}-version", tool.install_id),
+        t.tp(
+            "action.version",
+            &[("tool", tool.label.to_string())],
+            "Ver versión de {tool}",
+        ),
+        tool.verify,
+    )
+    .short(t.t("action.versionShort", "Ver versión instalada"))
+    .subgroup(subgroup)
+    .powershell()
+    .group(tool.group)
+    .verb("Versión")
+    .requires(Some(tool.cmd));
+    vec![install, update, uninstall, version]
+}
 
 const WINGET_INSTALL_FLAGS: &str = "-e --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity";
 const WINGET_QUERY_FLAGS: &str =
@@ -2825,6 +2940,11 @@ fn windows_actions(
         .chain(WINDOWS_VIEWERS.iter())
         .flat_map(|tool| windows_tool_actions(tool, t))
         .collect();
+    actions.extend(
+        WINDOWS_CHOCOLATEY_TOOLS
+            .iter()
+            .flat_map(|tool| chocolatey_tool_actions(tool, t)),
+    );
     actions.extend(windows_code_editor_actions(t));
     actions.extend(windows_virtualization_actions());
 
@@ -4671,7 +4791,7 @@ mod tests {
     fn windows_incluye_nsudo_lenguajes_y_kubernetes_en_el_catalogo() {
         let actions = get_install_actions(&contexto("windows"), &t());
         for id in [
-            "winget-nsudo",
+            "choco-nsudo",
             "winget-bun",
             "winget-julia",
             "winget-r",
@@ -4693,7 +4813,41 @@ mod tests {
         for id in ["winget-kubectl", "winget-helm", "winget-k9s"] {
             assert_eq!(buscar(&actions, id).group, DOCKER_GROUP, "{id}");
         }
-        assert_eq!(buscar(&actions, "winget-nsudo").group, TOOLS_GROUP);
+        assert_eq!(buscar(&actions, "choco-nsudo").group, TOOLS_GROUP);
+    }
+
+    #[test]
+    fn windows_no_depende_de_ids_retirados_de_winget_para_java_y_kotlin() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for (id, package) in [
+            ("choco-nsudo", "install nsudo"),
+            ("choco-kotlin", "install kotlinc"),
+            ("choco-maven", "install maven"),
+            ("choco-gradle", "install gradle"),
+            ("choco-ant", "install ant"),
+        ] {
+            let action = buscar(&actions, id);
+            assert!(action.command.contains(package), "{id} no usa {package}");
+            assert!(
+                action
+                    .command
+                    .contains("https://community.chocolatey.org/install.ps1"),
+                "{id} no prepara Chocolatey si falta"
+            );
+            assert!(action.label.contains("Chocolatey"));
+        }
+        for id in [
+            "winget-nsudo",
+            "winget-kotlin",
+            "winget-maven",
+            "winget-gradle",
+            "winget-ant",
+        ] {
+            assert!(
+                !actions.iter().any(|action| action.id == id),
+                "sigue presente {id}"
+            );
+        }
     }
 
     #[test]
@@ -5253,7 +5407,7 @@ mod tests {
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(lenguajes.first(), Some(&"winget-node"));
-        assert_eq!(lenguajes.last(), Some(&"winget-groovy"));
+        assert_eq!(lenguajes.last(), Some(&"choco-ant"));
     }
 
     #[test]

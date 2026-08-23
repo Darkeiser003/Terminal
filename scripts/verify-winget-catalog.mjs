@@ -35,7 +35,7 @@ const ids = [...source.matchAll(/\bwin\(\s*"[^"]+"\s*,\s*"[^"]+"\s*,\s*"[^"]*"\s
 const uniqueIds = [...new Set(ids)].sort();
 console.log(`WinGet: validando ${uniqueIds.length} identificadores del catálogo Windows...`);
 
-function failureReason(error) {
+function failureReason(error, command = 'winget show') {
     const output = [error?.stderr, error?.stdout]
         .filter(Boolean)
         .join('\n')
@@ -46,8 +46,8 @@ function failureReason(error) {
     return error?.killed
         ? `timeout de ${timeout} ms`
         : output
-            ? `winget show falló (${output.slice(0, 180)})`
-            : `winget show falló${error?.code !== undefined ? ` (código ${error.code})` : ''}`;
+            ? `${command} falló (${output.slice(0, 180)})`
+            : `${command} falló${error?.code !== undefined ? ` (código ${error.code})` : ''}`;
 }
 
 async function checkId(id) {
@@ -78,6 +78,7 @@ async function checkIds(idsToCheck) {
 
 let results = await checkIds(uniqueIds);
 let failures = results.filter((result) => !result.ok);
+let sourceRefreshFailed = false;
 
 // Una fuente WinGet obsoleta produce falsos "no encontrado" aunque el
 // identificador siga existiendo. Solo se actualiza y reintenta cuando hay
@@ -94,7 +95,8 @@ if (failures.length && process.env.LTERMINAL_WINGET_SOURCE_UPDATE !== '0') {
         results = results.map((result) => retriedById.get(result.id) ?? result);
         failures = results.filter((result) => !result.ok);
     } catch (error) {
-        console.warn(`WinGet: no se pudo actualizar la fuente (${failureReason(error)}); se conservan los diagnósticos originales.`);
+        sourceRefreshFailed = true;
+        console.warn(`WinGet: no se pudo actualizar la fuente (${failureReason(error, 'winget source update')}); se conservan los diagnósticos originales.`);
     }
 }
 
@@ -104,6 +106,8 @@ for (const result of results) {
 }
 console.log(`WinGet: ${results.length - failures.length} válidos, ${failures.length} inválidos.`);
 if (failures.length && mode === 'strict') {
-    console.error('WinGet: hay identificadores que no existen o no se pueden consultar; se detiene el build.');
+    console.error(sourceRefreshFailed
+        ? 'WinGet: la fuente no pudo actualizarse; no se puede confirmar si los IDs están retirados o si la caché está incompleta. Se detiene el build.'
+        : 'WinGet: hay identificadores que no existen en la fuente actual; se detiene el build.');
     process.exit(1);
 }
