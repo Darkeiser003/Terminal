@@ -422,9 +422,13 @@ struct WindowsTool {
     cmd: &'static str,
     pkg: &'static str,
     /// Sonda alternativa para aplicaciones que instalan el ejecutable fuera
-    /// del PATH (QEMU, VirtualBox y VMware).
+    /// del PATH (QEMU y VirtualBox).
     detect: Option<&'static str>,
     verify: Option<&'static str>,
+    /// Paquete de Chocolatey que se intenta solo si WinGet no puede instalar
+    /// el paquete primario. Se usa para PostgreSQL porque algunas fuentes de
+    /// Windows publican el ID versionado con retraso o no lo tienen todavía.
+    choco_fallback: Option<&'static str>,
     group: &'static str,
     hint: Option<&'static str>,
     no_detect: bool,
@@ -446,6 +450,7 @@ const fn win(
         pkg,
         detect: None,
         verify,
+        choco_fallback: None,
         group,
         hint: None,
         no_detect: false,
@@ -461,8 +466,11 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     WindowsTool { label_key: Some("tool.nodeLts"), ..win("winget-node", "Node.js LTS", "node", "OpenJS.NodeJS.LTS", Some("node -v; npm -v"), LANGUAGES_GROUP) },
     win("winget-mariadb", "MariaDB + InnoDB", "mariadb", "MariaDB.Server", Some("mariadb --version"), LANGUAGES_GROUP),
     win("winget-mysql", "MySQL + InnoDB", "mysql", "Oracle.MySQL", Some("mysql --version"), LANGUAGES_GROUP),
-    win("winget-postgresql", "PostgreSQL + psql", "psql", "PostgreSQL.PostgreSQL", Some("psql --version"), LANGUAGES_GROUP),
-    win("winget-dart", "Dart", "dart", "Dart.Dart", Some("dart --version"), LANGUAGES_GROUP),
+    WindowsTool {
+        choco_fallback: Some("postgresql"),
+        hint: Some("Usa PostgreSQL 18 desde WinGet; si esa fuente no lo ofrece, intenta el paquete postgresql de Chocolatey. Comprueba el origen antes de confirmar."),
+        ..win("winget-postgresql", "PostgreSQL + psql", "psql", "PostgreSQL.PostgreSQL.18", Some("psql --version"), LANGUAGES_GROUP)
+    },
     win("winget-zig", "Zig", "zig", "zig.zig", Some("zig version"), LANGUAGES_GROUP),
     win("winget-swift", "Swift", "swift", "Swift.Toolchain", Some("swift --version"), LANGUAGES_GROUP),
     win("winget-mongosh", "MongoDB · mongosh", "mongosh", "MongoDB.Shell", Some("mongosh --version"), LANGUAGES_GROUP),
@@ -511,10 +519,6 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
         ..win("winget-virtualbox", "Oracle VirtualBox", "VBoxManage", "Oracle.VirtualBox", Some("VBoxManage --version"), WINDOWS_COMPAT_GROUP)
     },
     WindowsTool {
-        detect: Some("powershell:if (Get-Command vmrun.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe')) { exit 0 } else { exit 1 }"),
-        ..win("winget-vmware", "VMware Workstation Pro", "vmrun", "VMware.WorkstationPro", Some("vmrun -T ws version"), WINDOWS_COMPAT_GROUP)
-    },
-    WindowsTool {
         hint: Some("Requiere WSL2 y normalmente pide reiniciar Windows antes de poder usarse."),
         ..win("winget-docker", "Docker Desktop", "docker", "Docker.DockerDesktop", Some("docker --version"), DOCKER_GROUP)
     },
@@ -549,6 +553,7 @@ struct ChocolateyTool {
 #[rustfmt::skip]
 static WINDOWS_CHOCOLATEY_TOOLS: &[ChocolateyTool] = &[
     ChocolateyTool { install_id: "choco-nsudo",  label: "NSudo · elevación avanzada", cmd: "NSudoLC", pkg: "nsudo", verify: "NSudoLC -?", group: TOOLS_GROUP },
+    ChocolateyTool { install_id: "choco-dart",   label: "Dart",         cmd: "dart",   pkg: "dart-sdk", verify: "dart --version",  group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-kotlin", label: "Kotlin",       cmd: "kotlinc", pkg: "kotlinc", verify: "kotlinc -version", group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-maven",  label: "Java · Maven", cmd: "mvn",     pkg: "maven",  verify: "mvn --version",    group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-gradle", label: "JVM · Gradle", cmd: "gradle",  pkg: "gradle", verify: "gradle --version", group: LANGUAGES_GROUP },
@@ -706,6 +711,15 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
     // herramienta; `short_label` es cómo se lee dentro de ese subgrupo, donde
     // repetir el nombre en cada línea sobra.
     let subgroup = label.clone();
+    let install_command = if let Some(choco_pkg) = tool.choco_fallback {
+        let fallback = chocolatey_command(&format!("install {choco_pkg} -y --no-progress"));
+        format!(
+            "{}; if ($LASTEXITCODE -ne 0) {{ Write-Host 'WinGet no pudo instalar PostgreSQL 18; se prueba Chocolatey.'; {} }}",
+            winget_install_command(tool.pkg), fallback
+        )
+    } else {
+        winget_install_command(tool.pkg)
+    };
 
     let mut actions = vec![
         InstallAction::new(
@@ -715,7 +729,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
                 &[("tool", label.clone()), ("source", "winget".to_string())],
                 "Instalar {tool} ({source})",
             ),
-            winget_install_command(tool.pkg),
+            install_command,
         )
         .short(t.tp(
             "action.installShort",
@@ -3104,6 +3118,8 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
     const HYPERV: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -eq 'Enabled'";
     const VMP: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -eq 'Enabled'";
     const SANDBOX: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -eq 'Enabled'";
+    const VMWARE: &str = "powershell:if (Get-Command vmrun.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe')) { exit 0 } else { exit 1 }";
+    const VMWARE_DOWNLOADS: &str = "https://support.broadcom.com/group/ecx/productdownloads";
     vec![
         InstallAction::new(
             "windows-hyperv-enable",
@@ -3149,6 +3165,44 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         .subgroup("Hyper-V")
         .verb("Comprobar")
         .requires(Some(HYPERV)),
+        InstallAction::new(
+            "vmware-download",
+            "Descargar VMware Workstation Pro",
+            format!("Start-Process '{}'", VMWARE_DOWNLOADS),
+        )
+        .short("Abrir descarga oficial de Broadcom")
+        .powershell()
+        .group(WINDOWS_COMPAT_GROUP)
+        .subgroup("VMware Workstation Pro")
+        .verb("Abrir")
+        .check(Some(VMWARE))
+        .done("Descarga oficial abierta; VMware Workstation Pro todavía no está instalado.")
+        .hint(
+            "La descarga se hace desde el portal oficial de Broadcom y requiere iniciar sesión. Entra en My Downloads > Free Software Downloads > VMware Workstation Pro; esta app no automatiza credenciales ni la instalación.",
+        ),
+        InstallAction::new(
+            "vmware-update-download",
+            "Actualizar VMware Workstation Pro",
+            format!("Start-Process '{}'", VMWARE_DOWNLOADS),
+        )
+        .short("Abrir descarga oficial de actualización")
+        .powershell()
+        .group(WINDOWS_COMPAT_GROUP)
+        .subgroup("VMware Workstation Pro")
+        .verb("Actualizar")
+        .requires(Some(VMWARE))
+        .done("Descarga oficial de actualización abierta; ejecuta el instalador de Broadcom para completar el proceso."),
+        InstallAction::new(
+            "vmware-version",
+            "Ver versión de VMware Workstation Pro",
+            "$vmrun = Get-Command vmrun.exe -ErrorAction SilentlyContinue; if ($vmrun) { & $vmrun.Source -T ws version } else { Write-Host 'VMware está detectado por su instalación, pero vmrun.exe no está en PATH.' }",
+        )
+        .short("Ver versión instalada")
+        .powershell()
+        .group(WINDOWS_COMPAT_GROUP)
+        .subgroup("VMware Workstation Pro")
+        .verb("Versión")
+        .requires(Some(VMWARE)),
     ]
 }
 
@@ -4728,10 +4782,21 @@ mod tests {
             "windows-sandbox-enable",
             "winget-qemu",
             "winget-virtualbox",
-            "winget-vmware",
+            "vmware-download",
+            "vmware-update-download",
+            "vmware-version",
         ] {
             assert!(actions.iter().any(|action| action.id == id), "falta {id}");
         }
+        assert!(!actions.iter().any(|action| action.id == "winget-vmware"));
+        let vmware = buscar(&actions, "vmware-download");
+        assert!(vmware
+            .command
+            .contains("https://support.broadcom.com/group/ecx/productdownloads"));
+        assert!(vmware
+            .done
+            .as_deref()
+            .is_some_and(|done| done.contains("todavía no está instalado")));
         assert!(!actions
             .iter()
             .any(|action| action.id == "compat-virt-manager"));
@@ -4746,7 +4811,7 @@ mod tests {
     #[test]
     fn las_sondas_de_virtualizacion_no_dependen_de_un_exe_en_path() {
         let actions = get_install_actions(&contexto("windows"), &t());
-        for id in ["winget-qemu", "winget-virtualbox", "winget-vmware"] {
+        for id in ["winget-qemu", "winget-virtualbox", "vmware-download"] {
             let action = buscar(&actions, id);
             assert!(
                 action
@@ -4817,10 +4882,11 @@ mod tests {
     }
 
     #[test]
-    fn windows_no_depende_de_ids_retirados_de_winget_para_java_y_kotlin() {
+    fn windows_no_depende_de_ids_retirados_de_winget_para_herramientas_alternativas() {
         let actions = get_install_actions(&contexto("windows"), &t());
         for (id, package) in [
             ("choco-nsudo", "install nsudo"),
+            ("choco-dart", "install dart-sdk"),
             ("choco-kotlin", "install kotlinc"),
             ("choco-maven", "install maven"),
             ("choco-gradle", "install gradle"),
@@ -4848,6 +4914,19 @@ mod tests {
                 "sigue presente {id}"
             );
         }
+    }
+
+    #[test]
+    fn postgres_usa_id_versionado_y_fallback_sin_busqueda_ambigua() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let install = buscar(&actions, "winget-postgresql");
+        assert!(install.command.contains("--id PostgreSQL.PostgreSQL.18"));
+        assert!(install.command.contains("install postgresql"));
+        assert!(install
+            .command
+            .contains("https://community.chocolatey.org/install.ps1"));
+        assert!(!install.command.contains("--id PostgreSQL.PostgreSQL "));
+        assert!(!actions.iter().any(|action| action.id == "choco-postgresql"));
     }
 
     #[test]

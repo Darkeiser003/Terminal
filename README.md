@@ -821,10 +821,16 @@ en Windows hay que revisar `winget source list` y, si la fuente está dañada,
 ejecutar `winget source reset --force` seguido de `winget source update`. El
 reset devuelve las fuentes a las predeterminadas y puede quitar fuentes
 personalizadas.
-Maven, Gradle, Ant y el compilador de Kotlin ya no se anuncian con esos IDs en
-WinGet; sus acciones de Windows usan Chocolatey como vía alternativa y preparan
-el gestor si todavía no está instalado. El panel lo indica expresamente porque
-son paquetes comunitarios, no manifiestos oficiales de WinGet.
+Maven, Gradle, Ant, Dart y el compilador de Kotlin no se anuncian con esos IDs
+fiables en WinGet; sus acciones de Windows usan Chocolatey como vía alternativa
+y preparan el gestor si todavía no está instalado. Dart documenta oficialmente
+ese procedimiento. PostgreSQL usa el ID versionado `PostgreSQL.PostgreSQL.18`
+que publica la fuente actual y, si WinGet no puede instalarlo, prueba el paquete
+`postgresql` de Chocolatey. El panel indica expresamente cuándo interviene
+Chocolatey porque es una fuente comunitaria, no un manifiesto de WinGet.
+VMware Workstation Pro tampoco se intenta buscar con WinGet: se abre su descarga
+oficial en el portal de Broadcom, que requiere iniciar sesión y completar la
+descarga manualmente.
 
 **El panel de dependencias tarda un par de segundos en abrir.** Refleja el
 estado actual del sistema, no el del arranque: consulta el PATH y comprueba unas
