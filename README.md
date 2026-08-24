@@ -77,19 +77,23 @@ script lo indica y no marca la release como verificada.
 
 ### conpty.dll
 
-En Windows la app **necesita** `conpty.dll` y `OpenConsole.exe` junto al
-ejecutable, y van vendorizados en `src-tauri/vendor/conpty/`. El ConPTY del
-sistema falla en algunos Windows recortados con `STATUS_DLL_INIT_FAILED`, y el
-error tarda más de dos minutos en aparecer: las pestañas se quedan en blanco sin
-decir por qué. `build.rs` las copia en cada compilación y `windows/build.ps1`
-aborta si no están. El detalle completo, en `src-tauri/vendor/conpty/README.md`.
+En Windows la app **necesita** `conpty.dll`, `OpenConsole.exe` y
+`WebView2Loader.dll` junto al ejecutable. Los dos primeros van vendorizados en
+`src-tauri/vendor/conpty/`; el tercero lo aporta la dependencia de WebView2 al
+compilar para Windows. El ConPTY del sistema falla en algunos Windows
+recortados con `STATUS_DLL_INIT_FAILED`, y el error tarda más de dos minutos en
+aparecer: las pestañas se quedan en blanco sin decir por qué. `build.rs` copia
+ConPTY en cada compilación y `windows/build.ps1` aborta si falta cualquiera de
+los cuatro archivos. El detalle completo, en
+`src-tauri/vendor/conpty/README.md`.
 
 ## Instalación para usar la aplicación
 
 **Windows portable.** Se distribuye como carpeta desempaquetada: se descomprime
 donde se quiera y se ejecuta `winslim-terminal.exe`. No instala WebView2, no
-toca el registro y no crea accesos directos. Los tres archivos de la carpeta
-(`winslim-terminal.exe`, `conpty.dll`, `OpenConsole.exe`) tienen que ir juntos.
+toca el registro y no crea accesos directos. Los cuatro archivos de la carpeta
+(`winslim-terminal.exe`, `conpty.dll`, `OpenConsole.exe`, `WebView2Loader.dll`)
+tienen que ir juntos.
 
 **Windows instalable.** `npm run dist:win:installer` genera un NSIS con el
 instalador offline de WebView2 incluido. Es la opción recomendada para equipos
@@ -790,10 +794,10 @@ consulta al sistema se inyecta para poder simularlo.
 
 ## Problemas conocidos
 
-**Las pestañas se quedan en blanco en Windows.** Falta `conpty.dll` junto al
-ejecutable. El ConPTY del sistema falla en algunos Windows recortados y tarda
-más de dos minutos en devolver el error. Los tres archivos de la carpeta
-desempaquetada tienen que ir juntos.
+**Las pestañas se quedan en blanco en Windows.** Falta `conpty.dll` o
+`WebView2Loader.dll` junto al ejecutable. El ConPTY del sistema falla en algunos
+Windows recortados y tarda más de dos minutos en devolver el error. Los cuatro
+archivos de la carpeta desempaquetada tienen que ir juntos.
 
 **El inventario de WSL sale incompleto.** La sonda rápida solo identifica la
 distro; al abrir Dependencias se enumeran también `/usr/local/bin`, las rutas de

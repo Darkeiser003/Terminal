@@ -4,7 +4,7 @@ Una sola cosa por plataforma, a propósito:
 
 | Plataforma | Artefacto | Cómo |
 | --- | --- | --- |
-| Windows portable | carpeta desempaquetada (`.exe` + `conpty.dll` + `OpenConsole.exe`) | `npm run dist:win` |
+| Windows portable | carpeta desempaquetada (`.exe` + `conpty.dll` + `OpenConsole.exe` + `WebView2Loader.dll`) | `npm run dist:win` |
 | Windows instalable | instalador NSIS con WebView2 offline | `npm run dist:win:installer` |
 | Linux | `.AppImage` | `npm run dist:linux` |
 
@@ -27,17 +27,19 @@ en cada compilación, también en release. El mapa de `bundle.resources` se
 conserva por si algún día se vuelve a empaquetar: sin él, una build con
 instalador dejaría la app instalada sin poder abrir ni una pestaña.
 
-Quien monte la carpeta desempaquetada tiene que llevarse los tres archivos de
+Quien monte la carpeta desempaquetada tiene que llevarse los cuatro archivos de
 `src-tauri/target/release/`:
 
 ```
 winslim-terminal.exe
 conpty.dll
 OpenConsole.exe
+WebView2Loader.dll
 ```
 
-La carpeta portable no instala WebView2: depende del runtime del sistema, como
-una aplicación Windows normal. El instalador NSIS es la distribución adecuada
+La carpeta portable no instala el runtime de WebView2: depende de que ese
+runtime ya esté instalado en el sistema, como una aplicación Windows normal.
+El instalador NSIS es la distribución adecuada
 para equipos Windows recortados o sin conexión, porque instala WebView2 antes
 de dejar lista la aplicación.
 

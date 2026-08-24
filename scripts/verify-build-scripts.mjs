@@ -53,6 +53,7 @@ const checks = [
     ['Build Windows cruzada ofrece smoke Wine', files.linuxWindows.includes('--wine-smoke') && files.linuxWindows.includes('timeout')],
     ['Build Windows cruzada admite repeticiones Wine', files.linuxWindows.includes('--wine-repeats') && files.linuxWindows.includes('WINE_REPEATS=3')],
     ['Build Linux puede iniciar pruebas Windows cruzadas', files.linux.includes('--cross-windows') && files.linux.includes('build-windows.sh')],
+    ['Build Windows nativa copia WebView2Loader', files.windows.includes("@('WebView2Loader.dll')")],
     ['Windows puede iniciar pruebas Linux cruzadas', files.windows.includes('$CrossLinux') && files.windows.includes('Invoke-CrossLinuxTests')],
     ['Windows instala WSL si falta', files.windows.includes('Microsoft.WSL') && files.windows.includes('--install') && files.windows.includes('Ubuntu')],
     ['Windows convierte la ruta del proyecto para WSL', files.windows.includes('wslpath') && files.windows.includes('wslRoot')],

@@ -2,8 +2,8 @@
 <#
     Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
 
-    Produce por defecto la carpeta desempaquetada con el .exe, conpty.dll y
-    OpenConsole.exe. Con -Installer genera además un instalador NSIS con el
+    Produce por defecto la carpeta desempaquetada con el .exe, conpty.dll,
+    OpenConsole.exe y WebView2Loader.dll. Con -Installer genera además un instalador NSIS con el
     WebView2 offline incluido; el porqué está en src-tauri/BUNDLE.md.
 
     Requisitos: Node.js >= 22.12 y el toolchain de Rust (rustup/cargo). La
@@ -517,7 +517,7 @@ Write-Ok "Compilado: $exePath"
 # 7. Carpeta desempaquetada
 # ---------------------------------------------------------------------------
 # target/release contiene ademas todos los artefactos de cargo (deps/, build/,
-# .pdb: cientos de megas). Lo que se distribuye son tres archivos, y se copian a
+# .pdb: cientos de megas). Lo que se distribuye son cuatro archivos, y se copian a
 # una carpeta limpia para no publicar el resto por accidente.
 Write-Step 'Preparando la carpeta desempaquetada'
 # NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build,
@@ -526,7 +526,7 @@ $distDir = Join-Path $ProjectRoot "release\WinSlimTerminal-$version"
 Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
-$payload = @('winslim-terminal.exe') + $conptyFiles
+$payload = @('winslim-terminal.exe') + $conptyFiles + @('WebView2Loader.dll')
 foreach ($file in $payload) {
     $source = Join-Path $ReleaseDir $file
     if (-not (Test-Path $source)) {
