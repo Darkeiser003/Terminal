@@ -44,6 +44,7 @@ for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'che
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
 check('npm check incluye la verificación de documentación', scripts.check.includes('check:docs'));
+check('npm check incluye la verificación de traducciones dinámicas', scripts.check.includes('check:i18n') && read('scripts/verify-i18n.mjs').includes('dynamicActionIds'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));
 check('npm check incluye clippy con warnings como errores', scripts.check.includes('clippy') && scripts.check.includes('-D warnings'));
 check('Verificador de enlaces da más margen a Git y reintenta', links.includes('gitTimeoutMs') && links.includes('gitRetries') && links.includes('git ls-remote'));
@@ -90,12 +91,26 @@ check('Backend expone el comando de métricas frontend', lib.includes('log_front
 check('Atajos usan un contrato compartido', shortcuts.includes('SHORTCUT_PREFERENCE_KEYS') && shortcuts.includes('matchesShortcut') && app.includes('from "./lib/shortcuts"'));
 check('Atajo de división usa la tecla física Backslash', shortcuts.includes("event.code === 'Backslash'") && shortcuts.includes('backslash'));
 check('Controles select y numéricos tienen estilo compartido en ambas builds', /^select\s*\{/m.test(appCss) && /^input\[type='number'\]\s*\{/m.test(appCss) && !appCss.includes('.platform-linux select'));
+check('La ventana nativa conserva resize y maximizar sin feedback del frontend',
+    !lib.includes('WindowEvent::Resized')
+        && !lib.includes('set_size(')
+        && !api.includes('window_ensure_usable_size')
+        && !read('src/components/TerminalPane.svelte').includes('ensureWindowUsableSize'));
+check('La configuración nativa deja maximizar y decoraciones activas', (() => {
+    const window = JSON.parse(read('src-tauri/tauri.conf.json')).app?.windows?.[0] ?? {};
+    return window.resizable === true && window.maximizable === true && window.decorations === true;
+})());
+check('Paneles estrechos usan el ancho real para reordenar controles', [
+    read('src/components/DependenciesPanel.svelte').includes('@container (max-width: 360px)'),
+    read('src/components/DependenciesPanel.svelte').includes('overflow-wrap: anywhere'),
+    read('src/components/Toolbar.svelte').includes('width: min(480px, calc(100vw - 20px))')
+].every(Boolean));
 check('Linux y Windows comparten la geometría base de ventana', (() => {
     const base = JSON.parse(read('src-tauri/tauri.conf.json'));
     const linux = JSON.parse(read('src-tauri/tauri.linux.conf.json'));
     const windows = JSON.parse(read('src-tauri/tauri.windows.conf.json'));
     const baseWindow = base.app?.windows?.[0] ?? {};
-    const inheritedGeometry = (platformWindow) => ['width', 'height', 'minWidth', 'minHeight', 'maxWidth', 'maxHeight', 'resizable', 'visible', 'dragDropEnabled']
+    const inheritedGeometry = (platformWindow) => ['width', 'height', 'minWidth', 'minHeight', 'maxWidth', 'maxHeight', 'resizable', 'maximizable', 'decorations', 'visible', 'dragDropEnabled']
         .every((key) => platformWindow?.[key] === undefined || platformWindow[key] === baseWindow[key]);
     return linux.app?.windows?.[0]?.title
         && windows.app?.windows?.[0]?.title
@@ -104,6 +119,16 @@ check('Linux y Windows comparten la geometría base de ventana', (() => {
 })());
 check('Ajustes normaliza atajos antes de guardarlos', read('src/components/SettingsPanel.svelte').includes('normalizeShortcut') && read('src/components/SettingsPanel.svelte').includes('normalizedDraft'));
 check('El entorno de scripts respeta noAutoSelect', read('src-tauri/src/app/panel_commands.rs').includes('!env.no_auto_select'));
+check('Los scripts integrados siguen visibles aunque falte su herramienta', (() => {
+    const panelCommands = read('src-tauri/src/app/panel_commands.rs');
+    const bundledStart = panelCommands.indexOf('fn bundled_operation_scripts');
+    const bundledEnd = panelCommands.indexOf('fn library_panel', bundledStart);
+    const bundled = bundledStart >= 0 && bundledEnd > bundledStart
+        ? panelCommands.slice(bundledStart, bundledEnd)
+        : '';
+    return bundled.includes('is_native_bundled_script')
+        && !bundled.includes('is_tool_installed');
+})());
 const dependenciesPanel = read('src/components/DependenciesPanel.svelte');
 const commonPanel = read('src/components/Panel.svelte');
 check('Contador de dependencias cuenta entradas visibles y no acciones internas', dependenciesPanel.includes('visibleComponentCount') && dependenciesPanel.includes('groups.reduce') && !dependenciesPanel.includes('count={refreshing ? undefined : actions.length}'));

@@ -585,8 +585,8 @@
 
     .bulk-actions {
         display: flex;
-        align-items: center;
-        justify-content: space-between;
+        align-items: stretch;
+        flex-direction: column;
         gap: 10px;
         padding: 8px;
         border-bottom: 1px solid var(--border);
@@ -598,6 +598,7 @@
         flex-direction: column;
         min-width: 0;
         gap: 2px;
+        overflow: hidden;
     }
 
     .bulk-copy strong {
@@ -613,9 +614,10 @@
 
     .bulk-buttons {
         display: flex;
-        flex: 0 0 auto;
+        min-width: 0;
+        flex: 1 1 auto;
         flex-wrap: wrap;
-        justify-content: flex-end;
+        justify-content: flex-start;
         gap: 5px;
     }
 
@@ -628,18 +630,23 @@
         color: #f0b5b9;
     }
 
-    @media (max-width: 620px) {
-        .bulk-actions {
-            align-items: stretch;
-            flex-direction: column;
-        }
-
-        .bulk-buttons {
-            justify-content: stretch;
+    @container (max-width: 360px) {
+        .filters {
+            grid-template-columns: minmax(0, 1fr);
         }
 
         .bulk-buttons .run {
             flex: 1 1 170px;
+        }
+
+        .item-row {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .item-row .run {
+            align-self: flex-start;
+            margin-left: 0;
         }
     }
 
@@ -662,6 +669,7 @@
         font-size: 12px;
         font-weight: 600;
         list-style: none;
+        line-height: 1.25;
         transition: background 0.15s ease;
     }
 
@@ -694,6 +702,7 @@
         align-items: center;
         gap: 8px;
         padding: 8px 10px;
+        min-width: 0;
         color: var(--text);
         cursor: pointer;
         font-size: 11px;
@@ -705,15 +714,25 @@
     .subgroup-heading {
         display: flex;
         flex-direction: column;
+        overflow: hidden;
         min-width: 0;
         gap: 2px;
     }
 
+    .subgroup-heading > span:first-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
     .subgroup-heading small {
+        overflow: hidden;
         color: var(--muted);
         font-size: 10px;
         font-weight: 400;
         line-height: 1.25;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .subgroup-title:hover {
@@ -814,6 +833,7 @@
     .item {
         display: flex;
         flex-direction: column;
+        min-width: 0;
         gap: 6px;
         padding: 10px 12px;
         border: 1px solid var(--border);
@@ -833,6 +853,7 @@
         justify-content: space-between;
         gap: 12px;
         width: 100%;
+        min-width: 0;
     }
 
     .label {
@@ -842,10 +863,11 @@
         font-size: 12px;
         font-weight: 600;
         line-height: 1.4;
-        word-break: break-word;
+        overflow-wrap: anywhere;
     }
 
     .hint {
+        overflow-wrap: anywhere;
         color: var(--muted);
         font-size: 11px;
         line-height: 1.45;
@@ -854,6 +876,7 @@
 
     .run {
         flex: 0 0 auto;
+        min-width: 0;
         margin-left: auto;
         padding: 4px 12px;
         border: 1px solid var(--border);
@@ -862,6 +885,7 @@
         color: var(--text);
         font: inherit;
         font-size: 11px;
+        line-height: 1.2;
         font-weight: 500;
         white-space: nowrap;
         cursor: pointer;

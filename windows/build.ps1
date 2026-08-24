@@ -309,14 +309,44 @@ if (-not (Test-Command 'cargo')) {
 $cargoVersion = (& cargo --version) -replace '^cargo\s+', ''
 Write-Ok "cargo $cargoVersion"
 
-function Test-MSVCLinker {
-    if (Test-Command 'link') { return $true }
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path $vswhere) {
-        $path = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
-        if ($path -and (Test-Path $path)) { return $true }
+function Get-VisualStudioInstallationPath {
+    $candidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe')
+    ) | Where-Object { $_ -and (Test-Path $_ -PathType Leaf) }
+    foreach ($vswhere in $candidates) {
+        $path = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
+        if ($path -and (Test-Path ([string]$path).Trim() -PathType Container)) {
+            return ([string]$path).Trim()
+        }
     }
-    return $false
+    return $null
+}
+
+function Import-MSVCEnvironment {
+    if ((Test-Command 'link.exe') -and (Test-Command 'cl.exe')) { return $true }
+    $installation = Get-VisualStudioInstallationPath
+    if ([string]::IsNullOrWhiteSpace($installation)) { return $false }
+    $devCmd = Join-Path $installation 'Common7\Tools\VsDevCmd.bat'
+    if (-not (Test-Path $devCmd -PathType Leaf)) { return $false }
+
+    # Cargo no hereda el entorno de una instalación de Visual Studio solo por
+    # existir vswhere.exe. Importamos la salida de VsDevCmd en este proceso para
+    # que link.exe, cl.exe y el Windows SDK sean visibles aunque el usuario haya
+    # lanzado la build desde PowerShell normal o haciendo doble clic.
+    $commandLine = '"' + $devCmd + '" -arch=x64 -host_arch=x64 && set'
+    $environmentLines = @(& cmd.exe /d /s /c $commandLine 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    foreach ($line in $environmentLines) {
+        if ([string]$line -match '^([^=]+)=(.*)$') {
+            [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+        }
+    }
+    return (Test-Command 'link.exe') -and (Test-Command 'cl.exe')
+}
+
+function Test-MSVCLinker {
+    return Import-MSVCEnvironment
 }
 
 if (-not (Test-MSVCLinker)) {
@@ -340,6 +370,7 @@ if (-not (Test-MSVCLinker)) {
             $vsSetup | Wait-Process -Timeout 600 -ErrorAction SilentlyContinue
         }
 
+        Refresh-EnvironmentPath
         if (Test-MSVCLinker) {
             Write-Ok 'Visual Studio C++ Build Tools instaladas correctamente'
         } else {
@@ -349,7 +380,7 @@ if (-not (Test-MSVCLinker)) {
         throw 'Faltan las Visual Studio C++ Build Tools (link.exe) para compilar en Windows. Instalalas desde https://visualstudio.microsoft.com/visual-cpp-build-tools/'
     }
 } else {
-    Write-Ok 'Visual Studio C++ Build Tools (link.exe)'
+    Write-Ok 'Visual Studio C++ Build Tools (cl.exe + link.exe + Windows SDK)'
 }
 
 # La versión se pregunta antes de empaquetar. Enter conserva la actual; el
@@ -458,32 +489,73 @@ if (-not $SkipChecks) {
 # ---------------------------------------------------------------------------
 # 6. Compilacion
 # ---------------------------------------------------------------------------
+function Invoke-TauriBuild {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $previousSkipChecks = $env:LTERMINAL_SKIP_CHECKS
+    try {
+        if ($SkipChecks) {
+            # Tauri ejecuta npm run build internamente. Este entorno llega también
+            # al prebuild y al build del frontend, de modo que -SkipChecks no
+            # vuelve a lanzar enlaces, fuentes externas ni svelte-check.
+            $env:LTERMINAL_SKIP_CHECKS = '1'
+        } else {
+            Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
+        }
+        return (Invoke-Native 'npm' $Arguments)
+    } finally {
+        if ($null -eq $previousSkipChecks) {
+            Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
+        } else {
+            $env:LTERMINAL_SKIP_CHECKS = $previousSkipChecks
+        }
+    }
+}
+
+function Find-WebView2Loader {
+    $target = Join-Path $ReleaseDir 'WebView2Loader.dll'
+    if (Test-Path $target -PathType Leaf) { return $target }
+    $buildDir = Join-Path $ReleaseDir 'build'
+    $candidate = Get-ChildItem -Path $buildDir -Filter 'WebView2Loader.dll' -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match '\\webview2-com-sys-[^\\]+\\out\\x64\\WebView2Loader\.dll$' } |
+        Select-Object -First 1
+    if ($null -ne $candidate) { return $candidate.FullName }
+    return $null
+}
+
+function Ensure-WebView2Loader {
+    $target = Join-Path $ReleaseDir 'WebView2Loader.dll'
+    $source = Find-WebView2Loader
+    if ([string]::IsNullOrWhiteSpace($source)) {
+        throw "No se encontró WebView2Loader.dll en $ReleaseDir ni en la salida x64 de webview2-com-sys."
+    }
+    if ($source -ne $target) {
+        Copy-Item $source $target -Force
+        Write-Ok 'WebView2Loader.dll copiado a target\\release para el empaquetador y la release portable'
+    }
+    if (-not (Test-Path $target -PathType Leaf)) {
+        throw "No se pudo preparar WebView2Loader.dll en $target."
+    }
+    return $target
+}
+
 if ($Installer) {
+    # Tauri/tauri-build solo copia automáticamente WebView2Loader para GNU; en
+    # MSVC queda dentro de build\\webview2-com-sys-*\\out\\x64. Primero se hace
+    # una pasada sin bundler, se copia el DLL al nivel de target\\release y solo
+    # entonces se genera NSIS. Sin esta fase el instalador podía compilar bien y
+    # entregar una aplicación sin su loader nativo.
+    Write-Step 'Compilando el binario Windows antes del instalador'
+    $code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--no-bundle')
+    if ($code -ne 0) { throw "La compilacion del binario fallo (codigo $code)." }
+    Ensure-WebView2Loader | Out-Null
+
     Write-Step 'Compilando (Tauri + instalador NSIS offline de WebView2)'
-    $buildArgs = @('run', 'tauri', '--', 'build', '--config', 'src-tauri/tauri.windows.installer.conf.json')
+    $code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--config', 'src-tauri/tauri.windows.installer.conf.json')
 } else {
     Write-Step 'Compilando (tauri build --no-bundle)'
     # --no-bundle es redundante con bundle.active:false de tauri.windows.conf.json,
     # pero se pasa igualmente para que la intención se lea aquí.
-    $buildArgs = @('run', 'tauri', '--', 'build', '--no-bundle')
-}
-$previousSkipChecks = $env:LTERMINAL_SKIP_CHECKS
-try {
-    if ($SkipChecks) {
-        # Tauri ejecuta npm run build internamente. Este entorno llega también
-        # al prebuild y al build del frontend, de modo que --SkipChecks no
-        # vuelve a lanzar enlaces, fuentes externas ni svelte-check.
-        $env:LTERMINAL_SKIP_CHECKS = '1'
-    } else {
-        Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
-    }
-    $code = Invoke-Native 'npm' $buildArgs
-} finally {
-    if ($null -eq $previousSkipChecks) {
-        Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
-    } else {
-        $env:LTERMINAL_SKIP_CHECKS = $previousSkipChecks
-    }
+    $code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--no-bundle')
 }
 if ($code -ne 0) { throw "La compilacion fallo (codigo $code)." }
 
@@ -492,6 +564,9 @@ if ($Installer) {
     $installers = @(Get-ChildItem $nsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue)
     if ($installers.Count -eq 0) {
         throw "La compilacion termino sin generar instalador NSIS en $nsisDir."
+    }
+    if ($installers[0].Length -lt 1MB) {
+        throw "El instalador NSIS parece incompleto ($($installers[0].Length) bytes): $($installers[0].FullName)."
     }
     Write-Ok "Instalador NSIS con WebView2 offline: $($installers[0].FullName)"
 }
@@ -517,8 +592,9 @@ Write-Ok "Compilado: $exePath"
 # 7. Carpeta desempaquetada
 # ---------------------------------------------------------------------------
 # target/release contiene ademas todos los artefactos de cargo (deps/, build/,
-# .pdb: cientos de megas). Lo que se distribuye son cuatro archivos, y se copian a
-# una carpeta limpia para no publicar el resto por accidente.
+# .pdb: cientos de megas). Lo que se distribuye son el ejecutable, sus DLL/host
+# nativos y el árbol `scripts/` declarado en bundle.resources. Se copian a una
+# carpeta limpia para no publicar el resto por accidente.
 Write-Step 'Preparando la carpeta desempaquetada'
 # NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build,
 # asi que la release anterior desapareceria al compilar la siguiente.
@@ -526,32 +602,34 @@ $distDir = Join-Path $ProjectRoot "release\WinSlimTerminal-$version"
 Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
-# En Windows nativo, `webview2-com-sys` deja el DLL de carga dentro de su
-# carpeta de build de Cargo (`build\webview2-com-sys-*\out\x64`) en vez de
-# copiarlo al nivel de `target\release`. La build cruzada sí lo deja junto al
-# ejecutable. Aceptamos ambas ubicaciones, pero nunca continuamos sin el DLL.
-$webview2Source = Join-Path $ReleaseDir 'WebView2Loader.dll'
-if (-not (Test-Path $webview2Source -PathType Leaf)) {
-    $webview2BuildDir = Join-Path $ReleaseDir 'build'
-    $webview2Candidate = Get-ChildItem -Path $webview2BuildDir -Filter 'WebView2Loader.dll' -File -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match '\\webview2-com-sys-[^\\]+\\out\\x64\\WebView2Loader\.dll$' } |
-        Select-Object -First 1
-    if ($null -ne $webview2Candidate) {
-        $webview2Source = $webview2Candidate.FullName
-        Write-Ok "WebView2Loader.dll encontrado en la salida de webview2-com-sys"
-    }
-}
+Ensure-WebView2Loader | Out-Null
 
 $payload = @('winslim-terminal.exe') + $conptyFiles + @('WebView2Loader.dll')
 foreach ($file in $payload) {
-    $source = if ($file -eq 'WebView2Loader.dll') { $webview2Source } else { Join-Path $ReleaseDir $file }
+    $source = Join-Path $ReleaseDir $file
     if (-not (Test-Path $source)) {
         throw "Falta $file en $ReleaseDir. La carpeta quedaria incompleta y la app no abriria pestanas."
     }
     Copy-Item $source (Join-Path $distDir $file) -Force
 }
+$baseConfig = Get-Content (Join-Path $TauriDir 'tauri.conf.json') -Raw | ConvertFrom-Json
+$resourceMap = $baseConfig.bundle.resources
+$resourceCount = 0
+foreach ($resource in $resourceMap.PSObject.Properties) {
+    $source = Join-Path $TauriDir ([string]$resource.Name)
+    $destination = Join-Path $distDir ([string]$resource.Value)
+    if (-not (Test-Path $source -PathType Leaf)) {
+        throw "Falta el recurso declarado por bundle.resources: $source"
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+    Copy-Item $source $destination -Force
+    $resourceCount++
+}
+if ($resourceCount -eq 0) {
+    throw 'La carpeta portable no contiene recursos de bundle.resources; la Biblioteca perdería sus scripts integrados.'
+}
 $sizeMb = [math]::Round(((Get-ChildItem $distDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
-Write-Ok "Carpeta lista: $distDir ($sizeMb MB, $($payload.Count) archivos)"
+Write-Ok "Carpeta lista: $distDir ($sizeMb MB, $($payload.Count) binarios + $resourceCount recursos)"
 $artifactCode = Invoke-Native 'node' @(
     'scripts/verify-release-artifacts.mjs',
     '--windows', (Join-Path $distDir 'winslim-terminal.exe'),

@@ -144,27 +144,23 @@ fn bundled_operation_scripts(app: &AppHandle, categories: &[FileCategory]) -> Ve
         let folder = resource_dir.join("scripts").join(folder_name);
         found.extend(scripts::list_all_scripts(&folder, categories));
     }
-    found.retain(|entry| {
-        // Si el usuario activa todos los filtros, no se mezclan los gestores
-        // POSIX con los de PowerShell: cada build enseña su variante nativa.
-        if entry.ext == ".ps1" && !is_windows || entry.ext == ".sh" && is_windows {
-            return false;
-        }
-        let installed = |command: &str| crate::path_env::is_tool_installed(command);
-        match entry.name.trim_end_matches(".sh").trim_end_matches(".ps1") {
-            "docker-manager" => installed("docker"),
-            "kubernetes-manager" => installed("kubectl"),
-            "ssh-manager" => installed("ssh"),
-            "service-manager" => is_windows || installed("systemctl"),
-            "network-manager" => true,
-            "adb-manager" => installed("adb"),
-            _ => true,
-        }
-    });
+    found.retain(|entry| is_native_bundled_script(entry, is_windows));
     for entry in &mut found {
         entry.source = "LTerminal".to_string();
     }
     found
+}
+
+fn is_native_bundled_script(entry: &ScriptEntry, is_windows: bool) -> bool {
+    // Si el usuario activa todos los filtros, no se mezclan los gestores POSIX
+    // con los de PowerShell: cada build enseña su variante nativa.
+    //
+    // No se filtra por la presencia del binario asociado. El script forma parte
+    // de la Biblioteca y debe seguir visible para poder abrir su menú, mostrar
+    // su diagnóstico y guiar a Entorno y dependencias. Si Docker, kubectl, SSH
+    // o ADB faltan, el propio script lo explica; si lo ocultamos aquí
+    // desaparecen también sus acciones rápidas.
+    !(entry.ext == ".ps1" && !is_windows || entry.ext == ".sh" && is_windows)
 }
 
 fn library_panel(app: &AppHandle, state: &AppState, categories: &[FileCategory]) -> ScriptsPanel {
@@ -1230,5 +1226,41 @@ mod tests {
         // Lo que no aplica no viaja.
         assert!(value.get("suggestion").is_none());
         assert!(value.get("tabId").is_none());
+    }
+
+    #[test]
+    fn los_scripts_integrados_se_muestran_sin_exigir_la_herramienta_previa() {
+        let ps1 = ScriptEntry {
+            name: "docker-manager.ps1".into(),
+            ext: ".ps1".into(),
+            kind: crate::scripts::ScriptType::Powershell,
+            category: FileCategory::Powershell,
+            interpreter: Some("powershell".into()),
+            runnable: true,
+            openable: false,
+            instruction: "".into(),
+            path: r"C:\app\scripts\operations\docker-manager.ps1".into(),
+            rel_dir: "operations".into(),
+            source: "LTerminal".into(),
+            hint: None,
+        };
+        let sh = ScriptEntry {
+            name: "docker-manager.sh".into(),
+            ext: ".sh".into(),
+            kind: crate::scripts::ScriptType::Shell,
+            category: FileCategory::Shell,
+            interpreter: Some("bash".into()),
+            runnable: true,
+            openable: false,
+            instruction: "".into(),
+            path: "/app/scripts/operations/docker-manager.sh".into(),
+            rel_dir: "operations".into(),
+            source: "LTerminal".into(),
+            hint: None,
+        };
+        assert!(is_native_bundled_script(&ps1, true));
+        assert!(!is_native_bundled_script(&ps1, false));
+        assert!(is_native_bundled_script(&sh, false));
+        assert!(!is_native_bundled_script(&sh, true));
     }
 }

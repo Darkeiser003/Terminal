@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::environments::Environment;
 use crate::preferences::{
@@ -597,85 +597,6 @@ pub fn log_open_folder(app: AppHandle) -> Option<String> {
         return None;
     }
     Some(path)
-}
-
-/// Mantiene un área útil mínima cuando el WebView pierde espacio frente al
-/// inspector acoplado u otro panel externo. El tamaño nativo de la ventana
-/// puede seguir siendo válido mientras el terminal queda con una fracción de
-/// esa altura; en ese caso se amplía, nunca se reduce.
-#[tauri::command]
-pub fn window_ensure_usable_size(
-    app: AppHandle,
-    viewport_width: i64,
-    viewport_height: i64,
-    pane_count: i64,
-) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let (min_width, min_height) = crate::responsive_window_min_size(&window);
-    let layout_factor = if pane_count > 1 { 2.0 } else { 1.0 };
-    let vertical_layout_factor = if pane_count >= 3 { 2.0 } else { 1.0 };
-    let layout_min_width = (min_width * layout_factor).min(crate::MAX_WINDOW_WIDTH);
-    let layout_min_height = (min_height * vertical_layout_factor).min(crate::MAX_WINDOW_HEIGHT);
-    let scale_factor = window
-        .current_monitor()
-        .ok()
-        .flatten()
-        .map(|monitor| monitor.scale_factor())
-        .unwrap_or(1.0);
-    let Ok(outer) = window.outer_size() else {
-        return;
-    };
-    let outer = outer.to_logical::<f64>(scale_factor);
-    let width_deficit = (layout_min_width - viewport_width.max(0) as f64).max(0.0);
-    let height_deficit = (layout_min_height - viewport_height.max(0) as f64).max(0.0);
-    if let Err(error) =
-        window.set_min_size(Some(LogicalSize::new(layout_min_width, layout_min_height)))
-    {
-        log_error!(
-            "No se pudo fijar el mínimo del área útil dividida",
-            serde_json::json!({
-                "error": error.to_string(),
-                "minWidth": layout_min_width,
-                "minHeight": layout_min_height,
-                "paneCount": pane_count,
-            })
-        );
-    }
-    if width_deficit <= 0.0 && height_deficit <= 0.0 {
-        return;
-    }
-    let target = LogicalSize::new(
-        (outer.width + width_deficit).max(layout_min_width),
-        (outer.height + height_deficit).max(layout_min_height),
-    );
-    if let Err(error) = window.set_size(target) {
-        log_error!(
-            "No se pudo ampliar la ventana para conservar el área útil mínima",
-            serde_json::json!({
-                "error": error.to_string(),
-                "viewportWidth": viewport_width,
-                "viewportHeight": viewport_height,
-                "minWidth": layout_min_width,
-                "minHeight": layout_min_height,
-                "paneCount": pane_count,
-            })
-        );
-    } else {
-        log_info!(
-            "Área útil mínima de la ventana reforzada",
-            serde_json::json!({
-                "viewportWidth": viewport_width,
-                "viewportHeight": viewport_height,
-                "targetWidth": target.width,
-                "targetHeight": target.height,
-                "minWidth": layout_min_width,
-                "minHeight": layout_min_height,
-                "paneCount": pane_count,
-            })
-        );
-    }
 }
 
 #[cfg(test)]

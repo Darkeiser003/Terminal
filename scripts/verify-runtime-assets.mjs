@@ -9,6 +9,8 @@ const required = [
   "src-tauri/default_settings.toml",
   "src-tauri/config/technology-catalog.json",
   "src-tauri/resources/com.lterminal.terminal.metainfo.xml",
+  "scripts/containers/docker-manager.sh",
+  "scripts/containers/kubernetes-manager.sh",
   "scripts/operations/ssh-manager.sh",
   "scripts/operations/ssh-manager.ps1",
   "scripts/operations/service-manager.sh",
@@ -56,7 +58,27 @@ for (const [index, item] of technologies.entries()) {
 const windowsConfig = JSON.parse(
   readFileSync(resolve(root, "src-tauri/tauri.windows.conf.json"), "utf8")
 );
+const baseConfig = JSON.parse(
+  readFileSync(resolve(root, "src-tauri/tauri.conf.json"), "utf8")
+);
+const checkResourceMap = (configName, resourceMap) => {
+  for (const source of Object.keys(resourceMap ?? {})) {
+    const sourcePath = resolve(root, "src-tauri", source);
+    try {
+      accessSync(sourcePath, constants.R_OK);
+      if (statSync(sourcePath).isDirectory()) {
+        throw new Error("se esperaba un archivo, no una carpeta");
+      }
+    } catch (error) {
+      throw new Error(
+        `Recurso declarado por ${configName} pero ausente: ${source} (${error.message})`
+      );
+    }
+  }
+};
+checkResourceMap("tauri.conf.json", baseConfig.bundle?.resources);
 const resources = windowsConfig.bundle?.resources ?? {};
+checkResourceMap("tauri.windows.conf.json", resources);
 for (const resource of ["vendor/conpty/conpty.dll", "vendor/conpty/OpenConsole.exe"]) {
   if (!(resource in resources)) {
     throw new Error(
@@ -77,6 +99,12 @@ if (
   throw new Error(
     "La configuración del instalador Windows debe activar NSIS con WebView2 offline."
   );
+}
+// El empaquetador de Tauri fusiona la configuración de plataforma y la del
+// instalador con la base. La configuración NSIS no puede perder los recursos
+// comunes ni los binarios ConPTY aunque solo declare el modo WebView2.
+if (Object.keys(baseConfig.bundle?.resources ?? {}).length === 0 || Object.keys(resources).length < 2) {
+  throw new Error("La configuración fusionada de Windows ha perdido recursos runtime.");
 }
 
 const linuxConfig = JSON.parse(

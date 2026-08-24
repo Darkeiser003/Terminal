@@ -331,6 +331,7 @@
         z-index: 50;
         display: flex;
         flex-direction: column;
+        min-width: 0;
         max-width: calc(100vw - 16px);
         max-height: calc(100vh - 60px);
         overflow: hidden;
@@ -349,6 +350,7 @@
        vez de hacer crecer el marco y desplazar el asa inferior con la lista. */
     .panel-scroll {
         flex: 1 1 auto;
+        min-width: 0;
         min-height: 0;
         overflow-x: hidden;
         overflow-y: auto;
@@ -448,8 +450,13 @@
     }
 
     .panel-subtitle {
+        min-width: 0;
+        overflow: hidden;
         color: var(--muted);
         font-size: 10px;
+        line-height: 1.25;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .panel-subtitle.error {

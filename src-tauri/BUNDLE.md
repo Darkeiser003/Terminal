@@ -4,7 +4,7 @@ Una sola cosa por plataforma, a propósito:
 
 | Plataforma | Artefacto | Cómo |
 | --- | --- | --- |
-| Windows portable | carpeta desempaquetada (`.exe` + `conpty.dll` + `OpenConsole.exe` + `WebView2Loader.dll`) | `npm run dist:win` |
+| Windows portable | carpeta desempaquetada (`.exe` + DLL/host nativos + `scripts/`) | `npm run dist:win` |
 | Windows instalable | instalador NSIS con WebView2 offline | `npm run dist:win:installer` |
 | Linux | `.AppImage` | `npm run dist:linux` |
 
@@ -19,22 +19,28 @@ Lo que **no** se genera, y por qué:
 - **Accesos directos.** Ni los del instalador ni los que creaban los scripts de
   build al terminar. Quien quiera uno se lo hace.
 
-## conpty.dll sin bundler
+## Recursos nativos y bundler
 
-`bundle.resources` solo lo aplica el empaquetador, que en Windows ya no corre.
-Los dos archivos llegan igualmente junto al `.exe` porque `build.rs` los copia
-en cada compilación, también en release. El mapa de `bundle.resources` se
-conserva por si algún día se vuelve a empaquetar: sin él, una build con
-instalador dejaría la app instalada sin poder abrir ni una pestaña.
+La build portable de Windows usa `tauri build --no-bundle`: los dos archivos de
+ConPTY llegan junto al `.exe` porque `build.rs` los copia en cada compilación,
+también en release. La build NSIS sí ejecuta el empaquetador y conserva además
+el mapa `bundle.resources`, de modo que los recursos comunes y ConPTY entran
+en el instalador. El script prepara `WebView2Loader.dll` antes de esa segunda
+pasada porque MSVC lo deja inicialmente dentro de la salida de Cargo.
 
-La build reúne estos cuatro archivos en la carpeta desempaquetada:
+La build reúne estos binarios y recursos en la carpeta desempaquetada:
 
 ```
 winslim-terminal.exe
 conpty.dll
 OpenConsole.exe
 WebView2Loader.dll
+scripts/
 ```
+
+Dentro de `scripts/` se conservan los gestores integrados de Docker,
+Kubernetes, SSH, servicios, red y ADB. Son parte de la aplicación: no deben
+eliminarse aunque la carpeta portable siga siendo válida como ejecutable.
 
 La carpeta portable no instala el runtime de WebView2: depende de que ese
 runtime ya esté instalado en el sistema, como una aplicación Windows normal.
@@ -42,5 +48,5 @@ El instalador NSIS es la distribución adecuada
 para equipos Windows recortados o sin conexión, porque instala WebView2 antes
 de dejar lista la aplicación.
 
-El resto de esa carpeta (`deps/`, `build/`, `.pdb`) son artefactos de cargo y
-no se distribuyen.
+Los otros artefactos de `target/release` (`deps/`, `build/`, `.pdb`) son
+artefactos de Cargo y no se distribuyen.

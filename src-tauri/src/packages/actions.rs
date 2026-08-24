@@ -457,6 +457,9 @@ const fn win(
     }
 }
 
+const QEMU_VERSION: &str = "powershell:$qemu = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue; if ($qemu) { & $qemu.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe') --version } else { exit 1 }";
+const VIRTUALBOX_VERSION: &str = "powershell:$vbox = Get-Command VBoxManage.exe -ErrorAction SilentlyContinue; if ($vbox) { & $vbox.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe') --version } else { exit 1 }";
+
 #[rustfmt::skip]
 static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-pwsh",   "PowerShell 7",    "pwsh",   "Microsoft.PowerShell",           Some("pwsh -v"),                      SHELLS_GROUP),
@@ -511,12 +514,12 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-helm",    "Kubernetes · Helm", "helm", "Helm.Helm",                     Some("helm version --short"),          DOCKER_GROUP),
     win("winget-k9s",     "Kubernetes · k9s (interactivo)", "k9s", "Derailed.k9s",       Some("k9s version --short"),           DOCKER_GROUP),
     WindowsTool {
-        detect: Some("powershell:if (Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { exit 0 } else { exit 1 }"),
-        ..win("winget-qemu", "QEMU", "qemu-system-x86_64", "SoftwareFreedomConservancy.QEMU", Some("qemu-system-x86_64 --version"), WINDOWS_COMPAT_GROUP)
+        detect: Some("powershell:if (Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe'))) { exit 0 } else { exit 1 }"),
+        ..win("winget-qemu", "QEMU", "qemu-system-x86_64", "SoftwareFreedomConservancy.QEMU", Some(QEMU_VERSION), WINDOWS_COMPAT_GROUP)
     },
     WindowsTool {
-        detect: Some("powershell:if (Get-Command VBoxManage.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { exit 0 } else { exit 1 }"),
-        ..win("winget-virtualbox", "Oracle VirtualBox", "VBoxManage", "Oracle.VirtualBox", Some("VBoxManage --version"), WINDOWS_COMPAT_GROUP)
+        detect: Some("powershell:if (Get-Command VBoxManage.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe'))) { exit 0 } else { exit 1 }"),
+        ..win("winget-virtualbox", "Oracle VirtualBox", "VBoxManage", "Oracle.VirtualBox", Some(VIRTUALBOX_VERSION), WINDOWS_COMPAT_GROUP)
     },
     WindowsTool {
         hint: Some("Requiere WSL2 y normalmente pide reiniciar Windows antes de poder usarse."),
@@ -571,7 +574,7 @@ fn chocolatey_command(arguments: &str) -> String {
          [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; \
          Invoke-Expression ((New-Object Net.WebClient).DownloadString(\
          'https://community.chocolatey.org/install.ps1')); \
-         $env:Path = \"$env:ChocolateyInstall\\bin;$env:Path\"; \
+         $env:Path = $env:ChocolateyInstall + '\\bin;' + $env:Path; \
          $choco = Get-Command choco.exe -ErrorAction SilentlyContinue }}; \
          if (-not $choco) {{ throw 'Chocolatey no se pudo instalar o no está disponible en PATH.' }}; \
          & $choco.Source {arguments}"
@@ -3115,10 +3118,14 @@ fn windows_actions(
 /// mientras que QEMU, VirtualBox y VMware se ofrecen como aplicaciones nativas
 /// de ciclo de vida completo en el grupo de compatibilidad.
 fn windows_virtualization_actions() -> Vec<InstallAction> {
-    const HYPERV: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -eq 'Enabled'";
-    const VMP: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -eq 'Enabled'";
-    const SANDBOX: &str = "powershell:(Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -eq 'Enabled'";
-    const VMWARE: &str = "powershell:if (Get-Command vmrun.exe -ErrorAction SilentlyContinue) { exit 0 } elseif (Test-Path (Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe')) { exit 0 } else { exit 1 }";
+    // `output_text` solo considera correcto el código de salida del proceso;
+    // una expresión PowerShell que imprime False sigue terminando con código 0.
+    // Las sondas deben convertir explícitamente el estado en exit 0/1 para que
+    // el panel no oculte la acción de activar una característica deshabilitada.
+    const HYPERV: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
+    const VMP: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
+    const SANDBOX: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
+    const VMWARE: &str = "powershell:if (Get-Command vmrun.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'VMware\\VMware Workstation\\vmware.exe'))) { exit 0 } else { exit 1 }";
     const VMWARE_DOWNLOADS: &str = "https://support.broadcom.com/group/ecx/productdownloads";
     vec![
         InstallAction::new(
@@ -3195,7 +3202,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         InstallAction::new(
             "vmware-version",
             "Ver versión de VMware Workstation Pro",
-            "$vmrun = Get-Command vmrun.exe -ErrorAction SilentlyContinue; if ($vmrun) { & $vmrun.Source -T ws version } else { Write-Host 'VMware está detectado por su instalación, pero vmrun.exe no está en PATH.' }",
+            "$vmrun = Get-Command vmrun.exe -ErrorAction SilentlyContinue; if ($vmrun) { & $vmrun.Source -T ws version } else { $candidates = @((Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe'), (Join-Path ${env:ProgramFiles(x86)} 'VMware\\VMware Workstation\\vmware.exe')); $vmware = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($vmware) { & $vmware -v } else { Write-Host 'VMware está detectado por su instalación, pero no se encontró un ejecutable de versión.' } }",
         )
         .short("Ver versión instalada")
         .powershell()
@@ -4821,6 +4828,39 @@ mod tests {
                 "{id} debe comprobar rutas instaladas fuera de PATH"
             );
         }
+        assert!(buscar(&actions, "winget-qemu-version")
+            .command
+            .contains("ProgramFiles"));
+        assert!(buscar(&actions, "winget-virtualbox-version")
+            .command
+            .contains("ProgramFiles"));
+    }
+
+    #[test]
+    fn las_sondas_de_caracteristicas_windows_convierten_false_en_fallo() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "windows-hyperv-enable",
+            "windows-vmp-enable",
+            "windows-sandbox-enable",
+        ] {
+            let check = buscar(&actions, id)
+                .check_cmd
+                .as_deref()
+                .expect("la característica debe tener sonda");
+            assert!(
+                check.contains("exit 0") && check.contains("exit 1"),
+                "{id}: {check}"
+            );
+        }
+    }
+
+    #[test]
+    fn la_accion_de_chocolatey_no_rompe_cmd_con_comillas_internas() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let command = &buscar(&actions, "winget-postgresql").command;
+        assert!(command.contains("ChocolateyInstall + '\\bin;'"));
+        assert!(!command.contains("$env:Path = \""));
     }
 
     #[test]

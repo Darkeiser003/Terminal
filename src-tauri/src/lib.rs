@@ -44,7 +44,7 @@ pub use updater::{commands as commands_update, self_update};
 
 use std::time::Instant;
 
-use tauri::{LogicalSize, Manager, RunEvent, WebviewWindow, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 use crate::platform::traits::HostPlatform;
 use crate::state::AppState;
@@ -61,84 +61,6 @@ fn migrate_local_data() {
                 "to": paths::USER_DATA_DIR.to_string_lossy(),
                 "settingsMerged": report.settings_merged,
                 "scriptsCopied": report.scripts_copied,
-            })
-        );
-    }
-}
-
-const MIN_WINDOW_WIDTH: f64 = 480.0;
-const MIN_WINDOW_HEIGHT: f64 = 270.0;
-const MIN_WINDOW_SCREEN_RATIO: f64 = 0.25;
-const MAX_WINDOW_WIDTH: f64 = 7680.0;
-const MAX_WINDOW_HEIGHT: f64 = 4320.0;
-
-/// Devuelve el mínimo lógico de la pantalla donde está la ventana.
-///
-/// El límite de la configuración es solo un respaldo: en un escritorio con
-/// una pantalla grande la ventana no debe poder reducirse a un tamaño ilegible
-/// y, al cambiar de monitor, el mínimo debe seguir la pantalla nueva.
-pub(crate) fn responsive_window_min_size(window: &WebviewWindow) -> (f64, f64) {
-    let Some(monitor) = window.current_monitor().ok().flatten() else {
-        return (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
-    };
-
-    let work_area = monitor
-        .work_area()
-        .size
-        .to_logical::<f64>(monitor.scale_factor());
-    responsive_window_min_size_for_area(work_area.width, work_area.height)
-}
-
-fn responsive_window_min_size_for_area(width: f64, height: f64) -> (f64, f64) {
-    (
-        (width * MIN_WINDOW_SCREEN_RATIO)
-            .ceil()
-            .clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH),
-        (height * MIN_WINDOW_SCREEN_RATIO)
-            .ceil()
-            .clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT),
-    )
-}
-
-/// Aplica límites nativos y corrige una ventana que el gestor haya restaurado
-/// por debajo del mínimo. Se ejecuta al abrirla y cuando cambia de monitor.
-fn enforce_responsive_window_constraints(window: &WebviewWindow, announce: bool) {
-    let (min_width, min_height) = responsive_window_min_size(window);
-    if let Err(error) = window.set_min_size(Some(LogicalSize::new(min_width, min_height))) {
-        log_error!(
-            "No se pudo aplicar el tamaño mínimo de la ventana",
-            serde_json::json!({ "error": error.to_string(), "minWidth": min_width, "minHeight": min_height })
-        );
-        return;
-    }
-
-    let scale_factor = window
-        .current_monitor()
-        .ok()
-        .flatten()
-        .map(|monitor| monitor.scale_factor())
-        .unwrap_or(1.0);
-    if let Ok(current) = window.inner_size() {
-        let current = current.to_logical::<f64>(scale_factor);
-        let width = current.width.max(min_width);
-        let height = current.height.max(min_height);
-        if width > current.width || height > current.height {
-            if let Err(error) = window.set_size(LogicalSize::new(width, height)) {
-                log_error!(
-                    "No se pudo corregir el tamaño de la ventana",
-                    serde_json::json!({ "error": error.to_string(), "width": width, "height": height })
-                );
-            }
-        }
-    }
-
-    if announce {
-        log_info!(
-            "Tamaño mínimo responsive aplicado",
-            serde_json::json!({
-                "minWidth": min_width,
-                "minHeight": min_height,
-                "screenRatio": MIN_WINDOW_SCREEN_RATIO,
             })
         );
     }
@@ -244,7 +166,6 @@ pub fn run() {
             commands::log_frontend_error,
             commands::log_frontend_performance,
             commands::log_open_folder,
-            commands::window_ensure_usable_size,
             commands_panels::scripts_list,
             commands_panels::scripts_list_here,
             commands_panels::scripts_pick_target,
@@ -299,7 +220,6 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(identity::current().name)?;
-                enforce_responsive_window_constraints(&window, true);
                 window.show()?;
                 log_info!(
                     "Ventana inicial mostrada",
@@ -330,20 +250,12 @@ pub fn run() {
                 .spawn(move || commands_update::on_startup(&update_app));
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            WindowEvent::Moved { .. }
-            | WindowEvent::Resized { .. }
-            | WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
-                    enforce_responsive_window_constraints(&webview, false);
-                }
-            }
-            WindowEvent::Destroyed => {
+        .on_window_event(|window, event| {
+            if let WindowEvent::Destroyed = event {
                 if let Some(state) = window.app_handle().try_state::<std::sync::Arc<AppState>>() {
                     state.tabs.shutdown();
                 }
             }
-            _ => {}
         })
         .build(tauri::generate_context!())
         .expect("no se pudo construir la aplicación")
@@ -370,26 +282,6 @@ mod tests {
         let raiz = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(raiz.join(relativo))
             .unwrap_or_else(|error| panic!("no se pudo leer {relativo}: {error}"))
-    }
-
-    #[test]
-    fn el_minimo_de_ventana_es_un_cuarto_de_la_pantalla() {
-        assert_eq!(
-            super::responsive_window_min_size_for_area(1920.0, 1080.0),
-            (480.0, 270.0)
-        );
-        assert_eq!(
-            super::responsive_window_min_size_for_area(3840.0, 2160.0),
-            (960.0, 540.0)
-        );
-        assert_eq!(
-            super::responsive_window_min_size_for_area(7680.0, 4320.0),
-            (1920.0, 1080.0)
-        );
-        assert_eq!(
-            super::responsive_window_min_size_for_area(1024.0, 600.0),
-            (480.0, 270.0)
-        );
     }
 
     /// Los nombres del bloque `generate_handler!` de este mismo archivo.

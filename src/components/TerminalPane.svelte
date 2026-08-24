@@ -167,7 +167,6 @@
      *  banner con las dimensiones anteriores. */
     let bannerRefreshSerial = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
-    let lastUsableWindowRequest = '';
     // El fastfetch es salida visual, pero la línea que el usuario está
     // editando pertenece al PTY. Nunca se debe repintar el banner mientras esa
     // línea está viva: si el banner crece al estrechar la ventana, podría
@@ -195,20 +194,6 @@
         // Un panel oculto mide 0: ajustarlo ahí daría un tamaño absurdo que
         // luego habría que deshacer.
         if (host.clientWidth === 0 || host.clientHeight === 0) return;
-        const viewportWidth = window.innerWidth;
-        const viewportHeight = window.innerHeight;
-        const paneCount = Math.max(1, app.panes.length);
-        const layoutMinWidth = paneCount > 1 ? 960 : 480;
-        const layoutMinHeight = paneCount > 2 ? 540 : 270;
-        if (viewportWidth > 0 && viewportHeight > 0
-            && (viewportWidth < layoutMinWidth || viewportHeight < layoutMinHeight)) {
-            const requestKey = `${viewportWidth}x${viewportHeight}x${paneCount}`;
-            if (requestKey !== lastUsableWindowRequest) {
-                lastUsableWindowRequest = requestKey;
-                void api.ensureWindowUsableSize(viewportWidth, viewportHeight, paneCount)
-                    .catch((error) => console.error('[TerminalPane] usable window guard failed', error));
-            }
-        }
         try {
             const dims = fitAddon.proposeDimensions();
             if (dims) {

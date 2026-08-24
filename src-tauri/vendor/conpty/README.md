@@ -29,8 +29,9 @@ backend del sistema.
 
 - En desarrollo, `build.rs` las copia a `target/<perfil>/`, que es donde
   `cargo run` y `tauri dev` dejan el binario.
-- En las builds empaquetadas, `bundle.resources` de `tauri.windows.conf.json`
-  las instala junto al `.exe`.
+- En la build portable, `windows/build.ps1` y `linux/build-windows.sh` las
+  copian junto al `.exe`; en el instalador NSIS, `bundle.resources` de
+  `tauri.windows.conf.json` las instala junto a la aplicación.
 
 En los dos casos acaban en la carpeta del ejecutable, que es donde
 `LoadLibrary("conpty.dll")` mira primero.

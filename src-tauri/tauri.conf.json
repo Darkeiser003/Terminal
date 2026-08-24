@@ -21,6 +21,8 @@
         "maxHeight": 4320,
         "backgroundColor": "#0d0d0d",
         "resizable": true,
+        "maximizable": true,
+        "decorations": true,
         "visible": false,
         "dragDropEnabled": false
       }

@@ -79,6 +79,23 @@ if (windowsPath) {
         check(`Runtime Windows ${runtime} es PE x64`, isPe64(runtimeFile.data), runtimeFile.absolute);
         check(`Runtime Windows ${runtime} no está vacío`, runtimeFile.size >= 16 * 1024, `${runtimeFile.size} bytes`);
     }
+    for (const resource of [
+        'scripts/containers/docker-manager.sh',
+        'scripts/containers/kubernetes-manager.sh',
+        'scripts/operations/docker-manager.ps1',
+        'scripts/operations/kubernetes-manager.ps1',
+        'scripts/operations/ssh-manager.sh',
+        'scripts/operations/service-manager.sh',
+        'scripts/operations/network-manager.sh',
+        'scripts/operations/adb-manager.sh',
+        'scripts/operations/ssh-manager.ps1',
+        'scripts/operations/service-manager.ps1',
+        'scripts/operations/network-manager.ps1',
+        'scripts/operations/adb-manager.ps1',
+    ]) {
+        const bundled = file(resolve(runtimeDir, resource), `Recurso Windows ${resource}`);
+        check(`Recurso Windows ${resource} no está vacío`, bundled.size > 0, bundled.absolute);
+    }
 }
 
 function statExists(path) {

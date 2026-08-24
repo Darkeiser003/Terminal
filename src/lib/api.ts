@@ -157,9 +157,6 @@ export const refreshBanner = (
     cursorRow: number,
 ) => invokeLogged<void>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow });
 
-export const ensureWindowUsableSize = (viewportWidth: number, viewportHeight: number, paneCount: number) =>
-    invokeLogged<void>('window_ensure_usable_size', { viewportWidth, viewportHeight, paneCount });
-
 // ---- Entornos ----
 
 export const listEnvironments = (tabId?: string) =>

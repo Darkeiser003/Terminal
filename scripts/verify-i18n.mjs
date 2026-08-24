@@ -30,6 +30,26 @@ function walkRust(directory) {
 }
 walkRust(path.join(root, 'src-tauri', 'src'));
 
+// Estas acciones de Windows se construyen manualmente y se traducen por su ID
+// en `InstallAction::translated`; el escaneo de llamadas `.t()` no puede ver
+// esas claves dinámicas. Mantenerlas explícitas evita que una nueva acción
+// vuelva a mostrar español en inglés sin que el chequeo lo detecte.
+const dynamicActionIds = [
+    'windows-hyperv-enable',
+    'windows-vmp-enable',
+    'windows-sandbox-enable',
+    'windows-hyperv-check',
+    'vmware-download',
+    'vmware-update-download',
+    'vmware-version',
+];
+for (const id of dynamicActionIds) {
+    for (const field of ['label', 'shortLabel']) {
+        const key = `action.${id}.${field}`;
+        if (!(key in spanish)) errors.push(`La acción dinámica usa «${key}», pero no existe en el catálogo español`);
+    }
+}
+
 for (const key of usedKeys) {
     if (!(key in spanish)) errors.push(`La interfaz usa «${key}», pero no existe en el catálogo español`);
 }

@@ -62,7 +62,10 @@ cualquier entorno gráfico ya tiene.
 - **Linux**: las bibliotecas de desarrollo de WebKitGTK. `linux/build.sh` las
   comprueba antes de compilar y dice el comando de instalación de apt, dnf y
   pacman si falta alguna.
-- **Windows**: nada más. El toolchain MSVC lo instala `rustup`.
+- **Windows**: Node.js, Rust mediante `rustup` y Visual Studio Build Tools con
+  la carga de trabajo C++ y el Windows SDK. `windows/build.ps1` comprueba e
+  importa automáticamente el entorno de MSVC; si falta, intenta instalarlo
+  mediante WinGet y deja un mensaje claro si hay que hacerlo manualmente.
 - **Compilar Windows desde Linux**: además de lo anterior, MinGW x64
   (`x86_64-w64-mingw32-gcc`) y, para el smoke opcional, Wine. El script puede
   instalar esos paquetes con el gestor de la distribución.
@@ -91,9 +94,10 @@ los cuatro archivos. El detalle completo, en
 
 **Windows portable.** Se distribuye como carpeta desempaquetada: se descomprime
 donde se quiera y se ejecuta `winslim-terminal.exe`. No instala WebView2, no
-toca el registro y no crea accesos directos. Los cuatro archivos de la carpeta
-(`winslim-terminal.exe`, `conpty.dll`, `OpenConsole.exe`, `WebView2Loader.dll`)
-tienen que ir juntos.
+toca el registro y no crea accesos directos. Los binarios y la carpeta
+`scripts/` tienen que ir juntos: además de `winslim-terminal.exe`,
+`conpty.dll`, `OpenConsole.exe` y `WebView2Loader.dll`, esa carpeta contiene
+los gestores integrados que muestra la Biblioteca.
 
 **Windows instalable.** `npm run dist:win:installer` genera un NSIS con el
 instalador offline de WebView2 incluido. Es la opción recomendada para equipos
@@ -142,7 +146,7 @@ directamente en la terminal.
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run dist:win` | Ejecuta la build completa de Windows: comprueba recursos, valida, genera la carpeta desempaquetada y su ZIP. |
 | `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido. |
-| `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64 y verifica `conpty.dll`, `OpenConsole.exe` y WebView2Loader. `--wine-smoke` requiere `WINE_SMOKE_PREFIX` apuntando a un prefijo que ya tenga WebView2 Runtime. |
+| `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64 y verifica los binarios nativos y los scripts integrados. `--wine-smoke` requiere `WINE_SMOKE_PREFIX` apuntando a un prefijo que ya tenga WebView2 Runtime. |
 | `npm run dist:linux` | Ejecuta la build Linux completa: solicita la versión, valida y genera el AppImage. |
 
 Para una build completa y verificada, con sus comprobaciones previas y su

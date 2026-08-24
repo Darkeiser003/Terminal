@@ -380,7 +380,8 @@
         display: flex;
         align-items: center;
         gap: 6px;
-        flex: 0 0 auto;
+        min-width: 0;
+        flex: 0 1 auto;
     }
 
     /* base 0 (no "auto"): con base automática, el ancho del <select> lo fija su
@@ -464,7 +465,8 @@
         top: calc(100% + 6px);
         left: 0;
         z-index: 61;
-        width: clamp(300px, 42vw, 480px);
+        width: min(480px, calc(100vw - 20px));
+        min-width: 0;
         max-width: calc(100vw - 20px);
         max-height: min(70vh, 480px);
         overflow-x: hidden;
@@ -501,6 +503,7 @@
         outline: 0;
         color: var(--text);
         background: transparent;
+        line-height: 1.2;
     }
 
     .env-group-title {
@@ -510,18 +513,21 @@
         font-weight: 700;
         letter-spacing: 0.035em;
         text-transform: uppercase;
+        line-height: 1.25;
     }
 
     .env-item {
         display: flex;
         align-items: center;
         width: 100%;
+        min-width: 0;
         gap: 8px;
         padding: 6px 8px;
         border: 1px solid transparent;
         border-radius: 4px;
         background: transparent;
         text-align: left;
+        line-height: 1.2;
     }
 
     .env-item:hover:not([aria-disabled="true"]) {
@@ -572,6 +578,7 @@
 
     .env-copy {
         display: flex;
+        overflow: hidden;
         min-width: 0;
         flex: 1 1 auto;
         flex-direction: column;
@@ -602,6 +609,7 @@
     }
 
     button {
+        min-width: 0;
         padding: 4px 10px;
         border: 1px solid var(--border);
         border-radius: 3px;
@@ -609,7 +617,14 @@
         color: var(--text);
         font: inherit;
         font-size: 12px;
+        line-height: 1.2;
+        white-space: nowrap;
         cursor: pointer;
+    }
+
+    .toolbar-group:not(.grow) > button {
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     button:hover {

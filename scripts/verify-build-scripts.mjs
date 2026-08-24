@@ -17,6 +17,11 @@ const files = {
     profilePs1: await readFile(resolve(root, 'src-tauri/resources/profile-bootstrap.ps1.in'), 'utf8'),
 };
 
+const installerBlock = files.windows.indexOf('if ($Installer) {');
+const installerBinaryBuild = files.windows.indexOf("$code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--no-bundle')", installerBlock);
+const installerLoaderPreparation = files.windows.indexOf('Ensure-WebView2Loader | Out-Null', installerBlock);
+const installerBundleBuild = files.windows.indexOf('tauri.windows.installer.conf.json', installerBlock);
+
 const checks = [
     ['Linux ejecuta la batería estática', files.linux.includes('npm run check')],
     ['El build comprueba los registros de instalación', files.package.includes('check:install-sources') && files.linux.includes('npm run check') && files.windows.includes("'check'")],
@@ -54,7 +59,12 @@ const checks = [
     ['Build Windows cruzada admite repeticiones Wine', files.linuxWindows.includes('--wine-repeats') && files.linuxWindows.includes('WINE_REPEATS=3')],
     ['Build Linux puede iniciar pruebas Windows cruzadas', files.linux.includes('--cross-windows') && files.linux.includes('build-windows.sh')],
     ['Build Windows nativa copia WebView2Loader', files.windows.includes("@('WebView2Loader.dll')")],
-    ['Build Windows nativa encuentra WebView2Loader de Cargo', files.windows.includes('webview2-com-sys-') && files.windows.includes('out\\x64') && files.windows.includes('Get-ChildItem')],
+    ['Build Windows nativa copia todos los recursos declarados', files.windows.includes('bundle.resources') && files.windows.includes('resourceCount') && files.windows.includes('Copy-Item $source $destination')],
+    ['Build Windows cruzada copia los scripts integrados', files.linuxWindows.includes('scripts/containers/docker-manager.sh') && files.linuxWindows.includes('scripts/operations/adb-manager.ps1') && files.linuxWindows.includes('cp "$PROJECT_ROOT/$resource"')],
+    ['Build Windows nativa encuentra WebView2Loader de Cargo', files.windows.includes('webview2-com-sys-') && files.windows.includes('out\\\\x64') && files.windows.includes('Get-ChildItem')],
+    ['Windows importa el entorno MSVC completo antes de Cargo', files.windows.includes('VsDevCmd.bat') && files.windows.includes('cmd.exe') && files.windows.includes('&& set') && files.windows.includes("Test-Command 'cl.exe'")],
+    ['Windows prepara WebView2 antes de generar NSIS', installerBlock >= 0 && installerBinaryBuild > installerBlock && installerLoaderPreparation > installerBinaryBuild && installerBundleBuild > installerLoaderPreparation],
+    ['Windows rechaza un instalador NSIS truncado', files.windows.includes('Length -lt 1MB') && files.windows.includes('instalador NSIS parece incompleto')],
     ['Windows puede iniciar pruebas Linux cruzadas', files.windows.includes('$CrossLinux') && files.windows.includes('Invoke-CrossLinuxTests')],
     ['Windows instala WSL si falta', files.windows.includes('Microsoft.WSL') && files.windows.includes('--install') && files.windows.includes('Ubuntu')],
     ['Windows convierte la ruta del proyecto para WSL', files.windows.includes('wslpath') && files.windows.includes('wslRoot')],

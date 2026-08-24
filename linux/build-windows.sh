@@ -275,6 +275,26 @@ cargo build --manifest-path "$TAURI_DIR/Cargo.toml" \
 for asset in conpty.dll OpenConsole.exe WebView2Loader.dll; do
     [ -f "$RELEASE_DIR/$asset" ] || fail "Falta el recurso Windows $asset junto al ejecutable."
 done
+# La build cruzada no usa el bundler NSIS, así que replica el árbol de recursos
+# que la build nativa copia a la carpeta portable. Sin esto el ejecutable abre,
+# pero la Biblioteca no encuentra los scripts integrados bajo resource_dir/scripts.
+for resource in \
+    scripts/containers/docker-manager.sh \
+    scripts/containers/kubernetes-manager.sh \
+    scripts/operations/docker-manager.ps1 \
+    scripts/operations/kubernetes-manager.ps1 \
+    scripts/operations/ssh-manager.sh \
+    scripts/operations/service-manager.sh \
+    scripts/operations/network-manager.sh \
+    scripts/operations/adb-manager.sh \
+    scripts/operations/ssh-manager.ps1 \
+    scripts/operations/service-manager.ps1 \
+    scripts/operations/network-manager.ps1 \
+    scripts/operations/adb-manager.ps1; do
+    [ -f "$PROJECT_ROOT/$resource" ] || fail "Falta el recurso empaquetable $resource."
+    mkdir -p "$RELEASE_DIR/$(dirname "$resource")"
+    cp "$PROJECT_ROOT/$resource" "$RELEASE_DIR/$resource"
+done
 if command -v file >/dev/null 2>&1; then
     file "$EXE" | grep -Eq 'PE32\+.*x86-64' || fail "$EXE no parece un ejecutable Windows x64."
 fi
