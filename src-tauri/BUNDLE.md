@@ -27,8 +27,7 @@ en cada compilación, también en release. El mapa de `bundle.resources` se
 conserva por si algún día se vuelve a empaquetar: sin él, una build con
 instalador dejaría la app instalada sin poder abrir ni una pestaña.
 
-Quien monte la carpeta desempaquetada tiene que llevarse los cuatro archivos de
-`src-tauri/target/release/`:
+La build reúne estos cuatro archivos en la carpeta desempaquetada:
 
 ```
 winslim-terminal.exe

@@ -526,9 +526,25 @@ $distDir = Join-Path $ProjectRoot "release\WinSlimTerminal-$version"
 Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
+# En Windows nativo, `webview2-com-sys` deja el DLL de carga dentro de su
+# carpeta de build de Cargo (`build\webview2-com-sys-*\out\x64`) en vez de
+# copiarlo al nivel de `target\release`. La build cruzada sí lo deja junto al
+# ejecutable. Aceptamos ambas ubicaciones, pero nunca continuamos sin el DLL.
+$webview2Source = Join-Path $ReleaseDir 'WebView2Loader.dll'
+if (-not (Test-Path $webview2Source -PathType Leaf)) {
+    $webview2BuildDir = Join-Path $ReleaseDir 'build'
+    $webview2Candidate = Get-ChildItem -Path $webview2BuildDir -Filter 'WebView2Loader.dll' -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match '\\webview2-com-sys-[^\\]+\\out\\x64\\WebView2Loader\.dll$' } |
+        Select-Object -First 1
+    if ($null -ne $webview2Candidate) {
+        $webview2Source = $webview2Candidate.FullName
+        Write-Ok "WebView2Loader.dll encontrado en la salida de webview2-com-sys"
+    }
+}
+
 $payload = @('winslim-terminal.exe') + $conptyFiles + @('WebView2Loader.dll')
 foreach ($file in $payload) {
-    $source = Join-Path $ReleaseDir $file
+    $source = if ($file -eq 'WebView2Loader.dll') { $webview2Source } else { Join-Path $ReleaseDir $file }
     if (-not (Test-Path $source)) {
         throw "Falta $file en $ReleaseDir. La carpeta quedaria incompleta y la app no abriria pestanas."
     }
