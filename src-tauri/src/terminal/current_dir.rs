@@ -334,9 +334,10 @@ mod tests {
     fn el_prompt_linux_resuelve_la_virgulilla_sin_metadatos_extra() {
         let native = env(Transport::Native);
         let home = crate::paths::home_cwd();
+        let home = home.to_string_lossy();
         assert_eq!(
             detect_current_directory("ana@pc:~/proyectos/app$ ", &native, None),
-            Some(home.join("proyectos/app").to_string_lossy().to_string())
+            Some(join_host_path(&home, "proyectos/app"))
         );
     }
 
