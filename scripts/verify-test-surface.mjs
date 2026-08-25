@@ -129,6 +129,18 @@ check('Los scripts integrados siguen visibles aunque falte su herramienta', (() 
     return bundled.includes('is_native_bundled_script')
         && !bundled.includes('is_tool_installed');
 })());
+const updater = read('src-tauri/src/updater/self_update.rs');
+const cargoBuild = read('src-tauri/build.rs');
+const windowsPlatform = read('src-tauri/src/platform/windows/mod.rs');
+check('El actualizador Windows rechaza payloads sin runtime ni scripts', [
+    updater.includes('windows_runtime_files'),
+    updater.includes('WebView2Loader.dll'),
+    updater.includes('scripts/operations/adb-manager.ps1'),
+    updater.includes('scripts/containers/kubernetes-manager.sh'),
+    updater.includes('La actualización Windows está incompleta')
+].every(Boolean));
+check('ConPTY solo se considera listo con DLL y host', windowsPlatform.includes('conpty.dll') && windowsPlatform.includes('OpenConsole.exe') && windowsPlatform.includes('dll.is_file() && host.is_file()'));
+check('Cargo compara el contenido de ConPTY y no solo el tamaño', cargoBuild.includes('same_contents') && cargoBuild.includes('std::fs::read(a)') && !cargoBuild.includes('same_size'));
 const dependenciesPanel = read('src/components/DependenciesPanel.svelte');
 const commonPanel = read('src/components/Panel.svelte');
 check('Contador de dependencias cuenta entradas visibles y no acciones internas', dependenciesPanel.includes('visibleComponentCount') && dependenciesPanel.includes('groups.reduce') && !dependenciesPanel.includes('count={refreshing ? undefined : actions.length}'));

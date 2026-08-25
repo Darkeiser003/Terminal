@@ -62,7 +62,7 @@ const checks = [
     ['Build Windows nativa copia todos los recursos declarados', files.windows.includes('bundle.resources') && files.windows.includes('resourceCount') && files.windows.includes('Copy-Item $source $destination')],
     ['Build Windows cruzada copia los scripts integrados', files.linuxWindows.includes('scripts/containers/docker-manager.sh') && files.linuxWindows.includes('scripts/operations/adb-manager.ps1') && files.linuxWindows.includes('cp "$PROJECT_ROOT/$resource"')],
     ['Build Windows nativa encuentra WebView2Loader de Cargo', files.windows.includes('webview2-com-sys-') && files.windows.includes('out\\\\x64') && files.windows.includes('Get-ChildItem')],
-    ['Windows importa el entorno MSVC completo antes de Cargo', files.windows.includes('VsDevCmd.bat') && files.windows.includes('cmd.exe') && files.windows.includes('&& set') && files.windows.includes("Test-Command 'cl.exe'")],
+    ['Windows importa el entorno MSVC completo antes de Cargo', files.windows.includes('VsDevCmd.bat') && files.windows.includes('$env:ComSpec') && files.windows.includes('/d /s /c') && files.windows.includes('&& set') && files.windows.includes("Test-Command 'cl.exe'")],
     ['Windows prepara WebView2 antes de generar NSIS', installerBlock >= 0 && installerBinaryBuild > installerBlock && installerLoaderPreparation > installerBinaryBuild && installerBundleBuild > installerLoaderPreparation],
     ['Windows rechaza un instalador NSIS truncado', files.windows.includes('Length -lt 1MB') && files.windows.includes('instalador NSIS parece incompleto')],
     ['Windows puede iniciar pruebas Linux cruzadas', files.windows.includes('$CrossLinux') && files.windows.includes('Invoke-CrossLinuxTests')],

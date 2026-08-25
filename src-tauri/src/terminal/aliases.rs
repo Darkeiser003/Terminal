@@ -1055,7 +1055,13 @@ pub struct InitScript {
 /// El script se ejecuta con `call`, así que la variable sobrevive al archivo.
 fn escape_capture_line() -> String {
     format!(
-        "for /f %%E in ('echo prompt $E^| cmd') do set \"{}=%%E\"",
+        // No se debe invocar `cmd` a través del PATH: en Windows recortado
+        // puede resolver un shim o una copia incompatible. `/d` también evita
+        // que un AutoRun del Registro rompa este cmd auxiliar. El cmd padre
+        // sigue siendo el de la sesión; solo se usa este proceso efímero para
+        // que `prompt $E` entregue un ESC sin escribirlo literalmente en la
+        // línea que edita ConPTY.
+        "for /f \"delims=\" %%E in ('echo prompt $E^| \"%ComSpec%\" /d') do set \"{}=%%E\"",
         crate::console_ui::CMD_ESC_VAR
     )
 }
@@ -1333,6 +1339,8 @@ mod tests {
         let cmd = build(ShellKind::Cmd, &options(Transport::Native));
         assert!(cmd.content.contains("doskey ls=dir $*"));
         assert!(cmd.content.contains("doskey pwd=cd $*"));
+        assert!(cmd.content.contains("\"%ComSpec%\" /d"));
+        assert!(!cmd.content.contains("prompt $E^| cmd')"));
 
         let bash = build(ShellKind::Bash, &options(Transport::Native));
         assert!(bash.content.contains("alias ls='command ls'"));

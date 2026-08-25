@@ -22,8 +22,13 @@ impl ProcessPlatform for WindowsPlatform {
 
     fn sideloaded_conpty(&self) -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
-        let dll = exe.parent()?.join("conpty.dll");
-        dll.is_file().then_some(dll)
+        let folder = exe.parent()?;
+        let dll = folder.join("conpty.dll");
+        let host = folder.join("OpenConsole.exe");
+        // `conpty.dll` carga este host al crear la pseudoconsola. Devolver la
+        // DLL como válida si falta el ejecutable deja la pestaña sin shell y
+        // oculta la causa real en el arranque.
+        (dll.is_file() && host.is_file()).then_some(dll)
     }
 }
 

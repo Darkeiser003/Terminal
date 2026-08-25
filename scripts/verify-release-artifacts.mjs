@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 
+const projectRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const args = process.argv.slice(2);
 const valueAfter = (flag) => {
     const index = args.indexOf(flag);
@@ -79,20 +81,12 @@ if (windowsPath) {
         check(`Runtime Windows ${runtime} es PE x64`, isPe64(runtimeFile.data), runtimeFile.absolute);
         check(`Runtime Windows ${runtime} no está vacío`, runtimeFile.size >= 16 * 1024, `${runtimeFile.size} bytes`);
     }
-    for (const resource of [
-        'scripts/containers/docker-manager.sh',
-        'scripts/containers/kubernetes-manager.sh',
-        'scripts/operations/docker-manager.ps1',
-        'scripts/operations/kubernetes-manager.ps1',
-        'scripts/operations/ssh-manager.sh',
-        'scripts/operations/service-manager.sh',
-        'scripts/operations/network-manager.sh',
-        'scripts/operations/adb-manager.sh',
-        'scripts/operations/ssh-manager.ps1',
-        'scripts/operations/service-manager.ps1',
-        'scripts/operations/network-manager.ps1',
-        'scripts/operations/adb-manager.ps1',
-    ]) {
+    const baseConfig = JSON.parse(
+        readFileSync(resolve(projectRoot, 'src-tauri/tauri.conf.json'), 'utf8')
+    );
+    const resources = Object.values(baseConfig.bundle?.resources ?? {});
+    check('El mapa de recursos Windows no está vacío', resources.length > 0, projectRoot);
+    for (const resource of resources) {
         const bundled = file(resolve(runtimeDir, resource), `Recurso Windows ${resource}`);
         check(`Recurso Windows ${resource} no está vacío`, bundled.size > 0, bundled.absolute);
     }

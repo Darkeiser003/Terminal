@@ -45,7 +45,7 @@ fn copy_conpty_next_to_executable() {
             let to = target.join(name);
             // Sobrescribir un .dll ya cargado por otra instancia en marcha
             // falla; si el destino ya está y coincide, no hay nada que hacer.
-            if same_size(&from, &to) {
+            if same_contents(&from, &to) {
                 continue;
             }
             if let Err(error) = std::fs::copy(&from, &to) {
@@ -66,9 +66,9 @@ fn profile_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn same_size(a: &Path, b: &Path) -> bool {
-    match (std::fs::metadata(a), std::fs::metadata(b)) {
-        (Ok(left), Ok(right)) => left.len() == right.len(),
+fn same_contents(a: &Path, b: &Path) -> bool {
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
 }

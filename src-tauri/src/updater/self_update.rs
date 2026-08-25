@@ -147,7 +147,40 @@ pub fn verify_payload(root: &Path, binary_name: &str) -> Result<(), String> {
             "Lo descargado no parece esta aplicación: no trae {binary_name}."
         ));
     }
+    if crate::platform::host().is_windows() {
+        for recurso in windows_runtime_files() {
+            if !root.join(recurso).is_file() {
+                return Err(format!(
+                    "La actualización Windows está incompleta: falta {recurso}."
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+/// Todo lo que necesita una carpeta portable Windows después de una
+/// actualización. El instalador y la build portable ya lo validan antes de
+/// publicar; repetirlo aquí evita que una release incompleta rompa una copia
+/// que funcionaba.
+fn windows_runtime_files() -> [&'static str; 15] {
+    [
+        "conpty.dll",
+        "OpenConsole.exe",
+        "WebView2Loader.dll",
+        "scripts/containers/docker-manager.sh",
+        "scripts/containers/kubernetes-manager.sh",
+        "scripts/operations/docker-manager.ps1",
+        "scripts/operations/kubernetes-manager.ps1",
+        "scripts/operations/ssh-manager.ps1",
+        "scripts/operations/service-manager.ps1",
+        "scripts/operations/network-manager.ps1",
+        "scripts/operations/adb-manager.ps1",
+        "scripts/operations/ssh-manager.sh",
+        "scripts/operations/service-manager.sh",
+        "scripts/operations/network-manager.sh",
+        "scripts/operations/adb-manager.sh",
+    ]
 }
 
 /// Los archivos de la versión nueva, con su ruta relativa a la raíz.

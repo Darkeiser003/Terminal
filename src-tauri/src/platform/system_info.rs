@@ -1612,21 +1612,20 @@ pub fn build_banner(
         let system = system_rows
             .iter()
             .find(|(label, _)| label == &t.t("banner.system", "Sistema"));
-        let header = system
-            .map(|(system_label, system_value)| {
-                let available_system = max_line_cols
-                    .saturating_sub(title_text.chars().count() + system_label.chars().count() + 3);
-                format!(
-                    "{title_text}  {system_label} {}",
-                    ellipsize(system_value, available_system)
-                )
-            })
-            .unwrap_or(title_text);
         lines.clear();
-        lines.push(format!(
-            "{BOLD}{accent}{}{RESET}",
-            ellipsize(&header, max_line_cols)
-        ));
+        lines.push(format!("{BOLD}{accent}{}{RESET}", title_text));
+        // En el modo compacto el título y el sistema no se pegan en una sola
+        // línea. En Windows el nombre de la edición puede ser largo
+        // (`Windows 11 IoT Enterprise ...`) y, junto al nombre de la app,
+        // producía una cabecera difícil de leer y demasiado sensible al
+        // ancho del panel. Cada línea se recorta por separado.
+        if let Some((system_label, system_value)) = system {
+            let available_system = max_line_cols.saturating_sub(system_label.chars().count() + 2);
+            lines.push(format!(
+                "{accent}{system_label}{RESET}  {}",
+                ellipsize(system_value, available_system)
+            ));
+        }
         for (label, value) in rows {
             if label == &t.t("banner.system", "Sistema") {
                 continue;
@@ -1753,6 +1752,28 @@ mod tests {
                 "{line:?}"
             );
         }
+    }
+
+    #[test]
+    fn el_banner_compacto_separa_titulo_y_sistema() {
+        let lines: Vec<String> = build_banner(
+            "cmd.exe",
+            "WinSlim Terminal",
+            80,
+            24,
+            1,
+            &Translator::default(),
+        )
+        .lines()
+        .map(crate::current_dir::strip_ansi)
+        .collect();
+        assert!(lines
+            .first()
+            .is_some_and(|line| line.contains("WinSlim Terminal")));
+        assert!(lines
+            .get(1)
+            .is_some_and(|line| line.starts_with("Sistema  ")));
+        assert!(!lines.first().is_some_and(|line| line.contains("Sistema")));
     }
 
     #[test]

@@ -335,7 +335,11 @@ function Import-MSVCEnvironment {
     # que link.exe, cl.exe y el Windows SDK sean visibles aunque el usuario haya
     # lanzado la build desde PowerShell normal o haciendo doble clic.
     $commandLine = '"' + $devCmd + '" -arch=x64 -host_arch=x64 && set'
-    $environmentLines = @(& cmd.exe /d /s /c $commandLine 2>$null)
+    # COMSPEC apunta al intérprete del Windows que está ejecutando la build.
+    # Usarlo evita que un `cmd.exe` alternativo del PATH sea el que cargue
+    # Visual Studio; el literal queda como respaldo para sesiones dañadas.
+    $comSpec = if (-not [string]::IsNullOrWhiteSpace($env:ComSpec)) { $env:ComSpec } else { 'cmd.exe' }
+    $environmentLines = @(& $comSpec /d /s /c $commandLine 2>$null)
     if ($LASTEXITCODE -ne 0) { return $false }
     foreach ($line in $environmentLines) {
         if ([string]$line -match '^([^=]+)=(.*)$') {
