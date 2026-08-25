@@ -55,6 +55,32 @@ function Invoke-Native {
     }
 }
 
+function Assert-E2eReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    if (-not (Test-Path $Path -PathType Leaf)) {
+        throw "El E2E terminó sin generar informe: $Path"
+    }
+    try {
+        $report = Get-Content $Path -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        throw "El informe E2E no es JSON válido: $Path ($_)"
+    }
+    if ($report.status -ne 'passed') {
+        $detail = if ($report.error) { [string]$report.error } else { 'sin detalle de error' }
+        throw "El E2E no terminó correctamente: estado '$($report.status)' ($detail). Informe: $Path"
+    }
+    if ($report.logValidated -ne $true) {
+        throw "El E2E no validó el log de la ejecución actual. Informe: $Path"
+    }
+    $phases = @($report.phases)
+    $events = @($report.events)
+    if ($phases.Count -lt 5 -or $events.Count -lt 5) {
+        throw "El E2E terminó sin una batería observable: fases=$($phases.Count), eventos=$($events.Count). Informe: $Path"
+    }
+}
+
 function Test-Command ($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
@@ -812,12 +838,19 @@ if ($runExtendedTests) {
     } else {
         $previousE2eBinary = $env:E2E_BINARY
         $previousE2eReport = $env:LTERMINAL_SMOKE_REPORT
+        $previousE2eLogFile = $env:LTERMINAL_LOG_FILE
         try {
             $env:E2E_BINARY = Join-Path $distDir 'winslim-terminal.exe'
             $env:LTERMINAL_SMOKE_REPORT = Join-Path $env:TEMP "winslim-terminal-e2e-$([guid]::NewGuid().ToString('N')).json"
-            Write-Host "    Informe E2E: $env:LTERMINAL_SMOKE_REPORT" -ForegroundColor DarkGray
+            # El binario lanzado por tauri-driver debe escribir en el mismo
+            # archivo que el smoke de arranque. Así el informe no puede pasar
+            # por leer un log antiguo o una ruta distinta de la release.
+            $env:LTERMINAL_LOG_FILE = $logPath
+            $e2eReportPath = $env:LTERMINAL_SMOKE_REPORT
+            Write-Host "    Informe E2E: $e2eReportPath" -ForegroundColor DarkGray
             $e2eCode = Invoke-Native 'npm' @('run', 'e2e')
             if ($e2eCode -ne 0) { throw "E2E falló (código $e2eCode). Revisa el informe y el log en $logPath." }
+            Assert-E2eReport $e2eReportPath
             Write-Ok 'E2E confirmó ventana, terminal, barra y Ajustes'
         } finally {
             if ($null -eq $previousE2eBinary) {
@@ -829,6 +862,11 @@ if ($runExtendedTests) {
                 Remove-Item Env:LTERMINAL_SMOKE_REPORT -ErrorAction SilentlyContinue
             } else {
                 $env:LTERMINAL_SMOKE_REPORT = $previousE2eReport
+            }
+            if ($null -eq $previousE2eLogFile) {
+                Remove-Item Env:LTERMINAL_LOG_FILE -ErrorAction SilentlyContinue
+            } else {
+                $env:LTERMINAL_LOG_FILE = $previousE2eLogFile
             }
         }
     }

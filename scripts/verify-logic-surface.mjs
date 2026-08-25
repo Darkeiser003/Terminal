@@ -64,6 +64,8 @@ const strictIndex = windowsBuild.indexOf('if ($strictProbeFailure)');
 check('Windows ejecuta E2E antes de fallar por sondas estrictas', e2eIndex >= 0 && strictIndex > e2eIndex);
 check('Windows fija el log del smoke al directorio de la release', windowsBuild.includes('$env:LTERMINAL_LOG_FILE = $logPath') && windowsBuild.includes('-WorkingDirectory $distDir'));
 check('Windows fija una ruta propia para el informe E2E', windowsBuild.includes('$env:LTERMINAL_SMOKE_REPORT') && windowsBuild.includes('winslim-terminal-e2e-'));
+check('Windows no da por pasado un E2E sin informe y log validados', windowsBuild.includes('Assert-E2eReport') && windowsBuild.includes("$report.status -ne 'passed'") && windowsBuild.includes('$report.logValidated -ne $true'));
+check('La orden de release Windows solicita pruebas ampliadas', read('package.json').includes('dist:win') && read('package.json').includes('-FullTests') && read('package.json').includes('-InstallE2eDriver'));
 
 // La copia de recursos se deriva del manifiesto, no de una lista paralela que
 // pueda quedarse atrás cuando se añade un script integrado.

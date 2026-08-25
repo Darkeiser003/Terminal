@@ -144,8 +144,9 @@ directamente en la terminal.
 | `npm run check:workspace` | Comprueba que las cachés, salidas y directorio temporal se puedan leer y escribir; detecta un `chown`/`chmod` pendiente antes de una build. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
-| `npm run dist:win` | Ejecuta la build completa de Windows: comprueba recursos, valida, genera la carpeta desempaquetada y su ZIP. |
-| `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido. |
+| `npm run dist:win` | Ejecuta la build completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera la carpeta desempaquetada y su ZIP. |
+| `npm run dist:win:fast` | Compila y valida Windows sin la batería ampliada ni el E2E; sirve solo para iteraciones rápidas. |
+| `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido y ejecuta la batería ampliada/E2E. |
 | `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64 y verifica los binarios nativos y los scripts integrados. `--wine-smoke` requiere `WINE_SMOKE_PREFIX` apuntando a un prefijo que ya tenga WebView2 Runtime. |
 | `npm run dist:linux` | Ejecuta la build Linux completa: solicita la versión, valida y genera el AppImage. |
 
