@@ -343,6 +343,14 @@ mod tests {
         std::fs::write(ruta, contenido).unwrap();
     }
 
+    fn preparar_payload_windows(root: &Path) {
+        if cfg!(windows) {
+            for recurso in windows_runtime_files() {
+                escribir(&root.join(recurso), "fixture");
+            }
+        }
+    }
+
     #[test]
     fn una_version_se_lee_con_o_sin_la_uve_de_delante() {
         assert_eq!(Version::parse("v1.4.3"), Version::parse("1.4.3"));
@@ -463,6 +471,7 @@ mod tests {
     fn aplicar_reemplaza_los_archivos_y_aparta_los_viejos() {
         let staged = tempfile::tempdir().unwrap();
         let install = tempfile::tempdir().unwrap();
+        preparar_payload_windows(staged.path());
         escribir(&staged.path().join("app.exe"), "nuevo");
         escribir(&staged.path().join("conpty.dll"), "dll-nueva");
         escribir(&install.path().join("app.exe"), "viejo");
@@ -485,6 +494,7 @@ mod tests {
     fn un_archivo_nuevo_que_no_existia_se_instala_sin_apartar_nada() {
         let staged = tempfile::tempdir().unwrap();
         let install = tempfile::tempdir().unwrap();
+        preparar_payload_windows(staged.path());
         escribir(&staged.path().join("app.exe"), "nuevo");
         escribir(&staged.path().join("locales/es.json"), "{}");
         escribir(&install.path().join("app.exe"), "viejo");
@@ -499,6 +509,7 @@ mod tests {
     fn no_queda_ningun_archivo_a_medias_cuando_todo_va_bien() {
         let staged = tempfile::tempdir().unwrap();
         let install = tempfile::tempdir().unwrap();
+        preparar_payload_windows(staged.path());
         escribir(&staged.path().join("app.exe"), "nuevo");
         escribir(&install.path().join("app.exe"), "viejo");
 
