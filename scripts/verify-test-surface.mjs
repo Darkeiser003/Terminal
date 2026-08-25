@@ -27,6 +27,7 @@ const requiredFiles = [
     'scripts/verify-i18n.mjs',
     'scripts/verify-runtime-assets.mjs',
     'scripts/verify-build-scripts.mjs',
+    'scripts/verify-logic-surface.mjs',
     'scripts/verify-test-surface.mjs',
     'scripts/verify-release-artifacts.mjs'
 ];
@@ -39,10 +40,11 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'check:i18n', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'check:i18n', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
+check('npm check incluye la auditoría de superficie lógica', scripts.check.includes('check:logic') && scripts['check:logic'].includes('verify-logic-surface.mjs'));
 check('npm check incluye la verificación de documentación', scripts.check.includes('check:docs'));
 check('npm check incluye la verificación de traducciones dinámicas', scripts.check.includes('check:i18n') && read('scripts/verify-i18n.mjs').includes('dynamicActionIds'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));
@@ -173,7 +175,12 @@ check('Smoke E2E prueba los cuatro estados de panel', [
 check('Smoke E2E prueba el explorador y su menú contextual', smoke.includes('.explorer') && smoke.includes('rightClick') && smoke.includes('dispatchContextMenu') && smoke.includes('[role="menu"]'));
 check('Smoke E2E prueba los acordeones cerrados y exclusivos', smoke.includes('.operations') && smoke.includes('.types') && smoke.includes('settingsText') && smoke.includes('acordeones exclusivos'));
 check('Smoke E2E prueba las acciones de dependencias sin ejecutarlas', smoke.includes('Compatibilidad Windows') && smoke.includes('data-testid="dependency-action"') && smoke.includes('aparece abierto antes'));
-check('Smoke E2E comprueba nombres y descripciones de compatibilidad Windows', smoke.includes('hasNamedTool') && smoke.includes('hasDescription') && smoke.includes('programa y descripción'));
+check('Smoke E2E adapta el catálogo de dependencias a cada plataforma', smoke.includes('nativeWindows') && smoke.includes('Virtualización') && smoke.includes('platformGroupPattern'));
+check('Smoke E2E comprueba nombres y descripciones del grupo de plataforma', smoke.includes('hasNamedTool') && smoke.includes('hasDescription') && smoke.includes('programa y descripción'));
+check('La sugerencia de herramienta abre dependencias y traduce su nombre', app.includes('suggestion.actionId') && app.includes('panels.show("deps")') && app.includes('.replace("{tool}", suggestion.label)'));
+check('Dependencias diferencia carga inicial de actualización', dependenciesPanel.includes('loading && actions.length === 0') && dependenciesPanel.includes('deps.refreshing'));
+check('Windows separa virtualización de compatibilidad Linux', read('src-tauri/src/packages/actions.rs').includes('VIRTUALIZATION_GROUP') && read('src-tauri/src/config/i18n.rs').includes('group.virt'));
+check('GPU Windows prefiere una descripción comercial ante un adaptador genérico', read('src-tauri/src/platform/system_info.rs').includes('preferred_gpu_name') && read('src-tauri/src/platform/system_info.rs').includes('Microsoft Basic Display Adapter'));
 
 const host = read('linux/exercise-host.sh');
 for (const marker of ['LTERMINAL_SHELL_OK', 'PowerShell', 'Nushell', 'Python', 'Node', 'Ruby', 'PHP', 'SQLite', 'MariaDB', 'Docker', 'Kubernetes']) {

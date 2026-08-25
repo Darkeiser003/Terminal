@@ -565,6 +565,32 @@ fn clean_gpu_name(value: &str) -> String {
     }
 }
 
+/// Windows puede devolver un adaptador genérico aunque el controlador haya
+/// dejado una descripción comercial en el Registro. En una VM también es una
+/// respuesta legítima: el invitado solo ve la tarjeta virtual y no puede
+/// conocer la GPU física del host sin passthrough.
+#[allow(dead_code)]
+fn is_generic_gpu_name(value: &str) -> bool {
+    let lower = clean_identity_value(value).to_ascii_lowercase();
+    lower.contains("microsoft basic display adapter")
+        || lower.contains("microsoft remote display adapter")
+        || lower.contains("standard vga graphics adapter")
+        || lower.contains("vmware svga")
+        || lower.contains("virtualbox graphics adapter")
+        || lower.contains("hyper-v video")
+        || lower.contains("virtio gpu")
+}
+
+#[allow(dead_code)]
+fn preferred_gpu_name(primary: &str, fallback: &str) -> String {
+    let primary = clean_gpu_name(primary);
+    let fallback = clean_gpu_name(fallback);
+    if (primary.is_empty() || is_generic_gpu_name(&primary)) && !fallback.is_empty() {
+        return fallback;
+    }
+    primary
+}
+
 // El esquema 3 invalida las cachés que aún contienen nombres técnicos de GPU
 // como `NVidia Corporation TU116s`.
 const HARDWARE_CACHE_SCHEMA: u32 = 3;
@@ -974,11 +1000,7 @@ fn read_full_gpu() -> String {
         let vram_64bit = read_gpu_vram_bytes();
         let cim = windows_cim_snapshot();
         let from_registry = registry_gpu_name();
-        let clean = clean_gpu_name(if cim.gpu_name.trim().is_empty() {
-            &from_registry
-        } else {
-            &cim.gpu_name
-        });
+        let clean = preferred_gpu_name(&cim.gpu_name, &from_registry);
         if !clean.is_empty() {
             if let Some(bytes) = vram_64bit {
                 let gb = (bytes as f64 / 1024f64.powi(3)).round() as u64;
@@ -1926,6 +1948,24 @@ mod tests {
             ),
             "AMD Radeon Vega 8 Graphics"
         );
+    }
+
+    #[test]
+    fn gpu_prefiere_el_registro_si_wmi_devuelve_un_adaptador_generico() {
+        assert_eq!(
+            preferred_gpu_name(
+                "Microsoft Basic Display Adapter",
+                "AMD Radeon Vega 8 Graphics"
+            ),
+            "AMD Radeon Vega 8 Graphics"
+        );
+        assert_eq!(
+            preferred_gpu_name("Microsoft Basic Display Adapter", ""),
+            "Microsoft Basic Display Adapter"
+        );
+        assert!(is_generic_gpu_name("Microsoft Basic Display Adapter"));
+        assert!(is_generic_gpu_name("VMware SVGA 3D"));
+        assert!(!is_generic_gpu_name("AMD Radeon Vega 8 Graphics"));
     }
 
     #[test]

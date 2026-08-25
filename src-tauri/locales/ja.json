@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "ディストリビューションまたは Windows のバージョン。",
+  "settings.banner.host.description": "コンピューター名。",
+  "settings.banner.kernel.description": "カーネルまたは Windows のバージョン。",
+  "settings.banner.environment.description": "アクティブなシェルまたは環境。",
+  "settings.banner.motherboard.description": "マザーボードのメーカーとモデル。",
+  "settings.banner.cpu.description": "プロセッサーとスレッド数。",
+  "settings.banner.gpu.description": "グラフィックスアダプター。",
+  "settings.banner.memory.description": "RAM の使用量と速度。",
+  "settings.banner.storage.description": "ドライブの使用量。",
+  "settings.banner.uptime.description": "起動してからの時間。",
+  "settings.banner.datetime.description": "現在の日付と時刻。",
   "deps.visibleComponents": "表示中のコンポーネント {count} 件"
 }

@@ -208,6 +208,7 @@ static GROUP_KEYS: &[(&str, &str)] = &[
     ("Lenguajes",                            "group.languages"),
     ("Frameworks",                            "group.frameworks"),
     ("Visores de archivos",                  "group.viewers"),
+    ("Virtualización",                        "group.virt"),
     ("Compatibilidad Windows",               "group.windowsCompat"),
     ("WSL",                                  "group.wsl"),
     ("Docker",                               "group.docker"),

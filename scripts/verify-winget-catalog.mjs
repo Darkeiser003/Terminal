@@ -30,8 +30,14 @@ try {
 }
 
 const source = await readFile('src-tauri/src/packages/actions.rs', 'utf8');
-const ids = [...source.matchAll(/\bwin\(\s*"[^"]+"\s*,\s*"[^"]+"\s*,\s*"[^"]*"\s*,\s*"([^"]+)"/gs)]
-    .map((match) => match[1]);
+const ids = [
+    ...[...source.matchAll(/\bwin\(\s*"[^"]+"\s*,\s*"[^"]+"\s*,\s*"[^"]*"\s*,\s*"([^"]+)"/gs)]
+        .map((match) => match[1]),
+    // Algunas acciones compuestas (por ejemplo MSYS2 + pacman) necesitan
+    // preparar primero una base WinGet sin ser una WindowsTool simple.
+    ...[...source.matchAll(/\bwinget_install_command\(\s*"([^"]+)"\s*\)/g)]
+        .map((match) => match[1]),
+];
 const uniqueIds = [...new Set(ids)].sort();
 console.log(`WinGet: validando ${uniqueIds.length} identificadores del catálogo Windows...`);
 

@@ -652,10 +652,14 @@ Write-Step 'Comprobacion de humo (ventana, frontend, terminal y PTY)'
 $smokeToken = "windows-build-$([guid]::NewGuid().ToString('N'))"
 $logPath = Join-Path $env:APPDATA 'winslim-terminal\logs\main.log'
 $previousSmokeToken = $env:LTERMINAL_SMOKE_TOKEN
+$previousLogFile = $env:LTERMINAL_LOG_FILE
 $process = $null
 try {
     $env:LTERMINAL_SMOKE_TOKEN = $smokeToken
-    $process = Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -PassThru
+    # Resource-dir, WebView2 y los scripts deben resolverse contra la carpeta
+    # desempaquetada, no contra la carpeta desde la que se lanzó PowerShell.
+    $env:LTERMINAL_LOG_FILE = $logPath
+    $process = Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -WorkingDirectory $distDir -PassThru
     $ready = $false
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         Start-Sleep -Seconds 1
@@ -687,6 +691,11 @@ try {
     } else {
         $env:LTERMINAL_SMOKE_TOKEN = $previousSmokeToken
     }
+    if ($null -eq $previousLogFile) {
+        Remove-Item Env:LTERMINAL_LOG_FILE -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_LOG_FILE = $previousLogFile
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -698,14 +707,17 @@ try {
 # debe esconder una validación que el usuario pidió explícitamente.
 $runExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
 $strictExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
+$strictProbeFailure = $false
 if (-not $runExtendedTests -and -not $NonInteractive) {
+    Write-Host '    La build queda a la espera de tu respuesta; no se inicia la batería ampliada automáticamente.' -ForegroundColor Yellow
     $extendedReply = Read-Host '¿Ejecutar también la batería completa de shells y herramientas instaladas? [s/N]'
     $runExtendedTests = $extendedReply -match '^(s|si|sí)$'
 }
 if ($runExtendedTests) {
     Write-Step 'Pruebas ampliadas de Windows (shells, herramientas y E2E)'
+    $systemCmd = if (-not [string]::IsNullOrWhiteSpace($env:ComSpec)) { $env:ComSpec } else { 'cmd.exe' }
     $probes = @(
-        @{ Name = 'cmd'; Exe = 'cmd.exe'; Args = @('/d', '/c', 'exit 0') },
+        @{ Name = 'cmd'; Exe = $systemCmd; Args = @('/d', '/c', 'exit 0') },
         @{ Name = 'PowerShell'; Exe = 'powershell.exe'; Args = @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') },
         @{ Name = 'PowerShell 7'; Exe = 'pwsh'; Args = @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') },
         @{ Name = 'Nushell'; Exe = 'nu'; Args = @('--version') },
@@ -762,6 +774,7 @@ if ($runExtendedTests) {
         @{ Name = 'VMware'; Exe = 'vmrun.exe'; Args = @('-T', 'ws', 'version') }
     )
     $missingProbes = @()
+    $failedProbes = @()
     foreach ($probe in $probes) {
         if (-not (Test-Command $probe.Exe)) {
             Write-Warn "$($probe.Name) no está instalado o no está en PATH."
@@ -770,17 +783,20 @@ if ($runExtendedTests) {
         }
         $probeCode = Invoke-Native $probe.Exe $probe.Args
         if ($probeCode -ne 0) {
-            throw "La prueba de $($probe.Name) falló (código $probeCode)."
+            Write-Warn "$($probe.Name) falló (código $probeCode); se continúa para no ocultar el resto de diagnósticos."
+            $failedProbes += "$($probe.Name) [$probeCode]"
+            continue
         }
         Write-Ok "$($probe.Name) respondió correctamente"
     }
     Write-Host "    Resumen de herramientas: $($probes.Count - $missingProbes.Count)/$($probes.Count) disponibles." -ForegroundColor Cyan
     if ($missingProbes.Count -gt 0) {
         Write-Warn "Faltan $($missingProbes.Count) sondas: $($missingProbes -join ', ')"
-        if ($strictExtendedTests) {
-            throw 'La batería ampliada estricta detectó herramientas ausentes. Instálalas desde Entorno y componentes o ejecuta la build sin -StrictTests.'
-        }
     }
+    if ($failedProbes.Count -gt 0) {
+        Write-Warn "Fallaron $($failedProbes.Count) sondas: $($failedProbes -join ', ')"
+    }
+    $strictProbeFailure = $strictExtendedTests -and ($missingProbes.Count -gt 0 -or $failedProbes.Count -gt 0)
 
     if (-not (Test-Command 'tauri-driver') -and $InstallE2eDriver -and (Test-Command 'cargo')) {
         Write-Warn 'Falta tauri-driver; se instalará con cargo para completar E2E.'
@@ -788,21 +804,37 @@ if ($runExtendedTests) {
         if ($driverCode -ne 0) { throw "No se pudo instalar tauri-driver (código $driverCode)." }
         Refresh-EnvironmentPath
     }
+    Write-Step 'E2E ampliado (WebDriver, ventana, terminal y paneles)'
     if (-not (Test-Command 'tauri-driver')) {
-        throw 'Falta tauri-driver. Reintenta con -InstallE2eDriver o instálalo con cargo.'
-    }
-    $previousE2eBinary = $env:E2E_BINARY
-    try {
-        $env:E2E_BINARY = Join-Path $distDir 'winslim-terminal.exe'
-        $e2eCode = Invoke-Native 'npm' @('run', 'e2e')
-        if ($e2eCode -ne 0) { throw "E2E falló (código $e2eCode). Revisa el log en $logPath." }
-        Write-Ok 'E2E confirmó ventana, terminal, barra y Ajustes'
-    } finally {
-        if ($null -eq $previousE2eBinary) {
-            Remove-Item Env:E2E_BINARY -ErrorAction SilentlyContinue
-        } else {
-            $env:E2E_BINARY = $previousE2eBinary
+        $message = 'E2E no se ejecutó: falta tauri-driver. Reintenta con -InstallE2eDriver o instálalo con cargo.'
+        Write-Warn $message
+        if ($strictExtendedTests) { throw $message }
+    } else {
+        $previousE2eBinary = $env:E2E_BINARY
+        $previousE2eReport = $env:LTERMINAL_SMOKE_REPORT
+        try {
+            $env:E2E_BINARY = Join-Path $distDir 'winslim-terminal.exe'
+            $env:LTERMINAL_SMOKE_REPORT = Join-Path $env:TEMP "winslim-terminal-e2e-$([guid]::NewGuid().ToString('N')).json"
+            Write-Host "    Informe E2E: $env:LTERMINAL_SMOKE_REPORT" -ForegroundColor DarkGray
+            $e2eCode = Invoke-Native 'npm' @('run', 'e2e')
+            if ($e2eCode -ne 0) { throw "E2E falló (código $e2eCode). Revisa el informe y el log en $logPath." }
+            Write-Ok 'E2E confirmó ventana, terminal, barra y Ajustes'
+        } finally {
+            if ($null -eq $previousE2eBinary) {
+                Remove-Item Env:E2E_BINARY -ErrorAction SilentlyContinue
+            } else {
+                $env:E2E_BINARY = $previousE2eBinary
+            }
+            if ($null -eq $previousE2eReport) {
+                Remove-Item Env:LTERMINAL_SMOKE_REPORT -ErrorAction SilentlyContinue
+            } else {
+                $env:LTERMINAL_SMOKE_REPORT = $previousE2eReport
+            }
         }
+    }
+
+    if ($strictProbeFailure) {
+        throw 'La batería ampliada estricta detectó herramientas ausentes o fallidas. Revisa el diagnóstico e instálalas desde Entorno y dependencias.'
     }
 }
 
@@ -832,7 +864,7 @@ Write-Ok "SHA256: $hash"
 
 if (-not $NoRun) {
     Write-Step 'Lanzando la version compilada'
-    Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe')
+    Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -WorkingDirectory $distDir
 }
 
 Write-Host ''

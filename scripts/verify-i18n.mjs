@@ -50,6 +50,11 @@ for (const id of dynamicActionIds) {
     }
 }
 
+for (const id of ['system', 'host', 'kernel', 'environment', 'motherboard', 'cpu', 'gpu', 'memory', 'storage', 'uptime', 'datetime']) {
+    const key = `settings.banner.${id}.description`;
+    if (!(key in spanish)) errors.push(`La descripción dinámica usa «${key}», pero no existe en el catálogo español`);
+}
+
 for (const key of usedKeys) {
     if (!(key in spanish)) errors.push(`La interfaz usa «${key}», pero no existe en el catálogo español`);
 }

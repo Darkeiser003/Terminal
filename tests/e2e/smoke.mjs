@@ -1006,47 +1006,59 @@ try {
         }
     }
     const dependencyText = (await Promise.all(dependencyGroups.map((item) => textOf(item[elementKey])))).join('\n');
-    if (!/Compatibilidad(?: con)? Windows|Windows compatibility/i.test(dependencyText)) {
-        throw new Error('No aparece Compatibilidad Windows en Dependencias');
+    // Linux ofrece compatibilidad Windows (Wine/Bottles/CrossOver), mientras
+    // Windows ofrece virtualización nativa (Hyper-V/QEMU/VirtualBox/VMware).
+    // El E2E debe comprobar el contrato de la plataforma, no una etiqueta fija.
+    const nativeWindows = process.platform === 'win32';
+    const platformGroupPattern = nativeWindows
+        ? /Virtualización|Virtualisation|Virtualization/i
+        : /Compatibilidad(?: con)? Windows|Windows compatibility/i;
+    const platformGroupLabel = nativeWindows ? 'Virtualización' : 'Compatibilidad Windows';
+    if (!platformGroupPattern.test(dependencyText)) {
+        throw new Error(`No aparece ${platformGroupLabel} en Dependencias`);
     }
     // Array.find no espera promesas; localizarlo de forma explícita para que
     // el smoke no tenga una condición siempre verdadera.
     let compatibilityId;
     for (const item of dependencyGroups) {
-        if (/Compatibilidad(?: con)? Windows|Windows compatibility/i.test(await textOf(item[elementKey]))) {
+        if (platformGroupPattern.test(await textOf(item[elementKey]))) {
             compatibilityId = item[elementKey];
             break;
         }
     }
-    if (!compatibilityId) throw new Error('No se pudo localizar el grupo de Compatibilidad Windows');
+    if (!compatibilityId) throw new Error(`No se pudo localizar el grupo de ${platformGroupLabel}`);
     await click(compatibilityId);
     const subgroupSummaries = await findAllWithin(compatibilityId, '[data-testid="dependency-subgroup"] > summary');
     const subgroupText = (await Promise.all(subgroupSummaries.map((item) => textOf(item[elementKey])))).join('\n');
-    const hasNamedTool = /Bottles|Steam|Lutris|QEMU|Wine|Proton|MinGW|CrossOver/i.test(subgroupText);
+    const hasNamedTool = nativeWindows
+        ? /Hyper-V|Virtual Machine Platform|Windows Sandbox|QEMU|VirtualBox|VMware/i.test(subgroupText)
+        : /Bottles|Steam|Lutris|QEMU|Wine|Proton|MinGW|CrossOver/i.test(subgroupText);
     const hasDescription = /Gestiona|Ejecuta|Instala|Organiza|Proporciona|Interfaz|Traduce|Compila|Alternativa|Manages|Runs|Installs|Organizes|Provides|Interface|Translates|Builds|Alternative/i.test(subgroupText);
     if (!hasNamedTool || !hasDescription) {
-        throw new Error('Compatibilidad Windows no muestra programa y descripción en sus submenús');
+        throw new Error(`${platformGroupLabel} no muestra programa y descripción en sus submenús`);
     }
-    if (subgroupSummaries.length === 0) throw new Error('Compatibilidad Windows no contiene submenús');
-    // Array.find no espera promesas: localizar CrossOver con el mismo patrón
-    // explícito usado para el grupo evita que vuelva a degradarse a una fila
-    // directa cuando solo queda una acción visible.
-    let crossoverSummaryId;
-    for (const summary of subgroupSummaries) {
-        if (/CrossOver/i.test(await textOf(summary[elementKey]))) {
-            crossoverSummaryId = summary[elementKey];
-            break;
+    if (subgroupSummaries.length === 0) throw new Error(`${platformGroupLabel} no contiene submenús`);
+    if (!nativeWindows) {
+        // Array.find no espera promesas: localizar CrossOver con el mismo patrón
+        // explícito usado para el grupo evita que vuelva a degradarse a una fila
+        // directa cuando solo queda una acción visible.
+        let crossoverSummaryId;
+        for (const summary of subgroupSummaries) {
+            if (/CrossOver/i.test(await textOf(summary[elementKey]))) {
+                crossoverSummaryId = summary[elementKey];
+                break;
+            }
         }
-    }
-    if (!crossoverSummaryId) throw new Error('CrossOver no aparece como submenú propio');
-    const crossoverDetails = await parentOf(crossoverSummaryId);
-    const crossoverActions = await findAllWithin(crossoverDetails, '[data-testid="dependency-action"]');
-    if (crossoverActions.length < 2) {
-        throw new Error(`CrossOver volvió a degradarse a una fila directa: ${crossoverActions.length} acción(es)`);
-    }
-    const crossoverActionText = (await Promise.all(crossoverActions.map((item) => textOf(item[elementKey])))).join('\n');
-    if (!/Descargar|Comprobar|Abrir|Download|Check|Open/i.test(crossoverActionText)) {
-        throw new Error('El submenú de CrossOver no contiene acciones de diagnóstico o apertura');
+        if (!crossoverSummaryId) throw new Error('CrossOver no aparece como submenú propio');
+        const crossoverDetails = await parentOf(crossoverSummaryId);
+        const crossoverActions = await findAllWithin(crossoverDetails, '[data-testid="dependency-action"]');
+        if (crossoverActions.length < 2) {
+            throw new Error(`CrossOver volvió a degradarse a una fila directa: ${crossoverActions.length} acción(es)`);
+        }
+        const crossoverActionText = (await Promise.all(crossoverActions.map((item) => textOf(item[elementKey])))).join('\n');
+        if (!/Descargar|Comprobar|Abrir|Download|Check|Open/i.test(crossoverActionText)) {
+            throw new Error('El submenú de CrossOver no contiene acciones de diagnóstico o apertura');
+        }
     }
     const subgroupNames = [];
     for (const subgroup of subgroupSummaries) subgroupNames.push(await textOf(subgroup[elementKey]));

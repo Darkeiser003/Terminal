@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "Distribuição ou versão do Windows.",
+  "settings.banner.host.description": "Nome do computador.",
+  "settings.banner.kernel.description": "Versão do kernel ou do Windows.",
+  "settings.banner.environment.description": "Shell ou ambiente ativo.",
+  "settings.banner.motherboard.description": "Fabricante e modelo da placa-mãe.",
+  "settings.banner.cpu.description": "Processador e número de threads.",
+  "settings.banner.gpu.description": "Adaptador gráfico.",
+  "settings.banner.memory.description": "Uso e velocidade da RAM.",
+  "settings.banner.storage.description": "Uso das unidades.",
+  "settings.banner.uptime.description": "Tempo desde o arranque.",
+  "settings.banner.datetime.description": "Data e hora atuais.",
   "deps.visibleComponents": "{count} componentes visíveis"
 }

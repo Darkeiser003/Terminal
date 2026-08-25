@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "배포판 또는 Windows 버전입니다.",
+  "settings.banner.host.description": "컴퓨터 이름입니다.",
+  "settings.banner.kernel.description": "커널 또는 Windows 버전입니다.",
+  "settings.banner.environment.description": "활성 셸 또는 환경입니다.",
+  "settings.banner.motherboard.description": "메인보드 제조사와 모델입니다.",
+  "settings.banner.cpu.description": "프로세서와 스레드 수입니다.",
+  "settings.banner.gpu.description": "그래픽 어댑터입니다.",
+  "settings.banner.memory.description": "RAM 사용량과 속도입니다.",
+  "settings.banner.storage.description": "드라이브 사용량입니다.",
+  "settings.banner.uptime.description": "부팅 후 경과한 시간입니다.",
+  "settings.banner.datetime.description": "현재 날짜와 시간입니다.",
   "deps.visibleComponents": "표시된 구성 요소 {count}개"
 }

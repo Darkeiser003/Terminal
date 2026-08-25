@@ -211,6 +211,12 @@ instalaciones automáticas. En Arch/CachyOS instala solo esos paquetes y no
 actualiza todo el sistema; `LTERMINAL_ALLOW_SYSTEM_UPGRADE=1` habilita la
 actualización completa de `pacman` de forma explícita.
 
+En Windows, si se ejecuta en modo interactivo sin `-FullTests`, la build pregunta
+antes de lanzar la batería ampliada. Las sondas de shells y herramientas se
+acumulan aunque alguna falle, de modo que el E2E no se pierde por un único
+`cmd.exe` o runtime ausente; en modo estricto la build informa el fallo después
+del E2E. El informe E2E se guarda en `%TEMP%\winslim-terminal-e2e-<id>.json`.
+
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
 `-Version 1.4.4 -NonInteractive` en Windows o `--version 1.4.4` en Linux.
@@ -751,9 +757,9 @@ npm run check
 ```
 
 Pasa la verificación de versión, recursos, arquitectura, scripts de build,
-enlaces locales de documentación, `svelte-check`, `cargo fmt --check`,
-`cargo clippy -D warnings` y los tests de Rust. Es lo que tiene que estar en
-verde antes de compilar.
+enlaces locales de documentación, traducciones, superficie de tests y
+superficie lógica, `svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings`
+y los tests de Rust. Es lo que tiene que estar en verde antes de compilar.
 
 La build Linux ejecuta por defecto la batería ampliada. Además del smoke test
 de ventana/frontend/PTY, comprueba shells y herramientas instaladas y ejecuta
@@ -839,6 +845,18 @@ Chocolatey porque es una fuente comunitaria, no un manifiesto de WinGet.
 VMware Workstation Pro tampoco se intenta buscar con WinGet: se abre su descarga
 oficial en el portal de Broadcom, que requiere iniciar sesión y completar la
 descarga manualmente.
+
+Para ampliar el catálogo de lenguajes de Windows sin fingir que existe un
+instalador nativo para cada ecosistema, también se ofrecen Haxe, Octave, Racket,
+SBCL, SWI-Prolog y SQLite mediante WinGet. OCaml se ofrece como paquete UCRT64
+independiente de MSYS2. GCC, GFortran y GDB se instalan como
+toolchain UCRT64 de MSYS2 y se añade su `ucrt64\\bin` al PATH del usuario; la
+acción busca la raíz real de MSYS2 en vez de asumir una única carpeta. Haskell
+usa GHCup y su bootstrap oficial de PowerShell, que puede instalar GHC, Cabal,
+Stack y HLS. AutoHotkey v2 también tiene instalador WinGet y una detección que
+contempla instalaciones fuera del PATH. Las fuentes alternativas solo se
+ofrecen cuando tienen una sonda posterior verificable, y no se convierten en
+instaladores Linux ni en acciones de WSL por accidente.
 
 **El panel de dependencias tarda un par de segundos en abrir.** Refleja el
 estado actual del sistema, no el del arranque: consulta el PATH y comprueba unas

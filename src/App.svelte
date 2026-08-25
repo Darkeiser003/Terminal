@@ -394,20 +394,27 @@
                     .replace("{tool}", suggestion.label)}
             </span>
             <div class="suggestion-actions">
-                <!-- Sin `actionId` se reconoce la herramienta pero no hay nada
-                     que ejecutar por ella en este sistema: solo queda descartar. -->
-                {#if suggestion.actionId}
-                    <button
-                        type="button"
-                        onclick={() => {
-                            app.dismissSuggestion(app.activeTabId!);
-                            panels.show("deps");
-                            void loadDeps();
-                        }}
-                    >
-                        {app.t("suggestion.install", "Instalar")}
-                    </button>
-                {/if}
+                <!-- Aunque no exista una acción automática para esta plataforma,
+                     el catálogo puede ofrecerla bajo WSL, Chocolatey o una
+                     descarga manual. En todos los casos el botón lleva al panel
+                     de dependencias; nunca ejecuta comandos por detrás. -->
+                <button
+                    type="button"
+                    onclick={() => {
+                        app.dismissSuggestion(app.activeTabId!);
+                        panels.show("deps");
+                        void loadDeps();
+                    }}
+                >
+                    {#if suggestion.actionId}
+                        {app
+                            .t("suggestion.install", "Instalar {tool}")
+                            .replace("{tool}", suggestion.label)
+                            .replace("{app}", suggestion.label)}
+                    {:else}
+                        {app.t("toolbar.deps", "Entorno y dependencias")}
+                    {/if}
+                </button>
                 <button
                     type="button"
                     onclick={() => app.dismissSuggestion(app.activeTabId!)}

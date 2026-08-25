@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "发行版或 Windows 版本。",
+  "settings.banner.host.description": "计算机名称。",
+  "settings.banner.kernel.description": "内核或 Windows 版本。",
+  "settings.banner.environment.description": "当前 Shell 或环境。",
+  "settings.banner.motherboard.description": "主板制造商和型号。",
+  "settings.banner.cpu.description": "处理器和线程数。",
+  "settings.banner.gpu.description": "图形适配器。",
+  "settings.banner.memory.description": "RAM 使用量和速度。",
+  "settings.banner.storage.description": "驱动器使用量。",
+  "settings.banner.uptime.description": "自启动以来的时间。",
+  "settings.banner.datetime.description": "当前日期和时间。",
   "deps.visibleComponents": "可见组件：{count}"
 }

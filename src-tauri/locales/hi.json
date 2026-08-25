@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "डिस्ट्रिब्यूशन या Windows संस्करण।",
+  "settings.banner.host.description": "कंप्यूटर का नाम।",
+  "settings.banner.kernel.description": "कर्नेल या Windows संस्करण।",
+  "settings.banner.environment.description": "सक्रिय शेल या वातावरण।",
+  "settings.banner.motherboard.description": "मदरबोर्ड निर्माता और मॉडल।",
+  "settings.banner.cpu.description": "प्रोसेसर और थ्रेड की संख्या।",
+  "settings.banner.gpu.description": "ग्राफ़िक्स अडैप्टर।",
+  "settings.banner.memory.description": "RAM का उपयोग और गति।",
+  "settings.banner.storage.description": "ड्राइव का उपयोग।",
+  "settings.banner.uptime.description": "बूट होने के बाद का समय।",
+  "settings.banner.datetime.description": "वर्तमान दिनांक और समय।",
   "deps.visibleComponents": "{count} दिखाई देने वाले घटक"
 }

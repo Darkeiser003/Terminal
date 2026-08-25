@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "Distribuție sau versiune Windows.",
+  "settings.banner.host.description": "Numele computerului.",
+  "settings.banner.kernel.description": "Versiunea kernelului sau Windows.",
+  "settings.banner.environment.description": "Shell sau mediu activ.",
+  "settings.banner.motherboard.description": "Producătorul și modelul plăcii de bază.",
+  "settings.banner.cpu.description": "Procesor și număr de fire de execuție.",
+  "settings.banner.gpu.description": "Adaptor grafic.",
+  "settings.banner.memory.description": "Utilizarea și viteza memoriei RAM.",
+  "settings.banner.storage.description": "Utilizarea unităților.",
+  "settings.banner.uptime.description": "Timp de la pornire.",
+  "settings.banner.datetime.description": "Data și ora curente.",
   "deps.visibleComponents": "{count} componente vizibile"
 }

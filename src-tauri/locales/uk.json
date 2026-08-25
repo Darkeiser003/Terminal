@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "Дистрибутив або версія Windows.",
+  "settings.banner.host.description": "Ім’я комп’ютера.",
+  "settings.banner.kernel.description": "Версія ядра або Windows.",
+  "settings.banner.environment.description": "Активна оболонка або середовище.",
+  "settings.banner.motherboard.description": "Виробник і модель материнської плати.",
+  "settings.banner.cpu.description": "Процесор і кількість потоків.",
+  "settings.banner.gpu.description": "Графічний адаптер.",
+  "settings.banner.memory.description": "Використання та швидкість RAM.",
+  "settings.banner.storage.description": "Використання дисків.",
+  "settings.banner.uptime.description": "Час від завантаження.",
+  "settings.banner.datetime.description": "Поточні дата й час.",
   "deps.visibleComponents": "Видимі компоненти: {count}"
 }

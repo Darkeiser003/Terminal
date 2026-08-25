@@ -335,9 +335,11 @@
     id="deps"
     title={app.t('deps.header', 'Entorno y componentes')}
     subtitle={error ||
-        (loading || refreshing
+        (loading && actions.length === 0
             ? app.t('deps.loading', 'Detectando…')
-            : app.t('deps.onlyApplicable', 'Solo se muestran acciones aplicables a este sistema.'))}
+            : refreshing
+              ? app.t('deps.refreshing', 'Actualizando detección…')
+              : app.t('deps.onlyApplicable', 'Solo se muestran acciones aplicables a este sistema.'))}
     error={Boolean(error)}
     count={loading || refreshing ? undefined : visibleComponentCount}
     countLabel={app

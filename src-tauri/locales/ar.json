@@ -841,5 +841,16 @@
   "settings.banner.storage": "Discos",
   "settings.banner.uptime": "Tiempo activo",
   "settings.banner.datetime": "Fecha",
+  "settings.banner.system.description": "التوزيعة أو إصدار Windows.",
+  "settings.banner.host.description": "اسم الحاسوب.",
+  "settings.banner.kernel.description": "إصدار النواة أو Windows.",
+  "settings.banner.environment.description": "الصدفة أو البيئة النشطة.",
+  "settings.banner.motherboard.description": "الشركة المصنعة وطراز اللوحة الأم.",
+  "settings.banner.cpu.description": "المعالج وعدد الخيوط.",
+  "settings.banner.gpu.description": "محوّل الرسوميات.",
+  "settings.banner.memory.description": "استخدام RAM وسرعتها.",
+  "settings.banner.storage.description": "استخدام محركات الأقراص.",
+  "settings.banner.uptime.description": "الوقت منذ الإقلاع.",
+  "settings.banner.datetime.description": "التاريخ والوقت الحاليان.",
   "deps.visibleComponents": "{count} مكونات ظاهرة"
 }

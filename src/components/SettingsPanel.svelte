@@ -132,6 +132,10 @@
         { id: "datetime", label: "Fecha", description: "Fecha y hora actuales." },
     ] as const;
 
+    function bannerDescription(item: (typeof bannerItems)[number]): string {
+        return app.t(`settings.banner.${item.id}.description`, item.description);
+    }
+
     function bannerItemEnabled(id: string): boolean {
         return !(draft?.bannerHiddenItems ?? "").split(",").filter(Boolean).includes(id);
     }
@@ -766,7 +770,7 @@
                                     />
                                     <span>
                                         <strong>{app.t(`settings.banner.${item.id}`, item.label)}</strong>
-                                        <small>{item.description}</small>
+                                        <small>{bannerDescription(item)}</small>
                                     </span>
                                 </label>
                             {/each}
@@ -895,7 +899,7 @@
                             <small
                                 >{app.t(
                                     "settings.autoDockerHint",
-                                    "Solo cuando está instalado y el daemon no responde.",
+                                    "Arrancar Docker al abrir la terminal cuando no responda.",
                                 )}</small
                             >
                         </span>

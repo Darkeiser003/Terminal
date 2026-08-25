@@ -21,6 +21,8 @@ const installerBlock = files.windows.indexOf('if ($Installer) {');
 const installerBinaryBuild = files.windows.indexOf("$code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--no-bundle')", installerBlock);
 const installerLoaderPreparation = files.windows.indexOf('Ensure-WebView2Loader | Out-Null', installerBlock);
 const installerBundleBuild = files.windows.indexOf('tauri.windows.installer.conf.json', installerBlock);
+const e2eBlock = files.windows.indexOf("Write-Step 'E2E ampliado");
+const strictProbeThrow = files.windows.indexOf('if ($strictProbeFailure)');
 
 const checks = [
     ['Linux ejecuta la batería estática', files.linux.includes('npm run check')],
@@ -63,6 +65,10 @@ const checks = [
     ['Build Windows cruzada copia los scripts integrados', files.linuxWindows.includes('scripts/containers/docker-manager.sh') && files.linuxWindows.includes('scripts/operations/adb-manager.ps1') && files.linuxWindows.includes('cp "$PROJECT_ROOT/$resource"')],
     ['Build Windows nativa encuentra WebView2Loader de Cargo', files.windows.includes('webview2-com-sys-') && files.windows.includes('out\\\\x64') && files.windows.includes('Get-ChildItem')],
     ['Windows importa el entorno MSVC completo antes de Cargo', files.windows.includes('VsDevCmd.bat') && files.windows.includes('$env:ComSpec') && files.windows.includes('/d /s /c') && files.windows.includes('&& set') && files.windows.includes("Test-Command 'cl.exe'")],
+    ['Build Windows fija el directorio de trabajo y el log del smoke', files.windows.includes('-WorkingDirectory $distDir') && files.windows.includes('$env:LTERMINAL_LOG_FILE = $logPath')],
+    ['Build Windows no corta la batería ante una sonda fallida', files.windows.includes('$failedProbes') && files.windows.includes('se continúa para no ocultar')],
+    ['Build Windows deja el informe E2E en una ruta explícita', files.windows.includes('$env:LTERMINAL_SMOKE_REPORT') && files.windows.includes('winslim-terminal-e2e-')],
+    ['Build Windows deja terminar el E2E antes de cerrar por sondas estrictas', e2eBlock >= 0 && strictProbeThrow > e2eBlock],
     ['Windows prepara WebView2 antes de generar NSIS', installerBlock >= 0 && installerBinaryBuild > installerBlock && installerLoaderPreparation > installerBinaryBuild && installerBundleBuild > installerLoaderPreparation],
     ['Windows rechaza un instalador NSIS truncado', files.windows.includes('Length -lt 1MB') && files.windows.includes('instalador NSIS parece incompleto')],
     ['Windows puede iniciar pruebas Linux cruzadas', files.windows.includes('$CrossLinux') && files.windows.includes('Invoke-CrossLinuxTests')],

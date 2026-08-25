@@ -41,6 +41,7 @@ pub static GROUP_ORDER: &[&str] = &[
     "Lenguajes",
     "Frameworks",
     "Visores de archivos",
+    "Virtualización",
     "Compatibilidad Windows",
     "WSL",
     "Contenedores y Kubernetes",
@@ -64,6 +65,7 @@ const SHELLS_GROUP: &str = "Shells";
 const TOOLS_GROUP: &str = "Sistema y herramientas";
 const LANGUAGES_GROUP: &str = "Lenguajes";
 const FRAMEWORKS_GROUP: &str = "Frameworks";
+const VIRTUALIZATION_GROUP: &str = "Virtualización";
 const WINDOWS_COMPAT_GROUP: &str = "Compatibilidad Windows";
 
 /// Una acción del panel. `shell` es la shell que el comando necesita para
@@ -457,8 +459,22 @@ const fn win(
     }
 }
 
-const QEMU_VERSION: &str = "powershell:$qemu = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue; if ($qemu) { & $qemu.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe') --version } else { exit 1 }";
-const VIRTUALBOX_VERSION: &str = "powershell:$vbox = Get-Command VBoxManage.exe -ErrorAction SilentlyContinue; if ($vbox) { & $vbox.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe') --version } else { exit 1 }";
+// Estas son órdenes de ejecución, no sondas del filtro: no llevan el prefijo
+// interno `powershell:` porque la acción ya está marcada como PowerShell.
+const QEMU_VERSION: &str = "$qemu = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue; if ($qemu) { & $qemu.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe') --version } else { exit 1 }";
+const VIRTUALBOX_VERSION: &str = "$vbox = Get-Command VBoxManage.exe -ErrorAction SilentlyContinue; if ($vbox) { & $vbox.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe') --version } else { exit 1 }";
+// AutoHotkey se instala con ejecutables que no siempre quedan en PATH. La
+// sonda cubre la instalación normal de v2, instalaciones por usuario y v1/v2,
+// pero no da por instalado cualquier archivo llamado "ahk".
+const AUTOHOTKEY_DETECT: &str = "powershell:$paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')); if ((Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue) -or (Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
+const AUTOHOTKEY_VERSION: &str = "$command = Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue; if (-not $command) { $command = Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue }; if ($command) { (Get-Item $command.Source).VersionInfo.ProductVersion } else { $paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')); $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { (Get-Item $path).VersionInfo.ProductVersion } else { exit 1 } }";
+const MSYS2_DETECT: &str = "powershell:$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { (Test-Path (Join-Path $_ 'gcc.exe')) -and (Test-Path (Join-Path $_ 'gfortran.exe')) -and (Test-Path (Join-Path $_ 'gdb.exe')) }) { exit 0 } else { exit 1 }";
+const MSYS2_PACKAGES: &str =
+    "mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-gdb";
+const MSYS2_OCAML_PACKAGE: &str = "mingw-w64-ucrt-x86_64-ocaml";
+const MSYS2_OCAML_DETECT: &str = "powershell:$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { Test-Path (Join-Path $_ 'ocaml.exe') }) { exit 0 } else { exit 1 }";
+const GHCUP_TOOLCHAIN_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghci.exe'), 'C:\\ghcup\\bin\\ghci.exe'); if ((Get-Command ghci.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
+const GHCUP_MANAGER_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghcup.exe'), 'C:\\ghcup\\bin\\ghcup.exe'); if ((Get-Command ghcup.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
 
 #[rustfmt::skip]
 static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
@@ -467,6 +483,20 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     WindowsTool { label_key: Some("tool.gitBash"), ..win("winget-git", "Git + Git Bash", "git", "Git.Git", Some("git --version"), TOOLS_GROUP) },
     win("winget-wt",     "Windows Terminal", "wt",    "Microsoft.WindowsTerminal",      None,                                 TOOLS_GROUP),
     WindowsTool { label_key: Some("tool.nodeLts"), ..win("winget-node", "Node.js LTS", "node", "OpenJS.NodeJS.LTS", Some("node -v; npm -v"), LANGUAGES_GROUP) },
+    WindowsTool {
+        detect: Some(AUTOHOTKEY_DETECT),
+        hint: Some("Instala AutoHotkey v2 para crear y ejecutar scripts .ahk. Incluye el intérprete y las herramientas de desarrollo; el editor se elige aparte."),
+        ..win("winget-autohotkey", "AutoHotkey v2", "AutoHotkey64.exe", "AutoHotkey.AutoHotkey", Some(AUTOHOTKEY_VERSION), LANGUAGES_GROUP)
+    },
+    // Estas familias sí tienen instaladores Windows mantenidos en WinGet; no
+    // se deben perder solo porque no estén en el repositorio de paquetes de
+    // Linux. `check:winget` valida todos estos IDs en el build nativo.
+    win("winget-haxe", "Haxe", "haxe", "HaxeFoundation.Haxe", Some("haxe --version"), LANGUAGES_GROUP),
+    win("winget-octave", "GNU Octave", "octave", "GNU.Octave", Some("octave --version"), LANGUAGES_GROUP),
+    win("winget-racket", "Racket", "racket", "Racket.Racket", Some("racket --version"), LANGUAGES_GROUP),
+    win("winget-sbcl", "Common Lisp · SBCL", "sbcl", "SBCL.SBCL", Some("sbcl --version"), LANGUAGES_GROUP),
+    win("winget-swipl", "Prolog · SWI", "swipl", "SWI-Prolog.SWI-Prolog", Some("swipl --version"), LANGUAGES_GROUP),
+    win("winget-sqlite", "SQLite", "sqlite3", "SQLite.SQLite", Some("sqlite3 --version"), LANGUAGES_GROUP),
     win("winget-mariadb", "MariaDB + InnoDB", "mariadb", "MariaDB.Server", Some("mariadb --version"), LANGUAGES_GROUP),
     win("winget-mysql", "MySQL + InnoDB", "mysql", "Oracle.MySQL", Some("mysql --version"), LANGUAGES_GROUP),
     WindowsTool {
@@ -503,7 +533,6 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-bazel",  "C/C++ · Bazel",  "bazel",  "Bazel.Bazel",                     Some("bazel --version"),               LANGUAGES_GROUP),
     win("winget-ninja",  "C/C++ · Ninja",  "ninja",  "Ninja-build.Ninja",               Some("ninja --version"),               LANGUAGES_GROUP),
     win("winget-meson",  "C/C++ · Meson",  "meson",  "mesonbuild.meson",                Some("meson --version"),               LANGUAGES_GROUP),
-    win("winget-gdb",    "C/C++ · GDB",    "gdb",    "MSYS2.MSYS2",                     Some("gdb --version"),                 LANGUAGES_GROUP),
     win("winget-groovy", "Groovy",          "groovysh", "Apache.Groovy.4",              Some("groovy --version"),              LANGUAGES_GROUP),
     win("winget-jq",     "jq · JSON",        "jq",     "jqlang.jq",                      Some("jq --version"),                  TOOLS_GROUP),
     win("winget-yq",     "yq · YAML",        "yq",     "MikeFarah.yq",                   Some("yq --version"),                  TOOLS_GROUP),
@@ -515,11 +544,11 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-k9s",     "Kubernetes · k9s (interactivo)", "k9s", "Derailed.k9s",       Some("k9s version --short"),           DOCKER_GROUP),
     WindowsTool {
         detect: Some("powershell:if (Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe'))) { exit 0 } else { exit 1 }"),
-        ..win("winget-qemu", "QEMU", "qemu-system-x86_64", "SoftwareFreedomConservancy.QEMU", Some(QEMU_VERSION), WINDOWS_COMPAT_GROUP)
+        ..win("winget-qemu", "QEMU", "qemu-system-x86_64", "SoftwareFreedomConservancy.QEMU", Some(QEMU_VERSION), VIRTUALIZATION_GROUP)
     },
     WindowsTool {
         detect: Some("powershell:if (Get-Command VBoxManage.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe'))) { exit 0 } else { exit 1 }"),
-        ..win("winget-virtualbox", "Oracle VirtualBox", "VBoxManage", "Oracle.VirtualBox", Some(VIRTUALBOX_VERSION), WINDOWS_COMPAT_GROUP)
+        ..win("winget-virtualbox", "Oracle VirtualBox", "VBoxManage", "Oracle.VirtualBox", Some(VIRTUALBOX_VERSION), VIRTUALIZATION_GROUP)
     },
     WindowsTool {
         hint: Some("Requiere WSL2 y normalmente pide reiniciar Windows antes de poder usarse."),
@@ -2957,6 +2986,9 @@ fn windows_actions(
         .chain(WINDOWS_VIEWERS.iter())
         .flat_map(|tool| windows_tool_actions(tool, t))
         .collect();
+    actions.extend(windows_msys2_toolchain_actions());
+    actions.extend(windows_msys2_ocaml_actions());
+    actions.extend(windows_haskell_actions());
     actions.extend(
         WINDOWS_CHOCOLATEY_TOOLS
             .iter()
@@ -3112,6 +3144,168 @@ fn windows_actions(
     actions
 }
 
+/// GCC, GFortran y GDB no son instaladores WinGet independientes fiables en
+/// Windows. MSYS2 sí publica un entorno UCRT64 mantenido y su propio `pacman`;
+/// se instala la base con WinGet, se añaden los tres paquetes y se incorpora
+/// la carpeta `ucrt64\\bin` al PATH del usuario. Así el selector de REPL y
+/// las acciones posteriores ven los ejecutables reales, no una instalación
+/// ficticia de la base de MSYS2.
+fn windows_msys2_toolchain_actions() -> Vec<InstallAction> {
+    let install = format!(
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar la toolchain UCRT64.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; $env:Path = $bin + ';' + $env:Path",
+        winget_install_command("MSYS2.MSYS2")
+    );
+    let update = format!(
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar la toolchain UCRT64.' }}"
+    );
+    let uninstall = format!(
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar la toolchain UCRT64.' }}"
+    );
+    vec![
+        InstallAction::new(
+            "windows-msys2-toolchain",
+            "Instalar GCC, Fortran y GDB (MSYS2 UCRT64)",
+            install,
+        )
+        .short("Instalar con MSYS2 y pacman")
+        .powershell()
+        .group(LANGUAGES_GROUP)
+        .subgroup("MSYS2 UCRT64")
+        .check(Some(MSYS2_DETECT))
+        .hint(
+            "Instala MSYS2 desde WinGet y después GCC, GFortran y GDB desde el repositorio UCRT64. La primera actualización puede pedir ejecutar la acción otra vez si MSYS2 actualiza su núcleo.",
+        ),
+        InstallAction::new(
+            "windows-msys2-toolchain-update",
+            "Actualizar GCC, Fortran y GDB (MSYS2 UCRT64)",
+            update,
+        )
+        .short("Actualizar con pacman")
+        .powershell()
+        .group(LANGUAGES_GROUP)
+        .subgroup("MSYS2 UCRT64")
+        .verb("Actualizar")
+        .requires(Some(MSYS2_DETECT)),
+        InstallAction::new(
+            "windows-msys2-toolchain-uninstall",
+            "Desinstalar GCC, Fortran y GDB (MSYS2 UCRT64)",
+            uninstall,
+        )
+        .short("Desinstalar paquetes de MSYS2")
+        .powershell()
+        .group(LANGUAGES_GROUP)
+        .subgroup("MSYS2 UCRT64")
+        .verb("Desinstalar")
+        .requires(Some(MSYS2_DETECT)),
+        InstallAction::new(
+            "windows-msys2-toolchain-version",
+            "Ver versión de GCC (MSYS2 UCRT64)",
+            "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $gcc = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin\\gcc.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($gcc) { & $gcc --version } else { throw 'GCC de MSYS2 no está instalado.' }",
+        )
+        .short("Ver versión instalada")
+        .powershell()
+        .group(LANGUAGES_GROUP)
+        .subgroup("MSYS2 UCRT64")
+        .verb("Versión")
+        .requires(Some(MSYS2_DETECT)),
+    ]
+}
+
+/// OCaml sí tiene un paquete UCRT64 independiente en MSYS2. Se mantiene como
+/// acción separada para no obligar a quien solo quiere OCaml a instalar GCC,
+/// GFortran y GDB.
+fn windows_msys2_ocaml_actions() -> Vec<InstallAction> {
+    let install = format!(
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar OCaml.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; $env:Path = $bin + ';' + $env:Path",
+        winget_install_command("MSYS2.MSYS2")
+    );
+    let update = format!(
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar OCaml.' }}"
+    );
+    let uninstall = format!(
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar OCaml.' }}"
+    );
+    let version = "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $ocaml = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin\\ocaml.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($ocaml) { & $ocaml -version } else { throw 'OCaml de MSYS2 no está instalado.' }";
+    vec![
+        InstallAction::new(
+            "windows-msys2-ocaml",
+            "OCaml (MSYS2 UCRT64)",
+            install,
+        )
+        .short("Instalar con MSYS2 y pacman")
+        .powershell()
+        .group(LANGUAGES_GROUP)
+        .subgroup("OCaml · MSYS2")
+        .check(Some(MSYS2_OCAML_DETECT))
+        .hint(
+            "Instala la compilación UCRT64 de OCaml desde MSYS2 y añade su carpeta binaria al PATH del usuario. MSYS2 se instala automáticamente si aún no existe.",
+        ),
+        InstallAction::new("windows-msys2-ocaml-update", "Actualizar OCaml (MSYS2)", update)
+            .short("Actualizar con pacman")
+            .powershell()
+            .group(LANGUAGES_GROUP)
+            .subgroup("OCaml · MSYS2")
+            .verb("Actualizar")
+            .requires(Some(MSYS2_OCAML_DETECT)),
+        InstallAction::new(
+            "windows-msys2-ocaml-uninstall",
+            "Desinstalar OCaml (MSYS2)",
+            uninstall,
+        )
+        .short("Desinstalar el paquete")
+        .powershell()
+        .group(LANGUAGES_GROUP)
+        .subgroup("OCaml · MSYS2")
+        .verb("Desinstalar")
+        .requires(Some(MSYS2_OCAML_DETECT)),
+        InstallAction::new(
+            "windows-msys2-ocaml-version",
+            "Ver versión de OCaml",
+            version,
+        )
+        .short("Ver versión instalada")
+        .powershell()
+        .group(LANGUAGES_GROUP)
+        .subgroup("OCaml · MSYS2")
+        .verb("Versión")
+        .requires(Some(MSYS2_OCAML_DETECT)),
+    ]
+}
+
+/// Haskell no tiene un paquete WinGet estable para todo el toolchain. GHCup es
+/// el instalador recomendado por el propio ecosistema y bootstrappea GHC,
+/// Cabal, Stack y HLS en Windows mediante su script oficial de PowerShell.
+fn windows_haskell_actions() -> Vec<InstallAction> {
+    let install = "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; & ([ScriptBlock]::Create((Invoke-WebRequest https://www.haskell.org/ghcup/sh/bootstrap-haskell.ps1 -UseBasicParsing))) -Interactive -DisableCurl";
+    let manager = "$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghcup.exe'), 'C:\\ghcup\\bin\\ghcup.exe'); $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if (-not $path) { $command = Get-Command ghcup.exe -ErrorAction SilentlyContinue; if ($command) { $path = $command.Source } }; if (-not $path) { throw 'GHCup no está instalado.' }; & $path upgrade; if ($LASTEXITCODE -ne 0) { throw 'GHCup no pudo actualizarse.' }";
+    let version = "$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghc.exe'), 'C:\\ghcup\\bin\\ghc.exe'); $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if (-not $path) { $command = Get-Command ghc.exe -ErrorAction SilentlyContinue; if ($command) { $path = $command.Source } }; if (-not $path) { throw 'GHC no está instalado.' }; & $path --version";
+    vec![
+        InstallAction::new("windows-ghcup", "Haskell · GHCup", install)
+            .short("Instalar con GHCup (sitio oficial)")
+            .powershell()
+            .group(LANGUAGES_GROUP)
+            .subgroup("Haskell")
+            .check(Some(GHCUP_TOOLCHAIN_DETECT))
+            .hint(
+                "GHCup es el instalador recomendado por Haskell para Windows. Puede instalar GHC, Cabal, Stack y Haskell Language Server; la primera ejecución es interactiva.",
+            ),
+        InstallAction::new("windows-ghcup-update", "Actualizar Haskell · GHCup", manager)
+            .short("Actualizar el gestor y el toolchain")
+            .powershell()
+            .group(LANGUAGES_GROUP)
+            .subgroup("Haskell")
+            .verb("Actualizar")
+            .requires(Some(GHCUP_MANAGER_DETECT)),
+        InstallAction::new("windows-ghcup-version", "Ver versión de Haskell", version)
+            .short("Ver versión de GHC")
+            .powershell()
+            .group(LANGUAGES_GROUP)
+            .subgroup("Haskell")
+            .verb("Versión")
+            .requires(Some(GHCUP_TOOLCHAIN_DETECT)),
+    ]
+}
+
 /// Capacidades de virtualización que pertenecen al propio Windows. No se
 /// mezclan con QEMU/libvirt/virt-manager: esos siguen siendo el stack Linux o
 /// WSL. En Windows el equivalente real es Hyper-V/Virtual Machine Platform,
@@ -3135,7 +3329,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         )
         .short("Activar la plataforma Hyper-V")
         .powershell()
-        .group(WINDOWS_COMPAT_GROUP)
+        .group(VIRTUALIZATION_GROUP)
         .subgroup("Hyper-V")
         .check(Some(HYPERV))
         .hint("Disponible en Windows Pro, Enterprise y Education; requiere permisos de administrador y normalmente reinicio."),
@@ -3146,7 +3340,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         )
         .short("Activar soporte de máquinas virtuales y WSL2")
         .powershell()
-        .group(WINDOWS_COMPAT_GROUP)
+        .group(VIRTUALIZATION_GROUP)
         .subgroup("Virtual Machine Platform")
         .check(Some(VMP))
         .hint("Es el componente que necesitan WSL2 y varias herramientas de virtualización; puede requerir reinicio."),
@@ -3157,7 +3351,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         )
         .short("Activar entorno desechable de pruebas")
         .powershell()
-        .group(WINDOWS_COMPAT_GROUP)
+        .group(VIRTUALIZATION_GROUP)
         .subgroup("Windows Sandbox")
         .check(Some(SANDBOX))
         .hint("Requiere Windows Pro/Enterprise/Education y virtualización habilitada; necesita reinicio."),
@@ -3168,7 +3362,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         )
         .short("Ver estado de Hyper-V")
         .powershell()
-        .group(WINDOWS_COMPAT_GROUP)
+        .group(VIRTUALIZATION_GROUP)
         .subgroup("Hyper-V")
         .verb("Comprobar")
         .requires(Some(HYPERV)),
@@ -3179,7 +3373,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         )
         .short("Abrir descarga oficial de Broadcom")
         .powershell()
-        .group(WINDOWS_COMPAT_GROUP)
+        .group(VIRTUALIZATION_GROUP)
         .subgroup("VMware Workstation Pro")
         .verb("Abrir")
         .check(Some(VMWARE))
@@ -3194,7 +3388,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         )
         .short("Abrir descarga oficial de actualización")
         .powershell()
-        .group(WINDOWS_COMPAT_GROUP)
+        .group(VIRTUALIZATION_GROUP)
         .subgroup("VMware Workstation Pro")
         .verb("Actualizar")
         .requires(Some(VMWARE))
@@ -3206,7 +3400,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         )
         .short("Ver versión instalada")
         .powershell()
-        .group(WINDOWS_COMPAT_GROUP)
+        .group(VIRTUALIZATION_GROUP)
         .subgroup("VMware Workstation Pro")
         .verb("Versión")
         .requires(Some(VMWARE)),
@@ -4467,6 +4661,76 @@ mod tests {
     }
 
     #[test]
+    fn autohotkey_ofrece_instalador_y_deteccion_fuera_del_path() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let install = buscar(&actions, "winget-autohotkey");
+        assert_eq!(install.group, LANGUAGES_GROUP);
+        assert_eq!(install.check_cmd.as_deref(), Some(AUTOHOTKEY_DETECT));
+        assert!(install.command.contains("AutoHotkey.AutoHotkey"));
+        assert_eq!(
+            buscar(&actions, "winget-autohotkey-version").command,
+            AUTOHOTKEY_VERSION
+        );
+    }
+
+    #[test]
+    fn windows_reincorpora_lenguajes_con_fuente_nativa_o_toolchain_real() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "winget-haxe",
+            "winget-octave",
+            "winget-racket",
+            "winget-sbcl",
+            "winget-swipl",
+            "winget-sqlite",
+        ] {
+            let action = buscar(&actions, id);
+            assert_eq!(action.group, LANGUAGES_GROUP, "{id}");
+            assert!(action.check_cmd.is_some(), "{id} sin detección");
+            assert!(action.command.contains("winget install --id"), "{id}");
+        }
+        let ocaml = buscar(&actions, "windows-msys2-ocaml");
+        assert!(ocaml.command.contains("MSYS2.MSYS2"));
+        assert!(ocaml.command.contains(MSYS2_OCAML_PACKAGE));
+        assert_eq!(ocaml.check_cmd.as_deref(), Some(MSYS2_OCAML_DETECT));
+        let msys2 = buscar(&actions, "windows-msys2-toolchain");
+        assert!(msys2.command.contains("MSYS2.MSYS2"));
+        assert!(msys2.command.contains(MSYS2_PACKAGES));
+        assert!(msys2.command.contains("$env:ProgramFiles"));
+        assert_eq!(msys2.check_cmd.as_deref(), Some(MSYS2_DETECT));
+        for id in [
+            "windows-msys2-toolchain-update",
+            "windows-msys2-toolchain-uninstall",
+            "windows-msys2-toolchain-version",
+        ] {
+            let command = &buscar(&actions, id).command;
+            assert!(
+                command.contains("$env:LOCALAPPDATA"),
+                "{id} no busca la raíz real"
+            );
+            assert!(
+                !command.contains("C:\\msys64\\usr\\bin\\bash.exe"),
+                "{id} fija una ruta"
+            );
+        }
+        let ghcup = buscar(&actions, "windows-ghcup");
+        assert!(ghcup
+            .command
+            .contains("www.haskell.org/ghcup/sh/bootstrap-haskell.ps1"));
+        assert_eq!(ghcup.check_cmd.as_deref(), Some(GHCUP_TOOLCHAIN_DETECT));
+    }
+
+    #[test]
+    fn las_versiones_de_virtualizacion_son_comandos_y_no_sondas_internas() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in ["winget-qemu-version", "winget-virtualbox-version"] {
+            let command = &buscar(&actions, id).command;
+            assert!(!command.starts_with("powershell:"), "{id}: {command}");
+            assert!(command.contains("Get-Command"), "{id}: {command}");
+        }
+    }
+
+    #[test]
     fn instalar_y_actualizar_nunca_se_ofrecen_a_la_vez_para_la_misma_herramienta() {
         let actions = get_install_actions(&contexto("windows"), &t());
         // Instalar se oculta si el comando ya está; actualizar se muestra solo
@@ -4742,6 +5006,28 @@ mod tests {
                 "{id} no debe aparecer en Windows nativo"
             );
         }
+    }
+
+    #[test]
+    fn la_virtualizacion_nativa_de_windows_no_se_presenta_como_compatibilidad() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "winget-qemu",
+            "winget-virtualbox",
+            "windows-hyperv-enable",
+            "windows-vmp-enable",
+            "vmware-download",
+        ] {
+            assert_eq!(buscar(&actions, id).group, VIRTUALIZATION_GROUP, "{id}");
+            assert_eq!(
+                buscar(&actions, id).translated("es").group_key,
+                Some("group.virt"),
+                "{id} sin traducción de virtualización"
+            );
+        }
+        assert!(!actions
+            .iter()
+            .any(|action| action.group == WINDOWS_COMPAT_GROUP));
     }
 
     #[test]
