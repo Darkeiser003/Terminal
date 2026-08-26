@@ -240,7 +240,9 @@ fn detect_windows_shells() -> Vec<Environment> {
         "cmd.exe",
         ShellKind::Cmd,
         &comspec,
-        &[],
+        // /d desactiva AutoRun. Una entrada de AutoRun rota o heredada de
+        // otra terminal no debe poder impedir que nazca la primera pestaña.
+        &["/d"],
     ));
 
     if let Some(ps5) = which("powershell.exe").or_else(|| which("powershell")) {
@@ -770,6 +772,17 @@ mod tests {
                 "{id} debe poder cargar el inicializador temporal sin cambiar la política global"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_desactiva_autorun_al_abrir_la_terminal() {
+        let envs = detect_windows_shells();
+        let cmd = envs
+            .iter()
+            .find(|env| env.id == "cmd")
+            .expect("cmd detectado");
+        assert_eq!(cmd.args, vec!["/d"]);
     }
 
     #[test]

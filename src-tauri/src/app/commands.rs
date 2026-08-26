@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,6 +20,8 @@ use crate::preferences::{
 use crate::state::AppState;
 use crate::tabs::{TabList, TabSummary, MAX_PTY_INPUT_CHARS};
 use crate::{i18n, identity, logger, settings};
+
+static SMOKE_EXIT_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 // ---- Pestañas (`tabs:*`) ----
 
@@ -75,12 +78,43 @@ pub fn tabs_ready(app: AppHandle, state: State<'_, Arc<AppState>>, tab_id: Strin
 /// La build usa el token de entorno para distinguir este arranque de logs
 /// antiguos: que el proceso siga vivo no demuestra que la interfaz funcione.
 #[tauri::command]
-pub fn frontend_ready(tab_id: String) {
+pub fn frontend_ready(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<(), String> {
     let smoke_token = std::env::var("LTERMINAL_SMOKE_TOKEN").ok();
+    if !state.tabs.has_session(&tab_id) {
+        // Montar xterm no demuestra que la shell ni el PTY hayan arrancado.
+        // En particular, un ConPTY/DLL roto podía dejar el frontend visible y
+        // hacer que el build creyera que el smoke había pasado.
+        log_error!(
+            "Frontend preparado pero sin sesión PTY",
+            serde_json::json!({ "tabId": tab_id, "smokeToken": smoke_token })
+        );
+        return Err("La sesión PTY no está disponible todavía".into());
+    }
     log_info!(
         "Frontend y terminal preparados",
         serde_json::json!({ "tabId": tab_id, "smokeToken": smoke_token })
     );
+    // El build de Windows arranca una instancia temporal. Cerrar el proceso
+    // desde PowerShell con TerminateProcess mientras el hijo aún está
+    // conectando al ConPTY provoca precisamente el diálogo 0xc0000142 que
+    // aparenta ser una DLL rota. Pedimos una salida normal, que pasa por
+    // `tabs.shutdown()` y suelta primero la shell y el pseudoterminal.
+    if std::env::var("LTERMINAL_SMOKE_AUTO_EXIT").as_deref() == Ok("1")
+        && !SMOKE_EXIT_SCHEDULED.swap(true, Ordering::AcqRel)
+    {
+        let app = app.clone();
+        let _ = std::thread::Builder::new()
+            .name("smoke-graceful-exit".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                app.exit(0);
+            });
+    }
+    Ok(())
 }
 
 // ---- pty (`pty-*`) ----

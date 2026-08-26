@@ -81,6 +81,87 @@ function Assert-E2eReport {
     }
 }
 
+function Show-SmokeDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Token
+    )
+    Write-Err "El smoke no confirmó el arranque completo. Log de esta ejecución: $Path"
+    if (-not (Test-Path $Path -PathType Leaf)) {
+        Write-Err 'No se creó main.log: el proceso pudo fallar antes de inicializar Rust/WebView2, o APPDATA no es escribible.'
+        return
+    }
+    $text = (Get-Content $Path -Tail 300 -ErrorAction SilentlyContinue) -join "`n"
+    if (-not [string]::IsNullOrWhiteSpace($Token)) {
+        $tokenLine = $text -split "`r?`n" |
+            Where-Object { $_ -match [regex]::Escape($Token) } |
+            Select-Object -First 1
+        $sessionMatch = if ($tokenLine) {
+            [regex]::Match($tokenLine, '^\[[^\]]+\] \[([^\]]+)\] ')
+        }
+        if ($sessionMatch -and $sessionMatch.Success) {
+            $session = [regex]::Escape($sessionMatch.Groups[1].Value)
+            $text = ($text -split "`r?`n" |
+                Where-Object { $_ -match "\[$session\]" }) -join "`n"
+        }
+    }
+    $markers = @(
+        @{ Name = 'ARRANQUE'; Pattern = 'ARRANQUE' },
+        @{ Name = 'Ventana inicial'; Pattern = 'Ventana inicial mostrada' },
+        @{ Name = 'PTY preparado'; Pattern = 'Preparando pty' },
+        @{ Name = 'PTY creado'; Pattern = 'pty spawneado' },
+        @{ Name = 'Error de PTY'; Pattern = 'No se pudo spawnear el pty|Frontend preparado pero sin sesión PTY' },
+        @{ Name = 'Frontend'; Pattern = 'Frontend y terminal preparados' }
+    )
+    foreach ($marker in $markers) {
+        $state = if ($text -match $marker.Pattern) { 'sí' } else { 'no' }
+        Write-Host "      $($marker.Name): $state" -ForegroundColor DarkGray
+    }
+    if ($text -match '0xC0000142|STATUS_DLL_INIT_FAILED|DLL_INIT_FAILED') {
+        Write-Err 'El log contiene STATUS_DLL_INIT_FAILED (0xC0000142): el fallo está en la inicialización de una DLL/proceso hijo, no en la batería WebDriver.'
+        Write-Err 'Comprueba especialmente conpty.dll/OpenConsole.exe, WebView2Loader.dll y el cmd.exe del sistema.'
+    } elseif ($text -match 'No se pudo spawnear el pty|Frontend preparado pero sin sesión PTY') {
+        Write-Err 'La ventana sí llegó a iniciar, pero la primera shell no consiguió crear un PTY; por eso el E2E no se lanza.'
+    } elseif ($text -notmatch 'Ventana inicial mostrada') {
+        Write-Err 'No se confirmó la ventana inicial; el fallo está antes del frontend (normalmente WebView2 o el ejecutable).'
+    } else {
+        Write-Err 'La ventana está viva, pero no confirmó frontend + PTY dentro del tiempo permitido.'
+    }
+    Write-Host '      Últimas líneas del log:' -ForegroundColor DarkGray
+    Get-Content $Path -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "        $_" -ForegroundColor DarkGray
+    }
+}
+
+function Test-SmokeReady {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Token
+    )
+    if (-not (Test-Path $Path -PathType Leaf)) {
+        return $false
+    }
+    $text = (Get-Content $Path -Tail 300 -ErrorAction SilentlyContinue) -join "`n"
+    $tokenLine = $text -split "`r?`n" |
+        Where-Object { $_ -match [regex]::Escape($Token) } |
+        Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($tokenLine)) {
+        return $false
+    }
+    $sessionMatch = [regex]::Match($tokenLine, '^\[[^\]]+\] \[([^\]]+)\] ')
+    if (-not $sessionMatch.Success) {
+        return $false
+    }
+    $session = [regex]::Escape($sessionMatch.Groups[1].Value)
+    $current = ($text -split "`r?`n" |
+        Where-Object { $_ -match "\[$session\]" }) -join "`n"
+    # El token también aparece en el marcador de error «sin sesión PTY». Solo
+    # el hito de éxito de ESTA sesión prueba frontend + xterm + PTY real; los
+    # errores de una ejecución anterior no contaminan el resultado.
+    return $current -match 'Frontend y terminal preparados' -and
+        $current -notmatch 'Frontend preparado pero sin sesión PTY'
+}
+
 function Test-Command ($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
@@ -679,9 +760,14 @@ $smokeToken = "windows-build-$([guid]::NewGuid().ToString('N'))"
 $logPath = Join-Path $env:APPDATA 'winslim-terminal\logs\main.log'
 $previousSmokeToken = $env:LTERMINAL_SMOKE_TOKEN
 $previousLogFile = $env:LTERMINAL_LOG_FILE
+$previousSmokeAutoExit = $env:LTERMINAL_SMOKE_AUTO_EXIT
 $process = $null
 try {
     $env:LTERMINAL_SMOKE_TOKEN = $smokeToken
+    # La app debe cerrar su PTY de forma ordenada. TerminateProcess sobre el
+    # padre mientras cmd.exe aún conecta al pseudoterminal genera el diálogo
+    # STATUS_DLL_INIT_FAILED (0xc0000142) aunque las DLL sean correctas.
+    $env:LTERMINAL_SMOKE_AUTO_EXIT = '1'
     # Resource-dir, WebView2 y los scripts deben resolverse contra la carpeta
     # desempaquetada, no contra la carpeta desde la que se lanzó PowerShell.
     $env:LTERMINAL_LOG_FILE = $logPath
@@ -691,26 +777,36 @@ try {
         Start-Sleep -Seconds 1
         $process.Refresh()
         if ($process.HasExited) {
-            Write-Err "La aplicacion se cerro sola con codigo $($process.ExitCode)."
-            if (Test-Path $logPath) { Get-Content $logPath -Tail 80 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray } }
-            throw 'La build compila pero no arranca. Revisa el log en %APPDATA%\winslim-terminal\logs.'
-        }
-        if (Test-Path $logPath) {
-            $recentLog = Get-Content $logPath -Tail 200 -ErrorAction SilentlyContinue
-            if (($recentLog -join "`n") -match [regex]::Escape($smokeToken)) {
+            if (Test-SmokeReady $logPath $smokeToken) {
                 $ready = $true
                 break
             }
+            Write-Err "La aplicacion se cerro sola con codigo $($process.ExitCode)."
+            Show-SmokeDiagnostics $logPath $smokeToken
+            throw 'La build compila pero no arranca. Revisa el log en %APPDATA%\winslim-terminal\logs.'
+        }
+        if (Test-SmokeReady $logPath $smokeToken) {
+            $ready = $true
+            break
         }
     }
     if (-not $ready) {
-        if (Test-Path $logPath) { Get-Content $logPath -Tail 80 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray } }
+        Show-SmokeDiagnostics $logPath $smokeToken
         throw "La ventana siguio viva, pero frontend/xterm/PTY no confirmaron el arranque en 30 s. Revisa $logPath."
     }
     Write-Ok 'Frontend, terminal y PTY confirmaron el arranque'
 } finally {
     if ($process -and -not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        # Dar tiempo a la salida solicitada por frontend_ready. Solo se fuerza
+        # el proceso si una versión antigua o un cierre defectuoso no responde.
+        for ($wait = 0; $wait -lt 20 -and -not $process.HasExited; $wait++) {
+            Start-Sleep -Milliseconds 250
+            $process.Refresh()
+        }
+        if (-not $process.HasExited) {
+            Write-Warn 'La app no respondió al cierre ordenado del smoke; se fuerza el cierre como último recurso.'
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
     }
     if ($null -eq $previousSmokeToken) {
         Remove-Item Env:LTERMINAL_SMOKE_TOKEN -ErrorAction SilentlyContinue
@@ -721,6 +817,11 @@ try {
         Remove-Item Env:LTERMINAL_LOG_FILE -ErrorAction SilentlyContinue
     } else {
         $env:LTERMINAL_LOG_FILE = $previousLogFile
+    }
+    if ($null -eq $previousSmokeAutoExit) {
+        Remove-Item Env:LTERMINAL_SMOKE_AUTO_EXIT -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_SMOKE_AUTO_EXIT = $previousSmokeAutoExit
     }
 }
 

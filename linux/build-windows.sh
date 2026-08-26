@@ -35,6 +35,7 @@ AUTO_INSTALL=1
 RUN_WINE=0
 WINE_REPEATS=1
 SKIP_CHECKS=0
+ALLOW_OFFLINE_CHECKS=0
 CLEAN=0
 
 while [ "$#" -gt 0 ]; do
@@ -63,9 +64,10 @@ while [ "$#" -gt 0 ]; do
             RUN_WINE=1
             ;;
         --skip-checks) SKIP_CHECKS=1 ;;
+        --allow-offline-checks) ALLOW_OFFLINE_CHECKS=1 ;;
         --clean) CLEAN=1 ;;
         -h|--help)
-            echo "Uso: $0 [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--no-install] [--clean]"
+            echo "Uso: $0 [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean]"
             exit 0
             ;;
         *)
@@ -80,6 +82,13 @@ step() { printf '\n==> %s\n' "$1"; }
 ok() { printf '    OK: %s\n' "$1"; }
 warn() { printf '    AVISO: %s\n' "$1" >&2; }
 fail() { printf '    ERROR: %s\n' "$1" >&2; exit 1; }
+
+if [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ]; then
+    export LTERMINAL_LINK_CHECK=warn
+    export LTERMINAL_INSTALL_SOURCE_CHECK=warn
+    export LTERMINAL_WINGET_CHECK=warn
+    warn "Comprobaciones externas en modo aviso; se mantienen las comprobaciones locales."
+fi
 
 package_manager() {
     local manager
@@ -180,7 +189,7 @@ run_wine_smoke() {
     fi
     command -v wine >/dev/null 2>&1 || fail "No se encontró Wine para ejecutar el smoke."
 
-    local prefix smoke_dir smoke_log code owns_prefix webview_key
+    local prefix smoke_dir wine_log app_log app_log_win code owns_prefix webview_key smoke_token
     owns_prefix=0
     if [ -n "${WINE_SMOKE_PREFIX:-}" ]; then
         prefix="$WINE_SMOKE_PREFIX"
@@ -188,11 +197,13 @@ run_wine_smoke() {
     else
         smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/lterminal-wine-smoke.XXXXXX")"
         prefix="$smoke_dir/prefix"
-        smoke_log="$smoke_dir/wine.log"
+        wine_log="$smoke_dir/wine.log"
+        app_log="$smoke_dir/app.log"
         mkdir -p "$prefix"
         owns_prefix=1
     fi
-    smoke_log="${smoke_log:-$(mktemp "${TMPDIR:-/tmp}/lterminal-wine-smoke-log.XXXXXX")}"
+    wine_log="${wine_log:-$(mktemp "${TMPDIR:-/tmp}/lterminal-wine-smoke-log.XXXXXX")}"
+    app_log="${app_log:-$(mktemp "${TMPDIR:-/tmp}/lterminal-wine-smoke-app-log.XXXXXX")}"
 
     webview_key=''
     for candidate in \
@@ -206,29 +217,61 @@ run_wine_smoke() {
     done
     if [ -z "$webview_key" ]; then
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
-        [ "$owns_prefix" -eq 0 ] && rm -f "$smoke_log"
+        [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
         fail "El prefijo Wine no tiene WebView2 Runtime. Instálalo en el mismo prefijo y reintenta con WINE_SMOKE_PREFIX=/ruta/al/prefijo; WebView2Loader.dll no sustituye al runtime."
     fi
 
-    warn "Smoke Windows bajo Wine: el proceso se mantiene abierto hasta el timeout si la ventana carga correctamente."
+    smoke_token="windows-cross-$$-$(date +%s%N)"
+    app_log_win="Z:${app_log//\//\\}"
+    warn "Smoke Windows bajo Wine: se espera el marcador de frontend + PTY y una salida ordenada."
     set +e
-    WINEPREFIX="$prefix" WINEDEBUG=+loaddll timeout --foreground 20s wine "Z:${EXE//\//\\}" >"$smoke_log" 2>&1
+    LTERMINAL_SMOKE_TOKEN="$smoke_token" \
+        LTERMINAL_SMOKE_AUTO_EXIT=1 \
+        LTERMINAL_LOG_FILE="$app_log_win" \
+        WINEPREFIX="$prefix" WINEDEBUG=+loaddll timeout --foreground 30s wine "Z:${EXE//\//\\}" >"$wine_log" 2>&1
     code=$?
     set -e
-    if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
-        sed 's/^/      /' "$smoke_log" >&2 || true
+    if [ "$code" -ne 0 ]; then
+        sed 's/^/      /' "$wine_log" >&2 || true
+        echo "      Log de la app:" >&2
+        sed 's/^/        /' "$app_log" >&2 || true
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
-        [ "$owns_prefix" -eq 0 ] && rm -f "$smoke_log"
-        fail "El ejecutable Windows terminó bajo Wine con código $code."
+        [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
+        fail "El smoke Windows bajo Wine no terminó limpiamente (código $code)."
     fi
-    if ! grep -Eiq 'WebView2Loader(\.dll)?' "$smoke_log"; then
-        sed 's/^/      /' "$smoke_log" >&2 || true
+    if ! grep -Eiq 'WebView2Loader(\.dll)?' "$wine_log"; then
+        sed 's/^/      /' "$wine_log" >&2 || true
+        echo "      Log de la app:" >&2
+        sed 's/^/        /' "$app_log" >&2 || true
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
-        [ "$owns_prefix" -eq 0 ] && rm -f "$smoke_log"
+        [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
         fail "Wine mantuvo el proceso, pero no llegó a cargar WebView2Loader.dll."
     fi
+    for marker in "\"smokeToken\":\"$smoke_token\"" 'Ventana inicial mostrada' 'pty spawneado' 'Frontend y terminal preparados'; do
+        if ! grep -Fq "$marker" "$app_log"; then
+            echo "      Log de la app:" >&2
+            sed 's/^/        /' "$app_log" >&2 || true
+            [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
+            [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
+            fail "El smoke Windows bajo Wine no registró el hito: $marker"
+        fi
+    done
+    if grep -Fq 'Frontend preparado pero sin sesión PTY' "$app_log"; then
+        echo "      Log de la app:" >&2
+        sed 's/^/        /' "$app_log" >&2 || true
+        [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
+        [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
+        fail "El smoke Windows bajo Wine detectó frontend sin sesión PTY."
+    fi
+    if grep -Fq '[ERROR]' "$app_log"; then
+        echo "      Log de la app:" >&2
+        sed 's/^/        /' "$app_log" >&2 || true
+        [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
+        [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
+        fail "El smoke Windows bajo Wine dejó errores en la sesión de arranque."
+    fi
     [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
-    [ "$owns_prefix" -eq 0 ] && rm -f "$smoke_log"
+    [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
     ok "Smoke Windows bajo Wine completado (código $code)"
 }
 
@@ -276,25 +319,18 @@ for asset in conpty.dll OpenConsole.exe WebView2Loader.dll; do
     [ -f "$RELEASE_DIR/$asset" ] || fail "Falta el recurso Windows $asset junto al ejecutable."
 done
 # La build cruzada no usa el bundler NSIS, así que replica el árbol de recursos
-# que la build nativa copia a la carpeta portable. Sin esto el ejecutable abre,
-# pero la Biblioteca no encuentra los scripts integrados bajo resource_dir/scripts.
-for resource in \
-    scripts/containers/docker-manager.sh \
-    scripts/containers/kubernetes-manager.sh \
-    scripts/operations/docker-manager.ps1 \
-    scripts/operations/kubernetes-manager.ps1 \
-    scripts/operations/ssh-manager.sh \
-    scripts/operations/service-manager.sh \
-    scripts/operations/network-manager.sh \
-    scripts/operations/adb-manager.sh \
-    scripts/operations/ssh-manager.ps1 \
-    scripts/operations/service-manager.ps1 \
-    scripts/operations/network-manager.ps1 \
-    scripts/operations/adb-manager.ps1; do
+# que la build nativa copia a la carpeta portable. La lista sale del manifiesto
+# base, no de una copia paralela que pueda olvidar el siguiente script integrado.
+while IFS=$'\t' read -r source destination; do
+    [ -n "$source" ] && [ -n "$destination" ] || continue
+    case "$source" in
+        ../scripts/*) resource="${source#../}" ;;
+        *) fail "El recurso Windows del manifiesto sale de la carpeta del proyecto: $source" ;;
+    esac
     [ -f "$PROJECT_ROOT/$resource" ] || fail "Falta el recurso empaquetable $resource."
-    mkdir -p "$RELEASE_DIR/$(dirname "$resource")"
-    cp "$PROJECT_ROOT/$resource" "$RELEASE_DIR/$resource"
-done
+    mkdir -p "$RELEASE_DIR/$(dirname "$destination")"
+    cp "$PROJECT_ROOT/$resource" "$RELEASE_DIR/$destination"
+done < <(node -e 'const fs=require("fs"); const resources=require("./src-tauri/tauri.conf.json").bundle?.resources ?? {}; for (const [source,destination] of Object.entries(resources)) process.stdout.write(`${source}\t${destination}\n`);')
 if command -v file >/dev/null 2>&1; then
     file "$EXE" | grep -Eq 'PE32\+.*x86-64' || fail "$EXE no parece un ejecutable Windows x64."
 fi

@@ -91,9 +91,15 @@ fn resolve_log_file(state: &mut LogState) -> Option<PathBuf> {
     if let Some(existing) = &state.path {
         return Some(existing.clone());
     }
-    let dir = paths::user_data_dir().join("logs");
-    fs::create_dir_all(&dir).ok()?;
-    let file = dir.join("main.log");
+    // Los builds y los E2E pueden fijar una ruta por ejecución para no leer un
+    // log acumulado de otra instalación. En uso normal no existe esta
+    // variable y se mantiene la ruta estable de usuario.
+    let file = std::env::var_os("LTERMINAL_LOG_FILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paths::user_data_dir().join("logs").join("main.log"));
+    let dir = file.parent()?;
+    fs::create_dir_all(dir).ok()?;
     state.path = Some(file.clone());
     Some(file)
 }

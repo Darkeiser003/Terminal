@@ -662,6 +662,17 @@ impl TabManager {
         let exe = env.exe.clone();
         let args = env.args.clone();
         let cwd = spawn_dir.clone();
+        log_info!(
+            "Preparando pty",
+            serde_json::json!({
+                "tabId": tab_id,
+                "envId": env.id,
+                "exe": exe,
+                "args": args,
+                "cwd": cwd.to_string_lossy(),
+                "sideloadedConpty": crate::pty::sideloaded_conpty().map(|path| path.to_string_lossy().to_string()),
+            })
+        );
         let (spawn_tx, spawn_rx) = std::sync::mpsc::sync_channel(1);
         let spawn_thread = std::thread::Builder::new()
             .name(format!("pty-spawn-{tab_id}"))

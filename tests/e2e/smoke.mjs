@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process';
 import { access, readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
@@ -71,7 +71,7 @@ const phaseTimings = [];
 let phaseStartedAt = smokeStartedAt;
 let phaseName = 'driver';
 const smokeReportPath = process.env.LTERMINAL_SMOKE_REPORT
-    ?? join('/tmp', `lterminal-smoke-${smokeToken}.json`);
+    ?? join(tmpdir(), `lterminal-smoke-${smokeToken}.json`);
 const smokeReport = {
     schemaVersion: 1,
     token: smokeToken,
@@ -665,6 +665,7 @@ async function assertCurrentLog() {
         'Ventana inicial mostrada',
         'Primera terminal preparada',
         'Frontend y terminal preparados',
+        'pty spawneado',
         'Banner inicial preparado',
     ]) {
         if (!current.some((line) => line.includes(marker))) {

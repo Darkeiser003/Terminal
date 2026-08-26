@@ -54,6 +54,7 @@ export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 CLEAN=0
 NO_RUN=0
 SKIP_CHECKS=0
+ALLOW_OFFLINE_CHECKS=0
 AUTO_INSTALL=1
 VERSION_OVERRIDE=""
 EXTENDED_TESTS=1
@@ -66,6 +67,7 @@ while [ "$#" -gt 0 ]; do
         --clean)       CLEAN=1 ;;
         --no-run)      NO_RUN=1 ;;
         --skip-checks) SKIP_CHECKS=1 ;;
+        --allow-offline-checks) ALLOW_OFFLINE_CHECKS=1 ;;
         --no-install)  AUTO_INSTALL=0 ;;
         --extended-tests) EXTENDED_TESTS=1 ;;
         --full-tests)     EXTENDED_TESTS=1 ;;
@@ -93,7 +95,7 @@ while [ "$#" -gt 0 ]; do
             VERSION_OVERRIDE="$1"
             ;;
         -h|--help)
-            echo "Uso: $0 [--clean] [--skip-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
+            echo "Uso: $0 [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
             exit 0
             ;;
         *)
@@ -108,6 +110,13 @@ step() { CURRENT_STEP="$1"; printf '\n\033[36m==> %s\033[0m\n' "$1"; }
 ok()   { printf '    \033[32mOK:\033[0m %s\n' "$1"; }
 warn() { printf '    \033[33mAVISO:\033[0m %s\n' "$1"; }
 err()  { printf '    \033[31mERROR:\033[0m %s\n' "$1" >&2; }
+
+if [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ]; then
+    export LTERMINAL_LINK_CHECK=warn
+    export LTERMINAL_INSTALL_SOURCE_CHECK=warn
+    export LTERMINAL_WINGET_CHECK=warn
+    warn "Comprobaciones externas en modo aviso; se mantienen las comprobaciones locales."
+fi
 
 # Tener DISPLAY o WAYLAND_DISPLAY definido no garantiza que esta shell pueda
 # hablar con el servidor gráfico. En contenedores y sesiones remotas las
@@ -169,6 +178,20 @@ cleanup_smoke_process() {
     kill -KILL "$pid" >/dev/null 2>&1 || true
     wait "$pid" >/dev/null 2>&1 || true
     SMOKE_PID=""
+}
+
+smoke_log_ready() {
+    local path="$1"
+    local token="$2"
+    [ -f "$path" ] || return 1
+    grep -Fq "\"smokeToken\":\"$token\"" "$path" || return 1
+    # Un token también se escribe en el error de frontend sin PTY. Exigir los
+    # hitos de la misma ejecución evita que el build pase solo porque WebView
+    # llegó a pintar una ventana o porque quedó un log antiguo.
+    grep -Fq "Ventana inicial mostrada" "$path" || return 1
+    grep -Fq "pty spawneado" "$path" || return 1
+    grep -Fq "Frontend y terminal preparados" "$path" || return 1
+    ! grep -Fq "Frontend preparado pero sin sesión PTY" "$path"
 }
 
 on_error() {
@@ -1367,7 +1390,8 @@ if ! graphical_session_available; then
     warn "La sesión gráfica no es accesible desde esta shell: no se ejecuta el smoke visual. El AppImage sí se generó."
 else
     SMOKE_LOG="$(mktemp)"
-    SMOKE_TOKEN="build-$$-$(date +%s)"
+    SMOKE_APP_LOG="$(mktemp)"
+    SMOKE_TOKEN="build-$$-$(date +%s%N)"
     # El smoke debe ser idéntico en máquinas con FUSE y sin FUSE. El montaje
     # directo puede heredar librerías/variables del host y producir un falso
     # fallo antes de crear la PTY; la extracción temporal es el camino
@@ -1377,7 +1401,8 @@ else
     setsid env \
         APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
         WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}" \
-        LTERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
+        LTERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" \
+        LTERMINAL_LOG_FILE="$SMOKE_APP_LOG" "$APPIMAGE" >"$SMOKE_LOG" 2>&1 &
     SMOKE_PID=$!
     READY=0
     # El smoke puede esperar más que el usuario: una primera sonda de hardware
@@ -1390,7 +1415,7 @@ else
     fi
     for attempt in $(seq 1 "$SMOKE_READY_TIMEOUT"); do
         if ! kill -0 "$SMOKE_PID" 2>/dev/null; then break; fi
-        if grep -Fq "\"smokeToken\":\"$SMOKE_TOKEN\"" "$HOME/.config/lterminal/logs/main.log" 2>/dev/null; then
+        if smoke_log_ready "$SMOKE_APP_LOG" "$SMOKE_TOKEN"; then
             READY=1
             break
         fi
@@ -1408,6 +1433,7 @@ else
         cleanup_smoke_process
         ok "Backend, frontend, IPC, xterm y primera terminal preparados"
         rm -f "$SMOKE_LOG"
+        rm -f "$SMOKE_APP_LOG"
     else
         cleanup_smoke_process
         err "El AppImage no completó el frontend y la primera terminal; no se publicará."
@@ -1415,9 +1441,10 @@ else
             echo "    Salida de la aplicación:" >&2
             sed 's/^/      /' "$SMOKE_LOG" >&2
         fi
-        echo "    Últimas líneas de $HOME/.config/lterminal/logs/main.log:" >&2
-        tail -n 80 "$HOME/.config/lterminal/logs/main.log" 2>/dev/null | sed 's/^/      /' >&2 || true
+        echo "    Últimas líneas del log de esta ejecución ($SMOKE_APP_LOG):" >&2
+        tail -n 80 "$SMOKE_APP_LOG" 2>/dev/null | sed 's/^/      /' >&2 || true
         rm -f "$SMOKE_LOG"
+        rm -f "$SMOKE_APP_LOG"
         exit 1
     fi
 fi
@@ -1488,6 +1515,7 @@ if [ "$CROSS_WINDOWS" -eq 1 ]; then
     step "Pruebas cruzadas Windows mediante MinGW y Wine"
     cross_args=(--full-tests --wine-repeats 3 --non-interactive)
     [ "$SKIP_CHECKS" -eq 1 ] && cross_args+=(--skip-checks)
+    [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ] && cross_args+=(--allow-offline-checks)
     [ "$AUTO_INSTALL" -eq 0 ] && cross_args+=(--no-install)
     bash "$PROJECT_ROOT/linux/build-windows.sh" "${cross_args[@]}"
     ok "Release Windows x64 compilada y ejecutada repetidamente bajo Wine"

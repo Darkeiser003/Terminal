@@ -15,7 +15,9 @@ const app = read('src/App.svelte');
 const settings = read('src/components/SettingsPanel.svelte');
 const dependencies = read('src/components/DependenciesPanel.svelte');
 const smoke = read('tests/e2e/smoke.mjs');
+const commands = read('src-tauri/src/app/commands.rs');
 const windowsBuild = read('windows/build.ps1');
+const windowsBuildLower = windowsBuild.toLowerCase();
 const actions = read('src-tauri/src/packages/actions.rs');
 const testSurface = read('scripts/verify-test-surface.mjs');
 const spanish = JSON.parse(read('src-tauri/locales/es.json'));
@@ -65,6 +67,8 @@ check('Windows ejecuta E2E antes de fallar por sondas estrictas', e2eIndex >= 0 
 check('Windows fija el log del smoke al directorio de la release', windowsBuild.includes('$env:LTERMINAL_LOG_FILE = $logPath') && windowsBuild.includes('-WorkingDirectory $distDir'));
 check('Windows fija una ruta propia para el informe E2E', windowsBuild.includes('$env:LTERMINAL_SMOKE_REPORT') && windowsBuild.includes('winslim-terminal-e2e-'));
 check('Windows no da por pasado un E2E sin informe y log validados', windowsBuild.includes('Assert-E2eReport') && windowsBuild.includes("$report.status -ne 'passed'") && windowsBuild.includes('$report.logValidated -ne $true'));
+check('El smoke exige una sesión PTY real', smoke.includes("'pty spawneado'") && commands.includes('Frontend preparado pero sin sesión PTY') && commands.includes('Result<(), String>') && windowsBuild.includes('Test-SmokeReady'));
+check('El smoke de Windows cierra el PTY de forma ordenada', windowsBuild.includes('LTERMINAL_SMOKE_AUTO_EXIT') && commands.includes('smoke-graceful-exit') && windowsBuildLower.includes('se fuerza el cierre como último recurso'));
 check('La orden de release Windows solicita pruebas ampliadas', read('package.json').includes('dist:win') && read('package.json').includes('-FullTests') && read('package.json').includes('-InstallE2eDriver'));
 
 // La copia de recursos se deriva del manifiesto, no de una lista paralela que
