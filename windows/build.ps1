@@ -22,6 +22,7 @@ param(
     [switch]$NonInteractive,
     [switch]$FullTests,
     [switch]$StrictTests,
+    [switch]$NoExtendedTests,
     [switch]$CrossLinux
 )
 
@@ -756,6 +757,8 @@ Write-Ok 'Estructura PE x64 y runtime Windows verificados'
 # primer PTY hayan terminado de inicializar. Un token unico debe volver por IPC
 # y quedar escrito en el log antes de permitir publicar la release.
 Write-Step 'Comprobacion de humo (ventana, frontend, terminal y PTY)'
+Write-Host '    Este paso comprueba solo el arranque mínimo y se cerrará automáticamente.' -ForegroundColor DarkGray
+Write-Host '    Las pestañas, menús, acciones y redimensionado se prueban después en E2E ampliado.' -ForegroundColor DarkGray
 $smokeToken = "windows-build-$([guid]::NewGuid().ToString('N'))"
 $logPath = Join-Path $env:APPDATA 'winslim-terminal\logs\main.log'
 $previousSmokeToken = $env:LTERMINAL_SMOKE_TOKEN
@@ -794,7 +797,7 @@ try {
         Show-SmokeDiagnostics $logPath $smokeToken
         throw "La ventana siguio viva, pero frontend/xterm/PTY no confirmaron el arranque en 30 s. Revisa $logPath."
     }
-    Write-Ok 'Frontend, terminal y PTY confirmaron el arranque'
+    Write-Ok 'Smoke mínimo completado: frontend, terminal y PTY confirmaron el arranque'
 } finally {
     if ($process -and -not $process.HasExited) {
         # Dar tiempo a la salida solicitada por frontend_ready. Solo se fuerza
@@ -826,16 +829,29 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# 8b. Pruebas ampliadas opcionales
+# 8b. Pruebas ampliadas
 # ---------------------------------------------------------------------------
 # El smoke ya comprobó ventana, frontend, xterm y PTY. Esta batería adicional
 # comprueba los ejecutables que la aplicación usa para preparar una sesión en
-# Windows. Se pregunta también con -NoRun: compilar sin lanzar la ventana no
-# debe esconder una validación que el usuario pidió explícitamente.
+# Windows y ejecuta el E2E real de WebDriver (pestañas, menús, acciones y
+# redimensionado). En modo no interactivo se ejecuta por defecto: omitirla
+# requiere -NoExtendedTests explícito para que una build no parezca verificada
+# cuando solo arrancó la ventana.
 $runExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
 $strictExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
 $strictProbeFailure = $false
-if (-not $runExtendedTests -and -not $NonInteractive) {
+if ($NoExtendedTests -and ($FullTests.IsPresent -or $StrictTests.IsPresent)) {
+    throw '-NoExtendedTests no se puede combinar con -FullTests ni -StrictTests.'
+}
+if ($NoExtendedTests) {
+    $runExtendedTests = $false
+    Write-Warn 'Batería ampliada omitida por -NoExtendedTests: esta build solo valida el arranque mínimo.'
+} elseif ($runExtendedTests) {
+    Write-Host '    Batería ampliada seleccionada explícitamente.' -ForegroundColor DarkGray
+} elseif ($NonInteractive) {
+    $runExtendedTests = $true
+    Write-Host '    Modo no interactivo: se ejecutará automáticamente la batería ampliada y el E2E.' -ForegroundColor DarkGray
+} else {
     Write-Host '    La build queda a la espera de tu respuesta; no se inicia la batería ampliada automáticamente.' -ForegroundColor Yellow
     $extendedReply = Read-Host '¿Ejecutar también la batería completa de shells y herramientas instaladas? [s/N]'
     $runExtendedTests = $extendedReply -match '^(s|si|sí)$'
@@ -933,9 +949,7 @@ if ($runExtendedTests) {
     }
     Write-Step 'E2E ampliado (WebDriver, ventana, terminal y paneles)'
     if (-not (Test-Command 'tauri-driver')) {
-        $message = 'E2E no se ejecutó: falta tauri-driver. Reintenta con -InstallE2eDriver o instálalo con cargo.'
-        Write-Warn $message
-        if ($strictExtendedTests) { throw $message }
+        throw 'E2E no se ejecutó: falta tauri-driver. Reintenta con -InstallE2eDriver o instálalo con cargo.'
     } else {
         $previousE2eBinary = $env:E2E_BINARY
         $previousE2eReport = $env:LTERMINAL_SMOKE_REPORT
@@ -979,6 +993,12 @@ if ($runExtendedTests) {
 
 if ($CrossLinux) {
     Invoke-CrossLinuxTests
+}
+
+if ($runExtendedTests) {
+    Write-Ok 'Validación completa de Windows: batería de herramientas y E2E ejecutados'
+} else {
+    Write-Warn 'Validación parcial de Windows: solo se ejecutó el smoke mínimo; no se probaron pestañas, menús ni redimensionado.'
 }
 
 # ---------------------------------------------------------------------------

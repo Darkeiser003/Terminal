@@ -12,6 +12,7 @@ REM   build.bat -Clean         borra node_modules y target antes
 REM   build.bat -SkipChecks    salta pruebas, clippy y svelte-check
 REM   build.bat -AllowOfflineChecks  mantiene los tests locales sin bloquear por red
 REM   build.bat -NoRun         no lanza la app al terminar
+REM   build.bat -NoExtendedTests  solo ejecuta el smoke minimo de arranque
 REM   build.bat -CrossLinux     compila y prueba tambien la release Linux en WSL
 
 set "SCRIPT_DIR=%~dp0"

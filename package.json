@@ -14,7 +14,7 @@
     "tauri": "tauri",
     "start": "tauri dev",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun -NonInteractive -FullTests -InstallE2eDriver",
-    "dist:win:fast": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun -NonInteractive",
+    "dist:win:fast": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun -NonInteractive -NoExtendedTests",
     "dist:win:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -Installer -NoRun -NonInteractive -FullTests -InstallE2eDriver",
     "dist:win:linux": "bash linux/build-windows.sh",
     "dist:linux": "bash linux/build.sh --no-run",

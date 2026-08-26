@@ -70,7 +70,7 @@ cualquier entorno gráfico ya tiene.
   (`x86_64-w64-mingw32-gcc`) y, para el smoke opcional, Wine. El script puede
   instalar esos paquetes con el gestor de la distribución.
 
-Para seleccionar la batería E2E al final del build hace falta además
+Para ejecutar la batería E2E al final del build hace falta además
 `tauri-driver`, `WebKitWebDriver` y una sesión gráfica. El builder ofrece
 `--install-e2e-driver` para instalar ambos controladores cuando sea posible
 (en Windows se usa `-InstallE2eDriver`), y el paquete nativo disponible en la distribución,
@@ -145,7 +145,7 @@ directamente en la terminal.
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run dist:win` | Ejecuta la build completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera la carpeta desempaquetada y su ZIP. |
-| `npm run dist:win:fast` | Compila y valida Windows sin la batería ampliada ni el E2E; sirve solo para iteraciones rápidas. |
+| `npm run dist:win:fast` | Compila y valida Windows solo con el smoke mínimo de arranque; omite explícitamente la batería ampliada y el E2E para iteraciones rápidas. |
 | `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido y ejecuta la batería ampliada/E2E. |
 | `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64 y verifica los binarios nativos y los scripts integrados. `--wine-smoke` requiere `WINE_SMOKE_PREFIX` apuntando a un prefijo que ya tenga WebView2 Runtime. |
 | `npm run dist:linux` | Ejecuta la build Linux completa: solicita la versión, valida y genera el AppImage. |
@@ -213,7 +213,8 @@ actualiza todo el sistema; `LTERMINAL_ALLOW_SYSTEM_UPGRADE=1` habilita la
 actualización completa de `pacman` de forma explícita.
 
 En Windows, si se ejecuta en modo interactivo sin `-FullTests`, la build pregunta
-antes de lanzar la batería ampliada. Las sondas de shells y herramientas se
+antes de lanzar la batería ampliada. En modo `-NonInteractive`, Windows la
+ejecuta automáticamente; solo `-NoExtendedTests` la omite. Las sondas de shells y herramientas se
 acumulan aunque alguna falle, de modo que el E2E no se pierde por un único
 `cmd.exe` o runtime ausente; en modo estricto la build informa el fallo después
 del E2E. El informe E2E se guarda en `%TEMP%\winslim-terminal-e2e-<id>.json`.
@@ -765,8 +766,9 @@ y los tests de Rust. Es lo que tiene que estar en verde antes de compilar.
 La build Linux ejecuta por defecto la batería ampliada. Además del smoke test
 de ventana/frontend/PTY, comprueba shells y herramientas instaladas y ejecuta
 E2E con `tauri-driver`; si falta una precondición, el build falla indicando
-cuál es. Se puede omitir con `linux/build.sh --no-extended-tests`; en Windows
-se fuerza con `windows/build.ps1 -FullTests`. La falta del driver E2E sí detiene
+cuál es. Se puede omitir con `linux/build.sh --no-extended-tests` o
+`windows/build.ps1 -NoExtendedTests`; en Windows `-FullTests` la selecciona
+explícitamente. La falta del driver E2E sí detiene
 la batería gráfica. El smoke recorre
 Ajustes, Biblioteca, Proyectos, Entorno y dependencias, acordeones, explorador
 y menú contextual, comandos internos, respuesta de la shell, división y
