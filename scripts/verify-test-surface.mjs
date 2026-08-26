@@ -121,7 +121,13 @@ check('Terminal intercepta cortar y eliminar sobre selección editable', ['delet
 check('Terminal reajusta xterm y banner tras resize y preferencias', ['ResizeObserver', 'refreshBanner', 'fitAndReport', 'pendingBannerSettingsRefresh'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
 check('Restablecer preferencias repinta los banners abiertos', read('src/lib/appState.svelte.ts').includes("winslim:banner-settings-changed") && read('src/components/TerminalPane.svelte').includes('requestAnimationFrame(refreshBannerForSettings)'));
 check('Preferencias informa los fallos de escritura al frontend', read('src-tauri/src/app/commands.rs').includes('Result<PreferencesPayload, String>') && read('src-tauri/src/app/commands.rs').includes('No se pudieron guardar las preferencias en settings.json'));
-check('E2E comprueba y restaura una opción real del banner', read('tests/e2e/smoke.mjs').includes('repintado del banner tras cambiar CPU') && read('tests/e2e/smoke.mjs').includes('restauración de la opción CPU del banner'));
+check('E2E comprueba y restaura una opción real del banner', (() => {
+    const smoke = read('tests/e2e/smoke.mjs');
+    return smoke.includes('settings-banner-cpu')
+        && smoke.includes('banner localizado tras cambiar CPU')
+        && smoke.includes('banner localizado tras restaurar CPU')
+        && smoke.includes("name: 'banner.cpu'");
+})());
 check('E2E comprueba ambos estados de Acciones rápidas y restaura la visibilidad', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
     return smoke.includes(":quick-actions off")
@@ -188,11 +194,23 @@ check('ConPTY solo se considera listo con DLL y host', windowsPlatform.includes(
 check('Cargo compara el contenido de ConPTY y no solo el tamaño', cargoBuild.includes('same_contents') && cargoBuild.includes('std::fs::read(a)') && !cargoBuild.includes('same_size'));
 const dependenciesPanel = read('src/components/DependenciesPanel.svelte');
 const commonPanel = read('src/components/Panel.svelte');
+const installCommands = read('src-tauri/src/packages/commands.rs');
 check('Contador de dependencias cuenta entradas visibles y no acciones internas', dependenciesPanel.includes('visibleComponentCount') && dependenciesPanel.includes('groups.reduce') && !dependenciesPanel.includes('count={refreshing ? undefined : actions.length}'));
 check('Contador de dependencias explica su significado al usuario', dependenciesPanel.includes("deps.visibleComponents") && commonPanel.includes('countLabel') && commonPanel.includes('aria-label={countLabel}'));
+check('La primera lista de dependencias no bloquea en sondas lentas',
+    installCommands.includes('DetectionDepth::Fast')
+        && installCommands.includes('state.install_actions()')
+        && installCommands.includes('cmd.starts_with("ecosystem:")')
+        && installCommands.includes('crate::path_env::which(cmd).is_some()')
+        && installCommands.includes('depth == DetectionDepth::Full'));
+check('Las reaperturas de Dependencias comparten la detección en curso',
+    dependenciesPanel.includes('refreshInFlight ?? api.refreshInstallActions()')
+        && dependenciesPanel.includes('refreshInFlight === request'));
 
 const smoke = read('tests/e2e/smoke.mjs');
 const e2eReportVerifier = read('scripts/verify-e2e-report.mjs');
+const tauriRuntime = read('src-tauri/src/lib.rs');
+const tauriConfig = JSON.parse(read('src-tauri/tauri.conf.json'));
 for (const marker of [
     'E2E_BINARY',
     'tauri-driver',
@@ -209,6 +227,24 @@ check('Smoke E2E valida una respuesta real de la shell', smoke.includes('LTERMIN
 check('Smoke E2E prueba refrescos consecutivos de entornos', smoke.includes('refresh-environments') && smoke.includes('for (let attempt') && smoke.includes('fin de refrescos concurrentes'));
 check('Smoke E2E prueba clics concurrentes de división', smoke.includes('burstCount') && smoke.includes('crearon demasiados paneles'));
 check('Smoke E2E registra tiempos por fase y métricas de aplicación', smoke.includes('phaseTimings') && smoke.includes('E2E tiempos') && smoke.includes('performance'));
+check('E2E valida los límites sobre el viewport y separa la decoración nativa',
+    smoke.includes('const measuredWidth = viewport?.width ?? rect?.width')
+    && smoke.includes('nativeFrameWidth > 64')
+    && smoke.includes('decoración nativa desproporcionada'));
+check('El smoke E2E no abre el inspector visual ni le cede el foco', (() => {
+    const openInspector = tauriRuntime.indexOf('window.open_devtools()');
+    const guard = openInspector < 0 ? '' : tauriRuntime.slice(Math.max(0, openInspector - 250), openInspector);
+    return guard.includes('LTERMINAL_OPEN_DEVTOOLS') && !guard.includes('LTERMINAL_SMOKE_TOKEN');
+})());
+check('Windows conserva la ventana automática y habilita CDP solo durante E2E elevado',
+    tauriConfig.app.windows.some((window) => (window.label ?? 'main') === 'main' && window.create !== false)
+    && tauriRuntime.includes('.config_mut()')
+    && tauriRuntime.includes('.build(context)')
+    && tauriRuntime.includes('window.additional_browser_args = Some')
+    && tauriRuntime.includes('--remote-debugging-port=0')
+    && tauriRuntime.includes('Automatización WebView2 preparada')
+    && tauriRuntime.includes('LTERMINAL_E2E_WEBDRIVER')
+    && smoke.includes("process.env.LTERMINAL_E2E_WEBDRIVER ??= '1'"));
 check('El informe E2E exige todas las fases funcionales en Linux y Windows', [
     'comandos internos y shell',
     'biblioteca y operaciones',

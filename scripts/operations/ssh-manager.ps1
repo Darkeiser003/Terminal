@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Action = 'menu',
     [string[]]$Arguments = @()
 )

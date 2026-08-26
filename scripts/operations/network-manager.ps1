@@ -1,4 +1,4 @@
-param([string]$Action = 'menu')
+﻿param([string]$Action = 'menu')
 
 function Show-Interfaces {
     Write-Host 'Interfaces y direcciones:'

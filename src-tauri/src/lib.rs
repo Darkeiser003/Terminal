@@ -132,6 +132,36 @@ pub fn run() {
         })
     );
 
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "windows")]
+    let context = {
+        let mut context = context;
+        if std::env::var("LTERMINAL_E2E_WEBDRIVER").as_deref() == Ok("1") {
+            if let Some(window) = context
+                .config_mut()
+                .app
+                .windows
+                .iter_mut()
+                .find(|config| config.label == "main")
+            {
+                // EdgeDriver transmite los argumentos mediante entorno, pero
+                // WebView2 puede ignorarlos en un host elevado. Aplicarlos al
+                // contexto usa CoreWebView2EnvironmentOptions y mantiene la
+                // creación automática y estable de la ventana principal.
+                window.additional_browser_args = Some(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                     --remote-debugging-port=0"
+                        .into(),
+                );
+                log_info!(
+                    "Automatización WebView2 preparada",
+                    serde_json::json!({ "remoteDebuggingPort": "dynamic" })
+                );
+            }
+        }
+        context
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -228,14 +258,12 @@ pub fn run() {
                         "startupMs": startup_started.elapsed().as_millis(),
                     })
                 );
-                // El smoke solicita el inspector explícitamente para probar
-                // el caso más exigente. Mantenerlo cerrado en una ejecución
-                // local normal evita que WebKit quite casi toda la altura de
-                // una ventana flotante pequeña.
+                // El inspector visual solo se abre cuando se solicita de forma
+                // explícita. El E2E necesita el protocolo de DevTools disponible,
+                // pero abrir su ventana roba el foco y puede hacer que EdgeDriver
+                // cierre la sesión antes de crearla.
                 #[cfg(debug_assertions)]
-                if std::env::var_os("LTERMINAL_OPEN_DEVTOOLS").is_some()
-                    || std::env::var_os("LTERMINAL_SMOKE_TOKEN").is_some()
-                {
+                if std::env::var_os("LTERMINAL_OPEN_DEVTOOLS").is_some() {
                     window.open_devtools();
                 }
             }
@@ -256,7 +284,7 @@ pub fn run() {
                 }
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("no se pudo construir la aplicación")
         .run(|app, event| {
             if let RunEvent::Exit = event {

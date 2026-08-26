@@ -200,6 +200,162 @@ function Test-Command ($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Get-WebView2RuntimeVersion {
+    # Microsoft documenta estas claves como la fuente canónica para detectar
+    # Evergreen WebView2. No se consulta Edge: una aplicación WebView2 no
+    # necesita que el navegador completo esté instalado.
+    $clientId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    $registryKeys = @(
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$clientId",
+        "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$clientId",
+        "HKCU:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$clientId",
+        "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$clientId"
+    )
+    foreach ($key in $registryKeys) {
+        try {
+            $version = [string](Get-ItemProperty -LiteralPath $key -Name 'pv' -ErrorAction Stop).pv
+            if ($version -match '^\d+\.\d+\.\d+\.\d+$' -and $version -ne '0.0.0.0') {
+                return $version
+            }
+        } catch {
+            # La instalación puede ser por usuario, por máquina, x86 o x64.
+        }
+    }
+    return $null
+}
+
+function Get-MsEdgeDriverVersion {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $LASTEXITCODE = 0
+        try {
+            $output = @(& $Path '--version' 2>&1)
+            $code = [int]$LASTEXITCODE
+        } catch {
+            return $null
+        }
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($code -ne 0) { return $null }
+    $match = [regex]::Match(($output | Out-String), '\b(\d+\.\d+\.\d+\.\d+)\b')
+    if ($match.Success) { return $match.Groups[1].Value }
+    return $null
+}
+
+function Get-VersionBuild {
+    param([string]$Version)
+    if ([string]::IsNullOrWhiteSpace($Version)) { return $null }
+    $parts = $Version.Split('.')
+    if ($parts.Count -lt 3) { return $null }
+    return "$($parts[0]).$($parts[1]).$($parts[2])"
+}
+
+function Test-MsEdgeDriverCompatibility {
+    param(
+        [string]$DriverVersion,
+        [string]$RuntimeVersion
+    )
+    $driverBuild = Get-VersionBuild $DriverVersion
+    $runtimeBuild = Get-VersionBuild $RuntimeVersion
+    return -not [string]::IsNullOrWhiteSpace($driverBuild) -and $driverBuild -eq $runtimeBuild
+}
+
+function Ensure-MsEdgeDriver {
+    $runtimeVersion = Get-WebView2RuntimeVersion
+    $explicitDriver = [string]$env:TAURI_NATIVE_DRIVER
+
+    if (-not [string]::IsNullOrWhiteSpace($explicitDriver)) {
+        if (-not (Test-Path -LiteralPath $explicitDriver -PathType Leaf)) {
+            throw "TAURI_NATIVE_DRIVER no apunta a un archivo: $explicitDriver"
+        }
+        $resolvedDriver = (Resolve-Path -LiteralPath $explicitDriver).Path
+        $driverVersion = Get-MsEdgeDriverVersion $resolvedDriver
+        if ([string]::IsNullOrWhiteSpace($driverVersion)) {
+            throw "El driver indicado en TAURI_NATIVE_DRIVER no responde a --version: $resolvedDriver"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($runtimeVersion) -and
+            -not (Test-MsEdgeDriverCompatibility $driverVersion $runtimeVersion)) {
+            throw "TAURI_NATIVE_DRIVER es $driverVersion, pero WebView2 Runtime es $runtimeVersion. Sus tres primeros componentes deben coincidir para E2E."
+        }
+        Write-Ok "Edge WebDriver explícito ${driverVersion}: $resolvedDriver"
+        return $resolvedDriver
+    }
+
+    $pathDriver = Get-Command 'msedgedriver.exe' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $pathDriver -and (Test-Path -LiteralPath $pathDriver.Source -PathType Leaf)) {
+        $pathVersion = Get-MsEdgeDriverVersion $pathDriver.Source
+        if ([string]::IsNullOrWhiteSpace($runtimeVersion) -or
+            (Test-MsEdgeDriverCompatibility $pathVersion $runtimeVersion)) {
+            Write-Ok "Edge WebDriver $pathVersion disponible en PATH"
+            return $pathDriver.Source
+        }
+        Write-Warn "msedgedriver.exe de PATH es $pathVersion, pero WebView2 Runtime es $runtimeVersion; se preparará el compatible."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        throw 'E2E necesita WebView2 Runtime y un Edge WebDriver compatible. No se encontró el runtime registrado; instala WebView2 o define TAURI_NATIVE_DRIVER.'
+    }
+
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432) {
+        [string]$env:PROCESSOR_ARCHITEW6432
+    } else {
+        [string]$env:PROCESSOR_ARCHITECTURE
+    }
+    $driverPlatform = switch ($architecture.ToUpperInvariant()) {
+        'AMD64' { 'win64' }
+        'ARM64' { 'arm64' }
+        'X86' { 'win32' }
+        default { throw "Arquitectura Windows no compatible con Edge WebDriver: $architecture" }
+    }
+    $runtimeBuild = Get-VersionBuild $runtimeVersion
+    $driverDir = Join-Path $TauriDir "target\e2e-driver\$runtimeBuild"
+    $driverPath = Join-Path $driverDir 'msedgedriver.exe'
+    if (Test-Path -LiteralPath $driverPath -PathType Leaf) {
+        $cachedVersion = Get-MsEdgeDriverVersion $driverPath
+        if (Test-MsEdgeDriverCompatibility $cachedVersion $runtimeVersion) {
+            Write-Ok "Edge WebDriver $cachedVersion recuperado de la caché de build"
+            return $driverPath
+        }
+        Remove-Item -LiteralPath $driverPath -Force
+    }
+
+    New-Item -ItemType Directory -Force -Path $driverDir | Out-Null
+    $archivePath = Join-Path $driverDir 'edgedriver.zip'
+    $releasePath = Join-Path $driverDir 'LATEST_RELEASE'
+    $runtimeMajor = $runtimeBuild.Split('.')[0]
+    $releaseUrl = "https://msedgedriver.microsoft.com/LATEST_RELEASE_${runtimeMajor}_WINDOWS"
+    Write-Warn "Falta Edge WebDriver compatible con WebView2 $runtimeVersion; se descargará sin instalar Microsoft Edge."
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $releaseUrl -OutFile $releasePath -UseBasicParsing
+        $driverVersion = (Get-Content -LiteralPath $releasePath -Raw).Trim().Trim([char]0xFEFF)
+        if (-not (Test-MsEdgeDriverCompatibility $driverVersion $runtimeVersion)) {
+            throw "Microsoft devolvió Edge WebDriver $driverVersion para WebView2 $runtimeVersion."
+        }
+        $driverUrl = "https://msedgedriver.microsoft.com/$driverVersion/edgedriver_$driverPlatform.zip"
+        Invoke-WebRequest -Uri $driverUrl -OutFile $archivePath -UseBasicParsing
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $driverDir -Force
+    } catch {
+        throw "No se pudo preparar Edge WebDriver para WebView2 $runtimeVersion. Conecta el equipo a Internet o define TAURI_NATIVE_DRIVER. $($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $releasePath -Force -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path -LiteralPath $driverPath -PathType Leaf)) {
+        throw "El paquete de Edge WebDriver no contenía msedgedriver.exe: $driverUrl"
+    }
+    $downloadedVersion = Get-MsEdgeDriverVersion $driverPath
+    if (-not (Test-MsEdgeDriverCompatibility $downloadedVersion $runtimeVersion)) {
+        throw "Se descargó Edge WebDriver $downloadedVersion, pero WebView2 Runtime es $runtimeVersion."
+    }
+    Write-Ok "Edge WebDriver $downloadedVersion preparado para WebView2 sin instalar Microsoft Edge"
+    return $driverPath
+}
+
 function Get-WslDistros {
     if (-not (Test-Command 'wsl.exe')) { return @() }
     $previous = $ErrorActionPreference
@@ -1046,14 +1202,20 @@ if ($runExtendedTests) {
         }
         Write-Ok 'tauri-driver instalado y disponible para la batería E2E'
     }
+    $nativeE2eDriver = Ensure-MsEdgeDriver
     Write-Step 'E2E ampliado (WebDriver, ventana, terminal y paneles)'
     if (Test-Command 'tauri-driver') {
         $previousE2eBinary = $env:E2E_BINARY
         $previousE2eReport = $env:LTERMINAL_SMOKE_REPORT
         $previousE2eLogFile = $env:LTERMINAL_LOG_FILE
+        $previousNativeE2eDriver = $env:TAURI_NATIVE_DRIVER
         try {
+            # El smoke activa CDP mediante la API de WebView2 al lanzar la app.
+            # Probar la propia release evita una segunda compilación y asegura
+            # que el ejecutable que se distribuye supera también el E2E.
             $env:E2E_BINARY = Join-Path $distDir 'winslim-terminal.exe'
             $env:LTERMINAL_SMOKE_REPORT = Join-Path $env:TEMP "winslim-terminal-e2e-$([guid]::NewGuid().ToString('N')).json"
+            $env:TAURI_NATIVE_DRIVER = $nativeE2eDriver
             # El binario lanzado por tauri-driver debe escribir en el mismo
             # archivo que el smoke de arranque. Así el informe no puede pasar
             # por leer un log antiguo o una ruta distinta de la release.
@@ -1081,6 +1243,11 @@ if ($runExtendedTests) {
                 Remove-Item Env:LTERMINAL_LOG_FILE -ErrorAction SilentlyContinue
             } else {
                 $env:LTERMINAL_LOG_FILE = $previousE2eLogFile
+            }
+            if ($null -eq $previousNativeE2eDriver) {
+                Remove-Item Env:TAURI_NATIVE_DRIVER -ErrorAction SilentlyContinue
+            } else {
+                $env:TAURI_NATIVE_DRIVER = $previousNativeE2eDriver
             }
         }
     } else {

@@ -72,13 +72,31 @@ cualquier entorno gráfico ya tiene.
 
 Para ejecutar la batería E2E al final del build hace falta además
 `tauri-driver`, un controlador nativo compatible y una sesión gráfica. En
-Windows, donde E2E se ejecuta por defecto, el builder instala automáticamente
-`tauri-driver` con Cargo si falta; `-InstallE2eDriver` sigue aceptándose por
-compatibilidad, pero ya no es necesario. En Linux, `--install-e2e-driver`
+Windows no hace falta instalar el navegador Microsoft Edge: el builder instala
+`tauri-driver` con Cargo si falta, detecta la versión registrada de WebView2
+Runtime y descarga en `src-tauri/target/e2e-driver/` el `msedgedriver.exe`
+compatible. Se puede usar un driver preparado manualmente mediante
+`TAURI_NATIVE_DRIVER=C:\ruta\msedgedriver.exe`; `-InstallE2eDriver` sigue
+aceptándose por compatibilidad, pero ya no es necesario. En Linux, `--install-e2e-driver`
 instala los controladores cuando sea posible y `--e2e-driver
 /ruta/WebKitWebDriver` permite indicar el ejecutable nativo si la distribución
 no lo incluye. Si una precondición no puede prepararse, el script lo indica y
 no marca la release como verificada.
+
+Cada E2E de Windows crea además un perfil WebView2 temporal y exclusivo, que
+EdgeDriver recibe mediante `webviewOptions`. Algunas combinaciones de WebView2
+y EdgeDriver crean `DevToolsActivePort` dentro del subdirectorio `EBWebView`,
+aunque el driver lo busca en la raíz del perfil; durante la creación de sesión
+el smoke activa un puerto de depuración dinámico y refleja ese archivo en la
+ubicación esperada. Así se automatiza la propia release, sin recompilar un
+segundo perfil debug. El protocolo se activa en segundo plano únicamente cuando
+el smoke define `LTERMINAL_E2E_WEBDRIVER=1`, incluso si el build está elevado;
+el inspector visual solo se muestra al definir
+`LTERMINAL_OPEN_DEVTOOLS`, para que no robe el foco de EdgeDriver. El perfil se
+elimina al pasar; si falla, su ruta queda en el informe y en la salida para
+diagnóstico.
+`E2E_WEBVIEW2_USER_DATA_FOLDER` permite fijar una ruta escribible propia cuando
+sea necesario.
 
 ### conpty.dll
 

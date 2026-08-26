@@ -166,6 +166,10 @@
     /** Evita que una detección lenta de una apertura anterior pise la lista de
      *  una apertura posterior del panel. */
     let loadSerial = 0;
+    /** Las reaperturas se unen a la detección que ya está en curso. Lanzar una
+     *  segunda competiría por WSL y los gestores de paquetes; descartarla sin
+     *  esperar, en cambio, dejaba `refreshing` bloqueado al cambiar el serial. */
+    let refreshInFlight: ReturnType<typeof api.refreshInstallActions> | null = null;
 
     export async function load(): Promise<void> {
         const serial = ++loadSerial;
@@ -195,19 +199,23 @@
      *  aquí no borra lo que ya se está enseñando: lo de antes sigue siendo
      *  válido, solo puede estar desactualizado. */
     async function refresh(): Promise<boolean> {
-        if (refreshing) return false;
         const serial = loadSerial;
         refreshing = true;
+        const request = refreshInFlight ?? api.refreshInstallActions();
+        refreshInFlight = request;
         let ok = true;
         try {
-            const list = await api.refreshInstallActions();
+            const list = await request;
             if (serial !== loadSerial) return false;
             actions = list.actions;
         } catch {
             ok = false;
-            error = app.t('deps.detectFailed', 'No se pudo completar la detección del entorno.');
-        } finally {
             if (serial === loadSerial) {
+                error = app.t('deps.detectFailed', 'No se pudo completar la detección del entorno.');
+            }
+        } finally {
+            if (refreshInFlight === request) {
+                refreshInFlight = null;
                 refreshing = false;
             }
         }

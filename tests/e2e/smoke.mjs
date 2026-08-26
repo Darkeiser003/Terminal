@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process';
-import { access, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -9,7 +9,8 @@ import { promisify } from 'node:util';
 // pruebas esté disponible. Desactivarlo hace que el smoke use el compositor
 // normal y evita falsos fallos en máquinas virtuales o escritorios remotos.
 process.env.WEBKIT_DISABLE_DMABUF_RENDERER ??= '1';
-process.env.TAURI_WEBVIEW_AUTOMATION ??= '1';
+process.env.TAURI_WEBVIEW_AUTOMATION ??= 'true';
+process.env.LTERMINAL_E2E_WEBDRIVER ??= '1';
 
 const driverPath = process.env.TAURI_DRIVER ?? 'tauri-driver';
 const nativeDriver = process.env.TAURI_NATIVE_DRIVER;
@@ -66,10 +67,59 @@ const FORCE_SHELL_REFRESH = process.env.E2E_FORCE_SHELL_REFRESH === '1';
 // solo dejó vivo el proceso.
 const smokeToken = process.env.LTERMINAL_SMOKE_TOKEN ?? `e2e-${process.pid}-${Date.now()}`;
 process.env.LTERMINAL_SMOKE_TOKEN = smokeToken;
+// Cada E2E de Windows usa una UDF propia. Así EdgeDriver y el WebView2 que
+// lanza comparten exactamente la ruta donde se crea DevToolsActivePort, sin
+// colisionar con el smoke release ni con una instancia normal de la app.
+const configuredWebViewUserDataFolder = process.env.E2E_WEBVIEW2_USER_DATA_FOLDER;
+const webviewUserDataFolder = process.platform === 'win32'
+    ? configuredWebViewUserDataFolder
+        ?? join(tmpdir(), `winslim-terminal-webview2-e2e-${process.pid}-${Date.now()}`)
+    : null;
+const ownsWebViewUserDataFolder = Boolean(webviewUserDataFolder && !configuredWebViewUserDataFolder);
+if (webviewUserDataFolder) await mkdir(webviewUserDataFolder, { recursive: true });
+let sessionCreationFinished = false;
+
+// Algunas versiones de WebView2 escriben DevToolsActivePort dentro de
+// <UDF>\EBWebView, pero EdgeDriver sigue buscándolo en <UDF>. Mientras se crea
+// la sesión reflejamos el archivo en la ubicación que espera el driver. No se
+// modifica el perfil real y ambos archivos desaparecen con la UDF temporal.
+async function bridgeWebView2DevToolsActivePort() {
+    if (!webviewUserDataFolder) return false;
+    const expectedPath = join(webviewUserDataFolder, 'DevToolsActivePort');
+    const actualPath = join(webviewUserDataFolder, 'EBWebView', 'DevToolsActivePort');
+    while (!sessionCreationFinished) {
+        try {
+            await access(expectedPath);
+            return false;
+        } catch {
+            // EdgeDriver todavía no ve el puerto en la raíz de la UDF.
+        }
+        try {
+            const contents = await readFile(actualPath, 'utf8');
+            if (/^\d+\r?\n\/devtools\/browser\//.test(contents)) {
+                await writeFile(expectedPath, contents, { flag: 'wx' });
+                smokeReport.host.webview2DevToolsPortBridged = true;
+                process.stdout.write(`E2E WebView2: DevToolsActivePort reflejado desde ${actualPath}\n`);
+                return true;
+            }
+        } catch {
+            // WebView2 puede tardar unos instantes en crear el archivo.
+        }
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+    return false;
+}
 
 const driverArgs = ['--port', driverPort, '--native-port', nativePort];
 if (nativeDriver) driverArgs.push('--native-driver', nativeDriver);
 const driver = spawn(driverPath, driverArgs, { stdio: ['ignore', 'inherit', 'inherit'] });
+let driverStartupError = null;
+driver.once('error', (error) => {
+    driverStartupError = new Error(`No se pudo iniciar tauri-driver (${driverPath}): ${error.message}`);
+});
+driver.once('exit', (code, signal) => {
+    driverStartupError ??= new Error(`tauri-driver terminó antes de aceptar sesiones (código=${code ?? 'ninguno'}, señal=${signal ?? 'ninguna'})`);
+});
 const endpoint = `http://127.0.0.1:${driverPort}`;
 const elementKey = 'element-6066-11e4-a52e-4f735466cecf';
 let sessionId;
@@ -89,6 +139,9 @@ const smokeReport = {
         desktop: process.env.XDG_CURRENT_DESKTOP ?? null,
         session: process.env.DESKTOP_SESSION ?? null,
         hyprland: IS_HYPRLAND,
+        webview2UserDataFolder: webviewUserDataFolder,
+        webview2AutomationMode: 'launch',
+        webview2DevToolsPortBridged: false,
     },
     limits: { ...WINDOW_LIMITS, ratio: 0.25 },
     phases: phaseTimings,
@@ -139,8 +192,10 @@ async function request(path, method = 'GET', body) {
 async function waitForDriver() {
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
+        if (driverStartupError) throw driverStartupError;
         try { await request('/status'); return; } catch { await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS)); }
     }
+    if (driverStartupError) throw driverStartupError;
     throw new Error('tauri-driver no respondió en 15 segundos');
 }
 
@@ -545,14 +600,28 @@ async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
 }
 
 function assertWindowBounds(rect, label) {
-    if (!rect || rect.width < WINDOW_LIMITS.minWidth || rect.height < WINDOW_LIMITS.minHeight) {
+    const viewport = rect?.content?.viewport;
+    const measuredWidth = viewport?.width ?? rect?.width;
+    const measuredHeight = viewport?.height ?? rect?.height;
+    if (!rect || measuredWidth < WINDOW_LIMITS.minWidth || measuredHeight < WINDOW_LIMITS.minHeight) {
         throw new Error(`${label} permitió una ventana menor que el mínimo: ${JSON.stringify(rect)}`);
     }
-    if (rect.width > WINDOW_LIMITS.maxWidth || rect.height > WINDOW_LIMITS.maxHeight) {
+    if (measuredWidth > WINDOW_LIMITS.maxWidth || measuredHeight > WINDOW_LIMITS.maxHeight) {
         throw new Error(
             `${label} superó el máximo configurado ${WINDOW_LIMITS.maxWidth}x${WINDOW_LIMITS.maxHeight}: `
             + JSON.stringify(rect),
         );
+    }
+    if (viewport) {
+        const nativeFrameWidth = rect.width - viewport.width;
+        const nativeFrameHeight = rect.height - viewport.height;
+        if (nativeFrameWidth < 0 || nativeFrameHeight < 0
+            || nativeFrameWidth > 64 || nativeFrameHeight > 128) {
+            throw new Error(
+                `${label} devolvió una decoración nativa desproporcionada: `
+                + `${nativeFrameWidth}x${nativeFrameHeight}, rect=${JSON.stringify(rect)}`,
+            );
+        }
     }
 }
 
@@ -766,9 +835,20 @@ async function assertCurrentLog() {
 
 try {
     await waitForDriver();
-    const created = await request('/session', 'POST', {
-        capabilities: { alwaysMatch: { 'tauri:options': { application } } },
-    });
+    const tauriOptions = { application };
+    if (webviewUserDataFolder) {
+        tauriOptions.webviewOptions = { userDataFolder: webviewUserDataFolder };
+    }
+    const devToolsPortBridge = bridgeWebView2DevToolsActivePort();
+    let created;
+    try {
+        created = await request('/session', 'POST', {
+            capabilities: { alwaysMatch: { 'tauri:options': tauriOptions } },
+        });
+    } finally {
+        sessionCreationFinished = true;
+        await devToolsPortBridge;
+    }
     sessionId = created.sessionId;
     markPhase('arranque de interfaz');
     await findWhenReady('.toolbar');
@@ -1205,7 +1285,9 @@ try {
     await waitUntil(async () => {
         const refreshButton = await find('[data-testid="dependency-refresh"]');
         return (await attribute(refreshButton, 'disabled')) === null;
-    }, 20000, 'fin de la re-detección de dependencias');
+    // WSL y los gestores de paquetes usan timeouts deliberados. La lista ya
+    // está pintada; este margen corresponde solo a su verificación exacta.
+    }, 90000, 'fin de la re-detección de dependencias');
     await findWhenReady('.dependency-actions');
     await findWhenReady('.manual-hint');
     const dependencyGroups = await findAll('[data-testid="dependency-group"]');
@@ -1507,6 +1589,18 @@ try {
     smokeReport.finishedAt = new Date().toISOString();
     smokeReport.durationMs = Date.now() - smokeStartedAt;
     smokeReport.phases = phaseTimings;
+    if (ownsWebViewUserDataFolder && smokeReport.status === 'passed') {
+        await rm(webviewUserDataFolder, {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 200,
+        }).catch((error) => {
+            process.stderr.write(`No se pudo limpiar el perfil WebView2 E2E ${webviewUserDataFolder}: ${error}\n`);
+        });
+    } else if (ownsWebViewUserDataFolder && smokeReport.status === 'failed') {
+        process.stderr.write(`Perfil WebView2 E2E conservado para diagnóstico: ${webviewUserDataFolder}\n`);
+    }
     await writeFile(smokeReportPath, `${JSON.stringify(smokeReport, null, 2)}\n`).catch((error) => {
         process.stderr.write(`No se pudo escribir el informe de smoke ${smokeReportPath}: ${error}\n`);
     });

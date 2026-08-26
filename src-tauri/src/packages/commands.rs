@@ -63,13 +63,23 @@ fn crossover_is_installed() -> bool {
     candidates.into_iter().any(|path| path.is_file())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetectionDepth {
+    /// Solo información ya disponible y comprobaciones del PATH. No entra en
+    /// WSL ni ejecuta gestores de paquetes o cmdlets.
+    Fast,
+    /// Inventario exacto: puede arrancar WSL y ejecutar sondas con timeout.
+    Full,
+}
+
 /// Contexto del sistema que necesita el catálogo para no ofrecer nada
-/// imposible. Se calcula igual desde `install_list` y desde `install_run`, para
-/// que la acción que se ejecuta sea exactamente la que se mostró.
-fn install_context(pkg_manager: Option<String>) -> InstallContext {
+/// imposible. La primera pintura no vuelve a entrar en WSL: la detección de
+/// arranque puede tener su caché bloqueada mientras sondea una distro y
+/// `install_list` debe poder responder durante ese trabajo.
+fn install_context(pkg_manager: Option<String>, depth: DetectionDepth) -> InstallContext {
     let platform = crate::platform::host().platform_id().to_string();
     InstallContext {
-        wsl: (platform == "windows")
+        wsl: (platform == "windows" && depth == DetectionDepth::Full)
             .then(|| crate::wsl_env::get_wsl_context(crate::wsl_env::ContextOptions::default())),
         has_snap: platform == "linux" && crate::path_env::is_tool_installed("snap"),
         has_flatpak: platform == "linux" && crate::path_env::is_tool_installed("flatpak"),
@@ -86,12 +96,28 @@ fn install_context(pkg_manager: Option<String>) -> InstallContext {
 /// su herramienta: si pedía `requires_cmd` es que está instalada, y si pedía
 /// `check_cmd` es que no. El panel lo usa para ordenar (lo instalado arriba)
 /// sin repetir ni un solo `where`/`which`.
-fn filter_available_actions(actions: Vec<InstallAction>) -> Vec<InstallAction> {
+fn filter_available_actions_with_depth(
+    actions: Vec<InstallAction>,
+    depth: DetectionDepth,
+) -> Vec<InstallAction> {
     // Varias acciones preguntan por el mismo comando: se resuelve una vez.
     let mut checked: HashMap<String, bool> = HashMap::new();
     let mut ecosystem_inventory: HashMap<String, Option<String>> = HashMap::new();
     let mut installed = |cmd: &str| -> bool {
         *checked.entry(cmd.to_string()).or_insert_with(|| {
+            // La lista inicial tiene que ser inmediata. Estas capacidades solo
+            // se conocen ejecutando procesos con timeouts de varios segundos;
+            // se consideran ausentes provisionalmente y `install_refresh`
+            // sustituye la lista por el resultado exacto en segundo plano.
+            if depth == DetectionDepth::Fast
+                && (cmd.starts_with("module:")
+                    || cmd.starts_with("ecosystem:")
+                    || cmd.starts_with("powershell:")
+                    || cmd.starts_with("flatpak:")
+                    || cmd == "elixir:public_key")
+            {
+                return false;
+            }
             // Algunas dependencias no son ejecutables independientes. Python
             // puede estar instalado y, aun así, no traer pip (por ejemplo en
             // instalaciones mínimas de Debian/Arch o entornos gestionados).
@@ -166,6 +192,11 @@ fn filter_available_actions(actions: Vec<InstallAction>) -> Vec<InstallAction> {
                 crossover_is_installed()
             } else if cmd.eq_ignore_ascii_case("NSudoLC") {
                 crate::platform::nsudo_path().is_some()
+            } else if depth == DetectionDepth::Fast {
+                // `is_tool_installed` valida los alias falsos de Python
+                // ejecutando `--version`. La primera pintura solo consulta el
+                // PATH; el refresco confirmará después si el binario responde.
+                crate::path_env::which(cmd).is_some()
             } else {
                 crate::path_env::is_tool_installed(cmd)
             }
@@ -194,6 +225,10 @@ fn filter_available_actions(actions: Vec<InstallAction>) -> Vec<InstallAction> {
             Some(action)
         })
         .collect()
+}
+
+fn filter_available_actions(actions: Vec<InstallAction>) -> Vec<InstallAction> {
+    filter_available_actions_with_depth(actions, DetectionDepth::Full)
 }
 
 /// Comprueba un paquete de ecosistema sin instalar ni modificar nada.
@@ -362,7 +397,10 @@ pub struct InstallList {
 /// llega después con lo que haya cambiado.
 #[tauri::command(async)]
 pub fn install_list(state: State<'_, Arc<AppState>>) -> InstallList {
-    build_list(&state, state.inventory())
+    if let Some(actions) = state.install_actions() {
+        return InstallList { actions };
+    }
+    build_list(&state, state.inventory(), DetectionDepth::Fast)
 }
 
 /// `install:refresh`: vuelve a detectarlo todo y devuelve la lista al día.
@@ -376,13 +414,20 @@ pub fn install_list(state: State<'_, Arc<AppState>>) -> InstallList {
 pub fn install_refresh(app: AppHandle, state: State<'_, Arc<AppState>>) -> InstallList {
     let inventory = state.refresh_environments();
     let _ = app.emit("envs-updated", inventory.clone());
-    build_list(&state, inventory)
+    build_list(&state, inventory, DetectionDepth::Full)
 }
 
-fn build_list(state: &AppState, inventory: crate::environments::Inventory) -> InstallList {
+fn build_list(
+    state: &AppState,
+    inventory: crate::environments::Inventory,
+    depth: DetectionDepth,
+) -> InstallList {
     let t = Translator::new(&crate::i18n::active_language());
-    let context = install_context(inventory.pkg_manager.clone());
-    let actions = filter_available_actions(install_actions::get_install_actions(&context, &t));
+    let context = install_context(inventory.pkg_manager.clone(), depth);
+    let actions = filter_available_actions_with_depth(
+        install_actions::get_install_actions(&context, &t),
+        depth,
+    );
 
     // El catálogo se genera en español y se traduce aquí, en la frontera con el
     // frontend: las acciones conservan su id, su comando y su orden, que es lo
@@ -545,7 +590,7 @@ pub fn install_run(
     // (la app acaba de arrancar y el panel no se ha abierto), se regenera el
     // catálogo con el mismo contexto para que la acción sea la misma.
     let actions = state.install_actions().unwrap_or_else(|| {
-        let context = install_context(state.inventory().pkg_manager);
+        let context = install_context(state.inventory().pkg_manager, DetectionDepth::Full);
         filter_available_actions(install_actions::get_install_actions(&context, &t))
     });
     let Some(action) = actions.into_iter().find(|action| action.id == action_id) else {
@@ -659,6 +704,28 @@ mod tests {
         ]);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].id, "pip-ausente");
+        assert_eq!(actions[0].installed, Some(false));
+    }
+
+    #[test]
+    fn la_lista_rapida_no_ejecuta_sondas_de_capacidades() {
+        let actions = filter_available_actions_with_depth(
+            vec![
+                accion(
+                    "instalar-capacidad",
+                    Some("ecosystem:npm|programa-que-no-existe|paquete"),
+                    None,
+                ),
+                accion(
+                    "actualizar-capacidad",
+                    None,
+                    Some("powershell:throw 'esta sonda no debe ejecutarse'"),
+                ),
+            ],
+            DetectionDepth::Fast,
+        );
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].id, "instalar-capacidad");
         assert_eq!(actions[0].installed, Some(false));
     }
 

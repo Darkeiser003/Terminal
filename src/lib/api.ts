@@ -313,9 +313,8 @@ export const runProject = (tabId: string, fullName: string) =>
 // ---- Entorno y dependencias adicionales ----
 
 /** El catálogo de acciones que tienen sentido en ESTE sistema, ya traducido y
- *  ordenado por apartados, más el resumen de arriba del panel. Vuelve a
- *  detectar los entornos por el camino: una herramienta recién instalada
- *  aparece sin reiniciar la app. */
+ *  ordenado por apartados. Usa exclusivamente el inventario en memoria y las
+ *  comprobaciones rápidas del PATH para poder pintar el panel al instante. */
 export const listInstallActions = () => invokeLogged<InstallList>('install_list');
 
 /** Vuelve a detectarlo todo (WSL, daemon de Docker, adb, binarios del PATH) y
