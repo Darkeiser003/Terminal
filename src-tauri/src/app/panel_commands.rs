@@ -145,10 +145,19 @@ fn bundled_operation_scripts(app: &AppHandle, categories: &[FileCategory]) -> Ve
         found.extend(scripts::list_all_scripts(&folder, categories));
     }
     found.retain(|entry| is_native_bundled_script(entry, is_windows));
+    let source = bundled_source_label(is_windows);
     for entry in &mut found {
-        entry.source = "LTerminal".to_string();
+        entry.source = source.to_string();
     }
     found
+}
+
+fn bundled_source_label(is_windows: bool) -> &'static str {
+    if is_windows {
+        crate::config::identity::WINDOWS.name
+    } else {
+        crate::config::identity::LINUX.name
+    }
 }
 
 fn is_native_bundled_script(entry: &ScriptEntry, is_windows: bool) -> bool {
@@ -1262,5 +1271,11 @@ mod tests {
         assert!(!is_native_bundled_script(&ps1, false));
         assert!(is_native_bundled_script(&sh, false));
         assert!(!is_native_bundled_script(&sh, true));
+    }
+
+    #[test]
+    fn los_scripts_integrados_usan_la_marca_de_la_build() {
+        assert_eq!(bundled_source_label(false), "LTerminal");
+        assert_eq!(bundled_source_label(true), "WinSlim Terminal");
     }
 }

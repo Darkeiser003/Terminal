@@ -45,12 +45,11 @@ check('La sugerencia no ejecuta una instalación directa', !suggestion.includes(
 check('La etiqueta de sugerencia rellena sus placeholders', suggestion.includes('.replace("{tool}", suggestion.label)') && suggestion.includes('.replace("{app}", suggestion.label)'));
 
 // La detección rápida y la completa son estados distintos. Si se vuelve a
-// cargar todo antes de pintar el inventario o se habilita un lote durante la
-// sustitución, reaparece el salto engañoso de contadores y los clics pierden su
-// elemento WebDriver.
+// cargar todo antes de pintar el inventario, reaparece el salto engañoso de
+// contadores y los clics pierden su elemento WebDriver.
 check('Dependencias pinta la detección rápida antes de refrescar', dependencies.includes('const list = await api.listInstallActions()') && dependencies.includes('actions = list.actions') && dependencies.includes('await refresh()'));
-check('Dependencias no habilita lotes hasta terminar la detección', dependencies.includes('detectionReady = ok') && dependencies.includes('!detectionReady || bulkInstallCount') && dependencies.includes('!detectionReady || bulkUninstallCount'));
-check('Dependencias conserva la lista visible si falla el refresco', dependencies.includes('La instantánea rápida no se considera') && dependencies.includes('actions = list.actions'));
+check('Dependencias conserva la lista visible si falla el refresco', dependencies.includes('actions = list.actions') && dependencies.includes('ok = false'));
+check('Dependencias no expone instalación masiva en la build', !dependencies.includes('bulkRunning') && !dependencies.includes('runBulk') && !dependencies.includes('dependency-bulk-install') && !dependencies.includes('dependency-bulk-uninstall') && !dependencies.includes('bulk-actions'));
 check('El contador no usa el número bruto de acciones internas', dependencies.includes('visibleComponentCount') && !dependencies.includes('count={actions.length}'));
 
 // El E2E debe seguir el contrato de la plataforma. Un nombre de grupo escrito

@@ -24,6 +24,7 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "alias" if argument.is_none() => "alias",
         "help" => "help",
         "banner" => "banner",
+        "quick-actions" | "quickactions" => "quickActions",
         _ => return None,
     };
     Some(InternalCommand {
@@ -49,6 +50,14 @@ mod tests {
             Some("paquetes")
         );
         assert_eq!(parse(":alias").unwrap().action, "alias");
+        assert_eq!(
+            parse(":quick-actions toggle").unwrap().action,
+            "quickActions"
+        );
+        assert_eq!(
+            parse(":quickactions off").unwrap().argument.as_deref(),
+            Some("off")
+        );
         assert_eq!(parse(":banner preset compact").unwrap().action, "banner");
         assert_eq!(
             parse(":banner preset compact").unwrap().argument.as_deref(),

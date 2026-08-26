@@ -328,11 +328,6 @@ export const refreshInstallActions = () => invokeLogged<InstallList>('install_re
 export const runInstallAction = (tabId: string, actionId: string) =>
     invokeLogged<InstallRunResult>('install_run', { tabId, actionId });
 
-/** Genera en la shell visible un lote construido desde el catálogo actual.
- *  Cada categoría pregunta antes de ejecutar sus comandos. */
-export const runInstallBulk = (tabId: string, mode: 'install' | 'uninstall') =>
-    invokeLogged<InstallRunResult>('install_bulk', { tabId, mode });
-
 // ---- Actualización de la propia aplicación ----
 
 /** Consulta la última release del repositorio de la app y la compara con la

@@ -9,6 +9,9 @@ const mode = (process.env.LTERMINAL_INSTALL_SOURCE_CHECK ?? 'warn').toLowerCase(
 const timeoutMs = Math.max(1000, Number(process.env.LTERMINAL_INSTALL_SOURCE_TIMEOUT_MS ?? 5000));
 const retries = Math.max(1, Number(process.env.LTERMINAL_INSTALL_SOURCE_RETRIES ?? 2));
 const sources = [
+    ['WinGet manifests', 'https://raw.githubusercontent.com/microsoft/winget-pkgs/master/README.md'],
+    ['Chocolatey', 'https://community.chocolatey.org/api/v2/'],
+    ['Flathub', 'https://dl.flathub.org/repo/flathub.flatpakrepo'],
     ['npm', 'https://registry.npmjs.org/'],
     ['PyPI', 'https://pypi.org/pypi/pip/json'],
     ['crates.io', 'https://crates.io/api/v1/crates/cargo'],
@@ -18,6 +21,9 @@ const sources = [
     ['NuGet', 'https://api.nuget.org/v3/index.json'],
     ['Hex', 'https://hex.pm/api/packages/plug'],
     ['Hackage', 'https://hackage.haskell.org/package/cabal'],
+    ['Dart pub', 'https://pub.dev/api/packages/http'],
+    ['Maven Central', 'https://search.maven.org/solrsearch/select?q=g%3Aorg.junit.jupiter&rows=1&wt=json'],
+    ['LuaRocks', 'https://luarocks.org/manifest.json'],
     ['AUR', 'https://aur.archlinux.org/rpc?v=5&type=search&arg=paru'],
 ];
 

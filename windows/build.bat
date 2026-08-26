@@ -13,6 +13,7 @@ REM   build.bat -SkipChecks    salta pruebas, clippy y svelte-check
 REM   build.bat -AllowOfflineChecks  mantiene los tests locales sin bloquear por red
 REM   build.bat -NoRun         no lanza la app al terminar
 REM   build.bat -NoExtendedTests  solo ejecuta el smoke minimo de arranque
+REM   build.bat -Fast           build de desarrollo rapida, mas grande y con simbolos
 REM   build.bat -CrossLinux     compila y prueba tambien la release Linux en WSL
 
 set "SCRIPT_DIR=%~dp0"

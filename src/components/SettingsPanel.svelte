@@ -13,6 +13,7 @@
 
     import * as api from "../lib/api";
     import { app } from "../lib/appState.svelte";
+    import { includesLocalized } from "../lib/localization";
     import { normalizeShortcut, SHORTCUT_PREFERENCE_KEYS } from "../lib/shortcuts";
     import type { PluginInfo, Preferences, ThemePreset, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
     import Panel from "./Panel.svelte";
@@ -107,10 +108,10 @@
 
     const environmentGroups = $derived([...new Set(app.environments.map((environment) => environment.group))]);
     const visibleEnvironments = $derived.by(() => {
-        const needle = environmentQuery.trim().toLocaleLowerCase('es');
+        const needle = environmentQuery.trim();
         return app.environments.filter((environment) =>
             (environmentGroup === 'all' || environment.group === environmentGroup) &&
-            (!needle || `${environment.label} ${environment.group}`.toLocaleLowerCase('es').includes(needle))
+            (!needle || includesLocalized(`${environment.label} ${environment.group}`, needle, app.catalog.language))
         );
     });
 
@@ -119,17 +120,17 @@
     }
 
     const bannerItems = [
-        { id: "system", label: "Sistema", description: "Distribución o versión de Windows." },
-        { id: "host", label: "Equipo", description: "Nombre del equipo." },
-        { id: "kernel", label: "Kernel", description: "Versión del kernel o de Windows." },
-        { id: "environment", label: "Entorno", description: "Shell o entorno activo." },
-        { id: "motherboard", label: "Placa", description: "Fabricante y modelo de placa." },
-        { id: "cpu", label: "CPU", description: "Procesador e hilos." },
-        { id: "gpu", label: "GPU", description: "Tarjeta gráfica." },
-        { id: "memory", label: "Memoria", description: "Uso de RAM y velocidad." },
-        { id: "storage", label: "Discos", description: "Uso de unidades." },
-        { id: "uptime", label: "Tiempo activo", description: "Tiempo desde el arranque." },
-        { id: "datetime", label: "Fecha", description: "Fecha y hora actuales." },
+        { id: "system", labelKey: "banner.system", label: "Sistema", description: "Distribución o versión de Windows." },
+        { id: "host", labelKey: "banner.pc", label: "Equipo", description: "Nombre del equipo." },
+        { id: "kernel", labelKey: "banner.kernel", label: "Kernel", description: "Versión del kernel o de Windows." },
+        { id: "environment", labelKey: "banner.environment", label: "Entorno", description: "Shell o entorno activo." },
+        { id: "motherboard", labelKey: "banner.motherboard", label: "Placa", description: "Fabricante y modelo de placa." },
+        { id: "cpu", labelKey: "banner.cpu", label: "CPU", description: "Procesador e hilos." },
+        { id: "gpu", labelKey: "banner.gpu", label: "GPU", description: "Tarjeta gráfica." },
+        { id: "memory", labelKey: "banner.memory", label: "Memoria", description: "Uso de RAM y velocidad." },
+        { id: "storage", labelKey: "banner.storage", label: "Discos", description: "Uso de unidades." },
+        { id: "uptime", labelKey: "banner.uptime", label: "Tiempo activo", description: "Tiempo desde el arranque." },
+        { id: "datetime", labelKey: "banner.datetime", label: "Fecha", description: "Fecha y hora actuales." },
     ] as const;
 
     function bannerDescription(item: (typeof bannerItems)[number]): string {
@@ -366,6 +367,7 @@
                 <button
                     type="button"
                     role="tab"
+                    data-testid={`settings-tab-${tab.id}`}
                     aria-selected={section === tab.id}
                     class:active={section === tab.id}
                     onclick={() => {
@@ -769,7 +771,7 @@
                                         onchange={(event) => setBannerItemEnabled(item.id, (event.currentTarget as HTMLInputElement).checked)}
                                     />
                                     <span>
-                                        <strong>{app.t(`settings.banner.${item.id}`, item.label)}</strong>
+                                        <strong>{app.t(item.labelKey, item.label)}</strong>
                                         <small>{bannerDescription(item)}</small>
                                     </span>
                                 </label>
@@ -948,9 +950,10 @@
                         <strong>{app.t("settings.visiblePanels", "Secciones visibles")}</strong>
                         <span>{app.t("settings.visiblePanelsHint", "Oculta funciones que no uses; puedes recuperarlas desde Ajustes.")}</span>
                     </div>
-                    <label class="check"><input type="checkbox" bind:checked={draft.showDependenciesPanel} /><span><strong>{app.t("toolbar.deps", "Entorno y dependencias")}</strong></span></label>
-                    <label class="check"><input type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong></span></label>
-                    <label class="check"><input type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong></span></label>
+                    <label class="check"><input data-testid="settings-show-dependencies" type="checkbox" bind:checked={draft.showDependenciesPanel} /><span><strong>{app.t("toolbar.deps", "Entorno y dependencias")}</strong></span></label>
+                    <label class="check"><input data-testid="settings-show-projects" type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong></span></label>
+                    <label class="check"><input data-testid="settings-show-library" type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong></span></label>
+                    <label class="check"><input data-testid="settings-show-quick-actions" type="checkbox" bind:checked={draft.showQuickActions} /><span><strong>{app.t("settings.showQuickActions", "Acciones rápidas")}</strong><small>{app.t("settings.showQuickActionsHint", "Muestra el submenú de acciones rápidas en la Biblioteca.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-explorer" type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong></span></label>
                     <div class="heading">
                         <strong>{app.t("settings.enabledEnvironments", "Entornos habilitados")}</strong>
@@ -1223,7 +1226,7 @@
                 >
                     {app.t("settings.reset", "Restablecer")}
                 </button>
-                <button type="submit" class="primary" disabled={saving}>
+                <button data-testid="settings-save" type="submit" class="primary" disabled={saving}>
                     {app.t("settings.save", "Guardar")}
                 </button>
             </div>

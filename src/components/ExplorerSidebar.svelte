@@ -12,6 +12,7 @@
 
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
+    import { compareLocalized } from '../lib/localization';
     import type { ExplorerEntry, Listing, ManagerChoices } from '../lib/types';
 
     let listing = $state<Listing | null>(null);
@@ -89,7 +90,7 @@
     const entries = $derived(
         [...(listing?.entries ?? [])].sort((a, b) => {
             if (a.kind !== b.kind) return a.kind === 'directory' ? -1 : 1;
-            return a.name.localeCompare(b.name, 'es', { sensitivity: 'base' });
+            return compareLocalized(a.name, b.name, app.catalog.language);
         })
     );
 
@@ -163,7 +164,9 @@
         statusError = true;
         status =
             result.error ??
-            app.t('explorer.errorOpenFolder', 'No se pudo abrir la carpeta.');
+            app
+                .t('explorer.errorOpenFolder', 'No se pudo abrir la carpeta {path}.')
+                .replace('{path}', itemPath ?? listing?.dir ?? '');
     }
 
     /** El gestor llega por identificador de la tabla del backend, nunca por
@@ -178,7 +181,9 @@
             statusError = true;
             status =
                 result.error ??
-                app.t('explorer.errorOpenFolder', 'No se pudo abrir la carpeta.');
+                app
+                    .t('explorer.errorOpenFolder', 'No se pudo abrir la carpeta {path}.')
+                    .replace('{path}', target ?? listing?.dir ?? '');
         }
     }
 </script>
@@ -391,7 +396,9 @@
                 {/each}
                 {#if listing?.truncated}
                     <div class="empty">
-                        {app.t('explorer.truncated', 'Hay más entradas de las que caben en la lista.')}
+                        {app
+                            .t('explorer.truncated', 'Mostrando solo los primeros {count} elementos.')
+                            .replace('{count}', String(listing.entries.length))}
                     </div>
                 {/if}
             {/if}

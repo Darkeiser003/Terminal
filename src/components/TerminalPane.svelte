@@ -11,6 +11,7 @@
 
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
+    import { compareLocalized, foldLocalized } from '../lib/localization';
     import * as perf from '../lib/performance';
     import { cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
@@ -28,52 +29,69 @@
     let observer: ResizeObserver | undefined;
     let mirroredLine: string | null = '';
 
-    const BANNER_ITEMS: Record<string, string> = {
-        system: 'Sistema',
-        host: 'Equipo',
-        kernel: 'Kernel',
-        environment: 'Entorno',
-        motherboard: 'Placa',
-        cpu: 'CPU',
-        gpu: 'GPU',
-        memory: 'Memoria',
-        storage: 'Discos',
-        uptime: 'Tiempo activo',
-        datetime: 'Fecha',
+    const BANNER_ITEM_KEYS: Record<string, [string, string]> = {
+        system: ['banner.system', 'System'],
+        host: ['banner.pc', 'PC'],
+        kernel: ['banner.kernel', 'Kernel'],
+        environment: ['banner.environment', 'Environment'],
+        motherboard: ['banner.motherboard', 'Motherboard'],
+        cpu: ['banner.cpu', 'CPU'],
+        gpu: ['banner.gpu', 'GPU'],
+        memory: ['banner.memory', 'Memory'],
+        storage: ['banner.storage', 'Disk'],
+        uptime: ['banner.uptime', 'Uptime'],
+        datetime: ['banner.datetime', 'DateTime'],
     };
+
+    function translated(key: string, fallback: string, values: Record<string, string | number> = {}): string {
+        let result = app.t(key, fallback);
+        for (const [name, value] of Object.entries(values)) result = result.replaceAll(`{${name}}`, String(value));
+        return result;
+    }
+
+    function bannerItemLabel(id: string): string {
+        const [key, fallback] = BANNER_ITEM_KEYS[id] ?? ['', id];
+        return key ? app.t(key, fallback) : fallback;
+    }
 
     async function configureBanner(argument?: string): Promise<void> {
         const tokens = (argument ?? 'list').trim().split(/\s+/).filter(Boolean);
-        const action = (tokens.shift() ?? 'list').toLocaleLowerCase();
-        const available = new Set(Object.keys(BANNER_ITEMS));
+        // Los verbos del protocolo son ASCII y no deben depender de la
+        // configuración regional (en turco, `LIST`.toLocaleLowerCase() no es
+        // "list"). Los nombres humanos del REPL sí usan el idioma activo.
+        const action = (tokens.shift() ?? 'list').toLowerCase();
+        const available = new Set(Object.keys(BANNER_ITEM_KEYS));
         const current = new Set((app.preferences?.bannerHiddenItems ?? '').split(',').filter(Boolean));
         const ids = tokens
-            .map((token) => token.toLocaleLowerCase())
+            .map((token) => token.toLowerCase())
             .filter((token) => available.has(token));
         const unknown = action === 'preset'
             ? []
-            : tokens.filter((token) => !available.has(token.toLocaleLowerCase()));
+            : tokens.filter((token) => !available.has(token.toLowerCase()));
 
         if (action === 'list') {
             const hidden = [...current].filter((id) => available.has(id));
-            term?.writeln(`\r\nBanner: ${hidden.length ? `ocultos: ${hidden.map((id) => BANNER_ITEMS[id]).join(', ')}` : 'perfil completo'}`);
-            term?.writeln('Uso: :banner hide|show|toggle <system|host|kernel|environment|motherboard|cpu|gpu|memory|storage|uptime|datetime>');
-            term?.writeln('Atajos: :banner preset compact | :banner preset full');
+            const state = hidden.length
+                ? translated('terminal.bannerHidden', 'hidden: {items}', { items: hidden.map(bannerItemLabel).join(', ') })
+                : app.t('terminal.fullProfile', 'full profile');
+            term?.writeln(`\r\n${translated('terminal.bannerStatus', 'Banner: {state}', { state })}`);
+            term?.writeln(app.t('terminal.bannerUsage', 'Usage: :banner hide|show|toggle <system|host|kernel|environment|motherboard|cpu|gpu|memory|storage|uptime|datetime>'));
+            term?.writeln(app.t('terminal.bannerShortcuts', 'Shortcuts: :banner preset compact | :banner preset full'));
             return;
         }
         if (unknown.length || (action !== 'preset' && !ids.length)) {
-            term?.writeln('\r\nUso: :banner hide|show|toggle <elementos>, :banner preset compact|full o :banner list');
+            term?.writeln(`\r\n${app.t('terminal.bannerUsageShort', 'Usage: :banner hide|show|toggle <items>, :banner preset compact|full or :banner list')}`);
             return;
         }
 
         if (action === 'preset') {
-            const preset = (tokens[0] ?? '').toLocaleLowerCase();
+            const preset = (tokens[0] ?? '').toLowerCase();
             if (preset === 'full' || preset === 'completo') current.clear();
             else if (preset === 'compact' || preset === 'compacto') {
                 current.clear();
                 for (const id of ['host', 'kernel', 'environment', 'motherboard', 'gpu', 'datetime']) current.add(id);
             } else {
-                term?.writeln('\r\nPerfiles disponibles: compact | full');
+                term?.writeln(`\r\n${app.t('terminal.bannerProfiles', 'Available profiles: compact | full')}`);
                 return;
             }
         } else if (action === 'hide') {
@@ -86,12 +104,44 @@
                 else current.add(id);
             }
         } else {
-            term?.writeln('\r\nAcciones disponibles: hide, show, toggle, preset, list');
+            term?.writeln(`\r\n${app.t('terminal.bannerActions', 'Available actions: hide, show, toggle, preset, list')}`);
             return;
         }
 
         await app.savePreferences({ bannerHiddenItems: [...current].join(',') });
-        term?.writeln(`\r\nBanner actualizado: ${current.size ? `${current.size} elemento(s) oculto(s)` : 'perfil completo'}.`);
+        const state = current.size
+            ? translated('terminal.hiddenCount', '{count} hidden item(s)', { count: current.size })
+            : app.t('terminal.fullProfile', 'full profile');
+        term?.writeln(`\r\n${translated('terminal.bannerUpdated', 'Banner updated: {state}.', { state })}`);
+    }
+
+    async function configureQuickActions(argument?: string): Promise<void> {
+        const tokens = (argument ?? 'list').trim().split(/\s+/).filter(Boolean);
+        if (tokens.length > 1) {
+            term?.writeln(`\r\n${app.t('terminal.quickActionsUsage', 'Usage: :quick-actions on|off|toggle|list')}`);
+            return;
+        }
+        const action = (tokens[0] ?? 'list').toLowerCase();
+        const current = app.preferences?.showQuickActions ?? true;
+        if (action === 'list') {
+            const state = current ? app.t('terminal.visible', 'visible') : app.t('terminal.hidden', 'hidden');
+            term?.writeln(`\r\n${translated('terminal.quickActionsStatus', 'Quick actions: {state}', { state })}`);
+            term?.writeln(app.t('terminal.quickActionsUsage', 'Usage: :quick-actions on|off|toggle|list'));
+            return;
+        }
+
+        let next: boolean;
+        if (['on', 'show', 'mostrar', 'enable', 'enabled'].includes(action)) next = true;
+        else if (['off', 'hide', 'ocultar', 'disable', 'disabled'].includes(action)) next = false;
+        else if (['toggle', 'alternar'].includes(action)) next = !current;
+        else {
+            term?.writeln(`\r\n${app.t('terminal.quickActionsUsage', 'Usage: :quick-actions on|off|toggle|list')}`);
+            return;
+        }
+
+        await app.savePreferences({ showQuickActions: next });
+        const state = next ? app.t('terminal.visible', 'visible') : app.t('terminal.hidden', 'hidden');
+        term?.writeln(`\r\n${translated('terminal.quickActionsStatus', 'Quick actions: {state}', { state })}.`);
     }
 
     async function runInternal(line: string): Promise<boolean> {
@@ -106,15 +156,17 @@
         } else if (command.action === 'reload') {
             await app.refreshEnvironments();
         } else if (command.action === 'repl') {
-            const wanted = command.argument!.toLocaleLowerCase();
+            const wanted = foldLocalized(command.argument!, app.catalog.language);
             const environment = app.environments.find((env) =>
                 env.repl && [env.id, env.language ?? '', env.label]
-                    .some((value) => value.toLocaleLowerCase().includes(wanted))
+                    .some((value) => foldLocalized(value, app.catalog.language).includes(wanted))
             );
             if (environment) await app.createTab(environment.id);
-            else term?.writeln(`\r\n\x1b[33m[REPL no detectado: ${command.argument}]\x1b[0m`);
+            else term?.writeln(`\r\n\x1b[33m[${translated('terminal.replMissing', 'REPL not detected: {name}', { name: command.argument! })}]\x1b[0m`);
         } else if (command.action === 'banner') {
             await configureBanner(command.argument);
+        } else if (command.action === 'quickActions') {
+            await configureQuickActions(command.argument);
         } else if (command.action === 'help' || command.action === 'alias') {
             const topic = command.action === 'alias' ? 'alias' : command.argument;
             const currentEnvironment = app.environments.find(
@@ -133,11 +185,11 @@
                 // de alias del host. :help sigue siendo útil y no inyecta
                 // `ayuda` en Python, Node, Docker o ADB como si fuera código
                 // de esa shell.
-                term?.writeln('\r\nAyuda' + (topic ? ' (' + topic + ')' : '') + ': usa :help desde la terminal o consulta los comandos internos.');
-                term?.writeln('Comandos internos: :config  :reload  :repl <nombre>  :alias  :help [sección]  :banner [opciones]');
+                term?.writeln(`\r\n${translated('terminal.helpFallback', 'Help{topic}: use :help from a terminal or consult the internal commands.', { topic: topic ? ` (${topic})` : '' })}`);
+                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :config  :reload  :repl <name>  :alias  :help [section]  :banner [options]  :quick-actions [options]'));
             }
         } else {
-            term?.writeln('\r\n:config  :reload  :repl <nombre>  :alias  :help  :banner');
+            term?.writeln(`\r\n${app.t('terminal.commandList', ':config  :reload  :repl <name>  :alias  :help  :banner  :quick-actions')}`);
         }
         return true;
     }
@@ -145,12 +197,12 @@
     function completeRepl(line: string): boolean {
         const match = /^\s*:repl\s+([\w-]*)$/i.exec(line);
         if (!match) return false;
-        const partial = match[1].toLocaleLowerCase();
+        const partial = foldLocalized(match[1], app.catalog.language);
         const names = [...new Set(app.environments
             .filter((env) => env.repl && env.available)
             .map((env) => env.language ?? env.id.replace(/^.*:/, '')))]
-            .filter((name) => name.toLocaleLowerCase().startsWith(partial))
-            .sort();
+            .filter((name) => foldLocalized(name, app.catalog.language).startsWith(partial))
+            .sort((left, right) => compareLocalized(left, right, app.catalog.language));
         if (names.length === 1) {
             const suffix = names[0].slice(match[1].length);
             mirroredLine = line + suffix;
@@ -172,16 +224,34 @@
     // línea está viva: si el banner crece al estrechar la ventana, podría
     // ocupar justamente las filas donde xterm ha envuelto el texto escrito.
     let userEditing = false;
+    let pendingBannerSettingsRefresh = false;
 
     function refreshBannerForSettings(): void {
-        if (!term || !active || userEditing) return;
+        if (!term) return;
+        // El panel puede guardar mientras el usuario está escribiendo. No se
+        // debe borrar su línea, pero tampoco perder el cambio: se reintenta
+        // justo después de que Enter/Backspace deje libre el prompt.
+        if (userEditing) {
+            pendingBannerSettingsRefresh = true;
+            return;
+        }
         void api.refreshBanner(
             tabId,
             term.cols,
             term.rows,
             Math.max(1, app.panes.length),
             term.buffer.active.cursorY,
-        );
+        ).catch((error) => {
+            console.error('[TerminalPane] refresh banner settings failed', error);
+        });
+    }
+
+    function flushPendingBannerSettingsRefresh(): void {
+        if (!pendingBannerSettingsRefresh || userEditing) return;
+        pendingBannerSettingsRefresh = false;
+        // Esperar un frame permite que la shell termine de pintar el prompt
+        // tras Enter antes de que el banner restaure su cursor visual.
+        requestAnimationFrame(refreshBannerForSettings);
     }
 
     function fitAndReport(): void {
@@ -315,6 +385,7 @@
             // cubre nano, REPLs y entradas con teclas de control.
             if (data.includes('\r') || data.includes('\n') || data.includes('\u0003')) {
                 userEditing = false;
+                flushPendingBannerSettingsRefresh();
             } else if (data) {
                 userEditing = true;
             }

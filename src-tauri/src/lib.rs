@@ -188,7 +188,6 @@ pub fn run() {
             commands_install::install_list,
             commands_install::install_refresh,
             commands_install::install_run,
-            commands_install::install_bulk,
             commands_projects::projects_state_get,
             commands_projects::projects_downloaded,
             commands_projects::projects_cd,

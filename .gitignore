@@ -8,9 +8,16 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 coverage/
+*.profraw
+lcov.info
 .vite/
 .svelte-kit/
 *.tsbuildinfo
+.env
+.env.*
+!.env.example
+lterminal-smoke-*.json
+winslim-terminal-e2e-*.json
 .DS_Store
 Thumbs.db
 

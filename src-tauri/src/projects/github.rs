@@ -1293,7 +1293,10 @@ mod tests {
 
     #[test]
     fn el_catalogo_de_fabrica_ancla_el_perfil_del_proyecto_y_conserva_creditos() {
-        let windows = load_catalog(Path::new("config/project-catalog.json"), "win32");
+        // La producción usa el catálogo empotrado. Probar esa misma fuente no
+        // depende del directorio actual del runner Windows, Wine o el IDE.
+        let raw: Value = serde_json::from_str(PROJECT_CATALOG).unwrap();
+        let windows = normalize_catalog(&raw, "win32");
         assert!(windows.owners.is_empty());
         assert_eq!(windows.fixed_profiles, vec!["Darkeiser003"]);
         assert!(windows.repositories.is_empty());
@@ -1305,7 +1308,7 @@ mod tests {
         );
 
         for plataforma in ["linux", "darwin"] {
-            let otro = load_catalog(Path::new("config/project-catalog.json"), plataforma);
+            let otro = normalize_catalog(&raw, plataforma);
             assert!(otro.owners.is_empty(), "{plataforma}");
             assert_eq!(otro.fixed_profiles, vec!["Darkeiser003"], "{plataforma}");
             assert!(otro.repositories.is_empty(), "{plataforma}");

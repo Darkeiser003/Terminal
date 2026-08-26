@@ -29,6 +29,8 @@ use serde::Serialize;
 use crate::i18n::Translator;
 use crate::wsl_env::WslContext;
 
+use super::descriptions::action_description;
+
 /// Orden en el que se pintan los apartados del panel. Es fijo a propósito:
 /// depende solo de qué apartados existen en este sistema, no del orden en que
 /// se hayan ido añadiendo acciones al catálogo. Lo que no esté aquí va al
@@ -87,6 +89,9 @@ pub struct InstallAction {
     /// ejemplo, abrir una descarga). Si falta, se usa el cierre genérico.
     pub done: Option<String>,
     pub hint: Option<String>,
+    /// Finalidad del programa o paquete. Los requisitos, permisos y el origen
+    /// de instalación pertenecen a `hint`, no a este texto.
+    pub description: Option<String>,
     pub shell: Option<String>,
     pub check_cmd: Option<String>,
     pub requires_cmd: Option<String>,
@@ -118,6 +123,7 @@ impl InstallAction {
             verb: None,
             done: None,
             hint: None,
+            description: None,
             shell: None,
             check_cmd: None,
             requires_cmd: None,
@@ -164,22 +170,29 @@ impl InstallAction {
                 texto
             })
         };
+        let translated_description = campo("description", &self.description);
         let subgroup_description = self
             .subgroup
             .as_deref()
             .zip(self.subgroup_description.as_deref())
-            .map(|(subgroup, description)| {
+            .map(|(subgroup, fallback)| {
+                if self.description.as_deref() == Some(fallback) {
+                    return translated_description
+                        .clone()
+                        .unwrap_or_else(|| fallback.to_string());
+                }
                 crate::i18n::translate(
                     language,
                     &format!("action.subgroupDescription.{subgroup}"),
                     &[],
-                    description,
+                    fallback,
                 )
             });
         InstallAction {
             label: campo("label", &Some(self.label.clone())).unwrap_or_default(),
             short_label: campo("shortLabel", &self.short_label),
             hint: campo("hint", &self.hint),
+            description: translated_description,
             verb: self
                 .verb
                 .as_deref()
@@ -233,6 +246,11 @@ impl InstallAction {
 
     fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -481,7 +499,15 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-pwsh",   "PowerShell 7",    "pwsh",   "Microsoft.PowerShell",           Some("pwsh -v"),                      SHELLS_GROUP),
     win("winget-nushell", "Nushell",        "nu",     "Nushell.Nushell",                Some("nu --version"),                  SHELLS_GROUP),
     WindowsTool { label_key: Some("tool.gitBash"), ..win("winget-git", "Git + Git Bash", "git", "Git.Git", Some("git --version"), TOOLS_GROUP) },
+    win("winget-git-lfs", "Git LFS", "git-lfs", "GitHub.GitLFS", Some("git lfs version"), TOOLS_GROUP),
+    win("winget-gh", "GitHub CLI", "gh", "GitHub.cli", Some("gh --version"), TOOLS_GROUP),
     win("winget-wt",     "Windows Terminal", "wt",    "Microsoft.WindowsTerminal",      None,                                 TOOLS_GROUP),
+    win("winget-ripgrep", "ripgrep", "rg", "BurntSushi.ripgrep.MSVC", Some("rg --version"), TOOLS_GROUP),
+    win("winget-fd", "fd", "fd", "sharkdp.fd", Some("fd --version"), TOOLS_GROUP),
+    win("winget-fzf", "fzf", "fzf", "junegunn.fzf", Some("fzf --version"), TOOLS_GROUP),
+    win("winget-bat", "bat", "bat", "sharkdp.bat", Some("bat --version"), TOOLS_GROUP),
+    win("winget-eza", "eza", "eza", "eza-community.eza", Some("eza --version"), TOOLS_GROUP),
+    win("winget-just", "just", "just", "Casey.Just", Some("just --version"), TOOLS_GROUP),
     WindowsTool { label_key: Some("tool.nodeLts"), ..win("winget-node", "Node.js LTS", "node", "OpenJS.NodeJS.LTS", Some("node -v; npm -v"), LANGUAGES_GROUP) },
     WindowsTool {
         detect: Some(AUTOHOTKEY_DETECT),
@@ -493,6 +519,7 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     // Linux. `check:winget` valida todos estos IDs en el build nativo.
     win("winget-haxe", "Haxe", "haxe", "HaxeFoundation.Haxe", Some("haxe --version"), LANGUAGES_GROUP),
     win("winget-octave", "GNU Octave", "octave", "GNU.Octave", Some("octave --version"), LANGUAGES_GROUP),
+    win("winget-maxima", "Maxima", "maxima", "MaximaTeam.Maxima", Some("maxima --version"), LANGUAGES_GROUP),
     win("winget-racket", "Racket", "racket", "Racket.Racket", Some("racket --version"), LANGUAGES_GROUP),
     win("winget-sbcl", "Common Lisp · SBCL", "sbcl", "SBCL.SBCL", Some("sbcl --version"), LANGUAGES_GROUP),
     win("winget-swipl", "Prolog · SWI", "swipl", "SWI-Prolog.SWI-Prolog", Some("swipl --version"), LANGUAGES_GROUP),
@@ -527,6 +554,7 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-bun",    "Bun",             "bun",    "Oven-sh.Bun",                    Some("bun --version"),                LANGUAGES_GROUP),
     win("winget-julia",  "Julia",           "julia",  "Julialang.Julia",               Some("julia --version"),              LANGUAGES_GROUP),
     win("winget-r",      "R",               "R",      "RProject.R",                     Some("R --version"),                  LANGUAGES_GROUP),
+    win("winget-erlang", "Erlang/OTP", "erl", "Erlang.Erlang", Some("erl -noshell -eval \"erlang:display(erlang:system_info(otp_release)), halt().\""), LANGUAGES_GROUP),
     win("winget-dotnet", "C#/F# · .NET SDK", "dotnet", "Microsoft.DotNet.SDK.8",        Some("dotnet --info"),                LANGUAGES_GROUP),
     win("winget-llvm",   "C/C++ · Clang/LLVM", "clang", "LLVM.LLVM",                    Some("clang --version; clang++ --version"), LANGUAGES_GROUP),
     win("winget-cmake",  "C/C++ · CMake",   "cmake",  "Kitware.CMake",                  Some("cmake --version"),               LANGUAGES_GROUP),
@@ -542,6 +570,14 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-kubectl", "Kubernetes · kubectl", "kubectl", "Kubernetes.kubectl",       Some("kubectl version --client"),      DOCKER_GROUP),
     win("winget-helm",    "Kubernetes · Helm", "helm", "Helm.Helm",                     Some("helm version --short"),          DOCKER_GROUP),
     win("winget-k9s",     "Kubernetes · k9s (interactivo)", "k9s", "Derailed.k9s",       Some("k9s version --short"),           DOCKER_GROUP),
+    win("winget-minikube", "Kubernetes · minikube", "minikube", "Kubernetes.minikube", Some("minikube version --short"), DOCKER_GROUP),
+    win("winget-kind", "Kubernetes · kind", "kind", "Kubernetes.kind", Some("kind version"), DOCKER_GROUP),
+    win("winget-kustomize", "Kubernetes · Kustomize", "kustomize", "Kubernetes.kustomize", Some("kustomize version --short"), DOCKER_GROUP),
+    win("winget-podman", "Podman", "podman", "RedHat.Podman", Some("podman --version"), DOCKER_GROUP),
+    win("winget-terraform", "Terraform", "terraform", "Hashicorp.Terraform", Some("terraform version"), TOOLS_GROUP),
+    win("winget-opentofu", "OpenTofu", "tofu", "OpenTofu.Tofu", Some("tofu version"), TOOLS_GROUP),
+    win("winget-aws-cli", "AWS CLI", "aws", "Amazon.AWSCLI", Some("aws --version"), TOOLS_GROUP),
+    win("winget-azure-cli", "Azure CLI", "az", "Microsoft.AzureCLI", Some("az version"), TOOLS_GROUP),
     WindowsTool {
         detect: Some("powershell:if (Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe'))) { exit 0 } else { exit 1 }"),
         ..win("winget-qemu", "QEMU", "qemu-system-x86_64", "SoftwareFreedomConservancy.QEMU", Some(QEMU_VERSION), VIRTUALIZATION_GROUP)
@@ -590,6 +626,9 @@ static WINDOWS_CHOCOLATEY_TOOLS: &[ChocolateyTool] = &[
     ChocolateyTool { install_id: "choco-maven",  label: "Java · Maven", cmd: "mvn",     pkg: "maven",  verify: "mvn --version",    group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-gradle", label: "JVM · Gradle", cmd: "gradle",  pkg: "gradle", verify: "gradle --version", group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-ant",    label: "Java · Ant",   cmd: "ant",     pkg: "ant",    verify: "ant -version",     group: LANGUAGES_GROUP },
+    ChocolateyTool { install_id: "choco-elixir", label: "Elixir",       cmd: "elixir",  pkg: "elixir", verify: "elixir --version",  group: LANGUAGES_GROUP },
+    ChocolateyTool { install_id: "choco-nim",    label: "Nim",          cmd: "nim",     pkg: "nim",    verify: "nim --version",     group: LANGUAGES_GROUP },
+    ChocolateyTool { install_id: "choco-scala",  label: "Scala 3",      cmd: "scala",   pkg: "scala",  verify: "scala -version",    group: LANGUAGES_GROUP },
 ];
 
 /// Chocolatey se instala desde su procedimiento oficial y queda invocable en
@@ -986,6 +1025,14 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-xonsh", "Xonsh", "xonsh", &[("default", "xonsh")], Some("xonsh --version"), SHELLS_GROUP),
     pkg("pkg-elvish", "Elvish", "elvish", &[("default", "elvish")], Some("elvish --version"), SHELLS_GROUP),
     pkg("pkg-git",    "Git",    "git",     &[("default", "git")],    Some("git --version"),    TOOLS_GROUP),
+    pkg("pkg-git-lfs", "Git LFS", "git-lfs", &[("default", "git-lfs")], Some("git lfs version"), TOOLS_GROUP),
+    pkg("pkg-gh", "GitHub CLI", "gh", &[("apt", "gh"), ("dnf", "gh"), ("pacman", "github-cli"), ("zypper", "gh"), ("apk", "github-cli")], Some("gh --version"), TOOLS_GROUP),
+    pkg("pkg-ripgrep", "ripgrep", "rg", &[("default", "ripgrep")], Some("rg --version"), TOOLS_GROUP),
+    pkg("pkg-fzf", "fzf", "fzf", &[("default", "fzf")], Some("fzf --version"), TOOLS_GROUP),
+    pkg("pkg-fd", "fd", "fd", &[("dnf", "fd-find"), ("pacman", "fd"), ("zypper", "fd"), ("apk", "fd")], Some("fd --version"), TOOLS_GROUP),
+    pkg("pkg-bat", "bat", "bat", &[("dnf", "bat"), ("pacman", "bat"), ("zypper", "bat"), ("apk", "bat")], Some("bat --version"), TOOLS_GROUP),
+    pkg("pkg-eza", "eza", "eza", &[("apt", "eza"), ("dnf", "eza"), ("pacman", "eza"), ("zypper", "eza"), ("apk", "eza")], Some("eza --version"), TOOLS_GROUP),
+    pkg("pkg-just", "just", "just", &[("apt", "just"), ("dnf", "just"), ("pacman", "just"), ("zypper", "just"), ("apk", "just")], Some("just --version"), TOOLS_GROUP),
     pkg("pkg-jq", "jq · JSON", "jq", &[("default", "jq")], Some("jq --version"), TOOLS_GROUP),
     pkg("pkg-yq", "yq · YAML", "yq", &[("default", "yq"), ("apt", "yq"), ("pacman", "yq")], Some("yq --version"), TOOLS_GROUP),
     pkg("pkg-gcc", "C/C++ · GCC y herramientas de compilación", "gcc", &[("apt", "build-essential"), ("pacman", "base-devel"), ("dnf", "gcc gcc-c++ make"), ("zypper", "gcc gcc-c++ make"), ("apk", "build-base")], Some("gcc --version; g++ --version"), LANGUAGES_GROUP),
@@ -1064,6 +1111,7 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-kubectl", "Kubernetes · kubectl", "kubectl", &[("apt", "kubectl"), ("pacman", "kubectl"), ("dnf", "kubernetes-client"), ("zypper", "kubectl"), ("apk", "kubectl")], Some("kubectl version --client"), DOCKER_GROUP),
     pkg("pkg-helm", "Kubernetes · Helm", "helm", &[("pacman", "helm"), ("dnf", "helm"), ("zypper", "helm"), ("apk", "helm")], Some("helm version --short"), DOCKER_GROUP),
     pkg("pkg-k9s", "Kubernetes · k9s (interactivo)", "k9s", &[("pacman", "k9s")], Some("k9s version --short"), DOCKER_GROUP),
+    pkg("pkg-podman", "Podman", "podman", &[("default", "podman")], Some("podman --version"), DOCKER_GROUP),
     pkg("pkg-tailscale", "Tailscale", "tailscale", &[("pacman", "tailscale"), ("apk", "tailscale")], Some("tailscale version"), SSH_GROUP),
 ]);
 
@@ -1261,9 +1309,9 @@ fn aur_tool_lifecycle_actions(
     let subgroup = label.clone();
     let source = format!("AUR · {aur_helper}");
     // `--noconfirm` no evita que paru abra el editor/revisión del PKGBUILD ni
-    // que busque proveedores alternativos. Eso dejaba el lote sin salida
-    // durante minutos detrás de `less` o esperando una respuesta invisible.
-    // Las acciones guiadas apuntan al paquete solicitado y son no interactivas.
+    // que busque proveedores alternativos. Así la acción individual apunta al
+    // paquete solicitado y no se queda detrás de `less` o de una respuesta
+    // invisible en una revisión interactiva.
     let review_flags = if aur_helper == "paru" {
         "--skipreview --noprovides"
     } else {
@@ -1632,9 +1680,9 @@ fn ecosystem_action(
     hint: &str,
 ) -> InstallAction {
     // El primer ejecutable es el runtime real del ecosistema (`python3`,
-    // `npm`, `composer`, `luarocks`, etc.). Declararlo aquí evita que el lote
-    // intente instalar cien herramientas sobre un runtime que todavía no
-    // existe; al refrescar el panel reaparecerán después de instalarlo.
+    // `npm`, `composer`, `luarocks`, etc.). Declararlo aquí evita que una acción
+    // intente instalar una herramienta sobre un runtime que todavía no existe;
+    // al refrescar el panel reaparecerá después de instalarlo.
     let runtime = command.split_whitespace().next().map(str::to_string);
     let requires = if command
         .split_whitespace()
@@ -1654,6 +1702,9 @@ fn ecosystem_action(
         .group(FRAMEWORKS_GROUP)
         .subgroup(subgroup)
         .hint(hint);
+    if let Some(description) = action_description(id) {
+        action = action.description(description);
+    }
     action.requires_cmd = requires;
     action.check_cmd = probe;
     action
@@ -1804,6 +1855,7 @@ fn ecosystem_lifecycle_actions(actions: Vec<InstallAction>) -> Vec<InstallAction
         let subgroup = install.subgroup.clone();
         let group = install.group.clone();
         let hint = install.hint.clone();
+        let description = install.description.clone();
         let command = install.command.clone();
         lifecycle.push(install);
 
@@ -1818,6 +1870,7 @@ fn ecosystem_lifecycle_actions(actions: Vec<InstallAction>) -> Vec<InstallAction
         .requires(Some(&probe));
         update.subgroup = subgroup.clone();
         update.hint = hint.clone();
+        update.description = description.clone();
         lifecycle.push(update);
 
         if let Some(remove_command) = ecosystem_uninstall_command(&probe) {
@@ -1836,6 +1889,7 @@ fn ecosystem_lifecycle_actions(actions: Vec<InstallAction>) -> Vec<InstallAction
             .verb("Desinstalar")
             .requires(Some(&probe));
             remove.subgroup = subgroup;
+            remove.description = description;
             remove.hint = Some("Elimina este framework del gestor correspondiente; revisa el comando antes de confirmarlo.".to_string());
             lifecycle.push(remove);
         }
@@ -2190,8 +2244,8 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
             id,
             &format!("{label} (Rust)"),
             // Cargo puede tardar varios minutos compilando y, sin modo
-            // detallado, parece congelado dentro del lote. Mostrar cada
-            // crate hace visible que sigue trabajando.
+            // detallado, parece congelado. Mostrar cada crate hace visible
+            // que la acción sigue trabajando.
             command.replace("cargo install ", "cargo install --verbose "),
             "Rust · frameworks y herramientas",
             "Necesita Rust y Cargo. Se instala como herramienta global del usuario.",
@@ -2737,6 +2791,11 @@ fn wsl_tool_actions(
                 .installed(true)
                 .hint(hint),
             );
+        }
+    }
+    if let Some(description) = action_description(tool.id) {
+        for action in &mut actions {
+            action.description = Some(description.to_string());
         }
     }
     actions
@@ -4568,6 +4627,26 @@ fn default_group(mut action: InstallAction) -> InstallAction {
     action
 }
 
+/// Completa la finalidad en una sola frontera para que instalar, actualizar,
+/// comprobar y desinstalar compartan el mismo texto semántico. Así `hint`
+/// puede limitarse a requisitos, permisos y procedencia.
+fn describe_action(mut action: InstallAction) -> InstallAction {
+    if action.description.is_none() {
+        if let Some(description) = action_description(&action.id) {
+            action.description = Some(description.to_string());
+        } else if let Some(description) = action.subgroup_description.clone() {
+            action.description = Some(description);
+        }
+    }
+    if action.subgroup_description.is_none()
+        && action.group != FRAMEWORKS_GROUP
+        && action.group != WSL_GROUP
+    {
+        action.subgroup_description = action.description.clone();
+    }
+    action
+}
+
 /// El panel se pinta en el orden en que llegan las acciones, así que el orden
 /// de los apartados se decide aquí y no depende de en qué punto del catálogo
 /// esté escrita cada acción. Dentro de cada apartado se respeta el orden
@@ -4609,7 +4688,13 @@ pub fn get_install_actions(context: &InstallContext, t: &Translator) -> Vec<Inst
             t,
         ),
     };
-    sort_by_group(actions.into_iter().map(default_group).collect())
+    sort_by_group(
+        actions
+            .into_iter()
+            .map(default_group)
+            .map(describe_action)
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -5195,13 +5280,38 @@ mod tests {
             "winget-kubectl",
             "winget-helm",
             "winget-k9s",
+            "winget-minikube",
+            "winget-kind",
+            "winget-kustomize",
+            "winget-podman",
+            "winget-gh",
+            "winget-git-lfs",
+            "winget-ripgrep",
+            "winget-fzf",
+            "winget-terraform",
+            "winget-opentofu",
+            "winget-aws-cli",
+            "winget-azure-cli",
+            "winget-erlang",
+            "winget-maxima",
+            "choco-elixir",
+            "choco-nim",
+            "choco-scala",
         ] {
             assert!(
                 actions.iter().any(|action| action.id == id),
                 "falta {id} en Windows"
             );
         }
-        for id in ["winget-kubectl", "winget-helm", "winget-k9s"] {
+        for id in [
+            "winget-kubectl",
+            "winget-helm",
+            "winget-k9s",
+            "winget-minikube",
+            "winget-kind",
+            "winget-kustomize",
+            "winget-podman",
+        ] {
             assert_eq!(buscar(&actions, id).group, DOCKER_GROUP, "{id}");
         }
         assert_eq!(buscar(&actions, "choco-nsudo").group, TOOLS_GROUP);
@@ -5812,7 +5922,7 @@ mod tests {
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(lenguajes.first(), Some(&"winget-node"));
-        assert_eq!(lenguajes.last(), Some(&"choco-ant"));
+        assert_eq!(lenguajes.last(), Some(&"choco-scala"));
     }
 
     #[test]
@@ -5983,6 +6093,57 @@ mod tests {
     }
 
     #[test]
+    fn windows_y_linux_comparten_las_utilidades_de_desarrollo_portables() {
+        let windows = get_install_actions(&contexto("windows"), &t());
+        let linux = get_install_actions(&contexto("linux"), &t());
+        for (windows_id, linux_id) in [
+            ("winget-git-lfs", "pkg-git-lfs"),
+            ("winget-gh", "pkg-gh"),
+            ("winget-ripgrep", "pkg-ripgrep"),
+            ("winget-fzf", "pkg-fzf"),
+            ("winget-eza", "pkg-eza"),
+            ("winget-just", "pkg-just"),
+            ("winget-podman", "pkg-podman"),
+        ] {
+            let windows_action = buscar(&windows, windows_id);
+            let linux_action = buscar(&linux, linux_id);
+            assert_eq!(
+                windows_action.description, linux_action.description,
+                "{windows_id}/{linux_id}: finalidad cruzada distinta"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_mantiene_un_catalogo_amplio_sin_reducirse_a_lenguajes_basicos() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let installables = actions
+            .iter()
+            .filter(|action| action.check_cmd.is_some())
+            .map(|action| action.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            installables.len() >= 300,
+            "el catálogo Windows se redujo a {} instalaciones",
+            installables.len()
+        );
+        for id in [
+            "winget-autohotkey",
+            "windows-msys2-toolchain",
+            "windows-msys2-ocaml",
+            "windows-ghcup",
+            "choco-elixir",
+            "winget-podman",
+            "winget-terraform",
+        ] {
+            assert!(
+                installables.contains(id),
+                "falta la familia representativa {id}"
+            );
+        }
+    }
+
+    #[test]
     fn una_accion_sin_apartado_lo_deduce_de_cualquier_tramo_de_su_id() {
         // Con startsWith, "pkg-docker-update" caía en "Sistema y herramientas"
         // y Docker aparecía a la vez ahí y en su propio apartado.
@@ -6049,12 +6210,31 @@ mod tests {
         // command_not_found y file_viewers referencian estos ids: cambiarlos
         // rompe la sugerencia sin que falle nada más.
         let windows = get_install_actions(&contexto("windows"), &t());
-        for id in ["winget-git", "winget-node", "adb-install", "viewer-code"] {
+        for id in [
+            "winget-git",
+            "winget-git-lfs",
+            "winget-gh",
+            "winget-ripgrep",
+            "winget-fzf",
+            "winget-eza",
+            "winget-just",
+            "winget-podman",
+            "winget-node",
+            "adb-install",
+            "viewer-code",
+        ] {
             assert!(windows.iter().any(|a| a.id == id), "falta {id} en Windows");
         }
         let linux = get_install_actions(&contexto("linux"), &t());
         for id in [
             "pkg-git",
+            "pkg-git-lfs",
+            "pkg-gh",
+            "pkg-ripgrep",
+            "pkg-fzf",
+            "pkg-eza",
+            "pkg-just",
+            "pkg-podman",
             "pkg-node",
             "pkg-pwsh",
             "pkg-wine",
@@ -6229,5 +6409,53 @@ mod tests {
         assert!(!tiene_hueco("if ($x) { Write-Host 'hola' }"));
         assert!(!tiene_hueco("sin llaves"));
         assert!(!tiene_hueco("{}"));
+    }
+
+    #[test]
+    fn cada_componente_del_catalogo_explica_para_que_sirve() {
+        for platform in ["linux", "windows", "macos"] {
+            let actions = get_install_actions(&contexto(platform), &t());
+            let missing = actions
+                .iter()
+                .filter(|action| action.subgroup.is_some() && action.description.is_none())
+                .map(|action| action.id.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                missing.is_empty(),
+                "{platform}: acciones agrupadas sin descripción semántica: {}",
+                missing.join(", ")
+            );
+        }
+    }
+
+    #[test]
+    fn las_descripciones_no_hablan_del_instalador() {
+        for platform in ["linux", "windows", "macos"] {
+            for action in get_install_actions(&contexto(platform), &t()) {
+                let Some(description) = action.description.as_deref() else {
+                    continue;
+                };
+                let lower = description.to_lowercase();
+                for forbidden in [
+                    "winget",
+                    "chocolatey",
+                    "pacman",
+                    "repositorio de paquetes",
+                    "paquete de la comunidad",
+                    "descarga oficial",
+                ] {
+                    assert!(
+                        !lower.contains(forbidden),
+                        "{} usa una descripción de procedencia: {description}",
+                        action.id
+                    );
+                }
+                assert!(
+                    (24..=180).contains(&description.chars().count()),
+                    "{} tiene una descripción poco útil o demasiado larga: {description}",
+                    action.id
+                );
+            }
+        }
     }
 }

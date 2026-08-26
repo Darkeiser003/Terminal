@@ -340,7 +340,7 @@
 <main class:platform-linux={app.appInfo?.platform === "linux"}>
     {#if startupError}
         <section class="startup-error" role="alert">
-            <h1>{app.t("startup.errorTitle", "LTerminal no pudo iniciar la interfaz")}</h1>
+            <h1>{app.t("startup.errorTitle", "La terminal no pudo iniciar la interfaz")}</h1>
             <p>{startupError}</p>
             <p>{app.t("startup.logHint", "Consulta la carpeta de logs desde Ajustes.")}</p>
         </section>

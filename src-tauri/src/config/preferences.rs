@@ -148,6 +148,7 @@ pub struct Preferences {
     pub show_dependencies_panel: bool,
     pub show_projects_panel: bool,
     pub show_scripts_panel: bool,
+    pub show_quick_actions: bool,
     pub show_explorer_panel: bool,
     pub manual_aliases_text: String,
     pub favorite_repl_ids: String,
@@ -474,6 +475,7 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             defaults.show_projects_panel,
         ),
         show_scripts_panel: bool_or_default(get("showScriptsPanel"), defaults.show_scripts_panel),
+        show_quick_actions: bool_or_default(get("showQuickActions"), defaults.show_quick_actions),
         show_explorer_panel: bool_or_default(
             get("showExplorerPanel"),
             defaults.show_explorer_panel,
@@ -744,6 +746,7 @@ mod tests {
         assert_eq!(parsed["showDependenciesPanel"], json!(true));
         assert_eq!(parsed["showProjectsPanel"], json!(true));
         assert_eq!(parsed["showScriptsPanel"], json!(true));
+        assert_eq!(parsed["showQuickActions"], json!(true));
         assert_eq!(parsed["showExplorerPanel"], json!(true));
     }
 
@@ -763,11 +766,13 @@ mod tests {
             "showDependenciesPanel": false,
             "showProjectsPanel": true,
             "showScriptsPanel": false,
+            "showQuickActions": false,
             "showExplorerPanel": false
         }));
         assert!(!prefs.show_dependencies_panel);
         assert!(prefs.show_projects_panel);
         assert!(!prefs.show_scripts_panel);
+        assert!(!prefs.show_quick_actions);
         assert!(!prefs.show_explorer_panel);
     }
 

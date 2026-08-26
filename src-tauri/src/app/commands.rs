@@ -307,28 +307,36 @@ pub fn settings_get() -> PreferencesPayload {
 /// `settings:save`. Lo que llegue se valida antes de guardarlo: el frontend no
 /// puede escribir valores fuera de rango ni claves desconocidas.
 #[tauri::command(async)]
-pub fn settings_save(incoming: Value) -> PreferencesPayload {
+pub fn settings_save(incoming: Value) -> Result<PreferencesPayload, String> {
     let sanitized = preferences::sanitize_preferences(&incoming);
-    match serde_json::to_value(&sanitized) {
-        Ok(Value::Object(patch)) => {
-            if settings::save_settings(&patch).is_none() {
-                log_error!("No se pudieron guardar las preferencias");
-            }
-        }
-        _ => log_error!("Las preferencias no se pudieron serializar"),
-    }
-    payload_for(sanitized)
+    let Value::Object(patch) = serde_json::to_value(&sanitized)
+        .map_err(|error| format!("Las preferencias no se pudieron serializar: {error}"))?
+    else {
+        return Err("Las preferencias no se pudieron serializar como objeto".to_string());
+    };
+    let saved = settings::save_settings(&patch)
+        .ok_or_else(|| "No se pudieron guardar las preferencias en settings.json".to_string())?;
+    Ok(payload_for(preferences::sanitize_preferences(
+        &Value::Object(saved),
+    )))
 }
 
 /// `settings:reset`
 #[tauri::command(async)]
-pub fn settings_reset() -> PreferencesPayload {
+pub fn settings_reset() -> Result<PreferencesPayload, String> {
     let defaults = Preferences::default();
-    if let Ok(Value::Object(patch)) = serde_json::to_value(&defaults) {
-        settings::save_settings(&patch);
-    }
+    let Value::Object(patch) = serde_json::to_value(&defaults)
+        .map_err(|error| format!("Las preferencias no se pudieron serializar: {error}"))?
+    else {
+        return Err("Las preferencias no se pudieron serializar como objeto".to_string());
+    };
+    let saved = settings::save_settings(&patch).ok_or_else(|| {
+        "No se pudieron restablecer las preferencias en settings.json".to_string()
+    })?;
     log_info!("Preferencias restablecidas");
-    payload_for(defaults)
+    Ok(payload_for(preferences::sanitize_preferences(
+        &Value::Object(saved),
+    )))
 }
 
 #[derive(Debug, Serialize)]

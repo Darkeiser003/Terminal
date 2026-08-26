@@ -14,7 +14,7 @@ if (!spanish) errors.push('Falta src-tauri/locales/es.json');
 const usedKeys = new Set();
 for (const file of fs.readdirSync(components).filter((name) => name.endsWith('.svelte'))) {
     const source = fs.readFileSync(path.join(components, file), 'utf8');
-    for (const match of source.matchAll(/app\.t\(\s*['"]([^'"]+)['"]/g)) usedKeys.add(match[1]);
+    for (const match of source.matchAll(/(?:app\.t|translated)\(\s*['"]([^'"]+)['"]/g)) usedKeys.add(match[1]);
 }
 
 const backendKeys = new Set();
@@ -51,6 +51,8 @@ for (const id of dynamicActionIds) {
 }
 
 for (const id of ['system', 'host', 'kernel', 'environment', 'motherboard', 'cpu', 'gpu', 'memory', 'storage', 'uptime', 'datetime']) {
+    const labelKey = id === 'host' ? 'banner.pc' : `banner.${id}`;
+    if (!(labelKey in spanish)) errors.push(`La etiqueta dinámica usa «${labelKey}», pero no existe en el catálogo español`);
     const key = `settings.banner.${id}.description`;
     if (!(key in spanish)) errors.push(`La descripción dinámica usa «${key}», pero no existe en el catálogo español`);
 }
@@ -77,6 +79,54 @@ for (const [file, catalog] of Object.entries(catalogs)) {
     }
 }
 
+// Los mensajes nuevos del terminal se interpolan en un único helper. Aquí sí
+// hay un contrato exacto: cambiar u omitir un marcador dejaría `{...}` visible
+// o perdería el dato en alguno de los 15 idiomas.
+const placeholderContracts = {
+    'terminal.bannerHidden': ['items'],
+    'terminal.bannerStatus': ['state'],
+    'terminal.hiddenCount': ['count'],
+    'terminal.bannerUpdated': ['state'],
+    'terminal.quickActionsStatus': ['state'],
+    'terminal.replMissing': ['name'],
+    'terminal.helpFallback': ['topic'],
+};
+for (const [file, catalog] of Object.entries(catalogs)) {
+    for (const [key, expected] of Object.entries(placeholderContracts)) {
+        const actual = [...String(catalog[key] ?? '').matchAll(/\{([^{}]+)\}/g)].map((match) => match[1]).sort();
+        if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+            errors.push(`${file}: «${key}» no conserva sus marcadores (${actual.join(', ')} != ${expected.join(', ')})`);
+        }
+    }
+}
+
+// Estas claves aparecieron en todos los catálogos copiadas literalmente desde
+// español. La paridad de claves no detecta ese fallo: se protege expresamente
+// el bloque dinámico del banner y el error de arranque, visibles antes de que
+// el usuario pueda corregir nada.
+const criticalLocalizedKeys = [
+    'startup.errorTitle',
+    'settings.bannerSections',
+    'settings.bannerSectionsHint',
+    'settings.bannerFull',
+    'settings.bannerCompact',
+    'terminal.quickActionsStatus',
+    'terminal.replMissing',
+    'terminal.helpFallback',
+    'terminal.internalCommands',
+];
+for (const [file, catalog] of Object.entries(catalogs)) {
+    if (file === 'es.json') continue;
+    for (const key of criticalLocalizedKeys) {
+        if (catalog[key] === spanish[key]) errors.push(`${file}: «${key}» sigue copiada del catálogo español`);
+    }
+}
+for (const catalog of Object.values(catalogs)) {
+    for (const id of ['system', 'host', 'kernel', 'environment', 'motherboard', 'cpu', 'gpu', 'memory', 'storage', 'uptime', 'datetime']) {
+        if (`settings.banner.${id}` in catalog) errors.push(`La etiqueta duplicada settings.banner.${id} debe reutilizar banner.*`);
+    }
+}
+
 // Los atributos visibles no pueden saltarse el catálogo. Los ejemplos de
 // datos, rutas, comandos y nombres propios se excluyen porque no son UI.
 const hardcodedUi = [
@@ -90,6 +140,24 @@ const hardcodedUi = [
 for (const [relative, pattern] of hardcodedUi) {
     const source = fs.readFileSync(path.join(root, relative), 'utf8');
     if (pattern.test(source)) errors.push(`${relative}: contiene texto visible hardcodeado fuera de app.t()`);
+}
+
+for (const file of fs.readdirSync(components).filter((name) => name.endsWith('.svelte'))) {
+    const relative = `src/components/${file}`;
+    const source = fs.readFileSync(path.join(components, file), 'utf8');
+    if (/toLocaleLowerCase\(\s*['"]es['"]\s*\)|localeCompare\([^\n]*['"]es['"]/.test(source)) {
+        errors.push(`${relative}: fuerza reglas de ordenación/búsqueda españolas en vez del idioma activo`);
+    }
+}
+
+const terminalPane = fs.readFileSync(path.join(components, 'TerminalPane.svelte'), 'utf8');
+for (const line of terminalPane.split('\n').filter((item) => /term\?\.writeln\(/.test(item))) {
+    if (!line.includes('app.t(') && !line.includes('translated(')) {
+        errors.push(`src/components/TerminalPane.svelte: salida interna sin traducir: ${line.trim()}`);
+    }
+}
+if (/\.toLocaleLowerCase\(/.test(terminalPane.replace(/\/\/[^\n]*/g, ''))) {
+    errors.push('src/components/TerminalPane.svelte: los verbos ASCII internos no pueden depender del locale del sistema');
 }
 
 // Los errores fijos de los paneles cruzan IPC y llegan directamente a la

@@ -23,6 +23,7 @@ param(
     [switch]$FullTests,
     [switch]$StrictTests,
     [switch]$NoExtendedTests,
+    [switch]$Fast,
     [switch]$CrossLinux
 )
 
@@ -233,7 +234,12 @@ function Invoke-CrossLinuxTests {
     # ejecuta la aplicación Linux real y --no-run evita dejarla abierta al
     # terminar las pruebas.
     $escapedRoot = $wslRoot.Replace("'", "'\''")
-    $linuxCommand = "cd '$escapedRoot' && bash linux/build.sh --full-tests --install-e2e-driver --no-run --non-interactive"
+    $linuxFlags = ' --full-tests --install-e2e-driver --no-run --non-interactive'
+    if ($Fast) { $linuxFlags += ' --fast' }
+    if ($NoExtendedTests) { $linuxFlags += ' --no-extended-tests' }
+    if ($SkipChecks) { $linuxFlags += ' --skip-checks' }
+    if ($AllowOfflineChecks) { $linuxFlags += ' --allow-offline-checks' }
+    $linuxCommand = "cd '$escapedRoot' && bash linux/build.sh$linuxFlags"
     Write-Step "Compilando y probando Linux dentro de WSL ($distro)"
     $code = Invoke-Native 'wsl.exe' @('--distribution', $distro, '--', 'bash', '-lc', $linuxCommand)
     if ($code -ne 0) {
@@ -249,6 +255,35 @@ $ReleaseDir  = Join-Path $TauriDir 'target\release'
 $VendorDir   = Join-Path $TauriDir 'vendor\conpty'
 
 Set-Location $ProjectRoot
+
+# Tauri debe seguir usando --release para conservar sus rutas de salida y el
+# empaquetado existente. Cargo permite cambiar los ajustes del perfil release
+# por variables de entorno: -Fast acelera iteraciones sin duplicar la
+# configuración Tauri ni dejar una carpeta target distinta que el empaquetador
+# no sepa localizar.
+function Set-CargoBuildProfile {
+    if ($Fast) {
+        $env:CARGO_PROFILE_RELEASE_OPT_LEVEL = '1'
+        $env:CARGO_PROFILE_RELEASE_LTO = 'false'
+        $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '256'
+        $env:CARGO_PROFILE_RELEASE_STRIP = 'none'
+        $env:CARGO_PROFILE_RELEASE_DEBUG = '1'
+        $env:CARGO_PROFILE_RELEASE_INCREMENTAL = 'true'
+        $env:CARGO_PROFILE_RELEASE_PANIC = 'unwind'
+        Write-Ok 'Perfil de desarrollo rápido: incremental, sin LTO y con símbolos de depuración'
+    } else {
+        $env:CARGO_PROFILE_RELEASE_OPT_LEVEL = 's'
+        $env:CARGO_PROFILE_RELEASE_LTO = 'true'
+        $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '1'
+        $env:CARGO_PROFILE_RELEASE_STRIP = 'true'
+        $env:CARGO_PROFILE_RELEASE_DEBUG = '0'
+        $env:CARGO_PROFILE_RELEASE_INCREMENTAL = 'false'
+        $env:CARGO_PROFILE_RELEASE_PANIC = 'abort'
+        Write-Ok 'Perfil release comprimido: LTO completo, símbolos eliminados y optimización máxima'
+    }
+}
+
+Set-CargoBuildProfile
 
 # Las comprobaciones locales siguen siendo obligatorias. Este modo solo relaja
 # las comprobaciones que dependen de red (enlaces, fuentes externas y WinGet), para que
@@ -706,11 +741,14 @@ Write-Ok "Compilado: $exePath"
 # target/release contiene ademas todos los artefactos de cargo (deps/, build/,
 # .pdb: cientos de megas). Lo que se distribuye son el ejecutable, sus DLL/host
 # nativos y el árbol `scripts/` declarado en bundle.resources. Se copian a una
-# carpeta limpia para no publicar el resto por accidente.
+# carpeta limpia para no publicar el resto por accidente. Las builds rápidas
+# usan además una carpeta y un nombre distintos para que un ZIP de desarrollo
+# no pueda confundirse con la release comprimida.
 Write-Step 'Preparando la carpeta desempaquetada'
 # NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build,
 # asi que la release anterior desapareceria al compilar la siguiente.
-$distDir = Join-Path $ProjectRoot "release\WinSlimTerminal-$version"
+$distSuffix = if ($Fast) { '-dev' } else { '' }
+$distDir = Join-Path $ProjectRoot "release\WinSlimTerminal-$version$distSuffix"
 Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
@@ -834,9 +872,9 @@ try {
 # El smoke ya comprobó ventana, frontend, xterm y PTY. Esta batería adicional
 # comprueba los ejecutables que la aplicación usa para preparar una sesión en
 # Windows y ejecuta el E2E real de WebDriver (pestañas, menús, acciones y
-# redimensionado). En modo no interactivo se ejecuta por defecto: omitirla
-# requiere -NoExtendedTests explícito para que una build no parezca verificada
-# cuando solo arrancó la ventana.
+# redimensionado). Se ejecuta por defecto en todos los modos: omitirla requiere
+# -NoExtendedTests explícito para que una build no parezca verificada cuando
+# solo arrancó la ventana.
 $runExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
 $strictExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
 $strictProbeFailure = $false
@@ -848,13 +886,9 @@ if ($NoExtendedTests) {
     Write-Warn 'Batería ampliada omitida por -NoExtendedTests: esta build solo valida el arranque mínimo.'
 } elseif ($runExtendedTests) {
     Write-Host '    Batería ampliada seleccionada explícitamente.' -ForegroundColor DarkGray
-} elseif ($NonInteractive) {
-    $runExtendedTests = $true
-    Write-Host '    Modo no interactivo: se ejecutará automáticamente la batería ampliada y el E2E.' -ForegroundColor DarkGray
 } else {
-    Write-Host '    La build queda a la espera de tu respuesta; no se inicia la batería ampliada automáticamente.' -ForegroundColor Yellow
-    $extendedReply = Read-Host '¿Ejecutar también la batería completa de shells y herramientas instaladas? [s/N]'
-    $runExtendedTests = $extendedReply -match '^(s|si|sí)$'
+    $runExtendedTests = $true
+    Write-Host '    Batería ampliada activada por defecto: se ejecutarán shells, herramientas y E2E.' -ForegroundColor DarkGray
 }
 if ($runExtendedTests) {
     Write-Step 'Pruebas ampliadas de Windows (shells, herramientas y E2E)'
@@ -966,7 +1000,9 @@ if ($runExtendedTests) {
             $e2eCode = Invoke-Native 'npm' @('run', 'e2e')
             if ($e2eCode -ne 0) { throw "E2E falló (código $e2eCode). Revisa el informe y el log en $logPath." }
             Assert-E2eReport $e2eReportPath
-            Write-Ok 'E2E confirmó ventana, terminal, barra y Ajustes'
+            $reportCode = Invoke-Native 'node' @('scripts/verify-e2e-report.mjs', $e2eReportPath)
+            if ($reportCode -ne 0) { throw "El informe E2E está incompleto (código $reportCode): $e2eReportPath" }
+            Write-Ok 'E2E confirmó todas las fases: ventana, terminal, paneles, comandos, preferencias y redimensionado'
         } finally {
             if ($null -eq $previousE2eBinary) {
                 Remove-Item Env:E2E_BINARY -ErrorAction SilentlyContinue
@@ -1009,8 +1045,12 @@ if ($runExtendedTests) {
 # con el .zip que no mencione otra plataforma).
 Write-Step 'Comprimiendo la release y calculando su huella'
 $releaseOut = Join-Path $ProjectRoot 'release'
+if ($Fast) {
+    $releaseOut = Join-Path $releaseOut 'dev'
+}
 New-Item -ItemType Directory -Force -Path $releaseOut | Out-Null
-$zipPath = Join-Path $releaseOut "WinSlimTerminal-Unpacked-$version.zip"
+$zipSuffix = if ($Fast) { '-dev' } else { '' }
+$zipPath = Join-Path $releaseOut "WinSlimTerminal-Unpacked-$version$zipSuffix.zip"
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 # Se comprime el CONTENIDO, sin carpeta intermedia. El actualizador acepta las
 # dos formas, pero asi la carpeta de destino queda igual que la de aqui.

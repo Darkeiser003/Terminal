@@ -62,6 +62,7 @@ INSTALL_E2E_DRIVER=0
 E2E_DRIVER_PATH="${TAURI_NATIVE_DRIVER:-}"
 CROSS_WINDOWS=0
 NON_INTERACTIVE=0
+FAST_BUILD=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --clean)       CLEAN=1 ;;
@@ -76,6 +77,7 @@ while [ "$#" -gt 0 ]; do
             CROSS_WINDOWS=1
             ;;
         --non-interactive) NON_INTERACTIVE=1 ;;
+        --fast)         FAST_BUILD=1 ;;
         --install-e2e-driver) INSTALL_E2E_DRIVER=1 ;;
         --e2e-driver)
             shift
@@ -95,7 +97,7 @@ while [ "$#" -gt 0 ]; do
             VERSION_OVERRIDE="$1"
             ;;
         -h|--help)
-            echo "Uso: $0 [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
+            echo "Uso: $0 [--fast] [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
             exit 0
             ;;
         *)
@@ -105,6 +107,39 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+# Tauri invoca Cargo internamente y necesita seguir viendo el perfil release
+# para conservar sus rutas de bundling. Cargo permite ajustar ese perfil por
+# entorno, así que el modo rápido no necesita una segunda configuración Tauri
+# ni crea un target/release alternativo que luego el empaquetador no encuentre.
+#
+# El perfil normal es deliberadamente caro: LTO completo, una unidad de
+# generación y símbolos eliminados. El perfil rápido prioriza iteraciones de
+# desarrollo: compilación incremental, menos optimización, más unidades de
+# generación y símbolos de depuración. Ambos producen el mismo AppImage y
+# pasan las mismas validaciones; --no-extended-tests/--skip-checks son opciones
+# independientes y explícitas.
+configure_cargo_profile() {
+    if [ "$FAST_BUILD" -eq 1 ]; then
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL=1
+        export CARGO_PROFILE_RELEASE_LTO=false
+        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256
+        export CARGO_PROFILE_RELEASE_STRIP=none
+        export CARGO_PROFILE_RELEASE_DEBUG=1
+        export CARGO_PROFILE_RELEASE_INCREMENTAL=true
+        export CARGO_PROFILE_RELEASE_PANIC=unwind
+        ok "Perfil de desarrollo rápido: incremental, sin LTO y con símbolos de depuración"
+    else
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL=s
+        export CARGO_PROFILE_RELEASE_LTO=true
+        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+        export CARGO_PROFILE_RELEASE_STRIP=true
+        export CARGO_PROFILE_RELEASE_DEBUG=0
+        export CARGO_PROFILE_RELEASE_INCREMENTAL=false
+        export CARGO_PROFILE_RELEASE_PANIC=abort
+        ok "Perfil release comprimido: LTO completo, símbolos eliminados y optimización máxima"
+    fi
+}
 
 step() { CURRENT_STEP="$1"; printf '\n\033[36m==> %s\033[0m\n' "$1"; }
 ok()   { printf '    \033[32mOK:\033[0m %s\n' "$1"; }
@@ -621,6 +656,7 @@ TAURI_DIR="$PROJECT_ROOT/src-tauri"
 BUNDLE_DIR="$TAURI_DIR/target/release/bundle/appimage"
 
 cd "$PROJECT_ROOT"
+configure_cargo_profile
 
 # ---------------------------------------------------------------------------
 # 1. Requisitos
@@ -1459,7 +1495,13 @@ step "Publicando la release y su huella"
 # NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build.
 RELEASE_DIR="$PROJECT_ROOT/release"
 mkdir -p "$RELEASE_DIR"
-RELEASE_NAME="LTerminal-$VERSION-$(uname -m).AppImage"
+if [ "$FAST_BUILD" -eq 1 ]; then
+    RELEASE_DIR="$RELEASE_DIR/dev"
+    RELEASE_NAME="LTerminal-$VERSION-$(uname -m)-dev.AppImage"
+    mkdir -p "$RELEASE_DIR"
+else
+    RELEASE_NAME="LTerminal-$VERSION-$(uname -m).AppImage"
+fi
 # Los de versiones anteriores se quedaban y SHA256SUMS acababa listando varias.
 rm -f "$RELEASE_DIR"/LTerminal-*.AppImage
 cp "$APPIMAGE" "$RELEASE_DIR/$RELEASE_NAME"
@@ -1507,13 +1549,25 @@ if [ "$EXTENDED_TESTS" -eq 1 ]; then
         err "Reintenta con --install-e2e-driver o indica --e2e-driver /ruta/WebKitWebDriver."
         exit 1
     fi
-    TAURI_NATIVE_DRIVER="$E2E_DRIVER_PATH" E2E_BINARY="$RELEASE_DIR/$RELEASE_NAME" npm run e2e
-    ok "E2E confirmó ventana, terminal, barra y Ajustes"
+    E2E_REPORT="$(mktemp "${TMPDIR:-/tmp}/lterminal-e2e-report.XXXXXX.json")"
+    if ! TAURI_NATIVE_DRIVER="$E2E_DRIVER_PATH" \
+        E2E_BINARY="$RELEASE_DIR/$RELEASE_NAME" \
+        LTERMINAL_SMOKE_REPORT="$E2E_REPORT" npm run e2e; then
+        err "E2E falló. Se conserva el informe para diagnóstico: $E2E_REPORT"
+        exit 1
+    fi
+    if ! node "$PROJECT_ROOT/scripts/verify-e2e-report.mjs" "$E2E_REPORT"; then
+        err "El E2E terminó, pero su informe está incompleto: $E2E_REPORT"
+        exit 1
+    fi
+    rm -f "$E2E_REPORT"
+    ok "E2E confirmó todas las fases: ventana, terminal, paneles, comandos, preferencias y redimensionado"
 fi
 
 if [ "$CROSS_WINDOWS" -eq 1 ]; then
     step "Pruebas cruzadas Windows mediante MinGW y Wine"
     cross_args=(--full-tests --wine-repeats 3 --non-interactive)
+    [ "$FAST_BUILD" -eq 1 ] && cross_args+=(--fast)
     [ "$SKIP_CHECKS" -eq 1 ] && cross_args+=(--skip-checks)
     [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ] && cross_args+=(--allow-offline-checks)
     [ "$AUTO_INSTALL" -eq 0 ] && cross_args+=(--no-install)

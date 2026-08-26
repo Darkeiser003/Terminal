@@ -5,6 +5,7 @@
 // cuando cambia y no hace falta repintar nada a mano.
 
 import * as api from './api';
+import { platformBrandText } from './localization';
 
 /** Cuántas terminales caben a la vez en la rejilla. Cuatro es el límite en el
  *  que cada una sigue siendo usable a tamaño de ventana normal. */
@@ -74,18 +75,9 @@ class AppStore {
      *  componente, igual que hacía `t()` en el backend. */
     t(key: string, fallback: string): string {
         const text = this.catalog.strings[key] ?? fallback;
-
-        // Los catálogos comparten traducciones con Windows para no duplicar
-        // reglas ni archivos. La identidad, en cambio, es una decisión de la
-        // plataforma: en Linux ningún texto de interfaz debe heredar la marca
-        // de Windows. Se transforma al presentar, después de elegir idioma,
-        // para que funcione igual con todos los catálogos.
-        if (this.appInfo?.platform !== 'linux') return text;
-        const appName = this.appInfo.name || 'LTerminal';
-        return text
-            .replaceAll('WinSlim Terminal', appName)
-            .replaceAll('WinSlim Project', appName)
-            .replaceAll('WinSlim', appName);
+        // Los catálogos son compartidos, pero la identidad es bidireccional:
+        // Windows tampoco debe heredar LTerminal de un texto común.
+        return platformBrandText(text, this.appInfo?.platform, this.appInfo?.name);
     }
 
     async load(): Promise<void> {
@@ -386,6 +378,9 @@ class AppStore {
      *  aquí no hay una segunda copia que se pudiera desincronizar. */
     async resetPreferences(): Promise<void> {
         this.applyPayload(await api.resetPreferences());
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed'));
+        }
     }
 
     /** Recarga las preferencias desde el backend, que es la única fuente: el

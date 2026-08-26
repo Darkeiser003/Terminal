@@ -623,7 +623,7 @@ pub fn build_help_topic_text(
         render_session(&mut lines, t, options);
     }
     if topic == HelpTopic::General || topic == HelpTopic::Internal {
-        render_internal(&mut lines);
+        render_internal(&mut lines, options.app_name);
     }
     if topic == HelpTopic::General || topic == HelpTopic::Aliases {
         render_aliases(&mut lines, options);
@@ -757,8 +757,8 @@ fn render_session(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions
     lines.push(String::new());
 }
 
-fn render_internal(lines: &mut Vec<String>) {
-    section(lines, "Comandos internos de LTerminal");
+fn render_internal(lines: &mut Vec<String>, app_name: &str) {
+    section(lines, &format!("Comandos internos de {app_name}"));
     lines.push("    Se reconocen únicamente al empezar la línea con : y no se envían al proceso de la shell.".to_string());
     lines.push(help_row(
         ":help [sección]",
@@ -780,6 +780,10 @@ fn render_internal(lines: &mut Vec<String>) {
     lines.push(help_row(
         ":banner hide|show|toggle <elemento>",
         "Activa u oculta información del banner; también admite preset compact, full y list.",
+    ));
+    lines.push(help_row(
+        ":quick-actions on|off|toggle|list",
+        "Muestra u oculta el submenú de acciones rápidas de la Biblioteca.",
     ));
     lines.push(
         "    Si una orden no aparece aquí, se deja intacta para que la interprete la shell."
@@ -959,9 +963,10 @@ fn help_compat_line(kind: ShellKind, help_path: Option<&str>) -> String {
             .unwrap_or_else(|| "doskey help=ayuda $*".to_string()),
         ShellKind::Powershell => {
             // `help` es un alias integrado de Get-Help. Set-Alias -Force es
-            // necesario para que el nombre canónico de LTerminal gane en
-            // todas las versiones de Windows PowerShell y PowerShell Core.
-            "function Show-LTerminalHelp { ayuda @args }; Set-Alias -Name help -Value Show-LTerminalHelp -Option AllScope -Force -Scope Global".to_string()
+            // necesario para que la ayuda de la aplicación gane en todas las
+            // versiones de Windows PowerShell y PowerShell Core. El nombre
+            // auxiliar es neutro: la marca visible ya la pone `app_name`.
+            "function Show-TerminalHelp { ayuda @args }; Set-Alias -Name help -Value Show-TerminalHelp -Option AllScope -Force -Scope Global".to_string()
         }
         ShellKind::Fish => "function help; ayuda $argv; end".to_string(),
         _ => "help() { ayuda \"$@\"; }".to_string(),
@@ -1596,6 +1601,10 @@ mod tests {
             build_help_topic_text(&Translator::default(), &opciones, HelpTopic::Packages);
         assert!(paquetes.contains("install <paquete>"));
         assert!(!paquetes.contains("Desarrollador principal"));
+        let internos =
+            build_help_topic_text(&Translator::default(), &opciones, HelpTopic::Internal);
+        assert!(internos.contains("Comandos internos de App"));
+        assert!(internos.contains(":quick-actions on|off|toggle|list"));
         assert_eq!(
             HelpTopic::from_argument(Some("help")),
             Some(HelpTopic::General)

@@ -9,13 +9,13 @@ dentro de la misma ventana. Funciona además como hub local de proyectos GitHub
 y como lanzador de scripts.
 
 La aplicación se llama **WinSlim Terminal** en Windows y **LTerminal** en
-Linux y macOS. No es una marca distinta: es la misma base con identidad,
+Linux. No es una marca distinta: es la misma base con identidad,
 identificador y rutas de datos propias por plataforma (`src-tauri/src/config/identity.rs`).
 
 | | |
 |---|---|
 | Versión | 1.4.4 |
-| Plataformas | Windows 10/11, Linux (x64), macOS (parcial) |
+| Plataformas | Windows 10/11 (x64), Linux (x64) |
 | Runtime | Tauri 2 · Rust 1.77+ · Node.js ≥ 22.12.0 (solo para compilar) |
 | Licencia | UNLICENSED (privado) |
 | Idiomas | Español, inglés, francés, alemán, italiano, portugués, rumano, ruso, ucraniano, polaco, chino, japonés, coreano, hindi y árabe |
@@ -142,25 +142,46 @@ directamente en la terminal.
 | `npm start` | Arranca la aplicación en desarrollo (Vite + `cargo run`). |
 | `npm run check` | Ciclo completo: versión, metadatos, recursos, arquitectura, documentación, enlaces, fuentes de instalación, catálogo WinGet cuando se ejecuta en Windows, `svelte-check`, formato, análisis estático y pruebas Rust. **Es lo que hay que pasar antes de compilar.** |
 | `npm run check:workspace` | Comprueba que las cachés, salidas y directorio temporal se puedan leer y escribir; detecta un `chown`/`chmod` pendiente antes de una build. |
+| `npm run check:install-sources` | Sondea 16 fuentes que usa el catálogo (WinGet, Chocolatey, Flathub y los registros de los principales ecosistemas) y distingue una caída de red de un error del código. |
+| `npm run check:i18n` | Comprueba la paridad de los 15 catálogos, textos visibles, marcadores dinámicos y fugas de idioma en búsquedas y comandos internos. |
+| `npm run check:contracts` | Cruza las preferencias Rust/TOML/TypeScript, los comandos internos Rust/Svelte y los recursos nativos Linux/Windows. |
+| `npm run test:frontend-logic` | Ejecuta la lógica pura de idioma, identidad de plataforma y los nueve atajos sin necesitar una ventana. |
+| `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o Acciones rápidas sin comprobar. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run dist:win` | Ejecuta la build completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera la carpeta desempaquetada y su ZIP. |
-| `npm run dist:win:fast` | Compila y valida Windows solo con el smoke mínimo de arranque; omite explícitamente la batería ampliada y el E2E para iteraciones rápidas. |
+| `npm run dist:win:fast` | Build de desarrollo rápida de Windows: usa compilación incremental, omite LTO y conserva símbolos; ejecuta solo el smoke mínimo y salta las comprobaciones previas. No es una release. |
 | `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido y ejecuta la batería ampliada/E2E. |
 | `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64 y verifica los binarios nativos y los scripts integrados. `--wine-smoke` requiere `WINE_SMOKE_PREFIX` apuntando a un prefijo que ya tenga WebView2 Runtime. |
+| `npm run dist:win:linux:fast` | Build cruzada Windows GNU x64 rápida para desarrollo; omite las comprobaciones previas y conserva la salida portable para probarla en Wine/Windows. |
 | `npm run dist:linux` | Ejecuta la build Linux completa: solicita la versión, valida y genera el AppImage. |
+| `npm run dist:linux:fast` | Build de desarrollo rápida de Linux: compilación incremental sin LTO, smoke mínimo y sin comprobaciones previas. No es una release. |
 
 Para una build completa y verificada, con sus comprobaciones previas y su
 release comprimida, usar los scripts de `windows/` y `linux/` en vez de estos.
+
+Las builds normales (`dist:win`, `dist:win:installer` y `dist:linux`) usan el
+perfil release comprimido: LTO completo, una unidad de generación y símbolos
+eliminados. Para iteraciones de desarrollo están disponibles `-Fast` en
+`windows/build.ps1`, `--fast` en `linux/build.sh` y `linux/build-windows.sh`, o
+los comandos npm `*:fast`. Ese perfil conserva símbolos, activa compilación
+incremental, reduce la optimización y desactiva LTO; por eso termina antes y
+pesa más. `--fast` solo cambia la compilación: las pruebas se controlan aparte,
+pero los comandos npm rápidos omiten deliberadamente las comprobaciones
+previas y la batería ampliada. Antes de publicar hay que ejecutar la build
+normal. Los artefactos rápidos quedan en `release/dev/` y llevan el sufijo
+`-dev`, para que no se confundan con los publicables.
 
 ## Compilación y distribución
 
 ```powershell
 windows\build.ps1          # o build.bat, para doble clic
+windows\build.ps1 -Fast -NoExtendedTests -SkipChecks  # iteración rápida de desarrollo
 ```
 
 ```bash
 linux/build.sh
+linux/build.sh --fast --no-extended-tests --skip-checks  # iteración rápida de desarrollo
 ```
 
 Para validar la compatibilidad Windows desde Linux:
@@ -178,8 +199,8 @@ tienen el mismo sentido que en la build Linux; `--clean` elimina únicamente la
 salida Windows cruzada. `LTERMINAL_WINDOWS_TARGET_DIR` permite cambiar esa
 carpeta sin compartir locks con otra compilación.
 
-Para hacer la validación cruzada completa desde Linux, incluyendo tres
-arranques aislados bajo Wine:
+Para hacer la validación cruzada completa desde Linux, incluyendo la batería
+Rust compilada como PE Windows y tres arranques aislados bajo Wine:
 
 ```bash
 linux/build.sh --full-tests --cross-windows
@@ -212,9 +233,8 @@ instalaciones automáticas. En Arch/CachyOS instala solo esos paquetes y no
 actualiza todo el sistema; `LTERMINAL_ALLOW_SYSTEM_UPGRADE=1` habilita la
 actualización completa de `pacman` de forma explícita.
 
-En Windows, si se ejecuta en modo interactivo sin `-FullTests`, la build pregunta
-antes de lanzar la batería ampliada. En modo `-NonInteractive`, Windows la
-ejecuta automáticamente; solo `-NoExtendedTests` la omite. Las sondas de shells y herramientas se
+En Windows, la batería ampliada se ejecuta automáticamente tanto en modo
+interactivo como no interactivo; solo `-NoExtendedTests` la omite. Las sondas de shells y herramientas se
 acumulan aunque alguna falle, de modo que el E2E no se pierde por un único
 `cmd.exe` o runtime ausente; en modo estricto la build informa el fallo después
 del E2E. El informe E2E se guarda en `%TEMP%\winslim-terminal-e2e-<id>.json`.
@@ -399,6 +419,14 @@ lo explica en la propia sesión, diciendo además cuál le ha tocado.
 Dos niveles: grupos temáticos y, dentro, un subgrupo plegable por herramienta.
 De cada herramienta se ve **o** «instalar» (si falta) **o**
 actualizar/desinstalar/ver versión (si está), nunca las dos mitades a la vez.
+Cada componente separa una descripción concisa de su finalidad de la nota
+operativa: la descripción explica para qué sirve; `hint` reserva requisitos,
+permisos, reinicios y procedencia. El buscador consulta ambos textos y los tests
+rechazan componentes agrupados sin descripción o descripciones que solo hablen
+del instalador.
+La instalación y la desinstalación se seleccionan componente a componente: la
+build no genera ni ejecuta un script masivo de entorno. Los scripts de desarrollo
+para preparar el proyecto siguen en `scripts/` y se usan desde el código fuente.
 
 El panel solo ofrece caminos que existen de verdad en ese sistema. El caso
 representativo es PowerShell en Linux: Microsoft no lo publica en los
@@ -510,6 +538,12 @@ carpeta o el filtro de tipos actual no los incluya; los que ya no existen se
 retiran automáticamente. Así las herramientas de uso diario siguen a un clic
 sin convertir la Biblioteca en un segundo explorador.
 
+Las **Operaciones rápidas** de la Biblioteca se pueden ocultar desde Ajustes
+(`Acciones rápidas`) o desde cualquier terminal con `:quick-actions off`; se
+recuperan con `:quick-actions on` y también admiten `toggle` y `list`. La opción
+queda activada de fábrica y solo oculta el submenú: los scripts integrados
+siguen disponibles en la Biblioteca.
+
 El filtro de tipos se adapta al sistema. En Linux aparecen primero
 SH/Bash/Zsh, Fish y paquetes Linux, que son los tres valores de fábrica; en
 Windows, CMD/BAT, PowerShell y VBScript ocupan esas posiciones. Python,
@@ -554,8 +588,7 @@ pregunta; si no hay ninguno, se ofrece instalar uno.
 Si al abrir un archivo el sistema no tiene ninguna aplicación asociada, la
 aplicación propone instalar un visor adecuado al tipo de contenido y **espera
 confirmación**. En Windows se usan ImageGlass, VLC, SumatraPDF, 7-Zip y Visual
-Studio Code; en Linux sus equivalentes del gestor de paquetes; en macOS solo
-los que el sistema no cubre ya con Vista Previa. Los mismos visores están en el
+Studio Code; en Linux sus equivalentes del gestor de paquetes. Los mismos visores están en el
 panel de dependencias para instalarlos sin esperar a que algo falle.
 
 ---
@@ -686,9 +719,11 @@ español y nunca como un identificador.
 Las etiquetas del panel de dependencias se traducen por dos vías: las generadas
 por molde (`action.install`, `action.updateShort`…), que cubren la mayor parte
 del catálogo, y las sueltas, por el identificador estable de cada acción
-(`action.<id>.label`). Las notas explicativas largas (`hint`) del catálogo de
-dependencias siguen mostrándose en español mientras no se traduzcan; el
-mecanismo y el validador ya las contemplan.
+(`action.<id>.label`). La finalidad usa `action.<id>.description`; si encabeza
+un acordeón, cabecera y tarjeta reutilizan esa misma traducción. Las notas
+operativas largas (`hint`) y las finalidades que aún no tengan entrada propia
+siguen el respaldo español en vez de mezclar una clave interna con el texto
+visible; el mecanismo y el validador ya las contemplan.
 
 ---
 
@@ -759,9 +794,10 @@ npm run check
 ```
 
 Pasa la verificación de versión, recursos, arquitectura, scripts de build,
-enlaces locales de documentación, traducciones, superficie de tests y
-superficie lógica, `svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings`
-y los tests de Rust. Es lo que tiene que estar en verde antes de compilar.
+enlaces locales de documentación, traducciones, contratos cruzados,
+lógica ejecutable del frontend, superficie de tests y superficie lógica,
+`svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y los tests de
+Rust. Es lo que tiene que estar en verde antes de compilar.
 
 La build Linux ejecuta por defecto la batería ampliada. Además del smoke test
 de ventana/frontend/PTY, comprueba shells y herramientas instaladas y ejecuta
@@ -774,6 +810,11 @@ Ajustes, Biblioteca, Proyectos, Entorno y dependencias, acordeones, explorador
 y menú contextual, comandos internos, respuesta de la shell, división y
 varios tamaños de ventana. También repite refrescos de entornos, clics de
 división y aperturas de paneles para detectar carreras y estados residuales.
+El informe JSON se vuelve a validar al terminar y debe contener las once fases,
+los dos estados de `:quick-actions` y evidencias de menú contextual,
+grupos/submenús de dependencias y la matriz responsive con dos paneles y el
+explorador visible y oculto. Una ventana que solo arranca y se cierra ya no
+puede contarse como E2E superado.
 La ruta Linux→Windows repite el arranque Wine con prefijos independientes; la
 ruta Windows→Linux repite el mismo build y E2E dentro de WSLg.
 
@@ -838,10 +879,11 @@ en Windows hay que revisar `winget source list` y, si la fuente está dañada,
 ejecutar `winget source reset --force` seguido de `winget source update`. El
 reset devuelve las fuentes a las predeterminadas y puede quitar fuentes
 personalizadas.
-Maven, Gradle, Ant, Dart y el compilador de Kotlin no se anuncian con esos IDs
-fiables en WinGet; sus acciones de Windows usan Chocolatey como vía alternativa
-y preparan el gestor si todavía no está instalado. Dart documenta oficialmente
-ese procedimiento. PostgreSQL usa el ID versionado `PostgreSQL.PostgreSQL.18`
+Maven, Gradle, Ant, Dart, Kotlin, Elixir, Nim y Scala no se anuncian con IDs
+fiables de WinGet para este catálogo; sus acciones de Windows usan Chocolatey
+como vía alternativa y preparan el gestor si todavía no está instalado. Elixir
+documenta oficialmente ese procedimiento y su paquete incorpora Erlang como
+dependencia. PostgreSQL usa el ID versionado `PostgreSQL.PostgreSQL.18`
 que publica la fuente actual y, si WinGet no puede instalarlo, prueba el paquete
 `postgresql` de Chocolatey. El panel indica expresamente cuándo interviene
 Chocolatey porque es una fuente comunitaria, no un manifiesto de WinGet.
@@ -851,7 +893,7 @@ descarga manualmente.
 
 Para ampliar el catálogo de lenguajes de Windows sin fingir que existe un
 instalador nativo para cada ecosistema, también se ofrecen Haxe, Octave, Racket,
-SBCL, SWI-Prolog y SQLite mediante WinGet. OCaml se ofrece como paquete UCRT64
+Maxima, SBCL, SWI-Prolog, Erlang y SQLite mediante WinGet. OCaml se ofrece como paquete UCRT64
 independiente de MSYS2. GCC, GFortran y GDB se instalan como
 toolchain UCRT64 de MSYS2 y se añade su `ucrt64\\bin` al PATH del usuario; la
 acción busca la raíz real de MSYS2 en vez de asumir una única carpeta. Haskell
@@ -861,9 +903,16 @@ contempla instalaciones fuera del PATH. Las fuentes alternativas solo se
 ofrecen cuando tienen una sonda posterior verificable, y no se convierten en
 instaladores Linux ni en acciones de WSL por accidente.
 
+El bloque de herramientas de desarrollo incluye GitHub CLI, Git LFS, ripgrep,
+fd, fzf, bat, eza y just; Windows añade Terraform, OpenTofu, AWS CLI y Azure CLI.
+Contenedores y Kubernetes incluye Docker, Podman, kubectl, Helm y k9s, y en
+Windows también minikube, kind y Kustomize. Linux solo presenta una entrada
+cuando el gestor detectado tiene un nombre de paquete conocido; no se fuerza un
+paquete de otra distribución para igualar contadores.
+
 **El panel de dependencias tarda un par de segundos en abrir.** Refleja el
-estado actual del sistema, no el del arranque: consulta el PATH y comprueba unas
-treinta herramientas. La detección de virtualización y el inventario de WSL sí
+estado actual del sistema, no el del arranque: consulta el PATH y comprueba por
+lotes las herramientas aplicables. La detección de virtualización y el inventario de WSL sí
 están cacheados.
 
 **El primer arranque tras compilar puede tardar.** El antivirus inspecciona un

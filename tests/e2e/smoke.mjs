@@ -38,6 +38,13 @@ const WINDOW_LIMITS = {
     maxWidth: Math.max(480, parseLimit('E2E_MAX_WIDTH', 7680, 7680)),
     maxHeight: Math.max(270, parseLimit('E2E_MAX_HEIGHT', 4320, 4320)),
 };
+const VISIBILITY_CONTROLS = {
+    dependencies: 'settings-show-dependencies',
+    projects: 'settings-show-projects',
+    library: 'settings-show-library',
+    quickActions: 'settings-show-quick-actions',
+    explorer: 'settings-show-explorer',
+};
 // El smoke espera señales observables, no pausas largas. Estos valores se
 // pueden ampliar para diagnosticar una máquina especialmente lenta.
 const parseDuration = (name, fallback, minimum, maximum) => {
@@ -66,6 +73,7 @@ const driver = spawn(driverPath, driverArgs, { stdio: ['ignore', 'inherit', 'inh
 const endpoint = `http://127.0.0.1:${driverPort}`;
 const elementKey = 'element-6066-11e4-a52e-4f735466cecf';
 let sessionId;
+let panelVisibilityInitial = null;
 const smokeStartedAt = Date.now();
 const phaseTimings = [];
 let phaseStartedAt = smokeStartedAt;
@@ -174,6 +182,13 @@ async function attribute(element, name) {
     return request(`/session/${sessionId}/element/${element}/attribute/${name}`);
 }
 
+async function property(element, name) {
+    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: 'return arguments[0][arguments[1]];',
+        args: [{ [elementKey]: element }, name],
+    });
+}
+
 async function textOf(element) {
     return request(`/session/${sessionId}/element/${element}/text`);
 }
@@ -205,18 +220,6 @@ async function contentGeometry() {
         };`,
         args: [],
     });
-}
-
-async function buttonWithText(pattern, selector = 'button') {
-    for (const item of await findAll(selector)) {
-        const id = item[elementKey];
-        if (pattern.test(await textOf(id))) return id;
-    }
-    throw new Error(`No se encontró un botón con texto ${pattern}`);
-}
-
-async function clickButton(pattern, selector = 'button') {
-    await click(await buttonWithText(pattern, selector));
 }
 
 async function waitUntil(predicate, timeoutMs = 20000, description = 'condición') {
@@ -853,7 +856,7 @@ try {
     }, 20000, 'fin de refrescos concurrentes de entornos');
 
     markPhase('ajustes');
-    await clickButton(/Ajustes|Settings/i, 'button[data-panel-toggle]');
+    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
     const dialog = await findWhenReady('[role="dialog"]');
     const title = await textOf(dialog);
     if (!/Preferencias|Preferences|Settings|Ajustes|Appearance|Terminal/i.test(title)) {
@@ -877,40 +880,115 @@ try {
     if (!/Abrir la primera lista|Open the first list/i.test(settingsText)) {
         throw new Error('Ajustes no muestra la preferencia de apertura inicial');
     }
+    // Comprobar una opción real del banner, no solo que el panel se pueda
+    // abrir. El cambio debe llegar al backend y repintar la terminal visible;
+    // después se restaura el valor para no contaminar la máquina del usuario.
+    await click(await findWhenReady('[data-testid="settings-tab-appearance"]'));
+    const bannerControls = await findAll('[role="dialog"] label.banner-item');
+    let cpuControl;
+    for (const item of bannerControls) {
+        if (/CPU|Procesador|Processor/i.test(await textOf(item[elementKey]))) {
+            cpuControl = item;
+            break;
+        }
+    }
+    if (!cpuControl) throw new Error('Ajustes no muestra la opción de CPU del banner');
+    const cpuInput = (await findAllWithin(cpuControl[elementKey], 'input'))[0]?.[elementKey];
+    if (!cpuInput) throw new Error('La opción de CPU no contiene un control editable');
+    const cpuWasVisible = await property(cpuInput, 'checked');
+    const beforeBannerSettings = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+    await click(cpuControl[elementKey]);
+    await click(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => {
+        const text = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+        return cpuWasVisible ? !/CPU|Procesador|Processor/i.test(text) : /CPU|Procesador|Processor/i.test(text);
+    }, 10000, 'repintado del banner tras cambiar CPU');
+    const changedBannerSettings = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+    if (changedBannerSettings === beforeBannerSettings) {
+        throw new Error('Cambiar una opción del banner no modificó la salida visible');
+    }
+    let restoredCpuControl;
+    for (const item of await findAll('[role="dialog"] label.banner-item')) {
+        if (/CPU|Procesador|Processor/i.test(await textOf(item[elementKey]))) {
+            restoredCpuControl = item;
+            break;
+        }
+    }
+    if (!restoredCpuControl) throw new Error('La opción de CPU desapareció al guardar el banner');
+    await click(restoredCpuControl[elementKey]);
+    await click(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => {
+        const text = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+        return cpuWasVisible ? /CPU|Procesador|Processor/i.test(text) : !/CPU|Procesador|Processor/i.test(text);
+    }, 10000, 'restauración de la opción CPU del banner');
     // El contrato del panel mantiene el orden Apariencia, Terminal,
     // Comportamiento, Información; usar el índice evita depender de que una
     // traducción concreta cambie la etiqueta visible de la pestaña.
-    await click(settingsTabs[2][elementKey]);
+    await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
+    panelVisibilityInitial = {};
+    let visibilityChanged = false;
+    for (const [name, testId] of Object.entries(VISIBILITY_CONTROLS)) {
+        const input = await findWhenReady(`[data-testid="${testId}"]`);
+        const checked = Boolean(await property(input, 'checked'));
+        panelVisibilityInitial[name] = checked;
+        if (!checked) {
+            await click(await findWhenReady(`[role="dialog"] label:has([data-testid="${testId}"])`));
+            visibilityChanged = true;
+        }
+    }
+    // Las fases siguientes necesitan estos paneles. Si el perfil del usuario
+    // ocultó alguno, habilitarlo en una sola escritura y restaurarlo al final.
+    if (visibilityChanged) {
+        await click(await findWhenReady('[data-testid="settings-save"]'));
+        await waitUntil(async () => {
+            for (const testId of Object.values(VISIBILITY_CONTROLS)) {
+                if (!Boolean(await property(await findWhenReady(`[data-testid="${testId}"]`), 'checked'))) return false;
+            }
+            return true;
+        }, 5000, 'activación temporal de paneles para el E2E');
+    }
     // El E2E debe ser repetible aunque la configuración del usuario haya
     // ocultado el explorador: habilitarlo desde el mismo control que usaría
     // una persona y comprobar después que aparece de verdad.
+    // Ajustes es modal: cerrarlo siempre antes de tocar el explorador o la
+    // terminal. Dejarlo abierto hacía que WebKit devolviese aleatoriamente
+    // "element not interactable" en la fase siguiente.
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Ajustes');
     if ((await findAll('.explorer')).length === 0) {
-        await click(await findWhenReady('[role="dialog"] .panel-close'));
         await click(await findWhenReady('.side-toggle:not(.panes)'));
     }
-    if ((await findAll('.explorer')).length === 0) {
-        // Si la sección completa estaba deshabilitada, habilitarla desde
-        // Ajustes. El diálogo se reabre después de cerrar el anterior para
-        // que WebKit no intente pulsar controles que están bajo una modal.
-        await clickButton(/Ajustes|Settings/i, 'button[data-panel-toggle]');
-        await findWhenReady('[role="dialog"]');
-        const visibilityTabs = await findAll('[role="dialog"] [role="tab"]');
-        await click(visibilityTabs[2][elementKey]);
-        // La casilla está dentro de una etiqueta estilizada; WebKit puede
-        // marcar el input como cubierto aunque el control sea visible. Pulsar
-        // la etiqueta reproduce el click de usuario y evita esa falsa alarma.
-        await click(await findWhenReady('[role="dialog"] label:has([data-testid="settings-show-explorer"])'));
-        await click(await buttonWithText(/Guardar|Save/i, '[role="dialog"] button'));
-        await click(await findWhenReady('[role="dialog"] .panel-close'));
-        await findWhenReady('.explorer');
-    }
+    await findWhenReady('.explorer');
     const terminal = await findWhenReady('.cell:not(.hidden) .xterm');
     await click(terminal);
 
     markPhase('biblioteca y operaciones');
+    // El comando interno debe cambiar la preferencia que consume la
+    // Biblioteca. Se comprueban ambos estados; no basta con reconocer la
+    // cadena ni con tener una casilla que nunca afecte a la interfaz.
+    await sendTerminalLine(':quick-actions off');
+    recordEvent('preference', { name: 'showQuickActions', value: false, source: 'internal-command' });
+    await click(await findWhenReady('[data-testid="toolbar-library"]'));
+    await findWhenReady('[role="dialog"] .types');
+    if ((await findAll('[role="dialog"] .operations')).length !== 0) {
+        throw new Error(':quick-actions off no ocultó Operaciones rápidas');
+    }
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca sin acciones rápidas');
+    await sendTerminalLine(':quick-actions on');
+    recordEvent('preference', { name: 'showQuickActions', value: true, source: 'internal-command' });
     // La primera apertura tiene que respetar la configuración cerrada por
     // defecto. Se abre y se vuelve a cerrar para probar el evento real.
-    await clickButton(/Biblioteca|Library/i, 'button[data-panel-toggle]');
+    await click(await findWhenReady('[data-testid="toolbar-library"]'));
+    const libraryDialog = await findWhenReady('[role="dialog"]');
+    const libraryIdentity = await textOf(libraryDialog);
+    if (process.platform === 'win32') {
+        if (!/WinSlim Terminal/i.test(libraryIdentity) || /\bLTerminal\b/i.test(libraryIdentity)) {
+            throw new Error(`La Biblioteca Windows mezcla la identidad Linux: ${JSON.stringify(libraryIdentity.slice(0, 240))}`);
+        }
+    } else if (!/LTerminal/i.test(libraryIdentity) || /WinSlim Terminal/i.test(libraryIdentity)) {
+        throw new Error(`La Biblioteca Linux mezcla la identidad Windows: ${JSON.stringify(libraryIdentity.slice(0, 240))}`);
+    }
     const operations = await findWhenReady('.operations');
     if ((await attribute(operations, 'open')) !== null) {
         throw new Error('Operaciones rápidas aparece abierta por defecto');
@@ -962,12 +1040,13 @@ try {
     if (!/Cortar|Cut/i.test(menuText) || !/Eliminar|papelera|Trash/i.test(menuText)) {
         throw new Error('El menú contextual no contiene cortar y eliminar');
     }
+    recordEvent('context-menu', { actions: ['cut', 'delete'] });
     await click(await findWhenReady('.menu-backdrop'));
 
     markPhase('proyectos');
     // Proyectos: recorrer los tres modos prueba que el contenido se desmonta
     // y vuelve a cargar sin romper el panel.
-    await clickButton(/Proyectos|Projects/i, 'button[data-panel-toggle]');
+    await click(await findWhenReady('[data-testid="toolbar-projects"]'));
     await findWhenReady('[role="dialog"]');
     const projectTabs = await findAll('[role="dialog"] [role="tab"]');
     if (projectTabs.length < 3) throw new Error(`Proyectos no muestra sus tres modos: ${projectTabs.length}`);
@@ -977,7 +1056,7 @@ try {
     markPhase('entorno y dependencias');
     // Dependencias: cargar el catálogo, abrir Compatibilidad Windows y un
     // submenú, pero no ejecutar instalaciones ni cambios del sistema.
-    await clickButton(/Entorno y dependencias|Dependencies/i, 'button[data-panel-toggle]');
+    await click(await findWhenReady('[data-testid="toolbar-dependencies"]'));
     await findWhenReady('[role="dialog"] .filters');
     await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0, 20000, 'grupos de dependencias');
     // `load()` pinta primero el inventario rápido y lanza después una
@@ -990,16 +1069,8 @@ try {
         const refreshButton = await find('[data-testid="dependency-refresh"]');
         return (await attribute(refreshButton, 'disabled')) === null;
     }, 20000, 'fin de la re-detección de dependencias');
-    const bulkActions = await findWhenReady('[data-testid="dependency-bulk-actions"]');
-    const bulkInstallButton = await findWhenReady('[data-testid="dependency-bulk-install"]');
-    const bulkUninstallButton = await findWhenReady('[data-testid="dependency-bulk-uninstall"]');
-    const bulkText = await textOf(bulkActions);
-    if (!/categor|category/i.test(bulkText)) {
-        throw new Error('Dependencias no muestra la explicación de acciones por categorías');
-    }
-    if (!/Instalar|Install/i.test(await textOf(bulkInstallButton)) || !/Desinstalar|Uninstall/i.test(await textOf(bulkUninstallButton))) {
-        throw new Error('Dependencias no muestra los dos lotes de instalación y desinstalación');
-    }
+    await findWhenReady('.dependency-actions');
+    await findWhenReady('.manual-hint');
     const dependencyGroups = await findAll('[data-testid="dependency-group"]');
     for (const group of dependencyGroups) {
         if ((await attribute(group[elementKey], 'open')) !== null) {
@@ -1098,7 +1169,7 @@ try {
     // Abrir y cerrar Dependencias varias veces comprueba que las respuestas de
     // detección tardías no pisan la lista de una apertura posterior.
     for (let attempt = 0; attempt < 3; attempt += 1) {
-        await clickButton(/Entorno y dependencias|Dependencies/i, 'button[data-panel-toggle]');
+        await click(await findWhenReady('[data-testid="toolbar-dependencies"]'));
         await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0, 10000, 'recarga de dependencias');
         const repeatedGroups = await findAll('[data-testid="dependency-group"]');
         if (repeatedGroups.length !== dependencyGroups.length) {
@@ -1107,6 +1178,12 @@ try {
         await click(await findWhenReady('[role="dialog"] .panel-close'));
         await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre repetido de Dependencias');
     }
+    recordEvent('dependencies', {
+        groups: dependencyGroups.length,
+        subgroups: subgroupNames.length,
+        repeatedLoads: 3,
+        platformGroup: platformGroupLabel,
+    });
 
     markPhase('pestañas, división y redimensionado');
     await resizeWindow(1100, 720);
@@ -1197,6 +1274,11 @@ try {
         }
         process.stdout.write(`E2E matriz ${explorerLabel} OK: ${matrixResults.join(', ')}\n`);
     }
+    recordEvent('responsive-matrix', {
+        panes: stablePaneCount,
+        cases: proportions.length * 2,
+        explorerStates: [false, true],
+    });
     await setExplorerVisible(true);
 
     markPhase('repetición de acciones y fastfetch');
@@ -1204,7 +1286,7 @@ try {
     // respuesta lenta de una apertura anterior no debe reaparecer encima de la
     // siguiente ni dejar el diálogo en un estado intermedio.
     for (let attempt = 0; attempt < 3; attempt += 1) {
-        await clickButton(/Ajustes|Settings/i, 'button[data-panel-toggle]');
+        await click(await findWhenReady('[data-testid="toolbar-settings"]'));
         await findWhenReady('[role="dialog"]');
         recordEvent('panel', { panel: 'settings', open: true, attempt: attempt + 1 });
         await click(await findWhenReady('[role="dialog"] .panel-close'));
@@ -1212,7 +1294,7 @@ try {
         recordEvent('panel', { panel: 'settings', open: false, attempt: attempt + 1 });
     }
     for (let attempt = 0; attempt < 3; attempt += 1) {
-        await clickButton(/Biblioteca|Library/i, 'button[data-panel-toggle]');
+        await click(await findWhenReady('[data-testid="toolbar-library"]'));
         const library = await findWhenReady('[role="dialog"]');
         const quickAccess = await findWhenReady('.operations', 5000);
         await click(await findWhenReady('.operations > summary'));
@@ -1252,6 +1334,25 @@ try {
         throw new Error('El banner no dejó texto reconocible tras redimensionar varias veces');
     }
     process.stdout.write(`E2E banner tamaños OK: ${bannerSizes.join(', ')}\n`);
+
+    if (panelVisibilityInitial) {
+        await click(await findWhenReady('[data-testid="toolbar-settings"]'));
+        await findWhenReady('[role="dialog"]');
+        await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
+        let restoreVisibility = false;
+        for (const [name, testId] of Object.entries(VISIBILITY_CONTROLS)) {
+            const input = await findWhenReady(`[data-testid="${testId}"]`);
+            const current = Boolean(await property(input, 'checked'));
+            if (current !== panelVisibilityInitial[name]) {
+                await click(await findWhenReady(`[role="dialog"] label:has([data-testid="${testId}"])`));
+                restoreVisibility = true;
+            }
+        }
+        if (restoreVisibility) await click(await findWhenReady('[data-testid="settings-save"]'));
+        recordEvent('preference', { name: 'panelVisibility', value: panelVisibilityInitial, source: 'restored' });
+        await click(await findWhenReady('[role="dialog"] .panel-close'));
+        await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'restauración de visibilidad');
+    }
 
     phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
     await assertCurrentLog();

@@ -201,6 +201,14 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    fn conpty_disponible_en_este_runtime() -> bool {
+        // Wine enlaza y ejecuta la lógica Windows, pero todavía no implementa
+        // CreatePseudoConsole con la fidelidad necesaria para portable-pty.
+        // Solo la batería cruzada pone este marcador: en Windows nativo estas
+        // pruebas continúan siendo obligatorias.
+        !(cfg!(windows) && std::env::var("LTERMINAL_TEST_UNDER_WINE").as_deref() == Ok("1"))
+    }
+
     fn shell_echo(text: &str) -> (String, Vec<String>) {
         if cfg!(windows) {
             (
@@ -223,6 +231,10 @@ mod tests {
 
     #[test]
     fn una_shell_que_imprime_y_sale_entrega_su_salida_y_su_codigo() {
+        if !conpty_disponible_en_este_runtime() {
+            eprintln!("ConPTY se valida en Windows nativo; Wine no implementa esta API.");
+            return;
+        }
         let (exe, args) = shell_echo("hola-pty");
         let (data_tx, data_rx) = mpsc::channel();
         let (exit_tx, exit_rx) = mpsc::channel();
@@ -279,6 +291,10 @@ mod tests {
 
     #[test]
     fn se_puede_redimensionar_una_sesion_viva() {
+        if !conpty_disponible_en_este_runtime() {
+            eprintln!("ConPTY se valida en Windows nativo; Wine no implementa esta API.");
+            return;
+        }
         let exe = if cfg!(windows) {
             std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
         } else {

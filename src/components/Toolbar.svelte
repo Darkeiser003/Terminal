@@ -5,6 +5,7 @@
 
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
+    import { includesLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
     import type { Environment } from '../lib/types';
 
@@ -94,9 +95,10 @@
      *  apariencia coherente con el resto de la aplicación. */
     const grouped = $derived.by(() => {
         const groups = new Map<string, Environment[]>();
-        const needle = envQuery.trim().toLocaleLowerCase();
+        const needle = envQuery.trim();
         for (const env of app.environments) {
-            if (needle && ![env.label, env.language ?? '', env.group].some((text) => text.toLocaleLowerCase().includes(needle))) continue;
+            if (needle && ![env.label, env.language ?? '', env.group]
+                .some((text) => includesLocalized(text, needle, app.catalog.language))) continue;
             const list = groups.get(env.group);
             if (list) list.push(env);
             else groups.set(env.group, [env]);
@@ -246,6 +248,7 @@
         {#if app.preferences?.showProjectsPanel !== false}<button
             type="button"
             data-panel-toggle
+            data-testid="toolbar-projects"
             class:active={panels.isOpen('projects')}
             onclick={() => {
                 if (panels.toggle('projects')) onOpenProjects();
@@ -257,6 +260,7 @@
         {#if app.preferences?.showScriptsPanel !== false}<button
             type="button"
             data-panel-toggle
+            data-testid="toolbar-library"
             class:active={panels.isOpen('scripts')}
             onclick={() => {
                 if (panels.toggle('scripts')) onOpenScripts();
@@ -268,6 +272,7 @@
         {#if app.preferences?.showDependenciesPanel !== false}<button
             type="button"
             data-panel-toggle
+            data-testid="toolbar-dependencies"
             class:active={panels.isOpen('deps')}
             onclick={() => {
                 if (panels.toggle('deps')) onOpenDeps();
@@ -279,6 +284,7 @@
         <button
             type="button"
             data-panel-toggle
+            data-testid="toolbar-settings"
             class:active={panels.isOpen('settings')}
             onclick={() => {
                 if (panels.toggle('settings')) onOpenSettings();

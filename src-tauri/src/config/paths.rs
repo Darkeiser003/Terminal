@@ -56,7 +56,7 @@ pub fn default_scripts_dir() -> PathBuf {
     user_data_dir().join("scripts")
 }
 
-/// Carpeta de proyectos por defecto: `<documentos>/<LTerminal|LTerminal> Projects`.
+/// Carpeta de proyectos por defecto: `<documentos>/<LTerminal|WinSlim> Projects`.
 pub fn default_projects_dir() -> PathBuf {
     documents_dir().join(identity::current().projects_folder_name)
 }

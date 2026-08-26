@@ -107,6 +107,7 @@ export interface Preferences {
     showDependenciesPanel: boolean;
     showProjectsPanel: boolean;
     showScriptsPanel: boolean;
+    showQuickActions: boolean;
     showExplorerPanel: boolean;
     manualAliasesText: string;
     favoriteReplIds: string;
@@ -194,7 +195,7 @@ export interface WindowsIntegrationStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'alias' | 'help' | 'banner';
+    action: 'config' | 'reload' | 'repl' | 'alias' | 'help' | 'banner' | 'quickActions';
     argument?: string;
 }
 
@@ -525,6 +526,8 @@ export interface InstallAction {
     subgroup: string | null;
     /** Descripción breve del programa que encabeza el plegable. */
     subgroupDescription: string | null;
+    /** Para qué sirve el programa; separado de requisitos y origen. */
+    description: string | null;
     verb: string | null;
     /** Cierre específico para acciones que no son una instalación. */
     done: string | null;

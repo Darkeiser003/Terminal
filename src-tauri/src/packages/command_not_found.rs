@@ -79,6 +79,14 @@ struct KnownTool {
 static KNOWN_TOOLS: &[KnownTool] = &[
     KnownTool { name: "docker",  label: "Docker",            windows: Some("winget-docker"),    macos: Some("brew-docker"), linux: Some("pkg-docker") },
     KnownTool { name: "git",     label: "Git",               windows: Some("winget-git"),       macos: Some("brew-git"),    linux: Some("pkg-git") },
+    KnownTool { name: "git-lfs", label: "Git LFS",           windows: Some("winget-git-lfs"),   macos: None,                linux: Some("pkg-git-lfs") },
+    KnownTool { name: "gh",      label: "GitHub CLI",        windows: Some("winget-gh"),        macos: None,                linux: Some("pkg-gh") },
+    KnownTool { name: "rg",      label: "ripgrep",           windows: Some("winget-ripgrep"),   macos: None,                linux: Some("pkg-ripgrep") },
+    KnownTool { name: "fd",      label: "fd",                windows: Some("winget-fd"),        macos: None,                linux: None },
+    KnownTool { name: "fzf",     label: "fzf",               windows: Some("winget-fzf"),       macos: None,                linux: Some("pkg-fzf") },
+    KnownTool { name: "bat",     label: "bat",               windows: Some("winget-bat"),       macos: None,                linux: None },
+    KnownTool { name: "eza",     label: "eza",               windows: Some("winget-eza"),       macos: None,                linux: Some("pkg-eza") },
+    KnownTool { name: "just",    label: "just",              windows: Some("winget-just"),      macos: None,                linux: Some("pkg-just") },
     KnownTool { name: "node",    label: "Node.js",           windows: Some("winget-node"),      macos: Some("brew-node"),   linux: Some("pkg-node") },
     KnownTool { name: "npm",     label: "Node.js (npm)",     windows: Some("winget-node"),      macos: Some("brew-node"),   linux: Some("pkg-node") },
     KnownTool { name: "python",  label: "Python",            windows: Some("winget-python"),    macos: Some("brew-python"), linux: Some("pkg-python") },
@@ -94,11 +102,22 @@ static KNOWN_TOOLS: &[KnownTool] = &[
     // teclea sin tenerlo, la sugerencia lleva justo a esa instalación.
     KnownTool { name: "wine",    label: "Wine (cmd.exe)",    windows: None,                     macos: None,                linux: Some("pkg-wine") },
     KnownTool { name: "wt",      label: "Windows Terminal",  windows: Some("winget-wt"),        macos: None,                linux: None },
+    KnownTool { name: "podman",  label: "Podman",            windows: Some("winget-podman"),    macos: None,                linux: Some("pkg-podman") },
+    KnownTool { name: "minikube", label: "minikube",         windows: Some("winget-minikube"),  macos: None,                linux: None },
+    KnownTool { name: "kind",    label: "kind",              windows: Some("winget-kind"),      macos: None,                linux: None },
+    KnownTool { name: "kustomize", label: "Kustomize",       windows: Some("winget-kustomize"), macos: None,                linux: None },
+    KnownTool { name: "terraform", label: "Terraform",       windows: Some("winget-terraform"), macos: None,                linux: None },
+    KnownTool { name: "tofu",    label: "OpenTofu",          windows: Some("winget-opentofu"),  macos: None,                linux: None },
+    KnownTool { name: "aws",     label: "AWS CLI",           windows: Some("winget-aws-cli"),   macos: None,                linux: None },
+    KnownTool { name: "az",      label: "Azure CLI",         windows: Some("winget-azure-cli"), macos: None,                linux: None },
 ];
 
 /// Las herramientas que se pueden instalar dentro de una distro WSL con su
 /// propio gestor de paquetes, en vez de en el Windows anfitrión.
-const WSL_INSTALLABLE: [&str; 6] = ["git", "node", "python", "bash", "fish", "zsh"];
+const WSL_INSTALLABLE: [&str; 13] = [
+    "git", "git-lfs", "gh", "ripgrep", "fzf", "eza", "just", "podman", "node", "python", "bash",
+    "fish", "zsh",
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +177,7 @@ pub fn resolve_tool_suggestion(
             let wsl_tool = match tool_name {
                 "npm" => "node",
                 "python3" => "python",
+                "rg" => "ripgrep",
                 other => other,
             };
             if WSL_INSTALLABLE.contains(&wsl_tool) {

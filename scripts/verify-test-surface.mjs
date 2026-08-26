@@ -28,6 +28,10 @@ const requiredFiles = [
     'scripts/verify-runtime-assets.mjs',
     'scripts/verify-build-scripts.mjs',
     'scripts/verify-logic-surface.mjs',
+    'scripts/verify-contracts.mjs',
+    'scripts/verify-e2e-report.mjs',
+    'scripts/test-e2e-report.mjs',
+    'scripts/test-frontend-logic.mjs',
     'scripts/verify-test-surface.mjs',
     'scripts/verify-release-artifacts.mjs'
 ];
@@ -40,13 +44,15 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'check:i18n', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:e2e-report', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
 check('npm check incluye la auditoría de superficie lógica', scripts.check.includes('check:logic') && scripts['check:logic'].includes('verify-logic-surface.mjs'));
 check('npm check incluye la verificación de documentación', scripts.check.includes('check:docs'));
 check('npm check incluye la verificación de traducciones dinámicas', scripts.check.includes('check:i18n') && read('scripts/verify-i18n.mjs').includes('dynamicActionIds'));
+check('npm check prueba contratos cruzados y lógica frontend ejecutable', scripts.check.includes('check:contracts') && scripts.check.includes('test:frontend-logic'));
+check('npm check prueba el validador del informe E2E', scripts.check.includes('test:e2e-report'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));
 check('npm check incluye clippy con warnings como errores', scripts.check.includes('clippy') && scripts.check.includes('-D warnings'));
 check('Verificador de enlaces da más margen a Git y reintenta', links.includes('gitTimeoutMs') && links.includes('gitRetries') && links.includes('git ls-remote'));
@@ -83,10 +89,47 @@ check('Panel común implementa cierre, Escape y foco', ['panels.close()', "event
 check('Panel común implementa acordeón exclusivo en los paneles', read('src/components/DependenciesPanel.svelte').includes('exclusiveAccordionGroups'));
 check('Biblioteca conserva ejecución directa sin argumentos', read('src/components/ScriptsPanel.svelte').includes('scripts.operation.runMenuTitle'));
 check('Biblioteca conserva ejecución Windows mediante Wine', read('src/components/ScriptsPanel.svelte').includes('runWindowsApplication'));
+check('Biblioteca etiqueta los scripts integrados según la plataforma', (() => {
+    const panelCommands = read('src-tauri/src/app/panel_commands.rs');
+    return panelCommands.includes('bundled_source_label(is_windows)')
+        && panelCommands.includes('crate::config::identity::WINDOWS.name')
+        && panelCommands.includes('crate::config::identity::LINUX.name');
+})());
+check('La ayuda PowerShell no arrastra la marca Linux', (() => {
+    const aliases = read('src-tauri/src/terminal/aliases.rs');
+    return aliases.includes('Show-TerminalHelp') && !aliases.includes('Show-LTerminalHelp');
+})());
+check('Acciones rápidas se pueden mostrar u ocultar y nacen visibles', (() => {
+    const scriptsPanel = read('src/components/ScriptsPanel.svelte');
+    const settings = read('src/components/SettingsPanel.svelte');
+    const defaults = read('src-tauri/default_settings.toml');
+    return defaults.includes('showQuickActions = true')
+        && scriptsPanel.includes('app.preferences?.showQuickActions ?? true')
+        && settings.includes('settings-show-quick-actions');
+})());
+check('El comando interno de acciones rápidas persiste su estado', (() => {
+    const parser = read('src-tauri/src/terminal/internal_commands.rs');
+    const terminal = read('src/components/TerminalPane.svelte');
+    return parser.includes('quick-actions')
+        && parser.includes('quickActions')
+        && terminal.includes('configureQuickActions')
+        && terminal.includes('showQuickActions');
+})());
 check('Biblioteca conserva Acceso rápido global y traducido', ['scripts.quickAccess', 'const pinned = $derived((data?.pinned ?? []).filter(matches))'].every((marker) => read('src/components/ScriptsPanel.svelte').includes(marker)));
 check('Explorador contiene copiar, cortar, eliminar y pegar', ['explorer.copy', 'explorer.cut', 'explorer.trash', 'explorer.paste'].every((marker) => read('src/components/ExplorerSidebar.svelte').includes(marker)));
 check('Terminal intercepta cortar y eliminar sobre selección editable', ['deleteEditableSelection(true)', 'deleteEditableSelection(false)'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
-check('Terminal reajusta xterm y banner tras resize', ['ResizeObserver', 'refreshBanner', 'fitAndReport'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
+check('Terminal reajusta xterm y banner tras resize y preferencias', ['ResizeObserver', 'refreshBanner', 'fitAndReport', 'pendingBannerSettingsRefresh'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
+check('Restablecer preferencias repinta los banners abiertos', read('src/lib/appState.svelte.ts').includes("winslim:banner-settings-changed") && read('src/components/TerminalPane.svelte').includes('requestAnimationFrame(refreshBannerForSettings)'));
+check('Preferencias informa los fallos de escritura al frontend', read('src-tauri/src/app/commands.rs').includes('Result<PreferencesPayload, String>') && read('src-tauri/src/app/commands.rs').includes('No se pudieron guardar las preferencias en settings.json'));
+check('E2E comprueba y restaura una opción real del banner', read('tests/e2e/smoke.mjs').includes('repintado del banner tras cambiar CPU') && read('tests/e2e/smoke.mjs').includes('restauración de la opción CPU del banner'));
+check('E2E comprueba ambos estados de Acciones rápidas y restaura la visibilidad', (() => {
+    const smoke = read('tests/e2e/smoke.mjs');
+    return smoke.includes(":quick-actions off")
+        && smoke.includes(":quick-actions on")
+        && smoke.includes('no ocultó Operaciones rápidas')
+        && smoke.includes('panelVisibilityInitial');
+})());
+check('E2E cierra Ajustes antes de interactuar con la interfaz inferior', read('tests/e2e/smoke.mjs').includes('Ajustes es modal: cerrarlo siempre'));
 check('Frontend registra métricas segmentadas', ['recordPerformance', 'app.initial-load', 'fastfetch.banner-visible'].every((marker) => read('src/lib/performance.ts').includes(marker) || app.includes(marker) || api.includes(marker)) && read('src/components/TerminalPane.svelte').includes('app.ready-for-input'));
 check('Paneles registran apertura hasta geometría visible', ['ui.panel.visible', 'requestAnimationFrame'].every((marker) => read('src/components/Panel.svelte').includes(marker)));
 check('Backend expone el comando de métricas frontend', lib.includes('log_frontend_performance') && read('src-tauri/src/app/commands.rs').includes('Métrica de rendimiento frontend'));
@@ -149,10 +192,11 @@ check('Contador de dependencias cuenta entradas visibles y no acciones internas'
 check('Contador de dependencias explica su significado al usuario', dependenciesPanel.includes("deps.visibleComponents") && commonPanel.includes('countLabel') && commonPanel.includes('aria-label={countLabel}'));
 
 const smoke = read('tests/e2e/smoke.mjs');
+const e2eReportVerifier = read('scripts/verify-e2e-report.mjs');
 for (const marker of [
     'E2E_BINARY',
     'tauri-driver',
-    'button[data-panel-toggle]',
+    'toolbar-settings',
     '[role="dialog"]',
     '.operations',
     '.xterm',
@@ -165,20 +209,46 @@ check('Smoke E2E valida una respuesta real de la shell', smoke.includes('LTERMIN
 check('Smoke E2E prueba refrescos consecutivos de entornos', smoke.includes('refresh-environments') && smoke.includes('for (let attempt') && smoke.includes('fin de refrescos concurrentes'));
 check('Smoke E2E prueba clics concurrentes de división', smoke.includes('burstCount') && smoke.includes('crearon demasiados paneles'));
 check('Smoke E2E registra tiempos por fase y métricas de aplicación', smoke.includes('phaseTimings') && smoke.includes('E2E tiempos') && smoke.includes('performance'));
+check('El informe E2E exige todas las fases funcionales en Linux y Windows', [
+    'comandos internos y shell',
+    'biblioteca y operaciones',
+    'entorno y dependencias',
+    'pestañas, división y redimensionado',
+    'repetición de acciones y fastfetch',
+].every((phase) => e2eReportVerifier.includes(phase))
+    && read('linux/build.sh').includes('verify-e2e-report.mjs')
+    && read('windows/build.ps1').includes('verify-e2e-report.mjs'));
 check('Smoke E2E evita refrescos de shell innecesarios y permite forzarlos', smoke.includes('FORCE_SHELL_REFRESH') && smoke.includes('E2E_FORCE_SHELL_REFRESH') && smoke.includes('POLL_INTERVAL_MS'));
 check('Smoke E2E prueba los cuatro estados de panel', [
-    /Ajustes\|Settings/.test(smoke),
-    /Biblioteca\|Library/.test(smoke),
-    /Proyectos\|Projects/.test(smoke),
-    /Entorno y dependencias\|Dependencies/.test(smoke)
-].every(Boolean));
+    'toolbar-settings',
+    'toolbar-library',
+    'toolbar-projects',
+    'toolbar-dependencies',
+].every((marker) => smoke.includes(marker)));
 check('Smoke E2E prueba el explorador y su menú contextual', smoke.includes('.explorer') && smoke.includes('rightClick') && smoke.includes('dispatchContextMenu') && smoke.includes('[role="menu"]'));
 check('Smoke E2E prueba los acordeones cerrados y exclusivos', smoke.includes('.operations') && smoke.includes('.types') && smoke.includes('settingsText') && smoke.includes('acordeones exclusivos'));
-check('Smoke E2E prueba las acciones de dependencias sin ejecutarlas', smoke.includes('Compatibilidad Windows') && smoke.includes('data-testid="dependency-action"') && smoke.includes('aparece abierto antes'));
+check('Smoke E2E prueba las acciones individuales de dependencias sin ejecutarlas', smoke.includes('Compatibilidad Windows') && smoke.includes('data-testid="dependency-action"') && smoke.includes('aparece abierto antes') && !smoke.includes('dependency-bulk-install') && !smoke.includes('dependency-bulk-uninstall'));
 check('Smoke E2E adapta el catálogo de dependencias a cada plataforma', smoke.includes('nativeWindows') && smoke.includes('Virtualización') && smoke.includes('platformGroupPattern'));
 check('Smoke E2E comprueba nombres y descripciones del grupo de plataforma', smoke.includes('hasNamedTool') && smoke.includes('hasDescription') && smoke.includes('programa y descripción'));
 check('La sugerencia de herramienta abre dependencias y traduce su nombre', app.includes('suggestion.actionId') && app.includes('panels.show("deps")') && app.includes('.replace("{tool}", suggestion.label)'));
 check('Dependencias diferencia carga inicial de actualización', dependenciesPanel.includes('loading && actions.length === 0') && dependenciesPanel.includes('deps.refreshing'));
+check('Dependencias separa finalidad de requisitos de instalación', (() => {
+    const actions = read('src-tauri/src/packages/actions.rs');
+    const types = read('src/lib/types.ts');
+    return actions.includes('pub description: Option<String>')
+        && types.includes('description: string | null')
+        && dependenciesPanel.includes('action.description')
+        && actions.includes('cada_componente_del_catalogo_explica_para_que_sirve')
+        && actions.includes('las_descripciones_no_hablan_del_instalador');
+})());
+check('El catálogo mantiene descripciones específicas fuera de la lógica de instalación', (() => {
+    const descriptions = read('src-tauri/src/packages/descriptions.rs');
+    return descriptions.includes('framework-django')
+        && descriptions.includes('winget-ripgrep')
+        && descriptions.includes('winget-minikube')
+        && descriptions.includes('choco-elixir');
+})());
+check('La build no registra ni expone el comando de instalación masiva', !api.includes('runInstallBulk') && !lib.includes('install_bulk') && !dependenciesPanel.includes('runBulk'));
 check('Windows separa virtualización de compatibilidad Linux', read('src-tauri/src/packages/actions.rs').includes('VIRTUALIZATION_GROUP') && read('src-tauri/src/config/i18n.rs').includes('group.virt'));
 check('GPU Windows prefiere una descripción comercial ante un adaptador genérico', read('src-tauri/src/platform/system_info.rs').includes('preferred_gpu_name') && read('src-tauri/src/platform/system_info.rs').includes('Microsoft Basic Display Adapter'));
 

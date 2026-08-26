@@ -33,10 +33,12 @@ EXE="$RELEASE_DIR/winslim-terminal.exe"
 
 AUTO_INSTALL=1
 RUN_WINE=0
+RUN_WINE_TESTS=0
 WINE_REPEATS=1
 SKIP_CHECKS=0
 ALLOW_OFFLINE_CHECKS=0
 CLEAN=0
+FAST_BUILD=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -44,6 +46,7 @@ while [ "$#" -gt 0 ]; do
         --wine-smoke|--smoke) RUN_WINE=1 ;;
         --full-tests|--extended-tests)
             RUN_WINE=1
+            RUN_WINE_TESTS=1
             WINE_REPEATS=3
             ;;
         --wine-repeats)
@@ -66,8 +69,9 @@ while [ "$#" -gt 0 ]; do
         --skip-checks) SKIP_CHECKS=1 ;;
         --allow-offline-checks) ALLOW_OFFLINE_CHECKS=1 ;;
         --clean) CLEAN=1 ;;
+        --fast) FAST_BUILD=1 ;;
         -h|--help)
-            echo "Uso: $0 [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean]"
+            echo "Uso: $0 [--fast] [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean]"
             exit 0
             ;;
         *)
@@ -77,6 +81,32 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+# Se mantiene --release para que la salida cruzada conserve su estructura y
+# los verificadores de PE/runtime sigan encontrando el ejecutable. El perfil
+# rápido solo cambia los ajustes de Cargo; no altera el target Windows ni el
+# empaquetado de recursos.
+configure_cargo_profile() {
+    if [ "$FAST_BUILD" -eq 1 ]; then
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL=1
+        export CARGO_PROFILE_RELEASE_LTO=false
+        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256
+        export CARGO_PROFILE_RELEASE_STRIP=none
+        export CARGO_PROFILE_RELEASE_DEBUG=1
+        export CARGO_PROFILE_RELEASE_INCREMENTAL=true
+        export CARGO_PROFILE_RELEASE_PANIC=unwind
+        ok "Perfil de desarrollo rápido Windows: incremental, sin LTO y con símbolos"
+    else
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL=s
+        export CARGO_PROFILE_RELEASE_LTO=true
+        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+        export CARGO_PROFILE_RELEASE_STRIP=true
+        export CARGO_PROFILE_RELEASE_DEBUG=0
+        export CARGO_PROFILE_RELEASE_INCREMENTAL=false
+        export CARGO_PROFILE_RELEASE_PANIC=abort
+        ok "Perfil release Windows comprimido: LTO completo y símbolos eliminados"
+    fi
+}
 
 step() { printf '\n==> %s\n' "$1"; }
 ok() { printf '    OK: %s\n' "$1"; }
@@ -183,6 +213,24 @@ ensure_target() {
     ok "Target Rust $TARGET disponible"
 }
 
+run_wine_rust_tests() {
+    if ! command -v wine >/dev/null 2>&1; then
+        install_wine || fail "Se pidieron tests Windows, pero Wine no está instalado."
+    fi
+    command -v wine >/dev/null 2>&1 || fail "No se encontró Wine para ejecutar los tests Windows."
+
+    local debug_dir wine_debug_dir
+    debug_dir="$WINDOWS_TARGET_DIR/$TARGET/debug"
+    wine_debug_dir="Z:${debug_dir//\//\\}"
+    LTERMINAL_TEST_UNDER_WINE=1 \
+        WINEDEBUG=-all \
+        WINEPATH="$wine_debug_dir" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine \
+        cargo test --manifest-path "$TAURI_DIR/Cargo.toml" \
+            --target "$TARGET" --features tauri/custom-protocol \
+            -- --test-threads=1
+}
+
 run_wine_smoke() {
     if ! command -v wine >/dev/null 2>&1; then
         install_wine || fail "Se pidió --wine-smoke, pero Wine no está instalado."
@@ -277,6 +325,7 @@ run_wine_smoke() {
 
 cd "$PROJECT_ROOT"
 step "Comprobando requisitos Windows desde Linux"
+configure_cargo_profile
 ensure_node_and_rust
 ensure_mingw
 ensure_target
@@ -295,17 +344,29 @@ else
     warn "Comprobaciones omitidas: el frontend se seguirá compilando, pero se omitirán las comprobaciones externas y svelte-check."
 fi
 
+# MinGW puede intentar exportar símbolos internos de Rust hasta superar el
+# límite de ordinales PE. No cambia la interfaz del ejecutable: solo evita que
+# el enlazador publique esos símbolos privados como exports.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings -C link-arg=-Wl,--exclude-all-symbols"
+export CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR"
+
+if [ "$SKIP_CHECKS" -eq 0 ]; then
+    step "Validando tests y ramas exclusivas de Windows"
+    # `npm run check` se ejecuta en el host Linux y no compila los bloques
+    # `cfg(windows)`. Esta pasada evita que código Windows roto llegue al
+    # empaquetado aunque la batería Linux esté completamente verde.
+    cargo check --manifest-path "$TAURI_DIR/Cargo.toml" \
+        --tests --target "$TARGET" \
+        --features tauri/custom-protocol
+    ok "Código y tests condicionados para Windows compilados sin avisos"
+fi
+
 step "Compilando WinSlim Terminal ($TARGET)"
 # Esta ruta usa Cargo directamente en lugar de `tauri build`, por lo que debe
 # reproducir explícitamente los dos pasos que el bundler hace por configuración:
 # generar `dist` y activar `tauri/custom-protocol`. Sin esto el EXE arranca,
 # pero intenta abrir localhost y la VM muestra una página de conexión rechazada.
 npm run build
-# MinGW puede intentar exportar símbolos internos de Rust hasta superar el
-# límite de ordinales PE. No cambia la interfaz del ejecutable: solo evita que
-# el enlazador publique esos símbolos privados como exports.
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--exclude-all-symbols"
-export CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR"
 # Para esta validación no necesitamos el bundler de Tauri: Cargo ejecuta el
 # build.rs, genera el PE y copia conpty/OpenConsole/WebView2Loader. Usar Cargo
 # directamente evita que `tauri build --no-bundle` deje su proceso abierto
@@ -339,6 +400,12 @@ node "$PROJECT_ROOT/scripts/verify-release-artifacts.mjs" \
     --windows "$EXE" \
     --windows-dir "$RELEASE_DIR"
 ok "Estructura PE x64 y runtime Windows verificados"
+
+if [ "$RUN_WINE_TESTS" -eq 1 ]; then
+    step "Ejecutando la batería Rust Windows bajo Wine"
+    run_wine_rust_tests
+    ok "Batería Rust Windows ejecutada bajo Wine"
+fi
 
 if [ "$RUN_WINE" -eq 1 ]; then
     for attempt in $(seq 1 "$WINE_REPEATS"); do

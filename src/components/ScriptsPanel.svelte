@@ -13,6 +13,7 @@
 
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
+    import { compareLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
     import type { ScriptEntry, ScriptsPanel as PanelData } from '../lib/types';
     import Panel from './Panel.svelte';
@@ -467,7 +468,9 @@
             const result = await api.openDirectory(tabId, directory);
             if (!result.ok) {
                 statusError = true;
-                status = result.error ?? app.t('explorer.errorOpenFolder', 'No se pudo abrir esta carpeta.');
+                status = result.error ?? app
+                    .t('explorer.errorOpenFolder', 'No se pudo abrir la carpeta {path}.')
+                    .replace('{path}', directory);
             }
         } catch (cause) {
             statusError = true;
@@ -504,11 +507,11 @@
             else groups.set(name, [script]);
         }
         return [...groups.entries()]
-            .sort(([a], [b]) => a.localeCompare(b, 'es', { sensitivity: 'base' }))
+            .sort(([a], [b]) => compareLocalized(a, b, app.catalog.language))
             .map(([name, scripts]) => ({
                 name,
                 scripts: scripts.sort(
-                    (a, b) => a.ext.localeCompare(b.ext) || a.name.localeCompare(b.name, 'es')
+                    (a, b) => a.ext.localeCompare(b.ext) || compareLocalized(a.name, b.name, app.catalog.language)
                 )
             }));
     }
@@ -771,7 +774,7 @@
         </details>
     {/if}
 
-    {#if mode === 'library' && (operationTools.length || windowsCompatibilityQuickAction)}
+    {#if mode === 'library' && (app.preferences?.showQuickActions ?? true) && (operationTools.length || windowsCompatibilityQuickAction)}
         <details class="operations" aria-label={app.t('scripts.operations', 'Operaciones rápidas')} ontoggle={onDetailsToggle}>
             <summary class="operations-title">
                 <span>{app.t('scripts.operations', 'Operaciones rápidas')}</span>
