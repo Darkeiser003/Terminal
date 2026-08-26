@@ -1,4 +1,4 @@
-#requires -Version 5.0
+﻿#requires -Version 5.0
 <#
     Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
 
@@ -29,6 +29,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell 5.1 necesita el BOM del propio archivo para leer bien sus
+# literales UTF-8 y, además, una codificación de consola explícita para no
+# convertir en «Ã³/Ã¡» la salida UTF-8 de Node, Cargo y las herramientas.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+try {
+    [Console]::InputEncoding = $utf8NoBom
+    [Console]::OutputEncoding = $utf8NoBom
+    $OutputEncoding = $utf8NoBom
+} catch {
+    # Un host sin consola puede rechazar InputEncoding; no afecta a la build.
+}
+
 function Write-Step ($Message) { Write-Host ''; Write-Host "==> $Message" -ForegroundColor Cyan }
 function Write-Ok   ($Message) { Write-Host "    OK: $Message" -ForegroundColor Green }
 function Write-Warn ($Message) { Write-Host "    AVISO: $Message" -ForegroundColor Yellow }
@@ -45,13 +57,33 @@ function Write-Err  ($Message) { Write-Host "    ERROR: $Message" -ForegroundCol
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)][string]$Command,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [switch]$CaptureOutput
     )
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $Command @Arguments | Out-Host
-        return $LASTEXITCODE
+        # Get-Command también puede resolver alias de ejecución de WindowsApps
+        # cuyo paquete real ya no existe. Invocarlos produce una excepción
+        # ResourceUnavailable antes de asignar LASTEXITCODE. Se convierte en
+        # el 9009 convencional de «comando no encontrado» para que la batería
+        # lo clasifique como ausente y continúe hasta el E2E.
+        $LASTEXITCODE = 0
+        try {
+            $script:LastNativeOutput = ''
+            if ($CaptureOutput) {
+                $nativeOutput = @(& $Command @Arguments 2>&1)
+                $exitCode = [int]$LASTEXITCODE
+                $script:LastNativeOutput = ($nativeOutput | Out-String)
+                $nativeOutput | Out-Host
+                return $exitCode
+            }
+            & $Command @Arguments | Out-Host
+            return [int]$LASTEXITCODE
+        } catch {
+            Write-Host ("    No se pudo iniciar {0}: {1}" -f $Command, $_.Exception.Message) -ForegroundColor DarkGray
+            return 9009
+        }
     } finally {
         $ErrorActionPreference = $previous
     }
@@ -78,7 +110,7 @@ function Assert-E2eReport {
     }
     $phases = @($report.phases)
     $events = @($report.events)
-    if ($phases.Count -lt 5 -or $events.Count -lt 5) {
+    if ($phases.Count -lt 11 -or $events.Count -lt 11) {
         throw "El E2E terminó sin una batería observable: fases=$($phases.Count), eventos=$($events.Count). Informe: $Path"
     }
 }
@@ -898,14 +930,20 @@ if ($runExtendedTests) {
         @{ Name = 'PowerShell'; Exe = 'powershell.exe'; Args = @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') },
         @{ Name = 'PowerShell 7'; Exe = 'pwsh'; Args = @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') },
         @{ Name = 'Nushell'; Exe = 'nu'; Args = @('--version') },
-        @{ Name = 'Windows Terminal'; Exe = 'wt.exe'; Args = @('--version') },
+        # `wt.exe --version` abre un diálogo gráfico de ayuda en lugar de ser
+        # una sonda CLI. Se lee la versión del alias ejecutable sin lanzarlo.
+        @{ Name = 'Windows Terminal'; Detect = 'wt.exe'; Exe = 'powershell.exe'; Args = @('-NoProfile', '-NonInteractive', '-Command', '$wt = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue; if (-not $wt) { exit 1 }; $wt.FileVersionInfo.ProductVersion') },
         @{ Name = 'NSudo'; Exe = 'NSudoLC.exe'; Args = @('-?') },
         @{ Name = 'Node.js'; Exe = 'node'; Args = @('-e', 'process.exit(0)') },
         @{ Name = 'npm'; Exe = 'npm'; Args = @('--version') },
         @{ Name = 'Git'; Exe = 'git'; Args = @('--version') },
-        @{ Name = 'Python'; Exe = 'python'; Args = @('-I', '-c', 'print("LTERMINAL_REPL_OK")') },
-        @{ Name = 'Ruby'; Exe = 'ruby'; Args = @('-e', 'puts "LTERMINAL_REPL_OK"') },
-        @{ Name = 'PHP'; Exe = 'php'; Args = @('-r', 'echo "LTERMINAL_REPL_OK";') },
+        # Windows PowerShell 5.1 elimina comillas dobles internas al construir
+        # la línea de un proceso nativo. Código como print("texto") llegaba a
+        # Python como print(texto). Las comillas simples forman parte del
+        # argumento y son sintaxis válida en estos intérpretes.
+        @{ Name = 'Python'; Exe = 'python'; Args = @('-I', '-c', "print('LTERMINAL_REPL_OK')"); Expect = 'LTERMINAL_REPL_OK' },
+        @{ Name = 'Ruby'; Exe = 'ruby'; Args = @('-e', "puts 'LTERMINAL_REPL_OK'"); Expect = 'LTERMINAL_REPL_OK' },
+        @{ Name = 'PHP'; Exe = 'php'; Args = @('-r', "echo 'LTERMINAL_REPL_OK';"); Expect = 'LTERMINAL_REPL_OK' },
         @{ Name = 'MariaDB'; Exe = 'mariadb'; Args = @('--version') },
         @{ Name = 'MySQL'; Exe = 'mysql'; Args = @('--version') },
         @{ Name = 'PostgreSQL'; Exe = 'psql'; Args = @('--version') },
@@ -919,8 +957,8 @@ if ($runExtendedTests) {
         @{ Name = 'Rustc'; Exe = 'rustc'; Args = @('--version') },
         @{ Name = 'Java'; Exe = 'java'; Args = @('-version') },
         @{ Name = 'Go'; Exe = 'go'; Args = @('version') },
-        @{ Name = 'Perl'; Exe = 'perl'; Args = @('-e', 'print "LTERMINAL_REPL_OK\n"') },
-        @{ Name = 'Lua'; Exe = 'lua'; Args = @('-e', 'print("LTERMINAL_REPL_OK")') },
+        @{ Name = 'Perl'; Exe = 'perl'; Args = @('-e', 'print qq(LTERMINAL_REPL_OK\n)'); Expect = 'LTERMINAL_REPL_OK' },
+        @{ Name = 'Lua'; Exe = 'lua'; Args = @('-e', "print('LTERMINAL_REPL_OK')"); Expect = 'LTERMINAL_REPL_OK' },
         @{ Name = 'Deno'; Exe = 'deno'; Args = @('--version') },
         @{ Name = 'Bun'; Exe = 'bun'; Args = @('--version') },
         @{ Name = 'Julia'; Exe = 'julia'; Args = @('--version') },
@@ -953,15 +991,27 @@ if ($runExtendedTests) {
     $missingProbes = @()
     $failedProbes = @()
     foreach ($probe in $probes) {
-        if (-not (Test-Command $probe.Exe)) {
+        $detectCommand = if ($probe.ContainsKey('Detect')) { [string]$probe.Detect } else { [string]$probe.Exe }
+        if (-not (Test-Command $detectCommand)) {
             Write-Warn "$($probe.Name) no está instalado o no está en PATH."
             $missingProbes += $probe.Name
             continue
         }
-        $probeCode = Invoke-Native $probe.Exe $probe.Args
+        $probeCode = Invoke-Native $probe.Exe $probe.Args -CaptureOutput
+        if ($probeCode -eq 9009) {
+            Write-Warn "$($probe.Name) tiene una entrada en PATH, pero su ejecutable real no está disponible."
+            $missingProbes += $probe.Name
+            continue
+        }
         if ($probeCode -ne 0) {
             Write-Warn "$($probe.Name) falló (código $probeCode); se continúa para no ocultar el resto de diagnósticos."
             $failedProbes += "$($probe.Name) [$probeCode]"
+            continue
+        }
+        if ($probe.ContainsKey('Expect') -and
+            $script:LastNativeOutput -notmatch [regex]::Escape([string]$probe.Expect)) {
+            Write-Warn "$($probe.Name) terminó con código 0, pero no produjo el marcador esperado."
+            $failedProbes += "$($probe.Name) [sin marcador]"
             continue
         }
         Write-Ok "$($probe.Name) respondió correctamente"
@@ -973,7 +1023,11 @@ if ($runExtendedTests) {
     if ($failedProbes.Count -gt 0) {
         Write-Warn "Fallaron $($failedProbes.Count) sondas: $($failedProbes -join ', ')"
     }
-    $strictProbeFailure = $strictExtendedTests -and ($missingProbes.Count -gt 0 -or $failedProbes.Count -gt 0)
+    # -FullTests exige que todo lo instalado responda y que se ejecute el E2E,
+    # pero el catálogo contiene herramientas opcionales: no obliga a tenerlas
+    # todas. -StrictTests sí convierte también las ausencias en fallo.
+    $strictProbeFailure = ($strictExtendedTests -and $failedProbes.Count -gt 0) -or
+        ($StrictTests.IsPresent -and $missingProbes.Count -gt 0)
 
     if (-not (Test-Command 'tauri-driver') -and $InstallE2eDriver -and (Test-Command 'cargo')) {
         Write-Warn 'Falta tauri-driver; se instalará con cargo para completar E2E.'
@@ -1023,7 +1077,7 @@ if ($runExtendedTests) {
     }
 
     if ($strictProbeFailure) {
-        throw 'La batería ampliada estricta detectó herramientas ausentes o fallidas. Revisa el diagnóstico e instálalas desde Entorno y dependencias.'
+        throw 'La batería ampliada detectó herramientas instaladas que fallaron, o ausencias bajo -StrictTests. Revisa el diagnóstico anterior.'
     }
 }
 

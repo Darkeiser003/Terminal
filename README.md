@@ -225,8 +225,9 @@ catálogo WinGet y registros externos, pero conserva
 `svelte-check`, clippy y las pruebas Rust. Para la batería completa usa `-FullTests` en Windows
 o `--full-tests`/`--extended-tests` en Linux; `--install-e2e-driver` permite
 que Linux intente instalar el driver nativo de WebKitGTK cuando la distribución
-lo ofrece. `-FullTests` y `-StrictTests` convierten las ausencias de herramientas
-de Windows en un fallo explícito, en vez de ocultarlas como omisiones. La build Linux ejecuta por defecto la batería ampliada y prepara
+lo ofrece. En Windows, `-FullTests` ejecuta toda la batería y exige que las
+herramientas instaladas respondan, pero conserva como diagnóstico las opcionales
+que falten; `-StrictTests` convierte también esas ausencias en fallo. La build Linux ejecuta por defecto la batería ampliada y prepara
 automáticamente `dash`, PostgreSQL cliente, Fortran y Bottles (Flatpak); usa
 `--no-extended-tests` para una compilación rápida o `--no-install` para impedir
 instalaciones automáticas. En Arch/CachyOS instala solo esos paquetes y no
@@ -236,8 +237,9 @@ actualización completa de `pacman` de forma explícita.
 En Windows, la batería ampliada se ejecuta automáticamente tanto en modo
 interactivo como no interactivo; solo `-NoExtendedTests` la omite. Las sondas de shells y herramientas se
 acumulan aunque alguna falle, de modo que el E2E no se pierde por un único
-`cmd.exe` o runtime ausente; en modo estricto la build informa el fallo después
-del E2E. El informe E2E se guarda en `%TEMP%\winslim-terminal-e2e-<id>.json`.
+runtime averiado; `-FullTests` informa después del E2E de los programas instalados
+que no respondieron, y `-StrictTests` incluye también los ausentes. El informe
+E2E se guarda en `%TEMP%\winslim-terminal-e2e-<id>.json`.
 
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
