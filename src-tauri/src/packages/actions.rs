@@ -493,6 +493,7 @@ const MSYS2_OCAML_PACKAGE: &str = "mingw-w64-ucrt-x86_64-ocaml";
 const MSYS2_OCAML_DETECT: &str = "powershell:$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { Test-Path (Join-Path $_ 'ocaml.exe') }) { exit 0 } else { exit 1 }";
 const GHCUP_TOOLCHAIN_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghci.exe'), 'C:\\ghcup\\bin\\ghci.exe'); if ((Get-Command ghci.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
 const GHCUP_MANAGER_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghcup.exe'), 'C:\\ghcup\\bin\\ghcup.exe'); if ((Get-Command ghcup.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
+const ERLANG_WINGET_ID: &str = "Erlang.ErlangOTP";
 
 #[rustfmt::skip]
 static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
@@ -554,7 +555,7 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-bun",    "Bun",             "bun",    "Oven-sh.Bun",                    Some("bun --version"),                LANGUAGES_GROUP),
     win("winget-julia",  "Julia",           "julia",  "Julialang.Julia",               Some("julia --version"),              LANGUAGES_GROUP),
     win("winget-r",      "R",               "R",      "RProject.R",                     Some("R --version"),                  LANGUAGES_GROUP),
-    win("winget-erlang", "Erlang/OTP", "erl", "Erlang.Erlang", Some("erl -noshell -eval \"erlang:display(erlang:system_info(otp_release)), halt().\""), LANGUAGES_GROUP),
+    win("winget-erlang", "Erlang/OTP", "erl", ERLANG_WINGET_ID, Some("erl -noshell -eval \"erlang:display(erlang:system_info(otp_release)), halt().\""), LANGUAGES_GROUP),
     win("winget-dotnet", "C#/F# · .NET SDK", "dotnet", "Microsoft.DotNet.SDK.8",        Some("dotnet --info"),                LANGUAGES_GROUP),
     win("winget-llvm",   "C/C++ · Clang/LLVM", "clang", "LLVM.LLVM",                    Some("clang --version; clang++ --version"), LANGUAGES_GROUP),
     win("winget-cmake",  "C/C++ · CMake",   "cmake",  "Kitware.CMake",                  Some("cmake --version"),               LANGUAGES_GROUP),
@@ -1931,7 +1932,7 @@ fn python_pip_action(platform: &str, pkg_manager: Option<&str>, python_cmd: &str
 /// detectar solo `mix` dejaba Credo/ExDoc fallando después de empezar.
 fn elixir_otp_action(platform: &str, pkg_manager: Option<&str>) -> InstallAction {
     let command = match platform {
-        "windows" => "winget install --id Erlang.Erlang --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity".to_string(),
+        "windows" => winget_install_command(ERLANG_WINGET_ID),
         "macos" => "brew install erlang".to_string(),
         _ => match pkg_manager.unwrap_or("apt") {
             "dnf" => "sudo dnf install -y erlang erlang-devel".to_string(),
@@ -5363,6 +5364,18 @@ mod tests {
             .contains("https://community.chocolatey.org/install.ps1"));
         assert!(!install.command.contains("--id PostgreSQL.PostgreSQL "));
         assert!(!actions.iter().any(|action| action.id == "choco-postgresql"));
+    }
+
+    #[test]
+    fn erlang_usa_el_identificador_otp_publicado_por_winget() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let install = buscar(&actions, "winget-erlang");
+        assert!(install.command.contains("--id Erlang.ErlangOTP"));
+        assert!(!install.command.contains("--id Erlang.Erlang "));
+
+        let otp_for_hex = elixir_otp_action("windows", None);
+        assert!(otp_for_hex.command.contains("--id Erlang.ErlangOTP"));
+        assert!(!otp_for_hex.command.contains("--id Erlang.Erlang "));
     }
 
     #[test]
