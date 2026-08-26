@@ -53,6 +53,17 @@ if (!dependencies || dependencies.groups < 1 || dependencies.subgroups < 1 || de
     throw new Error('El E2E no recorrió grupos, submenús y recargas de Entorno y dependencias.');
 }
 
+const minimumSplit = events.find((event) => event?.type === 'multi-pane-minimum');
+if (!minimumSplit || minimumSplit.passed !== true || minimumSplit.geometryValid !== true
+    || minimumSplit.paneCount < 2 || minimumSplit.panes?.length < 2) {
+    throw new Error('El E2E no demostró una división útil y sin solapamientos en el tamaño mínimo.');
+}
+
+const tabIsolation = events.find((event) => event?.type === 'tab-isolation');
+if (!tabIsolation || tabIsolation.passed !== true || tabIsolation.tabs < 3) {
+    throw new Error('El E2E no demostró sesiones PTY independientes entre pestañas.');
+}
+
 const responsive = events.find((event) => event?.type === 'responsive-matrix');
 if (!responsive || responsive.panes < 2 || responsive.cases < 20
     || !responsive.explorerStates?.includes(false) || !responsive.explorerStates?.includes(true)) {

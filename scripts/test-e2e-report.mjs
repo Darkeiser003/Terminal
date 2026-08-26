@@ -28,6 +28,8 @@ const valid = {
         { type: 'preference', name: 'showQuickActions', value: true },
         { type: 'context-menu', actions: ['cut', 'delete'] },
         { type: 'dependencies', groups: 8, subgroups: 6, repeatedLoads: 3, platformGroup: 'Virtualización' },
+        { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
+        { type: 'tab-isolation', passed: true, tabs: 3 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
     ],
 };
@@ -58,6 +60,14 @@ try {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'dependencies'),
     })).status, 0, 'falta la evidencia de grupos y submenús de dependencias');
+    assert.notEqual((await run('missing-minimum-split', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'multi-pane-minimum'),
+    })).status, 0, 'falta la evidencia de división útil en el tamaño mínimo');
+    assert.notEqual((await run('missing-tab-isolation', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'tab-isolation'),
+    })).status, 0, 'falta la evidencia de aislamiento entre pestañas');
     assert.notEqual((await run('missing-responsive-matrix', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'responsive-matrix'),
@@ -67,4 +77,4 @@ try {
     await rm(directory, { recursive: true, force: true });
 }
 
-console.log('Validador E2E probado: informe completo y seis rechazos correctos.');
+console.log('Validador E2E probado: informe completo y ocho rechazos correctos.');

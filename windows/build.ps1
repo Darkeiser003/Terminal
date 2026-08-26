@@ -1029,16 +1029,25 @@ if ($runExtendedTests) {
     $strictProbeFailure = ($strictExtendedTests -and $failedProbes.Count -gt 0) -or
         ($StrictTests.IsPresent -and $missingProbes.Count -gt 0)
 
-    if (-not (Test-Command 'tauri-driver') -and $InstallE2eDriver -and (Test-Command 'cargo')) {
-        Write-Warn 'Falta tauri-driver; se instalará con cargo para completar E2E.'
+    # La batería ampliada está activa por defecto, por tanto su controlador no
+    # puede depender de una segunda opción que el usuario tenga que adivinar.
+    # -InstallE2eDriver se conserva por compatibilidad con comandos antiguos,
+    # pero una build que llega hasta E2E prepara el driver siempre que falte.
+    if (-not (Test-Command 'tauri-driver')) {
+        if (-not (Test-Command 'cargo')) {
+            throw 'E2E no se puede preparar: falta cargo para instalar tauri-driver.'
+        }
+        Write-Warn 'Falta tauri-driver; se instalará automáticamente con cargo para completar E2E.'
         $driverCode = Invoke-Native 'cargo' @('install', 'tauri-driver', '--locked')
         if ($driverCode -ne 0) { throw "No se pudo instalar tauri-driver (código $driverCode)." }
         Refresh-EnvironmentPath
+        if (-not (Test-Command 'tauri-driver')) {
+            throw 'cargo terminó sin error, pero tauri-driver no apareció en PATH. Comprueba %USERPROFILE%\.cargo\bin.'
+        }
+        Write-Ok 'tauri-driver instalado y disponible para la batería E2E'
     }
     Write-Step 'E2E ampliado (WebDriver, ventana, terminal y paneles)'
-    if (-not (Test-Command 'tauri-driver')) {
-        throw 'E2E no se ejecutó: falta tauri-driver. Reintenta con -InstallE2eDriver o instálalo con cargo.'
-    } else {
+    if (Test-Command 'tauri-driver') {
         $previousE2eBinary = $env:E2E_BINARY
         $previousE2eReport = $env:LTERMINAL_SMOKE_REPORT
         $previousE2eLogFile = $env:LTERMINAL_LOG_FILE
@@ -1074,6 +1083,8 @@ if ($runExtendedTests) {
                 $env:LTERMINAL_LOG_FILE = $previousE2eLogFile
             }
         }
+    } else {
+        throw 'E2E no se ejecutó: tauri-driver sigue sin estar disponible después de prepararlo.'
     }
 
     if ($strictProbeFailure) {

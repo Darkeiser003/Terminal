@@ -767,6 +767,7 @@
                                 <label class="check banner-item">
                                     <input
                                         type="checkbox"
+                                        data-testid={`settings-banner-${item.id}`}
                                         checked={bannerItemEnabled(item.id)}
                                         onchange={(event) => setBannerItemEnabled(item.id, (event.currentTarget as HTMLInputElement).checked)}
                                     />

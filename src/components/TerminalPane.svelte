@@ -226,6 +226,24 @@
     let userEditing = false;
     let pendingBannerSettingsRefresh = false;
 
+    /** Diagnóstico estructural para E2E. No guarda texto ni códigos de teclas:
+     *  solo si el espejo conoce la línea, su longitud y la clase del evento. */
+    function exposeInputMirror(eventClass: string): void {
+        if (!host) return;
+        host.dataset.inputMirrorState = mirroredLine === null ? 'unknown' : 'known';
+        host.dataset.inputMirrorLength = mirroredLine === null ? '0' : String(mirroredLine.length);
+        host.dataset.inputEventClass = eventClass;
+    }
+
+    function controlEventClass(data: string): string {
+        if (/^\x1b\[<[0-9;]+[Mm]$/.test(data)) return 'csi-mouse';
+        const csi = /^\x1b\[[0-9;?]*([A-Za-z~])$/.exec(data);
+        if (csi) return `csi-${csi[1]}`;
+        if (/^\x1bO.$/.test(data)) return 'ss3';
+        if (/^[\x00-\x1f\x7f]+$/.test(data)) return 'control-bytes';
+        return 'non-ascii';
+    }
+
     function refreshBannerForSettings(): void {
         if (!term) return;
         // El panel puede guardar mientras el usuario está escribiendo. No se
@@ -380,32 +398,50 @@
             // Si el usuario había desplazado el historial, cualquier entrada
             // nueva debe devolverle a la línea que está editando.
             term?.scrollToBottom();
+            // xterm puede activar el informe de foco y emitir ESC[I / ESC[O al
+            // entrar o salir de un diálogo. Esas secuencias sí deben llegar a
+            // la shell, pero no son texto editado: si envenenan `mirroredLine`
+            // el siguiente `:comando` cae en Fish/cmd en vez de interceptarse.
+            const editingData = data
+                .replaceAll('\x1b[I', '')
+                .replaceAll('\x1b[O', '');
             // `onData` solo recibe teclas del usuario, no la salida de la
             // shell. Mantener este estado separado del espejo ASCII también
             // cubre nano, REPLs y entradas con teclas de control.
-            if (data.includes('\r') || data.includes('\n') || data.includes('\u0003')) {
+            if (editingData.includes('\r') || editingData.includes('\n') || editingData.includes('\u0003')) {
                 userEditing = false;
                 flushPendingBannerSettingsRefresh();
-            } else if (data) {
+            } else if (editingData) {
                 userEditing = true;
             }
-            const mirroredData = data
+            const mirroredData = editingData
                 .replaceAll('\x1b[200~', '')
                 .replaceAll('\x1b[201~', '');
-            if (mirroredData === '\t' && mirroredLine !== null && completeRepl(mirroredLine)) return;
+            if (!mirroredData) {
+                exposeInputMirror('focus');
+                void api.sendInput(tabId, data);
+                return;
+            }
+            // WebDriver y ConPTY pueden representar una sola pulsación Enter
+            // como CRLF. Contarla como dos terminadores deja el espejo en
+            // estado desconocido y el siguiente comando interno cae en la
+            // shell. Una línea pegada con varios saltos sigue teniendo varios.
+            const mirroredLineData = mirroredData.replaceAll('\r\n', '\n');
+            if (mirroredLineData === '\t' && mirroredLine !== null && completeRepl(mirroredLine)) return;
 
             // xterm puede entregar Enter separado (tecleo normal) o junto a la
             // línea completa (pegado, IME y algunas configuraciones de Fish).
             // Solo se intercepta una línea única; un pegado multilínea sigue
             // viajando intacto a la shell.
-            const terminators = [...mirroredData.matchAll(/[\r\n]/g)];
+            const terminators = [...mirroredLineData.matchAll(/[\r\n]/g)];
             const enterAt = terminators.length === 1 ? terminators[0].index : undefined;
-            const beforeEnter = enterAt === undefined ? mirroredData : mirroredData.slice(0, enterAt);
-            const afterEnter = enterAt === undefined ? '' : mirroredData.slice(enterAt + 1);
+            const beforeEnter = enterAt === undefined ? mirroredLineData : mirroredLineData.slice(0, enterAt);
+            const afterEnter = enterAt === undefined ? '' : mirroredLineData.slice(enterAt + 1);
             const candidate = mirroredLine === null ? beforeEnter : mirroredLine + beforeEnter;
             if (enterAt !== undefined && !afterEnter && candidate.trimStart().startsWith(':')) {
                 const line = candidate;
                 mirroredLine = '';
+                exposeInputMirror('internal-enter');
                 void runInternal(line)
                     .then((handled) => {
                         if (!handled) void api.sendInput(tabId, data);
@@ -419,9 +455,19 @@
                 return;
             }
             if (enterAt !== undefined) mirroredLine = '';
-            else if (mirroredData === '\u007f' && mirroredLine !== null) mirroredLine = mirroredLine.slice(0, -1);
-            else if (/^[\x20-\x7e]+$/.test(mirroredData) && mirroredLine !== null) mirroredLine += mirroredData;
+            else if (terminators.length > 1) mirroredLine = /[\r\n]$/.test(mirroredLineData) ? '' : null;
+            else if (mirroredLineData === '\u007f' && mirroredLine !== null) mirroredLine = mirroredLine.slice(0, -1);
+            else if (/^[\x20-\x7e]+$/.test(mirroredLineData) && mirroredLine !== null) mirroredLine += mirroredLineData;
             else mirroredLine = null;
+            exposeInputMirror(
+                enterAt !== undefined || terminators.length > 1
+                    ? 'shell-enter'
+                    : mirroredLineData === '\u007f'
+                        ? 'delete'
+                        : /^[\x20-\x7e]+$/.test(mirroredLineData)
+                            ? 'ascii'
+                            : controlEventClass(mirroredLineData),
+            );
             void api.sendInput(tabId, data);
         });
 

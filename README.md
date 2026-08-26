@@ -71,12 +71,14 @@ cualquier entorno gráfico ya tiene.
   instalar esos paquetes con el gestor de la distribución.
 
 Para ejecutar la batería E2E al final del build hace falta además
-`tauri-driver`, `WebKitWebDriver` y una sesión gráfica. El builder ofrece
-`--install-e2e-driver` para instalar ambos controladores cuando sea posible
-(en Windows se usa `-InstallE2eDriver`), y el paquete nativo disponible en la distribución,
-o `--e2e-driver /ruta/WebKitWebDriver` para indicar un ejecutable compatible
-cuando el paquete de WebKitGTK no lo incluye. Si falta cualquiera de ellos, el
-script lo indica y no marca la release como verificada.
+`tauri-driver`, un controlador nativo compatible y una sesión gráfica. En
+Windows, donde E2E se ejecuta por defecto, el builder instala automáticamente
+`tauri-driver` con Cargo si falta; `-InstallE2eDriver` sigue aceptándose por
+compatibilidad, pero ya no es necesario. En Linux, `--install-e2e-driver`
+instala los controladores cuando sea posible y `--e2e-driver
+/ruta/WebKitWebDriver` permite indicar el ejecutable nativo si la distribución
+no lo incluye. Si una precondición no puede prepararse, el script lo indica y
+no marca la release como verificada.
 
 ### conpty.dll
 

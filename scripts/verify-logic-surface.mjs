@@ -14,6 +14,7 @@ function check(name, condition) {
 const app = read('src/App.svelte');
 const settings = read('src/components/SettingsPanel.svelte');
 const dependencies = read('src/components/DependenciesPanel.svelte');
+const terminalPane = read('src/components/TerminalPane.svelte');
 const smoke = read('tests/e2e/smoke.mjs');
 const commands = read('src-tauri/src/app/commands.rs');
 const windowsBuild = read('windows/build.ps1');
@@ -68,7 +69,12 @@ check('Windows fija una ruta propia para el informe E2E', windowsBuild.includes(
 check('Windows no da por pasado un E2E sin informe y log validados', windowsBuild.includes('Assert-E2eReport') && windowsBuild.includes("$report.status -ne 'passed'") && windowsBuild.includes('$report.logValidated -ne $true'));
 check('El smoke exige una sesión PTY real', smoke.includes("'pty spawneado'") && commands.includes('Frontend preparado pero sin sesión PTY') && commands.includes('Result<(), String>') && windowsBuild.includes('Test-SmokeReady'));
 check('El smoke de Windows cierra el PTY de forma ordenada', windowsBuild.includes('LTERMINAL_SMOKE_AUTO_EXIT') && commands.includes('smoke-graceful-exit') && windowsBuildLower.includes('se fuerza el cierre como último recurso'));
-check('La orden de release Windows solicita pruebas ampliadas', read('package.json').includes('dist:win') && read('package.json').includes('-FullTests') && read('package.json').includes('-InstallE2eDriver'));
+check('La orden de release Windows solicita pruebas ampliadas', read('package.json').includes('dist:win') && read('package.json').includes('-FullTests'));
+check('Windows prepara automáticamente el driver que exige su E2E', windowsBuild.includes('se instalará automáticamente con cargo') && !windowsBuild.includes('-and $InstallE2eDriver -and'));
+check('La división mínima valida geometría propia sin depender del compositor', smoke.includes('assertPaneGeometry') && smoke.includes('geometryValid: true') && !smoke.includes("'ampliación de la ventana al dividir'"));
+check('El E2E identifica opciones del banner sin depender del idioma', settings.includes('settings-banner-${item.id}') && smoke.includes('settings-banner-cpu') && !smoke.includes('Ajustes no muestra la opción de CPU'));
+check('Los informes de foco no rompen el siguiente comando interno', terminalPane.includes(".replaceAll('\\x1b[I', '')") && terminalPane.includes(".replaceAll('\\x1b[O', '')") && terminalPane.includes('if (!mirroredData)'));
+check('CRLF cuenta como un solo Enter para comandos internos', terminalPane.includes("mirroredData.replaceAll('\\r\\n', '\\n')") && terminalPane.includes('terminators.length > 1'));
 
 // La copia de recursos se deriva del manifiesto, no de una lista paralela que
 // pueda quedarse atrás cuando se añade un script integrado.
