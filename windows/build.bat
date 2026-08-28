@@ -15,6 +15,7 @@ REM   build.bat -NoRun         no lanza la app al terminar
 REM   build.bat -NoExtendedTests  solo ejecuta el smoke minimo de arranque
 REM   build.bat -Fast           build de desarrollo rapida, mas grande y con simbolos
 REM   build.bat -CrossLinux     compila y prueba tambien la release Linux en WSL
+REM   build.bat -Help           muestra las opciones y no modifica nada
 
 set "SCRIPT_DIR=%~dp0"
 
@@ -27,13 +28,31 @@ if errorlevel 1 (
     exit /b 1
 )
 
+set "HELP_MODE=0"
+if /I "%~1"=="-Help" set "HELP_MODE=1"
+if /I "%~1"=="-h" set "HELP_MODE=1"
+if "%HELP_MODE%"=="1" goto invoke_build
 echo Compilando WinSlim Terminal (Tauri + Rust)...
 echo.
+
+:invoke_build
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%build.ps1" %*
 set "BUILD_CODE=%ERRORLEVEL%"
 
 echo.
+if /I "%~1"=="-Help" if "%BUILD_CODE%"=="0" (
+    echo Ayuda mostrada; no se ejecuto ninguna compilacion.
+    echo (Puedes cerrar esta ventana^)
+    pause >nul
+    exit /b 0
+)
+if /I "%~1"=="-h" if "%BUILD_CODE%"=="0" (
+    echo Ayuda mostrada; no se ejecuto ninguna compilacion.
+    echo (Puedes cerrar esta ventana^)
+    pause >nul
+    exit /b 0
+)
 if "%BUILD_CODE%"=="0" (
     echo Build completada.
 ) else (

@@ -239,7 +239,17 @@ class AppStore {
         }
 
         for (let i = 0; i < faltan; i++) {
-            await this.createTab(entorno);
+            const createdId = await this.createTab(entorno, siguiente);
+            // `createTab` activa la nueva pestaña, pero hasta ahora la rejilla
+            // seguía en modo de una sola casilla cuando solo existía una
+            // pestaña. Eso hacía que el banner naciera completo y luego solo
+            // se redimensionaran las dos casillas. Incorporar el identificador
+            // recién creado inmediatamente garantiza que su primer xterm ya
+            // se monta dentro de la rejilla compacta.
+            if (primera && createdId) {
+                const nextPanes = [...this.panes.filter((id) => id !== createdId), createdId];
+                this.panes = nextPanes.slice(0, siguiente);
+            }
         }
         if (primera) await this.activateTab(primera);
         const orden = [...(primera ? [primera] : []), ...this.tabs.map((tab) => tab.id)];
@@ -313,11 +323,12 @@ class AppStore {
         this.panes = vivas.length < 2 ? [] : vivas;
     }
 
-    async createTab(envId?: string): Promise<void> {
-        const created = await api.createTab(envId);
-        if (!created) return;
+    async createTab(envId?: string, paneCount?: number): Promise<string | null> {
+        const created = await api.createTab(envId, paneCount);
+        if (!created) return null;
         this.tabs = [...this.tabs, created];
         this.activeTabId = created.id;
+        return created.id;
     }
 
     /** Trae al frente la pestaña donde un panel ha acabado escribiendo, que no
@@ -354,6 +365,15 @@ class AppStore {
     /** Devuelve si el backend llegó a abrir la sesión nueva. La etiqueta
      *  definitiva la confirma después el evento `env-changed`. */
     async switchEnvironment(tabId: string, envId: string): Promise<boolean> {
+        // El cambio de entorno incluye una fase que no forma parte del IPC:
+        // la shell nueva tiene que ejecutar su inicializador y pintar el primer
+        // bloque. Avisar al renderer antes de invocar permite medir ese tiempo
+        // real, no solo los 10–50 ms que tarda el backend en crear el PTY.
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('winslim:environment-switch-started', {
+                detail: { tabId, envId },
+            }));
+        }
         return api.switchEnvironment(tabId, envId);
     }
 

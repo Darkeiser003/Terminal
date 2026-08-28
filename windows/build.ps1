@@ -12,6 +12,7 @@
 #>
 
 param(
+    [Alias('h')][switch]$Help,
     [switch]$Clean,
     [switch]$NoRun,
     [switch]$Installer,
@@ -29,6 +30,28 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if ($Help) {
+    Write-Host 'Uso: powershell -ExecutionPolicy Bypass -File windows\build.ps1 [opciones]'
+    Write-Host '  -Clean                Limpia dependencias y target antes de compilar.'
+    Write-Host '  -Fast                 Iteracion rapida (sin LTO, incremental).'
+    Write-Host '  -NoRun                No lanza la aplicacion al terminar.'
+    Write-Host '  -SkipChecks           Omite comprobaciones locales.'
+    Write-Host '  -NoExtendedTests      Omite sondas opcionales y E2E; conserva smoke minimo.'
+    Write-Host '  -FullTests            Fuerza la bateria ampliada y E2E.'
+    Write-Host '  -StrictTests          Hace fallar la build si faltan sondas opcionales.'
+    Write-Host '  -AllowOfflineChecks   Convierte comprobaciones externas en avisos.'
+    Write-Host '  -CrossLinux            Ejecuta tambien la build Linux dentro de WSL.'
+    Write-Host '  -Installer             Genera ademas el instalador NSIS offline.'
+    Write-Host '  -InstallE2eDriver     Instala tauri-driver si falta.'
+    Write-Host '  -Version X.Y.Z        Sobrescribe la version del paquete.'
+    Write-Host '  -NonInteractive        No espera entrada del usuario.'
+    Write-Host '  Sin opciones           Muestra un selector interactivo; Enter conserva los valores actuales.'
+    exit 0
+}
+
+$script:BuildStartedAt = [DateTime]::UtcNow
+$script:StepStartedAt = $script:BuildStartedAt
+
 # Windows PowerShell 5.1 necesita el BOM del propio archivo para leer bien sus
 # literales UTF-8 y, además, una codificación de consola explícita para no
 # convertir en «Ã³/Ã¡» la salida UTF-8 de Node, Cargo y las herramientas.
@@ -41,10 +64,64 @@ try {
     # Un host sin consola puede rechazar InputEncoding; no afecta a la build.
 }
 
-function Write-Step ($Message) { Write-Host ''; Write-Host "==> $Message" -ForegroundColor Cyan }
+function Write-Step ($Message) {
+    if ($null -ne $script:StepStartedAt) {
+        $elapsed = ([DateTime]::UtcNow - $script:StepStartedAt).TotalSeconds
+        if ($elapsed -ge 0.1) {
+            Write-Host ("    Tiempo del paso anterior: {0:N1} s" -f $elapsed) -ForegroundColor DarkGray
+        }
+    }
+    $script:StepStartedAt = [DateTime]::UtcNow
+    Write-Host ''
+    Write-Host "==> $Message" -ForegroundColor Cyan
+}
 function Write-Ok   ($Message) { Write-Host "    OK: $Message" -ForegroundColor Green }
 function Write-Warn ($Message) { Write-Host "    AVISO: $Message" -ForegroundColor Yellow }
 function Write-Err  ($Message) { Write-Host "    ERROR: $Message" -ForegroundColor Red }
+
+function Read-BuildChoice {
+    param(
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [Parameter(Mandatory = $true)][bool]$Default
+    )
+    $hint = if ($Default) { 'S/n' } else { 's/N' }
+    while ($true) {
+        $answer = Read-Host "$Prompt [$hint]"
+        if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+        switch ($answer.Trim().ToLowerInvariant()) {
+            { $_ -in @('s', 'si', 'sí', 'y', 'yes') } { return $true }
+            { $_ -in @('n', 'no') } { return $false }
+            default { Write-Warn 'Responde s/sí o n/no; Enter conserva el valor predeterminado.' }
+        }
+    }
+}
+
+# Una ejecución sin argumentos ofrece una configuración cómoda antes de tocar
+# dependencias o empezar a compilar. Los scripts siguen siendo totalmente
+# automatizables: si se pasa cualquier opción, se conserva exactamente la
+# semántica anterior; -NonInteractive también desactiva el diálogo.
+$hasExplicitBuildOptions = @($PSBoundParameters.Keys | Where-Object { $_ -ne 'Help' }).Count -gt 0
+$isCiEnvironment = $env:CI -match '^(1|true|yes)$'
+$interactiveBuild = -not $NonInteractive.IsPresent -and
+    -not $hasExplicitBuildOptions -and
+    -not $isCiEnvironment -and
+    [Environment]::UserInteractive -and
+    -not [Console]::IsInputRedirected
+if ($interactiveBuild) {
+    Write-Host ''
+    Write-Host 'Configuración de build (Enter conserva el valor actual):' -ForegroundColor Cyan
+    $Clean = Read-BuildChoice 'Limpiar dependencias y target antes de compilar' $Clean
+    $Fast = Read-BuildChoice 'Usar perfil rápido de desarrollo' $Fast
+    $Installer = Read-BuildChoice 'Generar también instalador NSIS offline' $Installer
+    $SkipChecks = Read-BuildChoice 'Saltar comprobaciones locales' $SkipChecks
+    $AllowOfflineChecks = Read-BuildChoice 'Convertir comprobaciones externas en avisos' $AllowOfflineChecks
+    if (-not $FullTests.IsPresent -and -not $StrictTests.IsPresent) {
+        $NoExtendedTests = [switch](-not (Read-BuildChoice 'Ejecutar pruebas ampliadas y E2E' (-not $NoExtendedTests.IsPresent)))
+    }
+    $CrossLinux = Read-BuildChoice 'Ejecutar también la build Linux mediante WSL' $CrossLinux
+    $NoRun = [switch](-not (Read-BuildChoice 'Lanzar la aplicación al terminar' (-not $NoRun)))
+    Write-Host '  Opciones seleccionadas. La build comenzará ahora.' -ForegroundColor DarkGray
+}
 
 # Ejecuta un comando nativo y devuelve SOLO su codigo de salida.
 #
@@ -72,11 +149,62 @@ function Invoke-Native {
         try {
             $script:LastNativeOutput = ''
             if ($CaptureOutput) {
-                $nativeOutput = @(& $Command @Arguments 2>&1)
-                $exitCode = [int]$LASTEXITCODE
-                $script:LastNativeOutput = ($nativeOutput | Out-String)
-                $nativeOutput | Out-Host
-                return $exitCode
+                # PowerShell 5.1 convierte cada línea de stderr de un proceso
+                # nativo en NativeCommandError. Eso es especialmente visible
+                # con `java -version`, que escribe deliberadamente toda su
+                # versión en stderr aunque termine con código 0. Redirigir a
+                # un archivo evita que el texto de diagnóstico se trate como
+                # una excepción; el resultado sigue validándose por el código
+                # de salida, que es la señal fiable de éxito.
+                $stderrPath = [IO.Path]::GetTempFileName()
+                $isJavaProbe = [IO.Path]::GetFileNameWithoutExtension($Command) -ieq 'java'
+                if ($isJavaProbe) {
+                    $stdoutPath = [IO.Path]::GetTempFileName()
+                    try {
+                        # ProcessStartInfo evita el NativeCommandError falso y
+                        # no toca el diccionario de entorno (Start-Process
+                        # falla con hosts que exponen PATH/path con distinta caja).
+                        $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $processInfo.FileName = $Command
+                        $processInfo.Arguments = ($Arguments -join ' ')
+                        $processInfo.UseShellExecute = $false
+                        $processInfo.CreateNoWindow = $true
+                        $processInfo.RedirectStandardOutput = $true
+                        $processInfo.RedirectStandardError = $true
+                        $process = New-Object System.Diagnostics.Process
+                        $process.StartInfo = $processInfo
+                        [void]$process.Start()
+                        $stdoutText = $process.StandardOutput.ReadToEnd()
+                        $stderrOutput = $process.StandardError.ReadToEnd()
+                        $process.WaitForExit()
+                        $exitCode = [int]$process.ExitCode
+                        $process.Dispose()
+                        [IO.File]::WriteAllText($stdoutPath, $stdoutText)
+                        [IO.File]::WriteAllText($stderrPath, $stderrOutput)
+                        $script:LastNativeOutput = ($stdoutText, [string]$stderrOutput) -join "`n"
+                        if (-not [string]::IsNullOrWhiteSpace($stdoutText)) { $stdoutText.TrimEnd() | Out-Host }
+                        if (-not [string]::IsNullOrWhiteSpace($stderrOutput)) { $stderrOutput.TrimEnd() | Out-Host }
+                        return $exitCode
+                    } finally {
+                        Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                try {
+                    $nativeOutput = @(& $Command @Arguments 2> $stderrPath)
+                    $exitCode = [int]$LASTEXITCODE
+                    $stderrOutput = if (Test-Path -LiteralPath $stderrPath) {
+                        Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+                    } else {
+                        ''
+                    }
+                    $stdoutText = ($nativeOutput | ForEach-Object { [string]$_ }) -join "`n"
+                    $script:LastNativeOutput = ($stdoutText, [string]$stderrOutput) -join "`n"
+                    if (-not [string]::IsNullOrWhiteSpace($stdoutText)) { $stdoutText | Out-Host }
+                    if (-not [string]::IsNullOrWhiteSpace($stderrOutput)) { $stderrOutput.TrimEnd() | Out-Host }
+                    return $exitCode
+                } finally {
+                    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+                }
             }
             & $Command @Arguments | Out-Host
             return [int]$LASTEXITCODE
@@ -366,7 +494,11 @@ function Get-WslDistros {
         $ErrorActionPreference = $previous
     }
     return @($lines |
-        ForEach-Object { ([string]$_).Trim() } |
+        # Windows PowerShell 5.1 recibe `wsl --list` como UTF-16 cuando la
+        # consola está configurada así y deja un NUL entre cada carácter. Si
+        # no se eliminan, `--distribution` recibe «U`0b`0u…» y WSL informa
+        # engañosamente que la distribución no existe.
+        ForEach-Object { (([string]$_).Split([char]0) -join '').Trim() } |
         Where-Object { $_ -and $_ -notmatch '^(Windows Subsystem|NAME|DISTRIBUTION)' } |
         ForEach-Object { $_ -replace '^\*\s*', '' })
 }
@@ -414,7 +546,19 @@ function Invoke-CrossLinuxTests {
         $ErrorActionPreference = $previous
     }
     if ($pathCode -ne 0 -or [string]::IsNullOrWhiteSpace($wslRoot)) {
-        throw "WSL no pudo convertir la ruta del proyecto Windows: $ProjectRoot"
+        # Windows PowerShell 5.1 puede separar en varios argumentos una ruta
+        # con espacios al invocar un binario nativo (wslpath). El proyecto
+        # está en una unidad Windows y WSL monta esas unidades en /mnt/<letra>
+        # por contrato; usar esa conversión determinista evita que una
+        # limitación del parser de argumentos impida toda la build.
+        $windowsPath = [string]$ProjectRoot
+        if ($windowsPath -match '^(?<drive>[A-Za-z]):[\\/](?<rest>.*)$') {
+            $wslRoot = "/mnt/$($Matches.drive.ToLowerInvariant())/$($Matches.rest -replace '\\','/')"
+            $wslRoot = $wslRoot.TrimEnd('/')
+            Write-Warn "wslpath no aceptó la ruta con espacios; usando conversión estándar $wslRoot"
+        } else {
+            throw "WSL no pudo convertir la ruta del proyecto Windows: $ProjectRoot"
+        }
     }
 
     # WSLg expone DISPLAY/WAYLAND_DISPLAY; build.sh instala WebKitGTK, Node,
@@ -684,7 +828,41 @@ function Test-MSVCLinker {
     return Import-MSVCEnvironment
 }
 
-if (-not (Test-MSVCLinker)) {
+function Get-RustLldPath {
+    # El toolchain MSVC de Rust incluye rust-lld.exe y Cargo puede usarlo como
+    # fallback cuando no hay una instalación completa de Visual Studio. Esto
+    # es especialmente útil en Windows recortados: exigir cl.exe aquí hacía
+    # abortar la build antes de que Cargo pudiera enlazar correctamente.
+    if (-not (Test-Command 'rustc')) { return $null }
+    # PowerShell 5.1 transforma stderr de un proceso nativo en un
+    # NativeCommandError cuando ErrorActionPreference es Stop. Algunas builds
+    # de rustc emiten un aviso inocuo de canonicalización antes de devolver el
+    # sysroot; se captura con la preferencia temporalmente relajada y se elige
+    # la primera línea que parezca una ruta real.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $sysrootOutput = @(& rustc --print sysroot 2>&1)
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    $sysroot = $sysrootOutput |
+        ForEach-Object { [string]$_ } |
+        Where-Object { $_ -match '^[A-Za-z]:\\|^/' } |
+        Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace([string]$sysroot)) { return $null }
+    $candidate = Join-Path ([string]$sysroot).Trim() 'lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe'
+    if (Test-Path $candidate -PathType Leaf) { return $candidate }
+    return $null
+}
+
+function Test-WindowsLinker {
+    if (Test-MSVCLinker) { return 'msvc' }
+    if (Get-RustLldPath) { return 'rust-lld' }
+    return $null
+}
+
+if (-not (Test-WindowsLinker)) {
     Write-Warn 'No se encontro el compilador/enlazador de C++ (link.exe / Visual Studio Build Tools).'
     if (Test-Command 'winget') {
         Write-Step 'Instalando Visual Studio 2022 Build Tools (C++) mediante winget...'
@@ -706,16 +884,24 @@ if (-not (Test-MSVCLinker)) {
         }
 
         Refresh-EnvironmentPath
-        if (Test-MSVCLinker) {
+        $detectedLinker = Test-WindowsLinker
+        if ($detectedLinker -eq 'msvc') {
             Write-Ok 'Visual Studio C++ Build Tools instaladas correctamente'
+        } elseif ($detectedLinker -eq 'rust-lld') {
+            Write-Warn 'Visual Studio no quedó disponible; se mantiene el enlazador Rust LLD'
+            Write-Ok 'Rust LLD disponible: se puede compilar la aplicación sin Visual Studio Build Tools'
         } else {
             throw 'Faltan las Visual Studio C++ Build Tools (link.exe). Se intento la instalacion con winget pero no concluyo. Instalalas manualmente desde https://visualstudio.microsoft.com/visual-cpp-build-tools/'
         }
     } else {
         throw 'Faltan las Visual Studio C++ Build Tools (link.exe) para compilar en Windows. Instalalas desde https://visualstudio.microsoft.com/visual-cpp-build-tools/'
     }
-} else {
+} elseif ((Test-MSVCLinker)) {
     Write-Ok 'Visual Studio C++ Build Tools (cl.exe + link.exe + Windows SDK)'
+} else {
+    $rustLld = Get-RustLldPath
+    Write-Warn "No se encontraron cl.exe/link.exe; se usará el enlazador incluido en Rust: $rustLld"
+    Write-Ok 'Rust LLD disponible: se puede compilar la aplicación sin Visual Studio Build Tools'
 }
 
 # La versión se pregunta antes de empaquetar. Enter conserva la actual; el
@@ -836,7 +1022,16 @@ function Invoke-TauriBuild {
         } else {
             Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
         }
-        return (Invoke-Native 'npm' $Arguments)
+        $code = Invoke-Native 'npm' $Arguments -CaptureOutput
+        # En algunos hosts npm/tauri puede devolver cero aunque el proceso de
+        # Cargo haya dejado un error fatal en la salida (por ejemplo, una
+        # compilación fallida seguida de un ejecutable release antiguo). No se
+        # debe empaquetar ni ejecutar ese artefacto obsoleto: los marcadores de
+        # error de Cargo/Tauri son una segunda señal defensiva junto al código.
+        if ($code -eq 0 -and $script:LastNativeOutput -match '(?im)^\s*(?:error(?:\[E\d+\])?:|failed to build app\b|could not compile\b)') {
+            return 1
+        }
+        return $code
     } finally {
         if ($null -eq $previousSkipChecks) {
             Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
@@ -1289,7 +1484,14 @@ Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath $zipPath -Force
 
 $hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
-"$hash  $(Split-Path $zipPath -Leaf)" | Set-Content (Join-Path $releaseOut 'SHA256SUMS.txt') -Encoding ascii
+$checksumManifest = Join-Path $releaseOut 'SHA256SUMS.txt'
+$hashCode = Invoke-Native 'node' @(
+    'scripts/update-release-hash.mjs',
+    '--manifest', $checksumManifest,
+    '--artifact', (Split-Path $zipPath -Leaf),
+    '--hash', $hash
+)
+if ($hashCode -ne 0) { throw "No se pudo actualizar el manifiesto SHA256: $checksumManifest" }
 Write-Ok "Release: $zipPath"
 Write-Ok "SHA256: $hash"
 
@@ -1302,3 +1504,5 @@ Write-Host ''
 Write-Host "Listo. WinSlim Terminal $version compilado y verificado." -ForegroundColor Green
 Write-Host "  Carpeta: $distDir"
 Write-Host "  Release: $zipPath"
+$totalSeconds = ([DateTime]::UtcNow - $script:BuildStartedAt).TotalSeconds
+Write-Host ("  Tiempo total: {0:N1} s" -f $totalSeconds) -ForegroundColor DarkGray

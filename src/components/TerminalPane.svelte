@@ -219,12 +219,46 @@
      *  banner con las dimensiones anteriores. */
     let bannerRefreshSerial = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    // El número de paneles puede cambiar sin que cambien las columnas/filas
+    // de este xterm. En ese caso también hay que repintar el banner: el modo
+    // de una casilla única es distinto del modo compacto de una rejilla.
+    let lastPaneCount = 0;
+    let paneRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     // El fastfetch es salida visual, pero la línea que el usuario está
     // editando pertenece al PTY. Nunca se debe repintar el banner mientras esa
     // línea está viva: si el banner crece al estrechar la ventana, podría
     // ocupar justamente las filas donde xterm ha envuelto el texto escrito.
     let userEditing = false;
     let pendingBannerSettingsRefresh = false;
+    let pendingPaneCountRefresh = false;
+    // El backend puede emitir el prompt y un repintado sintético en eventos
+    // consecutivos. Esperar a que App.svelte vacíe la cola de `term.write`
+    // garantiza que `cursorY` pertenece al prompt real, nunca a una fila del
+    // banner que todavía estaba entrando en xterm.
+    let terminalOutputBusy = false;
+    let pendingBannerRefresh = false;
+    // `refresh_banner` emite salida visual, que a su vez provoca los eventos
+    // busy/idle del terminal. Mientras el IPC sigue en vuelo no se debe
+    // encadenar otro repintado desde ese idle: hacerlo crea un bucle de
+    // cabeceras sintÃ©ticas y termina mezclÃ¡ndolas con el prompt.
+    let bannerRefreshInFlight = false;
+    let lastBannerRefreshRequest = { cols: 0, rows: 0, panes: 0, at: 0 };
+
+    function eventBelongsToPane(event: Event): boolean {
+        return (event as CustomEvent<{ tabId?: string }>).detail?.tabId === tabId;
+    }
+
+    function onTerminalOutputBusy(event: Event): void {
+        if (eventBelongsToPane(event)) terminalOutputBusy = true;
+    }
+
+    function onTerminalOutputIdle(event: Event): void {
+        if (!eventBelongsToPane(event)) return;
+        terminalOutputBusy = false;
+        if (!pendingBannerRefresh || userEditing || bannerRefreshInFlight) return;
+        pendingBannerRefresh = false;
+        requestAnimationFrame(refreshBannerNow);
+    }
 
     /** Diagnóstico estructural para E2E. No guarda texto ni códigos de teclas:
      *  solo si el espejo conoce la línea, su longitud y la clase del evento. */
@@ -244,6 +278,63 @@
         return 'non-ascii';
     }
 
+    function refreshBannerNow(): void {
+        if (!term) return;
+        if (userEditing || terminalOutputBusy) {
+            pendingBannerRefresh = true;
+            pendingPaneCountRefresh = true;
+            return;
+        }
+        if (bannerRefreshInFlight) {
+            pendingBannerRefresh = true;
+            return;
+        }
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const panes = Math.max(1, app.panes.length);
+        if (lastBannerRefreshRequest.cols === term.cols
+            && lastBannerRefreshRequest.rows === term.rows
+            && lastBannerRefreshRequest.panes === panes
+            && now - lastBannerRefreshRequest.at < 250) {
+            pendingBannerRefresh = true;
+            window.setTimeout(() => {
+                if (!bannerRefreshInFlight && pendingBannerRefresh && !userEditing && !terminalOutputBusy) {
+                    refreshBannerNow();
+                }
+            }, 250);
+            return;
+        }
+        // La respuesta indica si el backend pudo proteger el cursor. Si la
+        // shell aún estaba redibujando, no se pierde la solicitud: el backend
+        // la deja pendiente y el siguiente lote de salida volverá a intentarlo.
+        pendingBannerRefresh = true;
+        bannerRefreshInFlight = true;
+        lastBannerRefreshRequest = { cols: term.cols, rows: term.rows, panes, at: now };
+        void api.refreshBanner(
+            tabId,
+            term.cols,
+            term.rows,
+            panes,
+            pendingPaneCountRefresh ? undefined : term.buffer.active.cursorY,
+            pendingPaneCountRefresh ? undefined : term.buffer.active.cursorX,
+        ).then((applied) => {
+            if (applied) {
+                pendingBannerRefresh = false;
+                pendingPaneCountRefresh = false;
+            }
+        }).catch((error) => {
+            console.error('[TerminalPane] refresh banner settings failed', error);
+        }).finally(() => {
+            bannerRefreshInFlight = false;
+            if (pendingBannerRefresh && !userEditing && !terminalOutputBusy) {
+                window.setTimeout(() => {
+                    if (!bannerRefreshInFlight && pendingBannerRefresh && !userEditing && !terminalOutputBusy) {
+                        refreshBannerNow();
+                    }
+                }, 80);
+            }
+        });
+    }
+
     function refreshBannerForSettings(): void {
         if (!term) return;
         // El panel puede guardar mientras el usuario está escribiendo. No se
@@ -253,20 +344,14 @@
             pendingBannerSettingsRefresh = true;
             return;
         }
-        void api.refreshBanner(
-            tabId,
-            term.cols,
-            term.rows,
-            Math.max(1, app.panes.length),
-            term.buffer.active.cursorY,
-        ).catch((error) => {
-            console.error('[TerminalPane] refresh banner settings failed', error);
-        });
+        refreshBannerNow();
     }
 
     function flushPendingBannerSettingsRefresh(): void {
-        if (!pendingBannerSettingsRefresh || userEditing) return;
+        if (userEditing || (!pendingBannerSettingsRefresh && !pendingPaneCountRefresh && !pendingBannerRefresh)) return;
         pendingBannerSettingsRefresh = false;
+        pendingPaneCountRefresh = false;
+        pendingBannerRefresh = false;
         // Esperar un frame permite que la shell termine de pintar el prompt
         // tras Enter antes de que el banner restaure su cursor visual.
         requestAnimationFrame(refreshBannerForSettings);
@@ -313,10 +398,17 @@
             console.error('[TerminalPane] fitAndReport error', err);
             return;
         }
-        if (term.cols === lastSize.cols && term.rows === lastSize.rows) return;
+        const paneCount = Math.max(1, app.panes.length);
+        const paneCountChanged = paneCount !== lastPaneCount;
+        if (term.cols === lastSize.cols && term.rows === lastSize.rows && !paneCountChanged) return;
+        lastPaneCount = paneCount;
         lastSize = { cols: term.cols, rows: term.rows };
         const serial = ++bannerRefreshSerial;
         const editingAtResize = userEditing;
+        // Un cambio de rejilla invalida el cursor del viewport anterior. El
+        // primer repintado debe ignorarlo y tener un reintento explícito si la
+        // shell todavía está entregando su lote de arranque.
+        if (paneCountChanged) pendingPaneCountRefresh = true;
         // No resetear xterm antes del resize: la shell todavía conserva la
         // posición real de su prompt y ConPTY la repinta al recibir SIGWINCH.
         // Si se vacía solo el frontend aquí, ese prompt aparece en la fila
@@ -341,23 +433,33 @@
                     // resize: si había texto en edición, no se repinta justo
                     // después de Enter, cuando todavía puede estar saliendo
                     // la respuesta del comando.
-                    if (editingAtResize || userEditing) return;
-                    const bannerStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
-                    void api.refreshBanner(
-                        tabId,
-                        cols,
-                        rows,
-                        Math.max(1, app.panes.length),
-                        term?.buffer.active.cursorY ?? 0,
-                    ).then(() => {
-                        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-                        perf.record('terminal.banner-refresh', 'duration', {
-                            durationMs: Math.round(Math.max(0, now - bannerStartedAt) * 100) / 100,
-                            status: 'ok',
-                            tabId,
-                            details: { cols, rows, paneCount: Math.max(1, app.panes.length) },
-                        });
-                    });
+                    if (editingAtResize || userEditing) {
+                        // Un cambio de rejilla no se puede perder solo porque
+                        // el usuario estuviera editando la línea al dividir.
+                        // Se vuelve a pintar al terminar esa edición, cuando
+                        // el cursor ya no corre riesgo de ser sobrescrito.
+                    if (paneCountChanged) {
+                        pendingPaneCountRefresh = true;
+                        window.setTimeout(() => { pendingPaneCountRefresh = false; }, 900);
+                    }
+                        pendingBannerRefresh = true;
+                        return;
+                    }
+                    refreshBannerNow();
+                    if (paneCountChanged) {
+                        // La shell puede tener todavía encolado el banner que
+                        // escribió durante su inicialización. Un segundo
+                        // repintado, cuando ese lote ya llegó a xterm, evita
+                        // que reaparezca una cabecera completa sobre el modo
+                        // compacto de la rejilla.
+                        if (paneRefreshTimer) clearTimeout(paneRefreshTimer);
+                        paneRefreshTimer = setTimeout(() => {
+                            paneRefreshTimer = undefined;
+                            pendingPaneCountRefresh = true;
+                            pendingBannerRefresh = true;
+                            if (serial === bannerRefreshSerial) refreshBannerNow();
+                        }, 450);
+                    }
                 }, 120);
             }).then(() => {
                 const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -513,6 +615,8 @@
             details: { cols: term.cols, rows: term.rows },
         });
         window.addEventListener('winslim:banner-settings-changed', refreshBannerForSettings);
+        window.addEventListener('winslim:terminal-output-busy', onTerminalOutputBusy);
+        window.addEventListener('winslim:terminal-output-idle', onTerminalOutputIdle);
 
         // Solo ahora existe un xterm donde pintar: el backend suelta todo lo
         // que el pty escribió mientras tanto (banner + primer prompt).
@@ -538,7 +642,10 @@
         observer?.disconnect();
         window.removeEventListener('resize', fitAndReport);
         if (resizeTimer) clearTimeout(resizeTimer);
+        if (paneRefreshTimer) clearTimeout(paneRefreshTimer);
         window.removeEventListener('winslim:banner-settings-changed', refreshBannerForSettings);
+        window.removeEventListener('winslim:terminal-output-busy', onTerminalOutputBusy);
+        window.removeEventListener('winslim:terminal-output-idle', onTerminalOutputIdle);
         unregisterTerminal(tabId);
         term?.dispose();
     });

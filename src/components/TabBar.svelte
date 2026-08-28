@@ -162,6 +162,7 @@
         <button
             type="button"
             class="tab"
+            data-tab-id={tab.id}
             class:active={tab.id === app.activeTabId}
             class:dragging={tab.id === draggedTabId}
             class:drop-before={tab.id === dropTargetId && !dropAfter}

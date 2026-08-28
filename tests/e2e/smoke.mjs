@@ -26,9 +26,10 @@ const IS_HYPRLAND = [
     process.env.HYPRLAND_INSTANCE_SIGNATURE,
 ].filter(Boolean).join(' ').toLowerCase().includes('hyprland');
 
-// Límites de la ventana: 480x270 es el cuarto de una pantalla 1920x1080;
-// 7680x4320 cubre 8K sin permitir que
-// una petición de WebDriver cree un viewport que el layout nunca podrá medir.
+// Límites nativos de la ventana. Son un suelo absoluto para el gestor de
+// ventanas; el mínimo responsive se calcula con la pantalla real más abajo,
+// porque una constante basada en 1920x1080 falla en monitores 2K, 4K o con
+// escalado DPI.
 const parseLimit = (name, fallback, maximum) => {
     const value = Number(process.env[name]);
     return Number.isFinite(value) ? Math.min(maximum, Math.max(1, Math.floor(value))) : fallback;
@@ -262,6 +263,101 @@ async function property(element, name) {
     });
 }
 
+async function setSelectValue(css, value) {
+    const result = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const select = document.querySelector(${JSON.stringify(css)});
+            if (!select) return { ok: false, reason: 'missing' };
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+            if (!setter) return { ok: false, reason: 'no-setter' };
+            setter.call(select, ${JSON.stringify(value)});
+            select.dispatchEvent(new Event('input', { bubbles: true }));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            return { ok: select.value === ${JSON.stringify(value)}, value: select.value };`,
+        args: [],
+    });
+    if (!result?.ok) throw new Error(`No se pudo seleccionar ${value} en ${css}: ${JSON.stringify(result)}`);
+}
+
+const localeCatalogCache = new Map();
+async function loadLocaleCatalog(language) {
+    if (localeCatalogCache.has(language)) return localeCatalogCache.get(language);
+    try {
+        const catalog = JSON.parse(await readFile(join(process.cwd(), 'src-tauri', 'locales', `${language}.json`), 'utf8'));
+        localeCatalogCache.set(language, catalog);
+        return catalog;
+    } catch (error) {
+        throw new Error(`No se pudo cargar el catálogo E2E de ${language}: ${error.message}`);
+    }
+}
+
+async function readLanguageAnchors() {
+    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const dialog = document.querySelector('[role="dialog"]');
+            const text = (selector) => dialog?.querySelector(selector)?.textContent?.trim() ?? '';
+            const field = dialog?.querySelector('[data-testid="settings-language"]')?.closest('.field');
+            return {
+                language: dialog?.querySelector('[data-testid="settings-language"]')?.value ?? '',
+                tabs: [...(dialog?.querySelectorAll('[role="tab"]') ?? [])].map((tab) => tab.textContent.trim()),
+                languageLabel: field?.querySelector(':scope > span')?.textContent?.trim() ?? '',
+                languageHint: dialog?.querySelector('[data-testid="settings-language"]')?.closest('.field')?.nextElementSibling?.textContent?.trim() ?? '',
+                save: text('[data-testid="settings-save"]'),
+                reset: text('[data-testid="settings-reset-label"]'),
+                toolbar: {
+                    projects: document.querySelector('[data-testid="toolbar-projects"]')?.textContent?.trim() ?? '',
+                    scripts: document.querySelector('[data-testid="toolbar-library"]')?.textContent?.trim() ?? '',
+                    dependencies: document.querySelector('[data-testid="toolbar-dependencies"]')?.textContent?.trim() ?? '',
+                    settings: document.querySelector('[data-testid="toolbar-settings"]')?.textContent?.trim() ?? '',
+                },
+            };`,
+        args: [],
+    });
+}
+
+async function assertLanguageAnchors(language, expected) {
+    const actual = await readLanguageAnchors();
+    const required = {
+        languageLabel: expected['settings.language'],
+        languageHint: expected['settings.languageHint'],
+        save: expected['settings.save'],
+        reset: expected['settings.reset'],
+        projects: expected['toolbar.projects'],
+        scripts: expected['toolbar.scripts'],
+        dependencies: expected['toolbar.deps'],
+        settings: expected['toolbar.settings'],
+    };
+    const checks = [
+        ['settings.language', actual.languageLabel, required.languageLabel],
+        ['settings.languageHint', actual.languageHint, required.languageHint],
+        ['settings.save', actual.save, required.save],
+        ['settings.reset', actual.reset, required.reset],
+        ['toolbar.settings', actual.toolbar.settings, required.settings],
+    ];
+    // Un perfil puede ocultar Proyectos/Biblioteca/Dependencias. Solo se
+    // comparan esos botones cuando estÃ¡n presentes; Ajustes siempre es visible
+    // y sirve como ancla obligatoria para detectar texto hardcodeado.
+    for (const [name, value, target] of [
+        ['toolbar.projects', actual.toolbar.projects, required.projects],
+        ['toolbar.scripts', actual.toolbar.scripts, required.scripts],
+        ['toolbar.deps', actual.toolbar.dependencies, required.dependencies],
+    ]) {
+        if (value) checks.push([name, value, target]);
+    }
+    const mismatches = checks.filter(([, value, target]) => value !== target);
+    if (mismatches.length) {
+        throw new Error(`Texto hardcodeado o traducción incompleta para ${language}: ${JSON.stringify({ mismatches, actual })}`);
+    }
+    const expectedTabs = [
+        expected['settings.appearance'],
+        expected['settings.terminal'],
+        expected['settings.behavior'],
+        expected['settings.about'],
+    ];
+    if (!expectedTabs.every((label) => actual.tabs.includes(label))) {
+        throw new Error(`Las pestañas de Ajustes no están traducidas en ${language}: ${JSON.stringify({ expectedTabs, actualTabs: actual.tabs })}`);
+    }
+    return actual;
+}
+
 async function textOf(element) {
     return request(`/session/${sessionId}/element/${element}/text`);
 }
@@ -324,6 +420,20 @@ async function findWhenReady(css, timeoutMs = 20000) {
 
 async function click(element) {
     await request(`/session/${sessionId}/element/${element}/click`, 'POST', {});
+}
+
+async function closeEnvironmentMenu() {
+    const backdrops = await findAll('.env-backdrop');
+    if (!backdrops.length) return;
+    // El backdrop cubre toda la ventana y WebDriver puede considerar que el
+    // propio botón está interceptado si intentamos pulsarlo de nuevo. Ejecutar
+    // el mismo mousedown que usa la interfaz cierra el menú de forma
+    // determinista incluso cuando solo hay una shell disponible.
+    await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: 'const backdrop = document.querySelector(".env-backdrop"); if (backdrop) backdrop.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); return true;',
+        args: [],
+    });
+    await waitUntil(async () => (await findAll('.env-backdrop')).length === 0, 5000, 'cierre del selector de entornos');
 }
 
 async function sendWindowShortcut(keys) {
@@ -432,7 +542,7 @@ async function exerciseWindowManagerStates() {
     }
 }
 
-async function sendTerminalLine(line, pane = null) {
+async function sendTerminalKeys(line, pane = null, { enter = true, settle = true } = {}) {
     const xterm = pane
         ? (await findAllWithin(pane, '.xterm'))[0]?.[elementKey]
         : await findWhenReady('.cell:not(.hidden) .xterm');
@@ -453,7 +563,7 @@ async function sendTerminalLine(line, pane = null) {
     // WebKitWebDriver y no siempre genera el evento `input` que necesita
     // xterm. Las acciones de teclado sí recorren el mismo camino que una
     // pulsación real y permiten probar readline y el interceptor interno.
-    const keyActions = [...`${line}\n`].flatMap((character) => {
+    const keyActions = [...`${line}${enter ? '\n' : ''}`].flatMap((character) => {
         const value = character === '\n' ? '\uE007' : character;
         return [{ type: 'keyDown', value }, { type: 'keyUp', value }];
     });
@@ -465,16 +575,20 @@ async function sendTerminalLine(line, pane = null) {
         // WebKitWebDriver antiguo puede no implementar acciones de teclado;
         // conservar una ruta compatible para esos entornos.
         try {
-            await request(`/session/${sessionId}/element/${input}/value`, 'POST', { text: `${line}\n` });
+            await request(`/session/${sessionId}/element/${input}/value`, 'POST', { text: `${line}${enter ? '\n' : ''}` });
         } catch {
             try {
-                await request(`/session/${sessionId}/element/${input}/value`, 'POST', { value: [...`${line}\n`] });
+                await request(`/session/${sessionId}/element/${input}/value`, 'POST', { value: [...`${line}${enter ? '\n' : ''}`] });
             } catch {
                 throw firstError;
             }
         }
     }
-    await new Promise((resolve) => setTimeout(resolve, COMMAND_SETTLE_MS));
+    if (settle) await new Promise((resolve) => setTimeout(resolve, COMMAND_SETTLE_MS));
+}
+
+async function sendTerminalLine(line, pane = null) {
+    return sendTerminalKeys(line, pane, { enter: true, settle: true });
 }
 
 async function rightClick(element) {
@@ -599,6 +713,93 @@ async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
     throw new Error(`El banner no quedó listo en ${expected} panel(es) tras ${timeoutMs} ms: ${JSON.stringify({ lastSnapshot, geometry }).slice(0, 1800)}`);
 }
 
+function firstNonEmptyTerminalLine(text) {
+    return String(text ?? '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean) ?? '';
+}
+
+function bannerTextAnomalies(text) {
+    const clean = String(text ?? '')
+        .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+        .replace(/\x1b[78]/g, '')
+        .replace(/\r/g, '');
+    const lines = clean.split('\n').map((line) => line.trim()).filter(Boolean);
+    const headers = lines.filter((line) => /^(?:WinSlim|LTerminal).*Terminal\b/i.test(line));
+    const anomalies = [];
+    if (headers.length !== 1) anomalies.push(`cabeceras=${headers.length}`);
+    const suspicious = [
+        /^(?:Placa|Motherboard)\b.*(?:\bGB\b|\bMHz\b|%|GPU|Memoria|Memory|Fecha|Date)/i,
+        /^(?:GPU)\b.*(?:\bGB\b|Memoria|Memory|Disco|Disk|PC|Kernel|Fecha|Date)/i,
+        /^(?:Entorno|Environment)\b.*(?:WINSLIM|\bPC\b|Kernel|Placa|Motherboard|GPU)/i,
+        /^(?:Fecha(?: y hora)?|Date(?: and time)?)\b.*(?:Sistema|System|CPU|Memoria|Memory|Disco|Disk|PC|Kernel|GPU)/i,
+    ];
+    for (const line of lines) {
+        if (suspicious.some((pattern) => pattern.test(line))) anomalies.push(`línea mezclada: ${line}`);
+    }
+    // Un prompt dentro del bloque significa que el repintado restauró el
+    // cursor antes de terminar de escribir el banner. Es el síntoma que las
+    // capturas nativas mostraban como «GPU/Disco pegados»: los campos pueden
+    // aparecer una sola vez y pasar el chequeo de cabeceras, pero la shell ya
+    // está escribiendo antes de que termine Sesión/Fecha.
+    const field = /^(?:Sistema|System|PC|Equipo|Host|Kernel|Entorno|Environment|Placa|Motherboard|CPU|Procesador|Processor|GPU|Memoria|Memory|RAM|Disco|Disk|Storage|Uptime|Tiempo activo|Fecha(?: y hora)?|Date(?: and time)?)\b/i;
+    const lastField = lines.reduce((last, line, index) => field.test(line) ? index : last, -1);
+    const promptIndex = lines.findIndex((line) => /(?:^[A-Z]:\\[^ ]*[>❯$#]|^[^ ]+@[^ ]+:[^ ]+[❯$#])/.test(line));
+    if (promptIndex >= 0 && lastField > promptIndex) {
+        anomalies.push(`prompt antes del final del banner: línea ${promptIndex + 1}/${lastField + 1}`);
+    }
+    return anomalies;
+}
+
+/**
+ * Comprueba la evidencia visual que el smoke anterior dejaba pasar como
+ * «partial»: una casilla que empieza por GPU/Uptime puede contener datos
+ * correctos, pero está mostrando la cola de un banner desplazado. En una
+ * rejilla estable todas las casillas deben empezar por su propia cabecera.
+ */
+async function assertBannerHeaders(expected, label) {
+    let last = { panes: 0, rows: 0, headers: [], modes: [] };
+    try {
+        await waitUntil(async () => {
+            const panes = await visiblePanes();
+            const rows = await findAll('.cell:not(.hidden) .xterm-rows');
+            if (panes.length !== expected || rows.length < expected) return false;
+            const texts = await Promise.all(rows.slice(0, expected).map((row) => textOf(row[elementKey])));
+            const headers = texts.map(firstNonEmptyTerminalLine);
+            const modes = texts.map((text) => /Hardware:|Sesión:|Session:/i.test(text) ? 'full' : 'compact');
+            const anomalies = texts.map(bannerTextAnomalies);
+            last = { panes: panes.length, rows: rows.length, headers, modes, anomalies };
+            const allStartAtHeader = headers.every((header) => /^(?:WinSlim|LTerminal).*Terminal/i.test(header));
+            const forbiddenContinuation = /^(?:GPU|Memoria|Memory|Uptime|Tiempo activo|Disco|Disk|PC|Kernel|Entorno|Environment)\b/i;
+            const sameMode = new Set(modes).size <= 1;
+            return allStartAtHeader
+                && !headers.some((header) => forbiddenContinuation.test(header))
+                && anomalies.every((items) => items.length === 0)
+                && sameMode;
+        }, 5000, `${label}: cabeceras de banner`);
+    } catch (error) {
+        throw new Error(`${label}: cabeceras inconsistentes (${JSON.stringify(last)})`, { cause: error });
+    }
+    recordEvent('banner-headers-consistent', { label, expected, headers: last.headers });
+    return last;
+}
+
+async function assertTinyPanesClean(expected, label) {
+    let last = [];
+    await waitUntil(async () => {
+        const rows = await findAll('.cell:not(.hidden) .xterm-rows');
+        if (rows.length < expected) return false;
+        const texts = await Promise.all(rows.slice(0, expected).map((row) => textOf(row[elementKey])));
+        last = texts.map((text) => text.slice(-600));
+        // Por debajo de 12 filas el backend no pinta banner. Solo aceptamos
+        // el prompt/espacio; una cola de Sesión, GPU o una segunda cabecera es
+        // precisamente el residuo que este caso intenta detectar.
+        return texts.every((text) => !/(?:WinSlim|LTerminal).*Terminal|Sistema|System|CPU|Memoria|Memory|Uptime|Tiempo activo|Disco|Disk|GPU|Placa|Motherboard|Kernel|Entorno|Environment/i.test(text));
+    }, 5000, `${label}: casillas bajas sin residuos`);
+    recordEvent('banner-hidden-tiny-pane', { expected, preview: last });
+}
+
 function assertWindowBounds(rect, label) {
     const viewport = rect?.content?.viewport;
     const measuredWidth = viewport?.width ?? rect?.width;
@@ -643,6 +844,19 @@ function assertResponsiveMinimum(rect, label) {
             + `pantalla=${screen.width}x${screen.height}`,
         );
     }
+}
+
+function responsiveMinimumForScreen(screen) {
+    return {
+        width: Math.min(
+            WINDOW_LIMITS.maxWidth,
+            Math.max(WINDOW_LIMITS.minWidth, Math.ceil(screen.width * 0.25)),
+        ),
+        height: Math.min(
+            WINDOW_LIMITS.maxHeight,
+            Math.max(WINDOW_LIMITS.minHeight, Math.ceil(screen.height * 0.25)),
+        ),
+    };
 }
 
 async function setExplorerVisible(visible) {
@@ -853,7 +1067,14 @@ try {
     markPhase('arranque de interfaz');
     await findWhenReady('.toolbar');
     await findWhenReady('.cell:not(.hidden) .xterm');
-    await waitForBannerPanes(1, 20000);
+    const initialGeometry = await contentGeometry();
+    const initialTooShort = initialGeometry.panes.slice(0, 1)
+        .every((pane) => (pane.terminal?.rows ?? 0) < 12);
+    if (initialTooShort) {
+        await assertTinyPanesClean(1, 'arranque con casilla baja');
+    } else {
+        await waitForBannerPanes(1, 20000);
+    }
     await prepareWindowManagerForResize();
     markPhase('estados de ventana');
     await exerciseWindowManagerStates();
@@ -862,22 +1083,49 @@ try {
     // la decoración del escritorio. El tamaño máximo real puede ser menor si
     // la pantalla de CI no es 8K; esa dimensión real alimenta la matriz de
     // proporciones que viene después.
-    const minimumRect = await resizeWindow(WINDOW_LIMITS.minWidth, WINDOW_LIMITS.minHeight, { waitForBanner: false });
-    assertWindowBounds(minimumRect, 'El mínimo configurado');
-    assertResponsiveMinimum(minimumRect, 'El mínimo configurado');
+    const configuredMinimumRect = await resizeWindow(
+        WINDOW_LIMITS.minWidth,
+        WINDOW_LIMITS.minHeight,
+        { waitForBanner: false },
+    );
+    assertWindowBounds(configuredMinimumRect, 'El mínimo configurado');
+
+    // `minWidth`/`minHeight` de Tauri son límites absolutos y no pueden
+    // expresar «25 % de la pantalla». Pedir el cuarto de la pantalla
+    // observado evita comparar una constante de 1920x1080 con el espacio
+    // lógico real del runner (por ejemplo 2048x1122 => 512x281).
+    const screen = configuredMinimumRect.content?.screen;
+    const hasScreenGeometry = Number.isFinite(screen?.width) && Number.isFinite(screen?.height)
+        && screen.width > 0 && screen.height > 0;
+    const responsiveMinimum = hasScreenGeometry ? responsiveMinimumForScreen(screen) : null;
+    const minimumRect = responsiveMinimum
+        ? await resizeWindow(responsiveMinimum.width, responsiveMinimum.height, { waitForBanner: false })
+        : configuredMinimumRect;
+    assertWindowBounds(minimumRect, 'El mínimo responsive solicitado');
+    if (responsiveMinimum) assertResponsiveMinimum(minimumRect, 'El mínimo responsive solicitado');
+    recordEvent('responsive-minimum', {
+        configured: { width: configuredMinimumRect.width, height: configuredMinimumRect.height },
+        screen: screen ?? null,
+        requested: responsiveMinimum,
+        applied: { width: minimumRect.width, height: minimumRect.height },
+        passed: true,
+    });
     const inspectorVerticalReserve = Math.max(0, WINDOW_LIMITS.minHeight - minimumRect.content.viewport.height);
     const inspectorHorizontalReserve = Math.max(0, WINDOW_LIMITS.minWidth - minimumRect.content.viewport.width);
+    const responsiveBaseWidth = Math.max(WINDOW_LIMITS.minWidth, minimumRect.width);
+    const responsiveBaseHeight = Math.max(WINDOW_LIMITS.minHeight, minimumRect.height);
     const effectiveMinWidth = Math.min(
         WINDOW_LIMITS.maxWidth,
-        WINDOW_LIMITS.minWidth + inspectorHorizontalReserve,
+        responsiveBaseWidth + inspectorHorizontalReserve,
     );
     const effectiveMinHeight = Math.min(
         WINDOW_LIMITS.maxHeight,
-        WINDOW_LIMITS.minHeight + inspectorVerticalReserve
+        responsiveBaseHeight + inspectorVerticalReserve
             + (inspectorVerticalReserve > 0 ? 120 : 0),
     );
     process.stdout.write(
-        `E2E mínimo nativo: ${minimumRect.width}x${minimumRect.height}, `
+        `E2E mínimo nativo: ${configuredMinimumRect.width}x${configuredMinimumRect.height}, `
+        + `mínimo responsive=${minimumRect.width}x${minimumRect.height}, `
         + `viewport útil=${minimumRect.content.viewport.width}x${minimumRect.content.viewport.height}, `
         + `reserva inspector=${inspectorHorizontalReserve}x${inspectorVerticalReserve}\n`,
     );
@@ -899,7 +1147,14 @@ try {
     // generado con el tamaño anterior mientras termina el ResizeObserver. La
     // comprobación observa el repintado automático del banner, que es el mismo
     // camino que usa la ventana real.
-    await waitForBannerPanes(1, 20000);
+    const effectiveMinimumGeometry = await contentGeometry();
+    const effectiveMinimumTooShort = effectiveMinimumGeometry.panes.slice(0, 1)
+        .every((pane) => (pane.terminal?.rows ?? 0) < 12);
+    if (effectiveMinimumTooShort) {
+        await assertTinyPanesClean(1, 'mínimo útil con casilla baja');
+    } else {
+        await waitForBannerPanes(1, 20000);
+    }
     process.stdout.write(
         `E2E mínimo útil: ${effectiveMinimumRect.width}x${effectiveMinimumRect.height}, `
         + `viewport=${effectiveMinimumRect.content.viewport.width}x${effectiveMinimumRect.content.viewport.height}\n`,
@@ -924,6 +1179,16 @@ try {
     const afterSplit = await request(`/session/${sessionId}/window/rect`);
     const splitGeometry = await contentGeometry();
     assertPaneGeometry(splitGeometry, 2, 'División en el tamaño mínimo');
+    // Esta transición empieza con una sola pestaña y obliga a crear la
+    // segunda. No basta con comprobar que la casilla existe: ambas deben
+    // haber recibido el banner compacto, incluido el xterm recién montado.
+    const tinySplit = splitGeometry.panes.slice(0, 2).every((pane) => (pane.terminal?.rows ?? 0) < 12);
+    if (tinySplit) {
+        await assertTinyPanesClean(2, 'rejilla 2 paneles en altura mínima');
+    } else {
+        await waitForBannerPanes(2, 20000);
+        await assertBannerHeaders(2, 'rejilla 2 paneles tras crear la segunda pestaña');
+    }
     const autoExpanded = afterSplit.width > beforeSplit.width || afterSplit.height > beforeSplit.height;
     recordEvent('multi-pane-minimum', {
         before: { width: beforeSplit.width, height: beforeSplit.height },
@@ -978,7 +1243,15 @@ try {
         await click(freshTabs[index][elementKey]);
         await waitUntil(async () => {
             const currentTabs = await findAll('.tab');
-            return (await attribute(currentTabs[index][elementKey], 'class'))?.split(/\s+/).includes('active');
+            const tab = currentTabs[index];
+            const active = (await attribute(tab[elementKey], 'class'))?.split(/\s+/).includes('active');
+            if (!active) return false;
+            const tabId = await attribute(tab[elementKey], 'data-tab-id');
+            const visibleCells = await findAll('.cell:not(.hidden)');
+            for (const cell of visibleCells) {
+                if (await attribute(cell[elementKey], 'data-tab-id') === tabId) return true;
+            }
+            return false;
         }, 5000, `activación de pestaña ${index + 1}`);
         await sendTerminalLine(`echo ${tabMarkers[index]}`);
         await waitUntil(async () => {
@@ -989,6 +1262,15 @@ try {
     for (let index = 0; index < tabMarkers.length; index += 1) {
         const freshTabs = await findAll('.tab');
         await click(freshTabs[index][elementKey]);
+        const expectedTabId = await attribute(freshTabs[index][elementKey], 'data-tab-id');
+        await waitUntil(async () => {
+            const activeCells = await findAll('.cell:not(.hidden)');
+            for (const cell of activeCells) {
+                if (await attribute(cell[elementKey], 'data-tab-id') === expectedTabId) return true;
+            }
+            return false;
+        }, 5000, `vista visible de pestaÃ±a ${index + 1}`);
+        await sendTerminalLine(`echo ${tabMarkers[index]}`);
         await waitUntil(async () => {
             const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
             const text = await textOf(rows);
@@ -1020,6 +1302,53 @@ try {
         return (await attribute(environmentButton, 'disabled')) === null;
     }, 20000, 'fin de refrescos concurrentes de entornos');
 
+    // Cambiar de shell es una ruta distinta de refrescar el inventario: crea
+    // un PTY nuevo, ejecuta el inicializador y solo entonces debe aparecer el
+    // banner. Se prueba de forma oportunista con dos entornos disponibles y se
+    // vuelve al original para que el resto del smoke no dependa de PowerShell,
+    // bash o cmd concretos.
+    markPhase('cambio de shell');
+    const environmentButton = await findWhenReady('.env-select');
+    await click(environmentButton);
+    const environmentOptions = await findAll('.env-menu [data-testid="environment-option"]');
+    const availableOptions = [];
+    for (const option of environmentOptions) {
+        if ((await attribute(option[elementKey], 'aria-disabled')) !== 'true') {
+            availableOptions.push(option[elementKey]);
+        }
+    }
+    // Localizar la opción seleccionada de forma explícita mantiene el smoke
+    // compatible con WebDriver remoto (Array#find no espera promesas).
+    let originalOption = null;
+    for (const option of availableOptions) {
+        if ((await attribute(option, 'aria-selected')) === 'true') {
+            originalOption = option;
+            break;
+        }
+    }
+    const switchTarget = availableOptions.find((option) => option !== originalOption) ?? null;
+    if (switchTarget && originalOption) {
+        const originalId = await attribute(originalOption, 'data-environment-id');
+        const targetId = await attribute(switchTarget, 'data-environment-id');
+        const targetLabel = (await textOf(switchTarget)).trim().split(/\r?\n/)[0];
+        const switchStartedAt = Date.now();
+        await click(switchTarget);
+        await waitUntil(async () => (await textOf(environmentButton)).includes(targetLabel), 15000, 'confirmación del cambio de shell');
+        const switchElapsedMs = Date.now() - switchStartedAt;
+        recordEvent('environment-switch', { from: originalId, to: targetId, targetLabel, durationMs: switchElapsedMs, passed: true });
+
+        // Restaurar la shell original y comprobar que la segunda transición
+        // tampoco deja la lista desplegable en un estado intermedio.
+        await click(await findWhenReady('.env-select'));
+        const originalAgain = await findWhenReady(`.env-menu [data-environment-id="${originalId}"]`);
+        await click(originalAgain);
+        await waitUntil(async () => !(await textOf(await findWhenReady('.env-select'))).includes(targetLabel), 15000, 'restauración de la shell original');
+        recordEvent('environment-switch-restore', { to: originalId, passed: true });
+    } else {
+        await closeEnvironmentMenu();
+        recordEvent('environment-switch', { skipped: true, reason: 'solo hay una shell disponible' });
+    }
+
     markPhase('ajustes');
     // En builds de depuración WebKit puede reservar unos 300 px para el
     // inspector. Con la ventana de trabajo anterior el banner completo no
@@ -1033,6 +1362,47 @@ try {
     if (!/Preferencias|Preferences|Settings|Ajustes|Appearance|Terminal/i.test(title)) {
         throw new Error(`El panel de Ajustes no se abrió; texto recibido: ${JSON.stringify(title)}`);
     }
+
+    // Cambiar el idioma en una sesiÃ³n real detecta dos regresiones que la
+    // comprobaciÃ³n estÃ¡tica no puede ver: etiquetas escritas directamente en
+    // Svelte y catÃ¡logos que existen pero no llegan al frontend tras guardar.
+    // Se prueban varios idiomas disponibles y se restaura exactamente la
+    // preferencia original antes de continuar con el resto de la baterÃ­a.
+    markPhase('idiomas y traducciones');
+    await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
+    const languageSelect = await findWhenReady('[data-testid="settings-language"]');
+    const originalLanguage = String(await property(languageSelect, 'value'));
+    const languageOptions = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: 'return [...document.querySelectorAll(\'[data-testid="settings-language"] option\')].map((option) => option.value);',
+        args: [],
+    });
+    const languageCandidates = ['en', 'fr', 'de', 'it', 'pt']
+        .filter((language) => languageOptions.includes(language) && language !== originalLanguage)
+        .slice(0, 3);
+    if (languageCandidates.length < 2) {
+        throw new Error(`El selector de idioma no ofrece suficientes catÃ¡logos para probar: ${JSON.stringify(languageOptions)}`);
+    }
+    const languageResults = [];
+    for (const language of languageCandidates) {
+        const expected = await loadLocaleCatalog(language);
+        await setSelectValue('[data-testid="settings-language"]', language);
+        await click(await findWhenReady('[data-testid="settings-save"]'));
+        await waitUntil(
+            async () => String(await property(await findWhenReady('[data-testid="settings-language"]'), 'value')) === language,
+            5000,
+            `aplicaciÃ³n del idioma ${language}`,
+        );
+        const anchors = await assertLanguageAnchors(language, expected);
+        languageResults.push({ language, anchors: { tabs: anchors.tabs, toolbar: anchors.toolbar } });
+    }
+    await setSelectValue('[data-testid="settings-language"]', originalLanguage);
+    await click(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(
+        async () => String(await property(await findWhenReady('[data-testid="settings-language"]'), 'value')) === originalLanguage,
+        5000,
+        'restauraciÃ³n del idioma original',
+    );
+    recordEvent('language-switch', { original: originalLanguage, tested: languageResults, passed: true });
 
     const settingsTabs = await findAll('[role="dialog"] [role="tab"]');
     if (settingsTabs.length < 4) throw new Error(`Ajustes no muestra sus cuatro secciones: ${settingsTabs.length}`);
@@ -1289,7 +1659,6 @@ try {
     // está pintada; este margen corresponde solo a su verificación exacta.
     }, 90000, 'fin de la re-detección de dependencias');
     await findWhenReady('.dependency-actions');
-    await findWhenReady('.manual-hint');
     const dependencyGroups = await findAll('[data-testid="dependency-group"]');
     for (const group of dependencyGroups) {
         if ((await attribute(group[elementKey], 'open')) !== null) {
@@ -1411,26 +1780,93 @@ try {
     // representa de forma portable Ctrl+Shift+Backslash en WebKitGTK; probar
     // el control real evita que el smoke dependa de una codificación de tecla.
     const splitButton = await findWhenReady('.side-toggle.panes');
-    await click(splitButton);
-    const splitCount = await waitForPaneCount(2);
-    if (splitCount < 2) throw new Error(`La división no creó dos paneles; encontró ${splitCount}`);
-    await waitForBannerPanes(splitCount, 20000);
+    await waitForBannerPanes(1, 20000);
+    await assertBannerHeaders(1, 'rejilla 1 panel inicial');
 
-    // El clic de dividir es asíncrono porque puede tener que abrir pestañas.
-    // Un burst de clics no debe saltar varios estados ni crear duplicados.
-    for (let attempt = 0; attempt < 4; attempt += 1) await click(splitButton);
-    const burstCount = await waitForPaneCount(splitCount, 10000);
-    if (burstCount > splitCount + 1) {
-        throw new Error(`Los clics concurrentes crearon demasiados paneles: ${splitCount} -> ${burstCount}`);
+    // Reproduce la secuencia manual que más fácilmente dejaba una casilla con
+    // la cola del banner anterior: 1→2→3→4→1 y vuelta a 4. Cada transición
+    // comprueba geometría y que TODAS las casillas empiezan por su cabecera.
+    const paneSequence = [
+        [2, 1100, 720],
+        [3, 1240, 780],
+        [4, 1240, 780],
+        [1, 1100, 720],
+        [2, 1180, 740],
+        [3, 1300, 800],
+        [4, 1300, 800],
+    ];
+    let currentPaneCount = 1;
+    const paneTransitions = [];
+    for (const [target, width, height] of paneSequence) {
+        await click(splitButton);
+        await waitUntil(
+            async () => (await visiblePanes()).length === target,
+            15000,
+            `cambio a ${target} panel(es)`,
+        );
+        const actual = await resizeWindow(width, height, { waitForBanner: false });
+        const banner = await waitForBannerPanes(target, 20000);
+        await assertBannerHeaders(target, `rejilla ${target} paneles tras ${currentPaneCount}`);
+        paneTransitions.push({
+            from: currentPaneCount,
+            to: target,
+            window: { width: actual.width, height: actual.height },
+            elapsedMs: banner.elapsedMs,
+        });
+        currentPaneCount = target;
     }
-    const stablePaneCount = Math.max(splitCount, burstCount);
-    const burstBanner = await waitForBannerPanes(stablePaneCount, 20000);
-    process.stdout.write(`E2E banner OK: ${stablePaneCount} panel(es) tras burst en ${burstBanner.elapsedMs}ms\n`);
-
-    const finalCount = (await waitForPaneCount(stablePaneCount, 5000));
+    // El clic de dividir es asíncrono porque puede tener que abrir pestañas.
+    // Un burst de clics no debe saltar varios estados ni crear duplicados; al
+    // partir de cuatro clics volvemos determinísticamente a cuatro paneles.
+    for (let attempt = 0; attempt < 4; attempt += 1) await click(splitButton);
+    await waitUntil(
+        async () => (await visiblePanes()).length === 4,
+        15000,
+        'estabilización tras clics concurrentes de división',
+    );
+    const burstCount = (await visiblePanes()).length;
+    if (burstCount > 4) {
+        throw new Error(`Los clics concurrentes crearon demasiados paneles: 4 -> ${burstCount}`);
+    }
+    const burstBanner = await waitForBannerPanes(4, 20000);
+    await assertBannerHeaders(4, 'rejilla 4 paneles tras clics concurrentes');
+    paneTransitions.push({ from: 4, to: 4, burst: true, elapsedMs: burstBanner.elapsedMs });
+    const stablePaneCount = currentPaneCount;
+    const finalCount = await waitForPaneCount(stablePaneCount, 5000);
     if (finalCount !== stablePaneCount) {
         throw new Error(`El redimensionado alteró los paneles visibles: ${stablePaneCount} -> ${finalCount}`);
     }
+    recordEvent('pane-sequence', { transitions: paneTransitions, finalCount });
+    process.stdout.write(`E2E banner OK: secuencia 1→2→3→4→1→4, ${stablePaneCount} paneles finales\n`);
+
+    // Carrera crítica del fastfetch: dejar una línea larga en edición y
+    // redimensionar/dividir antes de pulsar Enter. Antes el repintado podía
+    // guardar el cursor en una fila de GPU y el eco de la shell atravesaba el
+    // banner. La cabecera debe seguir siendo la primera línea de cada panel y
+    // el texto escrito no puede aparecer en ella.
+    const focusedPane = await findWhenReady('.cell.focused');
+    const longInput = `echo LTERMINAL_LONG_INPUT_${'x'.repeat(180)}`;
+    await sendTerminalKeys(longInput, focusedPane, { enter: false, settle: false });
+    await resizeWindow(980, 640, { waitForBanner: false });
+    // La línea larga puede ocupar varias filas y desplazar temporalmente el
+    // encabezado del viewport. Liberamos la edición; el frontend debe ejecutar
+    // el repintado pendiente cuando la shell haya terminado de ecoar la orden.
+    await sendTerminalKeys('', focusedPane, { enter: true, settle: true });
+    await waitForBannerPanes(stablePaneCount, 20000);
+    const raceRows = await findAll('.cell:not(.hidden) .xterm-rows');
+    const raceTexts = await Promise.all(raceRows.slice(0, stablePaneCount).map((row) => textOf(row[elementKey])));
+    const raceHeaders = raceTexts.map(firstNonEmptyTerminalLine);
+    if (!raceHeaders.every((header) => /^(?:WinSlim|LTerminal).*Terminal/i.test(header))) {
+        throw new Error(`El repintado con entrada larga dejó una cabecera desplazada: ${JSON.stringify(raceHeaders)}`);
+    }
+    if (raceHeaders.some((header) => header.includes('LTERMINAL_LONG_INPUT'))) {
+        throw new Error(`La entrada de la shell atravesó el fastfetch: ${JSON.stringify(raceHeaders)}`);
+    }
+    recordEvent('banner-input-race', {
+        panes: stablePaneCount,
+        inputLength: longInput.length,
+        headers: raceHeaders,
+    });
 
     // No hay una lista finita de resoluciones «intermedias» en el sistema:
     // se prueban proporciones representativas respecto al máximo real que

@@ -63,7 +63,9 @@ E2E_DRIVER_PATH="${TAURI_NATIVE_DRIVER:-}"
 CROSS_WINDOWS=0
 NON_INTERACTIVE=0
 FAST_BUILD=0
+EXPLICIT_OPTIONS=0
 while [ "$#" -gt 0 ]; do
+    EXPLICIT_OPTIONS=1
     case "$1" in
         --clean)       CLEAN=1 ;;
         --no-run)      NO_RUN=1 ;;
@@ -98,6 +100,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         -h|--help)
             echo "Uso: $0 [--fast] [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
+            echo "Sin opciones: muestra un selector interactivo; Enter conserva los valores actuales."
             exit 0
             ;;
         *)
@@ -107,6 +110,56 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+ask_build_choice() {
+    local prompt="$1"
+    local default="$2"
+    local answer
+    local hint='s/N'
+    [ "$default" -eq 1 ] && hint='S/n'
+    while true; do
+        if ! read -r -p "$prompt [$hint] " answer; then
+            printf '\n'
+            [ "$default" -eq 1 ]
+            return $?
+        fi
+        answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')"
+        case "$answer" in
+            '')
+                [ "$default" -eq 1 ]
+                return $?
+                ;;
+            s|si|sí|y|yes) return 0 ;;
+            n|no) return 1 ;;
+            *) warn "Responde s/sí o n/no; Enter conserva el valor predeterminado." ;;
+        esac
+    done
+}
+
+configure_interactive_options() {
+    # Una ejecución sin argumentos permite escoger el perfil sin romper las
+    # builds automatizadas: cualquier argumento explícito, --non-interactive o
+    # una entrada/salida redirigida conserva exactamente el comportamiento
+    # anterior y no intenta leer del usuario.
+    if [ "$NON_INTERACTIVE" -eq 1 ] || [ "$EXPLICIT_OPTIONS" -eq 1 ] || \
+        [ "${CI:-}" = '1' ] || [ "${CI:-}" = 'true' ] || [ "${CI:-}" = 'yes' ] || \
+        [ ! -t 0 ] || [ ! -t 1 ]; then
+        return 0
+    fi
+    printf '\n\033[36mConfiguración de build (Enter conserva el valor actual):\033[0m\n'
+    if ask_build_choice 'Limpiar dependencias y target antes de compilar' "$CLEAN"; then CLEAN=1; else CLEAN=0; fi
+    if ask_build_choice 'Usar perfil rápido de desarrollo' "$FAST_BUILD"; then FAST_BUILD=1; else FAST_BUILD=0; fi
+    if ask_build_choice 'Instalar automáticamente dependencias faltantes' "$AUTO_INSTALL"; then AUTO_INSTALL=1; else AUTO_INSTALL=0; fi
+    if ask_build_choice 'Saltar comprobaciones locales' "$SKIP_CHECKS"; then SKIP_CHECKS=1; else SKIP_CHECKS=0; fi
+    if ask_build_choice 'Convertir comprobaciones externas en avisos' "$ALLOW_OFFLINE_CHECKS"; then ALLOW_OFFLINE_CHECKS=1; else ALLOW_OFFLINE_CHECKS=0; fi
+    if ask_build_choice 'Ejecutar pruebas ampliadas y E2E' "$EXTENDED_TESTS"; then EXTENDED_TESTS=1; else EXTENDED_TESTS=0; fi
+    if [ "$EXTENDED_TESTS" -eq 1 ]; then
+        if ask_build_choice 'Instalar tauri-driver/WebKitWebDriver si faltan' "$INSTALL_E2E_DRIVER"; then INSTALL_E2E_DRIVER=1; else INSTALL_E2E_DRIVER=0; fi
+    fi
+    if ask_build_choice 'Ejecutar también la build Windows cruzada' "$CROSS_WINDOWS"; then CROSS_WINDOWS=1; else CROSS_WINDOWS=0; fi
+    if ask_build_choice 'Lanzar la aplicación al terminar' "$((1 - NO_RUN))"; then NO_RUN=0; else NO_RUN=1; fi
+    printf '  Opciones seleccionadas. La build comenzará ahora.\n'
+}
 
 # Tauri invoca Cargo internamente y necesita seguir viendo el perfil release
 # para conservar sus rutas de bundling. Cargo permite ajustar ese perfil por
@@ -141,10 +194,23 @@ configure_cargo_profile() {
     fi
 }
 
-step() { CURRENT_STEP="$1"; printf '\n\033[36m==> %s\033[0m\n' "$1"; }
+BUILD_STARTED_SECONDS=$SECONDS
+STEP_STARTED_SECONDS=$SECONDS
+step() {
+    local now=$SECONDS
+    local elapsed=$((now - STEP_STARTED_SECONDS))
+    if [ "$elapsed" -gt 0 ]; then
+        printf '    Tiempo del paso anterior: %ss\n' "$elapsed"
+    fi
+    CURRENT_STEP="$1"
+    STEP_STARTED_SECONDS=$now
+    printf '\n\033[36m==> %s\033[0m\n' "$1"
+}
 ok()   { printf '    \033[32mOK:\033[0m %s\n' "$1"; }
 warn() { printf '    \033[33mAVISO:\033[0m %s\n' "$1"; }
 err()  { printf '    \033[31mERROR:\033[0m %s\n' "$1" >&2; }
+
+configure_interactive_options
 
 if [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ]; then
     export LTERMINAL_LINK_CHECK=warn
@@ -194,6 +260,26 @@ graphical_session_available() {
 # equivalente del "La build fallo con codigo N" de build.bat.
 CURRENT_STEP="inicio"
 SMOKE_PID=""
+NODE_MODULES_RESTORE=""
+
+# Linux y Windows comparten el checkout cuando la build se ejecuta desde WSL,
+# pero npm solo instala la dependencia nativa de Tauri correspondiente al
+# sistema actual. Un `npm ci` Linux puede por tanto borrar el CLI Windows del
+# árbol que usa la siguiente build nativa. Si detectamos ese caso, apartamos
+# temporalmente el árbol existente y lo restauramos al salir (también ante un
+# error); la build Linux trabaja con un node_modules limpio y el host conserva
+# sus binarios.
+restore_node_modules() {
+    local backup="${NODE_MODULES_RESTORE:-}"
+    [ -n "$backup" ] || return 0
+    if [ -d "$PROJECT_ROOT/node_modules" ]; then
+        rm -rf "$PROJECT_ROOT/node_modules"
+    fi
+    if [ -d "$backup" ]; then
+        mv "$backup" "$PROJECT_ROOT/node_modules"
+    fi
+    NODE_MODULES_RESTORE=""
+}
 
 # El smoke de arranque crea una aplicación real para verificar WebKit, IPC y la
 # primera PTY. AppImage puede delegar en un proceso nativo después de extraer
@@ -234,7 +320,7 @@ on_error() {
     printf '\n\033[31mLa build falló en: %s (código %s)\033[0m\n' "$CURRENT_STEP" "$code" >&2
     echo "Revisa los mensajes de arriba." >&2
 }
-trap cleanup_smoke_process EXIT
+trap 'restore_node_modules; cleanup_smoke_process' EXIT
 trap on_error ERR
 
 # rustup, nvm y compañía instalan en el HOME y dejan el PATH preparado en un
@@ -866,12 +952,14 @@ esac
 # Se puede sobrescribir para un toolchain antiguo que soporte otra compresión.
 # El plugin de Tauri/linuxdeploy actual solo genera Zstandard con el
 # mksquashfs que trae integrado. El appimagetool antiguo que suele estar en el
-# PATH puede no entender Zstandard, por eso el repaquetado final usa XZ.
+# PATH puede no entender Zstandard; aun así, XZ no es compatible con el runtime
+# AppImage extraído que usan el smoke y los entornos sin FUSE. La compresión
+# final se mantiene en Zstandard con la herramienta moderna y usa gzip (zlib)
+# con la antigua, salvo que el usuario la fuerce explícitamente.
 APPIMAGE_COMP="${LTERMINAL_APPIMAGE_COMP:-zstd}"
 # El appimagetool que distribuye Tauri es moderno y trae el mksquashfs que
 # necesita. Preferirlo evita que una versión antigua del PATH intente montar
-# su propio AppImage (fallando sin FUSE) o rechace Zstandard. Solo se usa XZ
-# como fallback cuando esa copia no está disponible.
+# su propio AppImage (fallando sin FUSE) o rechace Zstandard.
 BUNDLED_APPIMAGETOOL="${XDG_CACHE_HOME:-$HOME/.cache}/tauri/squashfs-root/plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool"
 BUNDLED_APPIMAGE_BIN_DIR="$(dirname "$BUNDLED_APPIMAGETOOL")"
 if [ -x "$BUNDLED_APPIMAGETOOL" ] && [ -x "$BUNDLED_APPIMAGE_BIN_DIR/mksquashfs" ]; then
@@ -880,7 +968,7 @@ if [ -x "$BUNDLED_APPIMAGETOOL" ] && [ -x "$BUNDLED_APPIMAGE_BIN_DIR/mksquashfs"
     APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-zstd}"
     ok "appimagetool moderno de Tauri seleccionado"
 else
-    APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-xz}"
+    APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-gzip}"
 fi
 APPIMAGE_RUNTIME_FILE="${LTERMINAL_APPIMAGE_RUNTIME:-}"
 if [ -n "$APPIMAGE_RUNTIME_FILE" ]; then
@@ -1120,6 +1208,20 @@ assert_writable_directory() {
 
 assert_writable_directory "$PROJECT_ROOT/node_modules" || exit 1
 assert_writable_directory "$PROJECT_ROOT/node_modules/.bin" || exit 1
+
+if [ -d "$PROJECT_ROOT/node_modules" ] &&
+    [ ! -e "$PROJECT_ROOT/node_modules/@tauri-apps/cli-linux-x64-gnu" ] &&
+    [ -e "$PROJECT_ROOT/node_modules/@tauri-apps/cli-win32-x64-msvc" ]; then
+    NODE_MODULES_RESTORE="$PROJECT_ROOT/.node_modules.windows.$$"
+    if mv "$PROJECT_ROOT/node_modules" "$NODE_MODULES_RESTORE"; then
+        warn "Aislando node_modules Windows durante la build Linux; se restaurará al terminar."
+    else
+        NODE_MODULES_RESTORE=""
+        err "No se pudo apartar node_modules Windows para evitar mezclar binarios nativos."
+        exit 1
+    fi
+fi
+
 # No destruir un árbol sano: `npm ci` borra node_modules antes de reconstruirlo
 # y puede dejar un binario nativo de esbuild a medio instalar si la build se
 # interrumpe o el sistema de archivos rechaza el reemplazo. Si faltan las
@@ -1128,7 +1230,31 @@ dependencies_ready() {
     [ "$CLEAN" -eq 0 ] \
         && [ -x "$PROJECT_ROOT/node_modules/.bin/vite" ] \
         && [ -x "$PROJECT_ROOT/node_modules/esbuild/bin/esbuild" ] \
-        && node -e "require('./node_modules/vite/package.json'); require('./node_modules/esbuild/package.json')" >/dev/null 2>&1
+        && node -e "require('./node_modules/vite/package.json'); require('./node_modules/esbuild/package.json')" >/dev/null 2>&1 \
+        && linux_native_dependencies_ready
+}
+
+# `node_modules` puede haberse creado en Windows y reutilizarse desde WSL
+# (ambos comparten el árbol del proyecto). Los ejecutables JS parecen sanos,
+# pero Rollup y esbuild cargan paquetes opcionales específicos de la plataforma;
+# si faltan, svelte-check solo revela el problema bastante más tarde. Detectar
+# aquí la pareja nativa obliga a `npm ci` a reconstruirla antes de empezar los
+# checks o Cargo.
+linux_native_dependencies_ready() {
+    case "$(uname -m)" in
+        x86_64)
+            node -e "require('@rollup/rollup-linux-x64-gnu'); require('@esbuild/linux-x64')" >/dev/null 2>&1
+            ;;
+        aarch64|arm64)
+            node -e "require('@rollup/rollup-linux-arm64-gnu'); require('@esbuild/linux-arm64')" >/dev/null 2>&1
+            ;;
+        *)
+            # Para arquitecturas nuevas no inventamos un nombre opcional: el
+            # propio bundler emitirá un diagnóstico accionable si el lockfile
+            # aún no las incluye.
+            return 0
+            ;;
+    esac
 }
 if dependencies_ready; then
     ok "Dependencias ya presentes; se conserva node_modules y se evita reinstalarlo"
@@ -1502,14 +1628,19 @@ if [ "$FAST_BUILD" -eq 1 ]; then
 else
     RELEASE_NAME="LTerminal-$VERSION-$(uname -m).AppImage"
 fi
-# Los de versiones anteriores se quedaban y SHA256SUMS acababa listando varias.
-rm -f "$RELEASE_DIR"/LTerminal-*.AppImage
+# No borres AppImage ni SHA256SUMS anteriores: una misma release puede incluir
+# varias arquitecturas, perfiles o plataformas. El manifiesto se actualiza de
+# forma incremental y solo sustituye la entrada del artefacto actual.
 cp "$APPIMAGE" "$RELEASE_DIR/$RELEASE_NAME"
 chmod +x "$RELEASE_DIR/$RELEASE_NAME"
 
-( cd "$RELEASE_DIR" && sha256sum "$RELEASE_NAME" > SHA256SUMS.txt )
+RELEASE_HASH="$(sha256sum "$RELEASE_DIR/$RELEASE_NAME" | awk '{print $1}')"
+node "$PROJECT_ROOT/scripts/update-release-hash.mjs" \
+    --manifest "$RELEASE_DIR/SHA256SUMS.txt" \
+    --artifact "$RELEASE_NAME" \
+    --hash "$RELEASE_HASH"
 ok "Release: $RELEASE_DIR/$RELEASE_NAME"
-ok "SHA256: $(cut -d' ' -f1 < "$RELEASE_DIR/SHA256SUMS.txt")"
+ok "SHA256: $RELEASE_HASH"
 node "$PROJECT_ROOT/scripts/verify-release-artifacts.mjs" \
     --linux "$RELEASE_DIR/$RELEASE_NAME" \
     --appdir "$APPDIR"
@@ -1586,3 +1717,4 @@ fi
 echo
 printf '\033[32mListo. LTerminal %s compilado y verificado.\033[0m\n' "$VERSION"
 echo "  AppImage: $RELEASE_DIR/$RELEASE_NAME"
+printf '  Tiempo total: %ss\n' "$((SECONDS - BUILD_STARTED_SECONDS))"

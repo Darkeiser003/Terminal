@@ -101,8 +101,11 @@ async function invokeLogged<T>(command: string, args?: InvokeArgs): Promise<T> {
 
 export const listTabs = () => invokeLogged<TabList>('tabs_list');
 
-export const createTab = (envId?: string) =>
-    invokeLogged<TabSummary | null>('tabs_create', { envId: envId ?? null });
+export const createTab = (envId?: string, paneCount?: number) =>
+    invokeLogged<TabSummary | null>('tabs_create', {
+        envId: envId ?? null,
+        paneCount: paneCount ?? null,
+    });
 
 export const closeTab = (tabId: string) => invokeLogged<void>('tabs_close', { tabId });
 
@@ -154,8 +157,9 @@ export const refreshBanner = (
     cols: number,
     rows: number,
     paneCount: number,
-    cursorRow: number,
-) => invokeLogged<void>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow });
+    cursorRow?: number,
+    cursorCol?: number,
+) => invokeLogged<boolean>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow, cursorCol });
 
 // ---- Entornos ----
 

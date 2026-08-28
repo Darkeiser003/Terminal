@@ -1554,21 +1554,36 @@ pub fn build_banner(
     lines.push(format!("{BOLD}{accent}{title}{RESET}"));
     lines.push(format!("\x1b[90m{separator}{RESET}"));
 
-    // Una terminal con pocas filas no puede enseñar las tres secciones
+    // Una terminal con muy pocas filas no puede enseñar las tres secciones
     // completas: el prompt desplazaría justo la CPU y la memoria fuera de la
     // vista. Conservamos la identidad y los datos esenciales en una línea por
     // campo; el modo normal sigue mostrando todas las secciones y discos.
     // El inspector acoplado y el explorador pueden dejar una casilla de unas
     // 20 filas aunque la ventana exterior parezca grande. Durante el primer
-    // frame tras un resize el PTY puede conservar temporalmente 40 filas; el
-    // umbral amplio evita que CPU o Memoria queden justo fuera del viewport en
-    // esa transición.
-    let compact_vertical = rows > 0 && usize::from(rows) <= 40;
+    // frame tras un resize el PTY puede conservar temporalmente el tamaño
+    // anterior; solo se compacta cuando el viewport es realmente bajo.
+    // Con 25 filas o más cabe el formato legible (secciones, aire y divisor
+    // antes del prompt). El umbral anterior de 40 activaba el modo compacto
+    // en una ventana normal y hacía que fastfetch pareciera una lista pegada.
+    // El modo compacto necesita al menos la cabecera, el separador y diez
+    // filas de datos. Si la casilla es menor, cualquier banner se desplazaría
+    // y dejaría solo su cola visible (o duplicaría líneas al redimensionar).
+    // En ese tamaño se oculta de forma explícita: el prompt queda limpio y el
+    // banner reaparece automáticamente al recuperar altura.
+    if rows > 0 && usize::from(rows) < 12 {
+        return String::new();
+    }
+    let compact_vertical = rows > 0 && usize::from(rows) <= 24;
     // Una división de tres o cuatro paneles puede conservar muchas filas en
     // el PTY, pero cada celda ya no tiene anchura suficiente para tres
     // secciones completas. Compactar también por anchura evita que el banner
     // empuje el prompt fuera de la vista durante un redimensionado.
-    let compact_layout = compact_vertical || available_cols < 88;
+    // Una vista dividida debe ser homogénea aunque una de sus casillas sea
+    // más ancha (por ejemplo, la tercera de la rejilla 1+2). Si cada panel
+    // decide por separado entre el formato completo y el compacto, al pasar
+    // de 2 a 3/4 quedan cabeceras visualmente distintas y es fácil confundir
+    // un repintado pendiente con una parte perdida del banner.
+    let compact_layout = compact_vertical || available_cols < 88 || pane_count > 1;
     let compact_rows = if compact_layout {
         let cpu_label = t.t("banner.cpu", "CPU");
         let memory_label = t.t("banner.memory", "Memoria");
@@ -1655,7 +1670,12 @@ pub fn build_banner(
             lines.push(format_row(label, value));
         }
     } else {
+        let mut first_section = true;
         for (section, rows) in sections {
+            if !first_section {
+                lines.push(String::new());
+            }
+            first_section = false;
             lines.push(format!(
                 "{BOLD}{accent}{}:{RESET}",
                 ellipsize(&section, max_line_cols)
@@ -1668,6 +1688,9 @@ pub fn build_banner(
 
     if compact_rows.is_none() {
         lines.push(format!("\x1b[90m{separator}{RESET}"));
+        // Dejar una línea limpia después del divisor hace visible dónde acaba
+        // el fastfetch y evita que el prompt quede pegado a la última métrica.
+        lines.push(String::new());
     }
 
     // La entrada siempre conserva cinco filas después del banner. Es el
@@ -1759,7 +1782,7 @@ mod tests {
 
     #[test]
     fn el_banner_vertical_compacto_conserva_la_informacion_esencial() {
-        let banner = build_banner("fish", "LTerminal", 60, 10, 2, &Translator::default());
+        let banner = build_banner("fish", "LTerminal", 60, 14, 2, &Translator::default());
         assert!(banner.contains("LTerminal"), "{banner}");
         assert!(banner.contains("Sistema"), "{banner}");
         assert!(banner.contains("CPU"), "{banner}");
@@ -2008,6 +2031,27 @@ mod tests {
     }
 
     #[test]
+    fn el_banner_legible_separa_secciones_y_prompt() {
+        let banner = build_banner(
+            "cmd.exe",
+            "WinSlim Terminal",
+            120,
+            40,
+            1,
+            &Translator::default(),
+        );
+        let lines: Vec<String> = banner.lines().map(crate::current_dir::strip_ansi).collect();
+        assert!(lines.iter().any(|line| line.is_empty()), "{banner}");
+        assert!(
+            lines.iter().filter(|line| line.starts_with("---")).count() >= 2,
+            "{banner}"
+        );
+        assert!(lines.iter().any(|line| line == "Sistema:"), "{banner}");
+        assert!(lines.iter().any(|line| line == "Hardware:"), "{banner}");
+        assert!(lines.iter().any(|line| line == "Sesión:"), "{banner}");
+    }
+
+    #[test]
     fn el_banner_compacto_conserva_datos_esenciales_sin_rutas_de_disco() {
         let t = Translator::default();
         let banner = build_banner("fish", "LTerminal", 120, 20, 2, &t);
@@ -2015,6 +2059,19 @@ mod tests {
         assert!(banner.contains("Sistema"), "{banner}");
         assert!(banner.contains("CPU"), "{banner}");
         assert!(banner.contains("Memoria"), "{banner}");
+    }
+
+    #[test]
+    fn una_rejilla_mantiene_el_mismo_formato_en_todas_sus_casillas() {
+        let t = Translator::default();
+        let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, 40, 4, &t);
+        let lineas: Vec<_> = banner.lines().map(crate::current_dir::strip_ansi).collect();
+        assert!(
+            lineas.iter().any(|linea| linea.starts_with("CPU")),
+            "{banner}"
+        );
+        assert!(!lineas.iter().any(|linea| linea == "Hardware:"), "{banner}");
+        assert!(!lineas.iter().any(|linea| linea == "Sesión:"), "{banner}");
     }
 
     #[test]
@@ -2035,6 +2092,14 @@ mod tests {
     fn cinco_filas_de_trabajo_dejan_el_banner_fuera() {
         let banner = build_banner("fish", "LTerminal", 120, 5, 1, &Translator::default());
         assert!(banner.is_empty(), "{banner}");
+    }
+
+    #[test]
+    fn una_casilla_demasiado_baja_no_deja_la_cola_del_banner() {
+        for rows in [6, 9, 11] {
+            let banner = build_banner("cmd.exe", "LTerminal", 120, rows, 2, &Translator::default());
+            assert!(banner.is_empty(), "rows={rows}: {banner}");
+        }
     }
 
     /// El nombre va ARRIBA DEL TODO y es el de la build que se está ejecutando.
@@ -2082,6 +2147,37 @@ mod tests {
                 assert!(
                     ancho <= columnas as usize,
                     "linea de {ancho} columnas con terminal de {columnas}: {linea:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cada_panel_de_una_rejilla_recibe_un_banner_autocontenido() {
+        let t = Translator::default();
+        // Las dimensiones pequeñas son las que más fácilmente dejan restos
+        // de una pintura anterior: cada panel debe empezar por su propia
+        // cabecera y no generar líneas que xterm parta por la mitad.
+        for (columnas, filas) in [(48u16, 14u16), (58, 17), (80, 22), (120, 30)] {
+            for paneles in [2usize, 3, 4] {
+                let banner =
+                    build_banner("cmd.exe", "WinSlim Terminal", columnas, filas, paneles, &t);
+                let lineas: Vec<_> = banner.lines().map(crate::current_dir::strip_ansi).collect();
+                assert!(
+                    lineas
+                        .first()
+                        .is_some_and(|linea| linea.contains("WinSlim Terminal")),
+                    "panel {paneles} de {columnas}x{filas}: {banner:?}"
+                );
+                assert!(
+                    lineas
+                        .iter()
+                        .all(|linea| linea.chars().count() <= columnas as usize),
+                    "panel {paneles} de {columnas}x{filas}: {lineas:?}"
+                );
+                assert!(
+                    lineas.len() <= usize::from(filas.saturating_sub(5)),
+                    "panel {paneles} de {columnas}x{filas}: {lineas:?}"
                 );
             }
         }

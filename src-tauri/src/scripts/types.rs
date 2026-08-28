@@ -144,9 +144,9 @@ const WINDOWS_ORDER: &[FileCategory] = &[
     FileCategory::Batch,
     FileCategory::Powershell,
     FileCategory::Vbscript,
+    FileCategory::Program,
     FileCategory::Autohotkey,
     FileCategory::Registry,
-    FileCategory::Program,
     FileCategory::Python,
     FileCategory::Node,
     FileCategory::OtherScript,
@@ -501,6 +501,14 @@ mod tests {
         assert_eq!(windows[0].id, FileCategory::Batch);
         assert_eq!(windows[1].id, FileCategory::Powershell);
         assert_eq!(windows[2].id, FileCategory::Vbscript);
+        assert_eq!(windows[3].id, FileCategory::Program);
+        assert_eq!(
+            windows[..4]
+                .iter()
+                .map(|filter| filter.id)
+                .collect::<Vec<_>>(),
+            default_categories_for(true)
+        );
     }
 
     #[test]

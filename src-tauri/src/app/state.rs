@@ -246,9 +246,10 @@ impl AppState {
             *started = true;
         }
         log_info!(
-            "Primera terminal preparada; comienza el inventario completo",
+            "Primera terminal preparada; se programa el inventario completo",
             serde_json::json!({
                 "afterStateMs": self.startup_started.elapsed().as_millis(),
+                "deferredMs": FULL_DETECTION_DEFER,
             })
         );
         let state = Arc::clone(self);
@@ -256,6 +257,11 @@ impl AppState {
         std::thread::Builder::new()
             .name("env-detect".into())
             .spawn(move || {
+                // Dar un pequeño margen al WebView para montar el xterm y a
+                // la primera shell para mostrar su prompt. Las sondas de WSL,
+                // Docker y ADB pueden consumir CPU/IO durante varios segundos
+                // y no deben competir con abrir una segunda pestaña.
+                std::thread::sleep(std::time::Duration::from_millis(FULL_DETECTION_DEFER));
                 let started = Instant::now();
                 maybe_start_docker_on_windows();
                 let inventory = state.refresh_environments();
@@ -291,6 +297,8 @@ impl AppState {
         envs.into_iter().find(|env| env.id == default_id)
     }
 }
+
+const FULL_DETECTION_DEFER: u64 = 750;
 
 /// La preferencia de arranque automático solo puede actuar de forma segura en
 /// Windows: allí Docker Desktop es una aplicación de usuario que se puede

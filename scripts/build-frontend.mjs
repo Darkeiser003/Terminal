@@ -6,7 +6,14 @@ const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function run(command, args) {
     return new Promise((resolve, reject) => {
-        const child = spawn(command, args, { stdio: 'inherit', shell: process.platform === 'win32' });
+        // npm.cmd es un script por lotes; usar cmd.exe explícitamente evita
+        // el `shell: true` deprecado por Node y conserva el comportamiento de
+        // npm en Windows. Los argumentos son constantes del proyecto y se
+        // citan si contienen espacios.
+        const quote = (value) => /[\s"&()^<>|]/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+        const child = process.platform === 'win32'
+            ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', [command, ...args].map(quote).join(' ')], { stdio: 'inherit' })
+            : spawn(command, args, { stdio: 'inherit' });
         child.on('error', reject);
         child.on('exit', (code, signal) => {
             if (code === 0) resolve();

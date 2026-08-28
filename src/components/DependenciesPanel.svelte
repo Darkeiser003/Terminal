@@ -170,6 +170,12 @@
      *  segunda competiría por WSL y los gestores de paquetes; descartarla sin
      *  esperar, en cambio, dejaba `refreshing` bloqueado al cambiar el serial. */
     let refreshInFlight: ReturnType<typeof api.refreshInstallActions> | null = null;
+    // La detección completa ejecuta sondas externas y puede tardar decenas de
+    // segundos en Windows. Al reabrir el panel poco después no hay motivo para
+    // repetirla: la lista visible sigue siendo válida y el botón permite forzar
+    // una comprobación cuando el usuario acaba de instalar algo.
+    const REFRESH_CACHE_MS = 60_000;
+    let refreshedAt = 0;
 
     export async function load(): Promise<void> {
         const serial = ++loadSerial;
@@ -198,14 +204,23 @@
     /** Re-detecta el entorno y sustituye la lista si algo ha cambiado. Un fallo
      *  aquí no borra lo que ya se está enseñando: lo de antes sigue siendo
      *  válido, solo puede estar desactualizado. */
-    async function refresh(): Promise<boolean> {
+    async function refresh(force = false): Promise<boolean> {
         const serial = loadSerial;
+        if (
+            !force &&
+            !refreshInFlight &&
+            refreshedAt > 0 &&
+            Date.now() - refreshedAt < REFRESH_CACHE_MS
+        ) {
+            return true;
+        }
         refreshing = true;
         const request = refreshInFlight ?? api.refreshInstallActions();
         refreshInFlight = request;
         let ok = true;
         try {
             const list = await request;
+            refreshedAt = Date.now();
             if (serial !== loadSerial) return false;
             actions = list.actions;
         } catch {
@@ -329,14 +344,13 @@
         </select>
     </div>
     <div class="dependency-actions">
-        <span class="manual-hint">{app.t('deps.manualHint', 'Selecciona cada componente por separado; no se ejecutan instalaciones masivas.')}</span>
         <div class="dependency-buttons">
             <button
                 type="button"
                 class="run secondary"
                 data-testid="dependency-refresh"
                 disabled={refreshing || running !== ''}
-                onclick={() => void refresh()}
+                onclick={() => void refresh(true)}
             >
                 {refreshing ? app.t('deps.refreshing', 'Actualizando…') : app.t('deps.refresh', 'Actualizar detección')}
             </button>
@@ -535,19 +549,8 @@
     .dependency-actions {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        padding: 8px;
-        border-bottom: 1px solid var(--border);
-        background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
-    }
-
-    .manual-hint {
-        min-width: 0;
-        color: var(--muted);
-        font-size: 10px;
-        line-height: 1.35;
-        overflow-wrap: anywhere;
+        justify-content: flex-end;
+        padding: 4px 6px 0;
     }
 
     .description {

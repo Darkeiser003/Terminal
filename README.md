@@ -62,10 +62,12 @@ cualquier entorno gráfico ya tiene.
 - **Linux**: las bibliotecas de desarrollo de WebKitGTK. `linux/build.sh` las
   comprueba antes de compilar y dice el comando de instalación de apt, dnf y
   pacman si falta alguna.
-- **Windows**: Node.js, Rust mediante `rustup` y Visual Studio Build Tools con
-  la carga de trabajo C++ y el Windows SDK. `windows/build.ps1` comprueba e
-  importa automáticamente el entorno de MSVC; si falta, intenta instalarlo
-  mediante WinGet y deja un mensaje claro si hay que hacerlo manualmente.
+- **Windows**: Node.js y Rust mediante `rustup`. Visual Studio Build Tools con
+  la carga de trabajo C++ y el Windows SDK son la ruta recomendada. `windows/build.ps1`
+  importa automáticamente el entorno de MSVC y, si no está disponible, acepta el
+  `rust-lld.exe` incluido en el toolchain para la build portable `--no-bundle`.
+  El instalador NSIS puede seguir necesitando las herramientas de Visual Studio
+  según los recursos nativos que se empaqueten.
 - **Compilar Windows desde Linux**: además de lo anterior, MinGW x64
   (`x86_64-w64-mingw32-gcc`) y, para el smoke opcional, Wine. El script puede
   instalar esos paquetes con el gestor de la distribución.
@@ -197,12 +199,20 @@ normal. Los artefactos rápidos quedan en `release/dev/` y llevan el sufijo
 ```powershell
 windows\build.ps1          # o build.bat, para doble clic
 windows\build.ps1 -Fast -NoExtendedTests -SkipChecks  # iteración rápida de desarrollo
+windows\build.ps1 -Installer -NoRun  # release Windows instalable (NSIS + WebView2 offline)
 ```
 
 ```bash
 linux/build.sh
 linux/build.sh --fast --no-extended-tests --skip-checks  # iteración rápida de desarrollo
 ```
+
+Al ejecutar `windows\build.ps1` o `linux/build.sh` sin argumentos desde una
+consola interactiva aparece un selector previo para activar o desactivar cada
+opción de build. Enter conserva el valor predeterminado actual. Las ejecuciones
+con argumentos explícitos, `-NonInteractive`/`--non-interactive` o entrada
+redirigida no preguntan nada, por lo que el uso automatizado y CI mantienen su
+comportamiento anterior.
 
 Para validar la compatibilidad Windows desde Linux:
 
@@ -268,6 +278,10 @@ proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
 Cada script comprueba los requisitos, instala dependencias, pasa `npm run check`,
 compila, monta el artefacto, hace una comprobación de humo (abre la app y mira
 que no se cierre sola) y publica la release con su SHA-256 en `release/`.
+El manifiesto `SHA256SUMS.txt` se actualiza por artefacto y de forma atómica:
+conserva los hashes de las demás arquitecturas, plataformas y perfiles de la
+misma versión, y solo sustituye la entrada del archivo que se acaba de generar.
+Las builds tampoco eliminan AppImage/ZIP anteriores del directorio de release.
 La comprobación estricta de enlaces distingue HTTP de repositorios Git: las
 URLs normales usan el timeout corto configurado y `git ls-remote` dispone de
 hasta 30 segundos y reintentos propios, para no rechazar una build porque la

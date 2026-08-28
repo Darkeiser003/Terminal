@@ -90,6 +90,7 @@ pub fn run() {
             }
         }
     }
+    let open_path = commands::open_path_argument();
     let migration_ms = migration_started.elapsed().as_millis();
     system_info::prewarm_hardware_info();
 
@@ -241,7 +242,16 @@ pub fn run() {
             let tab_started = Instant::now();
             match state.default_environment() {
                 Some(env) => {
-                    state.tabs.create_tab(&app.handle().clone(), &env, None);
+                    let initial_cwd = open_path.as_deref().and_then(|path| {
+                        if path.is_dir() {
+                            Some(path)
+                        } else {
+                            path.parent()
+                        }
+                    });
+                    state
+                        .tabs
+                        .create_tab(&app.handle().clone(), &env, initial_cwd);
                 }
                 None => log_error!("No se detectó ninguna shell en el sistema"),
             }

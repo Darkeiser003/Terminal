@@ -36,6 +36,10 @@
     let envMenuOpen = $state(false);
     let envQuery = $state('');
     let langMenuOpen = $state(false);
+    /** No se deben lanzar dos respawns sobre la misma pestaña: el segundo
+     *  mataría la sesión que el primer clic todavía está inicializando y el
+     *  usuario acabaría viendo una espera artificial o un banner mezclado. */
+    let switchingTabId = $state<string | null>(null);
 
     const flags: Record<string, string> = {
         auto: '🌐',
@@ -143,9 +147,14 @@
 
     async function selectEnvironment(environment: Environment): Promise<void> {
         const tabId = app.activeTabId;
-        if (!tabId || !environment.available) return;
+        if (!tabId || !environment.available || switchingTabId === tabId) return;
         envMenuOpen = false;
-        await app.switchEnvironment(tabId, environment.id);
+        switchingTabId = tabId;
+        try {
+            await app.switchEnvironment(tabId, environment.id);
+        } finally {
+            switchingTabId = null;
+        }
     }
 </script>
 
@@ -156,7 +165,7 @@
                 type="button"
                 class="env-select"
                 class:open={envMenuOpen}
-                disabled={!app.environmentsLoaded || !app.activeTabId}
+                disabled={!app.environmentsLoaded || !app.activeTabId || switchingTabId !== null}
                 aria-haspopup="listbox"
                 aria-expanded={envMenuOpen}
                 title={app.t('toolbar.environment', 'Entorno de la pestaña activa')}
@@ -198,10 +207,12 @@
                             {#each envs as environment (environment.id)}
                                 <div
                                     role="option"
+                                    data-testid="environment-option"
+                                    data-environment-id={environment.id}
                                     tabindex={environment.available ? 0 : -1}
                                     class="env-item"
                                     class:selected={environment.id === app.activeTab?.envId}
-                                    aria-disabled={!environment.available}
+                                    aria-disabled={!environment.available || switchingTabId !== null}
                                     aria-selected={environment.id === app.activeTab?.envId}
                                     title={translateLabel(environment.note ?? environment.label)}
                                     onclick={() => void selectEnvironment(environment)}

@@ -37,6 +37,17 @@ assert(!localization.platformBrandText('WinSlim Projects', 'linux', 'LTerminal')
 assert.equal(localization.platformBrandText('LTerminal', 'unknown', 'Otro'), 'LTerminal');
 
 const defaults = await readFile('src-tauri/default_settings.toml', 'utf8');
+const terminalPane = await readFile('src/components/TerminalPane.svelte', 'utf8');
+const refreshBannerStart = terminalPane.indexOf('function refreshBannerNow()');
+const fitAndReportStart = terminalPane.indexOf('function fitAndReport()');
+assert(refreshBannerStart >= 0 && fitAndReportStart > refreshBannerStart, 'No se pudo delimitar refreshBannerNow');
+assert(!terminalPane.slice(refreshBannerStart, fitAndReportStart).includes('paneCountChanged'),
+    'refreshBannerNow no debe leer paneCountChanged fuera del alcance de fitAndReport');
+const paneResizeBlock = terminalPane.slice(fitAndReportStart);
+assert(paneResizeBlock.includes('if (paneCountChanged) pendingPaneCountRefresh = true;'),
+    'Un cambio de rejilla debe forzar el primer repintado sin cursor');
+assert(paneResizeBlock.includes('pendingPaneCountRefresh = true;\n                            pendingBannerRefresh = true;'),
+    'El repintado de rejilla debe reintentarse después del lote inicial');
 const configuredShortcuts = [...defaults.matchAll(/^shortcut\w+\s*=\s*"([^"]+)"/gm)].map((match) => match[1]);
 assert.equal(configuredShortcuts.length, shortcuts.SHORTCUT_PREFERENCE_KEYS.length);
 const normalizedDefaults = configuredShortcuts.map(shortcuts.normalizeShortcut);

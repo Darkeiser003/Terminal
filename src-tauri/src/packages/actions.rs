@@ -479,13 +479,13 @@ const fn win(
 
 // Estas son órdenes de ejecución, no sondas del filtro: no llevan el prefijo
 // interno `powershell:` porque la acción ya está marcada como PowerShell.
-const QEMU_VERSION: &str = "$qemu = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue; if ($qemu) { & $qemu.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe') --version } else { exit 1 }";
-const VIRTUALBOX_VERSION: &str = "$vbox = Get-Command VBoxManage.exe -ErrorAction SilentlyContinue; if ($vbox) { & $vbox.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe') --version } else { exit 1 }";
+const QEMU_VERSION: &str = "$qemu = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue; if ($qemu) { & $qemu.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe') --version } else { throw 'QEMU no está instalado.' }";
+const VIRTUALBOX_VERSION: &str = "$vbox = Get-Command VBoxManage.exe -ErrorAction SilentlyContinue; if ($vbox) { & $vbox.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe') --version } else { throw 'VirtualBox no está instalado.' }";
 // AutoHotkey se instala con ejecutables que no siempre quedan en PATH. La
 // sonda cubre la instalación normal de v2, instalaciones por usuario y v1/v2,
 // pero no da por instalado cualquier archivo llamado "ahk".
 const AUTOHOTKEY_DETECT: &str = "powershell:$paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')); if ((Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue) -or (Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
-const AUTOHOTKEY_VERSION: &str = "$command = Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue; if (-not $command) { $command = Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue }; if ($command) { (Get-Item $command.Source).VersionInfo.ProductVersion } else { $paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')); $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { (Get-Item $path).VersionInfo.ProductVersion } else { exit 1 } }";
+const AUTOHOTKEY_VERSION: &str = "$command = Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue; if (-not $command) { $command = Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue }; if ($command) { (Get-Item $command.Source).VersionInfo.ProductVersion } else { $paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')); $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { (Get-Item $path).VersionInfo.ProductVersion } else { throw 'AutoHotkey no está instalado.' } }";
 const MSYS2_DETECT: &str = "powershell:$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { (Test-Path (Join-Path $_ 'gcc.exe')) -and (Test-Path (Join-Path $_ 'gfortran.exe')) -and (Test-Path (Join-Path $_ 'gdb.exe')) }) { exit 0 } else { exit 1 }";
 const MSYS2_PACKAGES: &str =
     "mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-gdb";
@@ -3381,11 +3381,16 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
     const SANDBOX: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
     const VMWARE: &str = "powershell:if (Get-Command vmrun.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'VMware\\VMware Workstation\\vmware.exe'))) { exit 0 } else { exit 1 }";
     const VMWARE_DOWNLOADS: &str = "https://support.broadcom.com/group/ecx/productdownloads";
+    let enable_feature = |feature: &str| {
+        format!(
+            "$elevated = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','$feature = Get-WindowsOptionalFeature -Online -FeatureName {feature} -ErrorAction SilentlyContinue; if (-not $feature) {{ exit 2 }}; if ($feature.State -eq ''Enabled'') {{ exit 0 }}; Enable-WindowsOptionalFeature -Online -FeatureName {feature} -All -NoRestart -ErrorAction Stop; if (-not $?) {{ exit 3 }}'); if ($elevated.ExitCode -eq 2) {{ Write-Error 'La característica de Windows {feature} no está disponible en esta edición.' }} elseif ($elevated.ExitCode -ne 0) {{ Write-Error ('La activación de {feature} terminó con el código ' + $elevated.ExitCode) }} else {{ Write-Host 'La característica está activada; puede ser necesario reiniciar Windows.' }} }}",
+        )
+    };
     vec![
         InstallAction::new(
             "windows-hyperv-enable",
             "Activar Hyper-V",
-            "Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart",
+            enable_feature("Microsoft-Hyper-V-All"),
         )
         .short("Activar la plataforma Hyper-V")
         .powershell()
@@ -3396,7 +3401,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         InstallAction::new(
             "windows-vmp-enable",
             "Activar Virtual Machine Platform",
-            "Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -All -NoRestart",
+            enable_feature("VirtualMachinePlatform"),
         )
         .short("Activar soporte de máquinas virtuales y WSL2")
         .powershell()
@@ -3407,7 +3412,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         InstallAction::new(
             "windows-sandbox-enable",
             "Activar Windows Sandbox",
-            "Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart",
+            enable_feature("Containers-DisposableClientVM"),
         )
         .short("Activar entorno desechable de pruebas")
         .powershell()
@@ -4817,6 +4822,26 @@ mod tests {
     }
 
     #[test]
+    fn las_versiones_de_windows_no_pueden_cerrar_la_powershell_interactiva() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "winget-qemu-version",
+            "winget-virtualbox-version",
+            "winget-autohotkey-version",
+        ] {
+            let command = &buscar(&actions, id).command;
+            assert!(
+                command.contains("throw"),
+                "{id} no informa el fallo: {command}"
+            );
+            assert!(
+                !command.contains("exit 1"),
+                "{id} podría cerrar la shell: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn instalar_y_actualizar_nunca_se_ofrecen_a_la_vez_para_la_misma_herramienta() {
         let actions = get_install_actions(&contexto("windows"), &t());
         // Instalar se oculta si el comando ya está; actualizar se muestra solo
@@ -5223,6 +5248,33 @@ mod tests {
             assert!(
                 check.contains("exit 0") && check.contains("exit 1"),
                 "{id}: {check}"
+            );
+        }
+    }
+
+    #[test]
+    fn las_caracteristicas_windows_se_elevan_y_dan_un_error_claro_si_no_existen() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for (id, feature) in [
+            ("windows-hyperv-enable", "Microsoft-Hyper-V-All"),
+            ("windows-vmp-enable", "VirtualMachinePlatform"),
+            ("windows-sandbox-enable", "Containers-DisposableClientVM"),
+        ] {
+            let action = buscar(&actions, id);
+            assert!(
+                action
+                    .command
+                    .contains("Start-Process -FilePath powershell.exe -Verb RunAs")
+                    && action.command.contains("-Wait -PassThru")
+                    && action.command.contains(feature)
+                    && action
+                        .command
+                        .contains("no está disponible en esta edición")
+                    && action.command.contains("Write-Error")
+                    && !action.command.contains('"')
+                    && !action.command.contains("exit $elevated.ExitCode"),
+                "{id} no prepara una elevación segura para {feature}: {}",
+                action.command
             );
         }
     }

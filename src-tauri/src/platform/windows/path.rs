@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
 
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
 use winreg::RegKey;
@@ -9,13 +8,77 @@ const REGISTRY_PATH_KEYS: [&str; 2] = [
     r"HKCU\Environment",
 ];
 
-pub(super) fn find_executable(command: &str) -> Option<PathBuf> {
-    let output = crate::process::output_text("where", &[command], Duration::from_millis(1500))?;
-    output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(PathBuf::from)
+pub(super) fn find_executable(command: &str, path_value: &str) -> Option<PathBuf> {
+    if command.is_empty() || command.contains(['\0', '\r', '\n']) {
+        return None;
+    }
+    let command_path = Path::new(command);
+    let explicit = command.contains('\\') || command.contains('/') || command_path.is_absolute();
+    let directories: Vec<PathBuf> = if explicit {
+        vec![PathBuf::new()]
+    } else {
+        std::iter::once(PathBuf::from("."))
+            .chain(
+                path_value
+                    .split(';')
+                    .filter(|entry| !entry.trim().is_empty())
+                    .map(|entry| PathBuf::from(entry.trim().trim_matches('"'))),
+            )
+            .collect()
+    };
+    let has_extension = command_path.extension().is_some();
+    let pathext = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".into());
+    let extensions: Vec<&str> = if has_extension {
+        vec![""]
+    } else {
+        pathext
+            .split(';')
+            .filter(|extension| !extension.trim().is_empty())
+            .collect()
+    };
+    for directory in directories {
+        let base = if explicit {
+            command_path.to_path_buf()
+        } else {
+            directory.join(command)
+        };
+        if has_extension && base.is_file() {
+            return Some(base);
+        }
+        if !has_extension {
+            for extension in &extensions {
+                let candidate = base.with_extension(extension.trim_start_matches('.'));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+
+    #[test]
+    fn busca_en_el_path_sin_lanzar_where() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("winslim-probe.cmd");
+        std::fs::write(&executable, "@echo off").unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        assert_eq!(
+            find_executable("winslim-probe", &path)
+                .map(|path| path.to_string_lossy().to_ascii_lowercase()),
+            Some(executable.to_string_lossy().to_ascii_lowercase())
+        );
+    }
+
+    #[test]
+    fn rechaza_nombres_con_saltos_de_linea() {
+        assert!(find_executable("bad\nname", "C:\\Windows\\System32").is_none());
+    }
 }
 
 pub(super) fn persistent_path_entries() -> Vec<String> {

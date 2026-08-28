@@ -46,8 +46,8 @@ impl PathPlatform for WindowsPlatform {
             .to_string()
     }
 
-    fn find_executable(&self, command: &str, _path_value: &str) -> Option<PathBuf> {
-        path::find_executable(command)
+    fn find_executable(&self, command: &str, path_value: &str) -> Option<PathBuf> {
+        path::find_executable(command, path_value)
     }
 
     fn persistent_path_entries(&self) -> Vec<String> {
@@ -96,8 +96,9 @@ pub fn nsudo_path() -> Option<String> {
     {
         return Some((*path).to_string());
     }
-    path::find_executable("NSudoLC.exe")
-        .or_else(|| path::find_executable("NSudo.exe"))
+    let path_value = std::env::var("PATH").unwrap_or_default();
+    path::find_executable("NSudoLC.exe", &path_value)
+        .or_else(|| path::find_executable("NSudo.exe", &path_value))
         .map(|path| path.to_string_lossy().into_owned())
 }
 

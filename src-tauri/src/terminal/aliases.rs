@@ -976,6 +976,7 @@ fn help_compat_line(kind: ShellKind, help_path: Option<&str>) -> String {
 /// Un alias por script detectado. El comando de lanzamiento ya viene construido
 /// por el lanzador de scripts, que es quien sabe cómo se ejecuta cada
 /// extensión.
+#[derive(Clone)]
 pub struct ScriptAlias {
     pub alias_name: String,
     /// El comando tal y como lo escribiría el usuario, sin argumentos.
@@ -1082,6 +1083,21 @@ pub fn build_init_script(
     let banner_clear_path = options.banner_clear_path.or(options.banner_path);
     let mut lines: Vec<String> = format.header.iter().map(|line| line.to_string()).collect();
 
+    // La primera salida visible debe ser realmente la primera instrucción del
+    // inicializador. Antes se registraban los alias base (y, en cmd, se
+    // ejecutaba además un `cmd /d` auxiliar para capturar ESC) antes de limpiar
+    // y leer el banner. En equipos con Windows Defender o perfiles de shell
+    // lentos eso hacía que el cambio de shell pareciera congelado aunque el
+    // PTY ya estuviese listo. La limpieza usa comandos nativos y no depende de
+    // ningún alias que todavía se vaya a declarar.
+    lines.push(clear_command(
+        kind,
+        banner_clear_path,
+        false,
+        options.transport,
+        options.app_name,
+    ));
+
     match kind {
         ShellKind::Cmd => {
             lines.push(escape_capture_line());
@@ -1154,16 +1170,6 @@ pub fn build_init_script(
         options.transport,
     ));
     lines.push(help_compat_line(kind, options.help_path));
-
-    // Pantalla limpia + banner: lo último que hace el archivo, y la señal para
-    // la app de que la pestaña ya puede mostrarse.
-    lines.push(clear_command(
-        kind,
-        banner_clear_path,
-        false,
-        options.transport,
-        options.app_name,
-    ));
 
     let help_options = HelpOptions {
         app_name: options.app_name,
@@ -1553,10 +1559,67 @@ mod tests {
     }
 
     #[test]
-    fn el_archivo_termina_limpiando_la_pantalla() {
+    fn el_archivo_limpia_la_pantalla_antes_de_los_aliases() {
         let script = build(ShellKind::Cmd, &options(Transport::Native));
-        let ultima = script.content.trim_end().lines().last().unwrap();
-        assert!(ultima.contains(CLEAR_MARKER));
+        let limpieza = script
+            .content
+            .lines()
+            .position(|line| line.contains(CLEAR_MARKER))
+            .expect("el inicializador debe emitir el marcador");
+        let primer_alias = script
+            .content
+            .lines()
+            .position(|line| line.starts_with("doskey clear="))
+            .expect("el inicializador debe registrar alias");
+        assert!(
+            limpieza < primer_alias,
+            "el banner debe mostrarse antes de cargar la biblioteca"
+        );
+    }
+
+    #[test]
+    fn el_banner_se_emite_antes_de_las_sondas_auxiliares() {
+        let script = build(ShellKind::Cmd, &options(Transport::Native));
+        let limpieza = script
+            .content
+            .find(CLEAR_MARKER)
+            .expect("el inicializador debe emitir el marcador");
+        let captura_escape = script
+            .content
+            .find("for /f")
+            .expect("cmd debe preparar la variable ESC");
+        assert!(
+            limpieza < captura_escape,
+            "el primer banner no debe esperar al cmd auxiliar: {0}",
+            script.content
+        );
+    }
+
+    #[test]
+    fn todas_las_shells_muestran_el_banner_antes_de_los_aliases_de_scripts() {
+        let aliases = [ScriptAlias {
+            alias_name: "backup".into(),
+            launch_command: "echo backup".into(),
+        }];
+        for kind in [
+            ShellKind::Cmd,
+            ShellKind::Powershell,
+            ShellKind::Bash,
+            ShellKind::Fish,
+        ] {
+            let mut opts = options(Transport::Native);
+            opts.script_aliases = &aliases;
+            let script = build(kind, &opts);
+            let marker = script
+                .content
+                .find(CLEAR_MARKER)
+                .expect("cada shell debe emitir el marcador");
+            let alias = script
+                .content
+                .find("backup")
+                .expect("el alias de prueba debe llegar al inicializador");
+            assert!(marker < alias, "{kind:?} carga el alias antes del banner");
+        }
     }
 
     // ---- Ayuda ----

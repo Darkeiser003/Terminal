@@ -29,8 +29,10 @@ const valid = {
         { type: 'context-menu', actions: ['cut', 'delete'] },
         { type: 'dependencies', groups: 8, subgroups: 6, repeatedLoads: 3, platformGroup: 'Virtualización' },
         { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
+        { type: 'responsive-minimum', passed: true, configured: { width: 481, height: 271 }, requested: { width: 512, height: 281 }, applied: { width: 513, height: 282 } },
         { type: 'tab-isolation', passed: true, tabs: 3 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
+        { type: 'banner-ready', preview: ['WinSlim Terminal 1.4.4\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
     ],
 };
 const directory = await mkdtemp(join(tmpdir(), 'lterminal-e2e-report-test-'));
@@ -64,6 +66,10 @@ try {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'multi-pane-minimum'),
     })).status, 0, 'falta la evidencia de división útil en el tamaño mínimo');
+    assert.notEqual((await run('missing-responsive-minimum', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'responsive-minimum'),
+    })).status, 0, 'falta la evidencia del mínimo responsive calculado');
     assert.notEqual((await run('missing-tab-isolation', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'tab-isolation'),
@@ -73,8 +79,14 @@ try {
         events: valid.events.filter((event) => event.type !== 'responsive-matrix'),
     })).status, 0, 'falta la evidencia del redimensionado responsive');
     assert.notEqual((await run('failed', { ...valid, status: 'failed' })).status, 0, 'un E2E fallido no puede validarse');
+    assert.notEqual((await run('mixed-banner', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'banner-ready'
+            ? { ...event, preview: ['WinSlim Terminal 1.4.4\nPlaca ASUS 1 GB (60%)'] }
+            : event),
+    })).status, 0, 'un banner mezclado debe fallar');
 } finally {
     await rm(directory, { recursive: true, force: true });
 }
 
-console.log('Validador E2E probado: informe completo y ocho rechazos correctos.');
+console.log('Validador E2E probado: informe completo y diez rechazos correctos.');

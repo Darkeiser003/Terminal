@@ -5,6 +5,8 @@
 //! eventos y en todos los comandos.
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,11 +42,49 @@ const MAX_PENDING_OUTPUT: usize = 500;
 /// Solo se puede sustituir el bloque superior si el cursor está fuera de todas
 /// las filas que se van a limpiar. Durante el arranque el frontend todavía no
 /// conoce el cursor; en ese caso se conserva el comportamiento normal.
+#[cfg(test)]
 fn banner_cursor_is_safe(cursor_row: Option<u16>, affected_rows: usize) -> bool {
     cursor_row.map_or(true, |cursor| usize::from(cursor) >= affected_rows)
 }
 
+/// Un repintado solo puede escribir encima del bloque nuevo si el cursor cae
+/// dentro de sus filas. Que el bloque antiguo sea más alto no lo hace
+/// inseguro: en ese caso se conserva explícitamente la fila del prompt al
+/// limpiar, lo que permite recuperar un banner que ya se había desplazado.
+fn banner_cursor_is_safe_for_new_banner(cursor_row: Option<u16>, new_rows: usize) -> bool {
+    cursor_row.map_or(true, |cursor| usize::from(cursor) >= new_rows)
+}
+
+fn banner_rows_to_clear(previous: usize, current: usize, viewport_rows: u16) -> usize {
+    let affected = previous.max(current);
+    if viewport_rows == 0 {
+        affected
+    } else {
+        affected.min(usize::from(viewport_rows))
+    }
+}
+
+/// Cuenta las filas que ocupa un bloque de texto en xterm, no solo sus saltos
+/// de línea. Al estrechar una casilla, una línea que antes cabía en una fila
+/// puede ocupar varias y dejar el final del banner antiguo visible si se
+/// limpia usando únicamente `text.lines().count()`.
+fn banner_visual_rows(text: &str, columns: u16) -> usize {
+    let width = usize::from(columns.max(1));
+    text.split('\n')
+        .map(|line| {
+            let visible = crate::current_dir::strip_ansi(line.trim_end_matches('\r'))
+                .chars()
+                .count();
+            visible.max(1).div_ceil(width)
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
 fn banner_with_environment_note(env: &Environment, banner: &str) -> String {
+    if banner.is_empty() {
+        return String::new();
+    }
     let note = env
         .note
         .as_deref()
@@ -133,12 +173,64 @@ pub fn scripts_folder() -> PathBuf {
         .unwrap_or_else(paths::default_scripts_dir)
 }
 
+/// El contenido de la biblioteca no cambia entre dos pestañas abiertas en
+/// rápida sucesión. Escanearlo de nuevo para cada PTY hacía que el coste del
+/// disco quedase dentro del camino crítico, especialmente en Windows Defender
+/// o en una carpeta sincronizada. El sello del directorio invalida la entrada
+/// cuando se añade o elimina un script; la caducidad corta cubre también los
+/// cambios internos que no actualicen el sello del directorio.
+struct ScriptAliasCache {
+    key: String,
+    aliases: Vec<crate::alias_profiles::ScriptAlias>,
+    refreshed_at: Instant,
+}
+
+static SCRIPT_ALIAS_CACHE: once_cell::sync::Lazy<Mutex<Option<ScriptAliasCache>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+
+const SCRIPT_ALIAS_CACHE_TTL: Duration = Duration::from_secs(2);
+
+fn script_alias_cache_key(env: &Environment, folder: &Path, manual_aliases: &str) -> String {
+    let modified = std::fs::metadata(folder)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut manual_hasher = std::collections::hash_map::DefaultHasher::new();
+    manual_aliases.hash(&mut manual_hasher);
+    let manual_hash = manual_hasher.finish();
+    format!(
+        "{}|{:?}|{:?}|{}|{}|{}|{}|{}",
+        env.id,
+        env.kind,
+        env.transport,
+        env.host_root.as_deref().unwrap_or_default(),
+        env.container_root.as_deref().unwrap_or_default(),
+        folder.to_string_lossy(),
+        modified,
+        manual_hash,
+    )
+}
+
 /// Un alias por script detectado, con su comando de lanzamiento ya construido
 /// para esta shell. Los scripts que no se pueden lanzar desde aquí (un `.ps1`
 /// dentro de un contenedor, por ejemplo) se quedan fuera.
 fn script_aliases_for(env: &Environment) -> Vec<crate::alias_profiles::ScriptAlias> {
+    let folder = scripts_folder();
+    let manual_text = crate::preferences::current().manual_aliases_text;
+    let key = script_alias_cache_key(env, &folder, &manual_text);
+    {
+        let cache = SCRIPT_ALIAS_CACHE.lock();
+        if let Some(cached) = cache.as_ref().filter(|cached| {
+            cached.key == key && cached.refreshed_at.elapsed() < SCRIPT_ALIAS_CACHE_TTL
+        }) {
+            return cached.aliases.clone();
+        }
+    }
+
     let categories = crate::scripts::types::default_categories();
-    let scripts = crate::scripts::list_all_scripts(&scripts_folder(), &categories);
+    let scripts = crate::scripts::list_all_scripts(&folder, &categories);
     let context = crate::scripts::LaunchContext {
         transport: Some(env.transport),
         host_root: env.host_root.clone(),
@@ -156,7 +248,7 @@ fn script_aliases_for(env: &Environment) -> Vec<crate::alias_profiles::ScriptAli
             })
         })
         .collect();
-    for alias in manual_aliases_from_text(&crate::preferences::current().manual_aliases_text) {
+    for alias in manual_aliases_from_text(&manual_text) {
         if aliases
             .iter()
             .any(|known| known.alias_name == alias.alias_name)
@@ -165,6 +257,12 @@ fn script_aliases_for(env: &Environment) -> Vec<crate::alias_profiles::ScriptAli
         }
         aliases.push(alias);
     }
+    let mut cache = SCRIPT_ALIAS_CACHE.lock();
+    *cache = Some(ScriptAliasCache {
+        key,
+        aliases: aliases.clone(),
+        refreshed_at: Instant::now(),
+    });
     aliases
 }
 
@@ -289,6 +387,10 @@ struct Tab {
     /// Sube en cada respawn. Una entrega que llega con una generación vieja es
     /// de un pty ya reemplazado y se descarta.
     generation: u64,
+    /// Instante en que se solicitó esta sesión. Se consume al primer bloque de
+    /// salida posterior al marcador de limpieza para medir el tiempo que el
+    /// usuario realmente espera al cambiar de shell.
+    startup_started_at: Option<Instant>,
     session: Option<Arc<PtySession>>,
     /// El frontend aún no tiene un xterm para esta pestaña.
     ready: bool,
@@ -306,12 +408,29 @@ struct Tab {
     /// Filas que ocupó el último banner. Al redibujar se limpian las antiguas
     /// y las nuevas para que un banner anterior no deje secciones duplicadas.
     banner_rows: usize,
+    /// Texto que se pintó la última vez. Se conserva para calcular cuántas
+    /// filas físicas ocupa después de un reflujo por cambio de ancho.
+    banner_text: String,
+    /// Tamaño real de esta casilla. El viewport global solo sirve como valor
+    /// inicial: en una rejilla cada pestaña puede tener unas dimensiones
+    /// distintas (y la última en redimensionarse no debe dictar el banner de
+    /// las demás).
+    viewport: Viewport,
+    /// Número de paneles visibles cuando se pintó el banner. Se conserva para
+    /// que el repintado progresivo no vuelva accidentalmente al modo de una
+    /// sola terminal mientras llegan los datos lentos del sistema.
+    pane_count: usize,
     /// Durante el arranque la shell aún está cargando aliases, limpiando la
     /// pantalla y mostrando el primer prompt. Un resize que llegue en ese
     /// intervalo no puede repintar el banner todavía: el cursor guardado
     /// estaría arriba y el prompt acabaría dibujándose sobre el fastfetch.
     initializing: bool,
     pending_banner_refresh: Option<(u16, u16, usize)>,
+    /// El script que limpia la consola y pinta el banner. En una pestaña
+    /// nueva se retiene hasta el primer `pty_resize` real del frontend; usar
+    /// el viewport persistido aquí hacía nacer el banner con el ancho de una
+    /// rejilla anterior y después intentaba refluirlo encima del prompt.
+    pending_init_command: Option<String>,
     /// Carpeta que el panel «Aquí» está escaneando para esta pestaña.
     here_scripts_dir: Option<String>,
     /// La eligió el usuario a mano: entonces no la pisa el cwd de la shell.
@@ -356,6 +475,13 @@ pub struct TabManager {
     registry: Mutex<Registry>,
     viewport: Mutex<Viewport>,
     viewport_saver: ViewportSaver,
+    /// `pty-data` puede llegar desde el lector del PTY al mismo tiempo que un
+    /// repintado de banner disparado por `resize`. `AppHandle::emit` no ofrece
+    /// un orden total entre hilos y xterm puede procesar el segundo bloque
+    /// antes de terminar el primero, dejando etiquetas y valores intercalados.
+    /// Una única compuerta mantiene el orden de bytes/eventos que ve cada
+    /// pestaña (también durante `mark_ready`, cuando se vacía la cola inicial).
+    outbound_lock: Mutex<()>,
 }
 
 impl TabManager {
@@ -364,6 +490,7 @@ impl TabManager {
             registry: Mutex::new(Registry::default()),
             viewport: Mutex::new(viewport),
             viewport_saver: ViewportSaver::default(),
+            outbound_lock: Mutex::new(()),
         }
     }
 
@@ -392,11 +519,32 @@ impl TabManager {
                     let disks_ready = crate::system_info::disks_data_ready();
                     if (hardware_ready && !hardware_refreshed) || (disks_ready && !disks_refreshed)
                     {
-                        let viewport = tabs.viewport();
-                        if tabs.registry.lock().find(&tab_id).is_none() {
-                            return;
-                        }
-                        tabs.refresh_banner(&app, &tab_id, viewport.cols, viewport.rows, 1, None);
+                        let (viewport, pane_count) = {
+                            let registry = tabs.registry.lock();
+                            let Some(tab) = registry.find(&tab_id) else {
+                                return;
+                            };
+                            // Las sondas lentas pueden terminar una por una y
+                            // cada pestaÃ±a tiene su propio hilo de refresco.
+                            // Reescribir un banner ya visible sin conocer el
+                            // cursor del xterm vuelve a introducir cabeceras
+                            // duplicadas. El siguiente resize/settings, que sÃ­
+                            // trae coordenadas del cursor, repintarÃ¡ con
+                            // seguridad si el usuario necesita el dato nuevo.
+                            if tab.banner_rows > 0 {
+                                return;
+                            }
+                            (tab.viewport, tab.pane_count.max(1))
+                        };
+                        tabs.refresh_banner(
+                            &app,
+                            &tab_id,
+                            viewport.cols,
+                            viewport.rows,
+                            pane_count,
+                            None,
+                            None,
+                        );
                         log_info!(
                             "Banner progresivo completado",
                             serde_json::json!({
@@ -524,6 +672,7 @@ impl TabManager {
     /// El frontend ya creó el xterm de esta pestaña: se le entrega todo lo que
     /// el pty haya escrito mientras tanto (banner + primer prompt de la shell).
     pub fn mark_ready(&self, app: &AppHandle, tab_id: &str) {
+        let _outbound = self.outbound_lock.lock();
         let pending = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
@@ -538,6 +687,7 @@ impl TabManager {
     }
 
     fn send(&self, app: &AppHandle, tab_id: &str, message: Outbound) {
+        let _outbound = self.outbound_lock.lock();
         {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
@@ -572,6 +722,22 @@ impl TabManager {
         env: &Environment,
         initial_cwd: Option<&Path>,
     ) -> TabSummary {
+        self.create_tab_with_panes(app, env, initial_cwd, 1)
+    }
+
+    /// Igual que `create_tab`, pero permite que una pestaña que nace dentro
+    /// de una rejilla genere desde el primer byte el banner compacto. Así no
+    /// hay una ventana intermedia en la que el xterm nuevo pinte el formato
+    /// completo y luego solo se redimensionen las casillas antiguas.
+    pub fn create_tab_with_panes(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        env: &Environment,
+        initial_cwd: Option<&Path>,
+        pane_count: usize,
+    ) -> TabSummary {
+        let initial_viewport = self.viewport();
+        let pane_count = pane_count.max(1);
         let tab_id = {
             let mut registry = self.registry.lock();
             registry.counter += 1;
@@ -583,6 +749,7 @@ impl TabManager {
                 env: None,
                 cwd: None,
                 generation: 0,
+                startup_started_at: None,
                 session: None,
                 ready: false,
                 pending: VecDeque::new(),
@@ -591,8 +758,12 @@ impl TabManager {
                 cwd_buffer: String::new(),
                 last_missing_command: None,
                 banner_rows: 0,
+                banner_text: String::new(),
+                viewport: initial_viewport,
+                pane_count,
                 initializing: waits_for_initial_clear(env),
                 pending_banner_refresh: None,
+                pending_init_command: None,
                 here_scripts_dir: None,
                 here_manual: false,
                 explorer_dir: None,
@@ -628,6 +799,7 @@ impl TabManager {
         env: &Environment,
         initial_cwd: Option<&Path>,
     ) -> bool {
+        let startup_started_at = Instant::now();
         let generation = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
@@ -643,12 +815,19 @@ impl TabManager {
             // de inicialización, y esa salida debe descartarse hasta el
             // marcador de limpieza.
             tab.initializing = waits_for_initial_clear(env);
+            tab.startup_started_at = Some(startup_started_at);
             tab.pending_banner_refresh = None;
+            tab.pending_init_command = None;
             tab.generation
         };
 
         let spawn_dir = spawn_cwd::resolve_spawn_cwd(initial_cwd, env, &paths::home_cwd());
-        let viewport = self.viewport();
+        let (viewport, pane_count) = self
+            .registry
+            .lock()
+            .find(tab_id)
+            .map(|tab| (tab.viewport, tab.pane_count.max(1)))
+            .unwrap_or_else(|| (self.viewport(), 1));
 
         let manager = Arc::clone(self);
         let app_for_data = app.clone();
@@ -657,8 +836,6 @@ impl TabManager {
         let exit_manager = Arc::clone(self);
         let app_for_exit = app.clone();
         let tab_for_exit = tab_id.to_string();
-        let started_at = Instant::now();
-
         let exe = env.exe.clone();
         let args = env.args.clone();
         let cwd = spawn_dir.clone();
@@ -693,7 +870,7 @@ impl TabManager {
                             &tab_for_exit,
                             generation,
                             code,
-                            started_at.elapsed(),
+                            startup_started_at.elapsed(),
                         );
                     },
                 );
@@ -763,7 +940,9 @@ impl TabManager {
                 // con una línea corta; si este entorno no puede leer los
                 // temporales del host, el banner lo pinta la app.
                 let t = crate::i18n::Translator::new(&active_language());
+                let aliases_started = Instant::now();
                 let aliases = script_aliases_for(env);
+                let aliases_ms = aliases_started.elapsed().as_millis();
                 // La fachada devuelve siempre None fuera de Windows. Así el
                 // alias NSudo no puede filtrarse a builds Linux ni siquiera si
                 // existe un ejecutable con ese nombre en PATH.
@@ -774,19 +953,11 @@ impl TabManager {
                     crate::identity::current().name,
                     viewport.cols,
                     viewport.rows,
-                    1,
+                    pane_count,
                     &t,
                 );
                 let build_banner_ms = banner_started.elapsed().as_millis();
                 let show_banner = crate::preferences::current().show_system_banner;
-                let banner_rows = if show_banner {
-                    banner_with_environment_note(env, &banner)
-                        .lines()
-                        .count()
-                        .max(1)
-                } else {
-                    0
-                };
                 let session_files_started = Instant::now();
                 let session_files = crate::session_files::write_session_files(
                     &crate::session_files::SessionRequest {
@@ -806,6 +977,15 @@ impl TabManager {
                     },
                     &t,
                 );
+                // Guardar exactamente el texto que se entregó a la shell
+                // (incluidos el salto inicial y la nota del entorno) permite
+                // calcular sus filas físicas cuando la casilla se estrecha.
+                let banner_text = session_files.banner_text.clone();
+                let banner_rows = if banner_text.is_empty() {
+                    0
+                } else {
+                    banner_visual_rows(&banner_text, viewport.cols)
+                };
                 log_info!(
                     "Banner inicial preparado",
                     serde_json::json!({
@@ -816,6 +996,7 @@ impl TabManager {
                         "bannerRows": banner_rows,
                         "visible": show_banner,
                         "buildBannerMs": build_banner_ms,
+                        "aliasesMs": aliases_ms,
                         "bannerDataReady": crate::system_info::banner_data_ready(),
                         "sessionFilesMs": session_files_started.elapsed().as_millis(),
                         "durationMs": banner_started.elapsed().as_millis(),
@@ -823,13 +1004,25 @@ impl TabManager {
                 );
                 if let Some(tab) = self.registry.lock().find_mut(tab_id) {
                     tab.banner_rows = banner_rows;
+                    tab.banner_text = banner_text;
+                    tab.viewport = viewport;
                     tab.initializing = session_files.init_command.is_some();
                     tab.pending_banner_refresh = None;
                 }
 
                 match session_files.init_command {
                     Some(command) => {
-                        self.write(tab_id, &format!("{command}\r"));
+                        let start_now = self
+                            .registry
+                            .lock()
+                            .find(tab_id)
+                            .map(|tab| tab.ready)
+                            .unwrap_or(false);
+                        if start_now {
+                            self.write(tab_id, &format!("{command}\r"));
+                        } else if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                            tab.pending_init_command = Some(command);
+                        }
                     }
                     None => {
                         let pending = {
@@ -844,7 +1037,7 @@ impl TabManager {
                             self.send(app, tab_id, Outbound::Data(session_files.banner_text));
                         }
                         if let Some((cols, rows, pane_count)) = pending {
-                            self.refresh_banner(app, tab_id, cols, rows, pane_count, None);
+                            self.refresh_banner(app, tab_id, cols, rows, pane_count, None, None);
                         }
                     }
                 }
@@ -963,14 +1156,37 @@ impl TabManager {
                     // parte de la sesión visible: si la enviamos, el prompt
                     // antiguo puede quedarse entre las secciones del banner
                     // cuando llega el repintado.
-                    let initializing = self
-                        .registry
-                        .lock()
-                        .find(tab_id)
-                        .map(|tab| tab.initializing)
-                        .unwrap_or(false);
+                    let (initializing, first_output) = {
+                        let mut registry = self.registry.lock();
+                        let Some(tab) = registry.find_mut(tab_id) else {
+                            return;
+                        };
+                        if tab.initializing {
+                            (true, None)
+                        } else {
+                            // Solo se mide el primer bloque que ya puede
+                            // verse. En shells con inicializador, cualquier
+                            // prompt previo se descarta hasta `PtyEvent::Clear`.
+                            (
+                                false,
+                                tab.startup_started_at
+                                    .take()
+                                    .map(|started| started.elapsed()),
+                            )
+                        }
+                    };
                     if initializing {
                         return;
+                    }
+                    if let Some(elapsed) = first_output {
+                        log_info!(
+                            "Primer output de shell",
+                            serde_json::json!({
+                                "tabId": tab_id,
+                                "generation": generation,
+                                "durationMs": elapsed.as_millis() as u64,
+                            })
+                        );
                     }
                     self.inspect_output(app, tab_id, &data);
                     self.send(app, tab_id, Outbound::Data(data));
@@ -992,12 +1208,12 @@ impl TabManager {
                         }
                     };
                     if let Some((cols, rows, pane_count)) = pending {
-                        self.refresh_banner(app, tab_id, cols, rows, pane_count, None);
+                        self.refresh_banner(app, tab_id, cols, rows, pane_count, None, None);
                     }
                 }
             }
             PtyEvent::Clear(marker) => {
-                {
+                let marker_elapsed = {
                     let mut registry = self.registry.lock();
                     let Some(tab) = registry.find_mut(tab_id) else {
                         return;
@@ -1013,6 +1229,33 @@ impl TabManager {
                     // aquí el siguiente Data ya contiene la salida posterior
                     // a la limpieza, que es el ancla segura para repintar.
                     tab.initializing = false;
+                    // Si la shell se liberó después del primer `pty_resize`,
+                    // ya imprimió el archivo regenerado para ese viewport.
+                    // No vuelvas a superponer el mismo banner al llegar el
+                    // primer bloque de datos: esa segunda pasada dejaba un
+                    // separador residual al final. Conservamos solo una
+                    // petición que corresponda a otro tamaño (resize durante
+                    // la inicialización).
+                    if tab.pending_banner_refresh.is_some_and(|pending| {
+                        pending.0 == tab.viewport.cols
+                            && pending.1 == tab.viewport.rows
+                            && pending.2 == tab.pane_count.max(1)
+                    }) {
+                        tab.pending_banner_refresh = None;
+                    }
+                    tab.startup_started_at
+                        .as_ref()
+                        .map(|started| started.elapsed())
+                };
+                if let Some(elapsed) = marker_elapsed {
+                    log_info!(
+                        "Marcador de inicializacion recibido",
+                        serde_json::json!({
+                            "tabId": tab_id,
+                            "generation": generation,
+                            "durationMs": elapsed.as_millis() as u64,
+                        })
+                    );
                 }
                 // El marcador se emite antes del clear nativo: se elimina la
                 // pantalla anterior antes de que ConPTY pinte banner/prompt.
@@ -1189,6 +1432,12 @@ impl TabManager {
         *self.viewport.lock() = viewport;
         self.viewport_saver.remember(viewport);
 
+        // Guardar el tamaño por pestaña evita que una casilla redimensionada
+        // en último lugar contamine el repintado progresivo de las otras.
+        if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+            tab.viewport = viewport;
+        }
+
         let Some(session) = self.session_of(tab_id) else {
             return;
         };
@@ -1200,11 +1449,77 @@ impl TabManager {
                 })
             );
         }
+        // La primera medición del xterm ya representa la casilla real. Solo
+        // entonces se libera el inicializador retenido de una pestaña nueva,
+        // evitando que una rejilla anterior deje un banner refluido o doble.
+        let pending_init = self.registry.lock().find_mut(tab_id).and_then(|tab| {
+            tab.pending_init_command
+                .take()
+                .map(|command| (command, tab.pane_count.max(1)))
+        });
+        if let Some(command) = pending_init {
+            let (command, pane_count) = command;
+            // El archivo ya se había generado con el viewport persistido,
+            // que puede pertenecer a otra rejilla. Regenerarlo aquí garantiza
+            // que la shell imprima desde el primer byte el mismo layout que
+            // el xterm acaba de medir.
+            self.refresh_initial_banner_files(tab_id, cols, rows, pane_count);
+            self.write(tab_id, &format!("{command}\r"));
+            log_debug!(
+                "Inicialización de shell liberada tras medir el panel",
+                serde_json::json!({ "tabId": tab_id, "cols": cols, "rows": rows })
+            );
+        }
+    }
+
+    fn refresh_initial_banner_files(&self, tab_id: &str, cols: u16, rows: u16, pane_count: usize) {
+        let env = self
+            .registry
+            .lock()
+            .find(tab_id)
+            .and_then(|tab| tab.env.clone());
+        let Some(env) = env else { return };
+        let t = crate::i18n::Translator::new(&active_language());
+        let banner = crate::system_info::build_banner(
+            &env.label,
+            crate::identity::current().name,
+            cols,
+            rows,
+            pane_count,
+            &t,
+        );
+        let show_banner = crate::preferences::current().show_system_banner;
+        let visible = if show_banner {
+            banner_with_environment_note(&env, &banner)
+        } else {
+            String::new()
+        };
+        crate::session_files::refresh_banner_files(tab_id, env.note.as_deref(), &banner);
+        let banner_text = if visible.is_empty() {
+            String::new()
+        } else {
+            format!("\r\n{visible}")
+        };
+        let banner_rows = if banner_text.is_empty() {
+            0
+        } else {
+            banner_visual_rows(&banner_text, cols)
+        };
+        if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+            tab.viewport = Viewport { cols, rows };
+            tab.banner_rows = banner_rows;
+            tab.banner_text = banner_text;
+        }
+        log_debug!(
+            "Banner inicial ajustado al primer viewport",
+            serde_json::json!({ "tabId": tab_id, "cols": cols, "rows": rows, "paneCount": pane_count })
+        );
     }
 
     /// Vuelve a dibujar el banner en la parte superior del xterm sin escribir
     /// en el proceso hijo. Se guarda/restaura la posición del cursor para que
     /// una ruta o un editor que esté abierto no reciba teclas inesperadas.
+    #[allow(clippy::too_many_arguments)]
     pub fn refresh_banner(
         &self,
         app: &AppHandle,
@@ -1213,19 +1528,23 @@ impl TabManager {
         rows: u16,
         pane_count: usize,
         cursor_row: Option<u16>,
-    ) {
+        cursor_col: Option<u16>,
+    ) -> bool {
+        let pane_count = pane_count.max(1);
         {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
-                return;
+                return false;
             };
+            tab.viewport = Viewport { cols, rows };
+            tab.pane_count = pane_count;
             if tab.initializing {
                 tab.pending_banner_refresh = Some((cols, rows, pane_count));
                 log_debug!(
                     "Banner pendiente hasta terminar el arranque de la shell",
                     serde_json::json!({ "tabId": tab_id, "cols": cols, "paneCount": pane_count })
                 );
-                return;
+                return false;
             }
         }
         let env = self
@@ -1233,7 +1552,7 @@ impl TabManager {
             .lock()
             .find(tab_id)
             .and_then(|tab| tab.env.clone());
-        let Some(env) = env else { return };
+        let Some(env) = env else { return false };
         let t = crate::i18n::Translator::new(&active_language());
         let banner = crate::system_info::build_banner(
             &env.label,
@@ -1257,24 +1576,36 @@ impl TabManager {
         // El banner ocupa la parte superior de la pantalla. Se limpian solo
         // esas filas y se restaura el cursor; el historial posterior queda
         // intacto y no se envía ninguna orden a la shell.
-        let rows = if banner.is_empty() {
+        let banner_text = if banner.is_empty() {
+            String::new()
+        } else {
+            format!("\r\n{banner}")
+        };
+        let new_banner_rows = if banner_text.is_empty() {
             0
         } else {
-            banner.lines().count().max(1)
+            banner_visual_rows(&banner_text, cols)
         };
-        let rows_to_clear = {
+        let (rows_to_clear, cursor_row_to_preserve) = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
-                return;
+                return false;
             };
-            let previous = tab.banner_rows;
-            let affected_rows = previous.max(rows);
+            // El contenido anterior puede haberse refluido ya al nuevo ancho
+            // antes de que llegue este IPC. Recalcularlo con `cols` captura
+            // también las continuaciones que no aparecen en `lines()`.
+            let previous = if tab.banner_text.is_empty() {
+                tab.banner_rows
+            } else {
+                banner_visual_rows(&tab.banner_text, cols)
+            };
+            let affected_rows = previous.max(new_banner_rows);
             if affected_rows == 0 {
-                return;
+                return true;
             }
-            if !banner_cursor_is_safe(cursor_row, affected_rows) {
+            if !banner_cursor_is_safe_for_new_banner(cursor_row, new_banner_rows) {
                 log_debug!(
-                    "Repintado del banner aplazado para proteger el cursor",
+                    "Repintado omitido para no sobrescribir el prompt",
                     serde_json::json!({
                         "tabId": tab_id,
                         "cursorRow": cursor_row,
@@ -1283,16 +1614,61 @@ impl TabManager {
                         "paneCount": pane_count
                     })
                 );
-                return;
+                return true;
             }
-            tab.banner_rows = rows;
-            previous.max(rows)
+            // La casilla puede conservar el cursor en una fila del banner
+            // anterior. Sobrescribirla produce exactamente el síntoma visible
+            // (GPU/Disco pegados o una segunda cabecera). La transición de
+            // rejilla no es una excepción: se deja pendiente y el siguiente
+            // bloque de salida vuelve a intentarlo cuando la shell ya terminó
+            // de redibujar su prompt.
+            tab.banner_rows = new_banner_rows;
+            tab.banner_text = banner_text;
+            // Nunca avanzar con CRLF más allá del viewport: xterm desplazaría
+            // el historial y el prompt reaparecería con un desplazamiento
+            // vertical, justo el residuo que se veía en los paneles de arriba.
+            let rows_to_clear = banner_rows_to_clear(previous, new_banner_rows, rows);
+            (rows_to_clear, cursor_row.map(usize::from))
         };
+        let clear_rows = rows_to_clear.min(usize::from(rows));
+        let cursor_inside_new_banner = false;
+        let insert_rows = 0usize;
         let mut visual = String::from("\x1b7\x1b[H");
-        for index in 0..rows_to_clear {
-            visual.push_str("\x1b[2K");
-            if index + 1 < rows_to_clear {
-                visual.push_str("\r\n");
+        if false && cursor_inside_new_banner && insert_rows > 0 {
+            let _ = write!(&mut visual, "\x1b[{}L", insert_rows);
+            // Guardar de nuevo despuÃ©s de insertar hace que ESC8 restaure el
+            // prompt en su fila desplazada, no en la coordenada antigua.
+            // La columna se recibe desde xterm para no mover el caret al
+            // principio de una lÃ­nea que el usuario estuviera editando.
+            let shifted_row = cursor_row.map_or(1, |row| {
+                usize::from(row)
+                    .saturating_add(insert_rows)
+                    .saturating_add(1)
+            });
+            let shifted_col = cursor_col.map_or(1, |col| usize::from(col).saturating_add(1));
+            let _ = write!(&mut visual, "\x1b[{};{}H\x1b7", shifted_row, shifted_col);
+            log_debug!(
+                "Filas insertadas para proteger el prompt durante el repintado",
+                serde_json::json!({
+                    "tabId": tab_id,
+                    "cursorRow": cursor_row,
+                    "insertRows": insert_rows,
+                    "newBannerRows": new_banner_rows,
+                    "cols": cols,
+                    "paneCount": pane_count
+                })
+            );
+        }
+        for index in 0..clear_rows {
+            // Si el banner viejo ocupaba más que el nuevo, su última parte
+            // puede contener ya el prompt. No borrar esa fila evita perderlo
+            // mientras recuperamos la cabecera desde la esquina superior.
+            if cursor_row_to_preserve != Some(index) {
+                // Usar posiciones absolutas en vez de CRLF es importante:
+                // mover el cursor con saltos de línea puede activar el
+                // auto-scroll de xterm cuando el banner antiguo era mayor
+                // que el panel, dejando precisamente una cola visible.
+                let _ = write!(&mut visual, "\x1b[{};1H\x1b[2K", index + 1);
             }
         }
         visual.push_str("\x1b[H");
@@ -1303,6 +1679,7 @@ impl TabManager {
             "Banner redibujado tras cambio de tamaño",
             serde_json::json!({ "tabId": tab_id, "cols": cols, "paneCount": pane_count })
         );
+        true
     }
 
     /// Mata todos los pty al cerrar la app, para no dejar shells huérfanas.
@@ -1424,6 +1801,7 @@ mod tests {
             env: None,
             cwd: None,
             generation: 0,
+            startup_started_at: None,
             session: None,
             ready: false,
             pending: VecDeque::new(),
@@ -1432,8 +1810,12 @@ mod tests {
             cwd_buffer: String::new(),
             last_missing_command: None,
             banner_rows: 0,
+            banner_text: String::new(),
+            viewport: Viewport::default(),
+            pane_count: 1,
             initializing: true,
             pending_banner_refresh: None,
+            pending_init_command: None,
             here_scripts_dir: None,
             here_manual: false,
             explorer_dir: None,
@@ -1452,6 +1834,32 @@ mod tests {
     }
 
     #[test]
+    fn un_banner_reducido_puede_recuperar_un_bloque_antiguo_mayor() {
+        // Al pasar de una ventana completa a una rejilla, el banner viejo
+        // puede haber empujado el prompt dentro de sus filas. Lo importante es
+        // no escribir sobre el bloque NUEVO; la fila del prompt se conserva
+        // mientras se limpian las restantes.
+        assert!(banner_cursor_is_safe_for_new_banner(Some(15), 11));
+        assert!(banner_cursor_is_safe_for_new_banner(Some(11), 11));
+        assert!(!banner_cursor_is_safe_for_new_banner(Some(10), 11));
+        assert!(banner_cursor_is_safe_for_new_banner(None, 11));
+    }
+
+    #[test]
+    fn la_limpieza_del_banner_no_hace_desplazar_el_viewport() {
+        assert_eq!(banner_rows_to_clear(22, 11, 16), 16);
+        assert_eq!(banner_rows_to_clear(8, 11, 16), 11);
+        assert_eq!(banner_rows_to_clear(22, 11, 0), 22);
+    }
+
+    #[test]
+    fn las_filas_del_banner_cuentan_las_continuaciones_por_ancho() {
+        let banner = "\x1b[31mCPU\x1b[0m 1234567890\r\nGPU";
+        assert_eq!(banner_visual_rows(banner, 20), 2);
+        assert_eq!(banner_visual_rows(banner, 8), 3);
+    }
+
+    #[test]
     fn el_resumen_solo_expone_lo_que_ve_el_frontend() {
         let tab = Tab {
             id: "tab-3".into(),
@@ -1460,6 +1868,7 @@ mod tests {
             env: None,
             cwd: Some(PathBuf::from("/tmp")),
             generation: 2,
+            startup_started_at: None,
             session: None,
             ready: true,
             pending: VecDeque::new(),
@@ -1468,8 +1877,12 @@ mod tests {
             cwd_buffer: String::new(),
             last_missing_command: None,
             banner_rows: 0,
+            banner_text: String::new(),
+            viewport: Viewport::default(),
+            pane_count: 1,
             initializing: false,
             pending_banner_refresh: None,
+            pending_init_command: None,
             here_scripts_dir: None,
             here_manual: false,
             explorer_dir: None,

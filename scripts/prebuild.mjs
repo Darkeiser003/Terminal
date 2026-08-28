@@ -5,7 +5,14 @@ const skipChecks = /^(1|true|yes|si|sí)$/i.test(process.env.LTERMINAL_SKIP_CHEC
 
 function run(command, args) {
     return new Promise((resolve, reject) => {
-        const child = spawn(command, args, { stdio: 'inherit', shell: process.platform === 'win32' });
+        // npm.cmd es un script por lotes, no un ejecutable PE. Invocarlo a
+        // través de cmd.exe mantiene compatibilidad con Windows sin activar
+        // `shell: true` (deprecado por Node). Los argumentos de estos scripts
+        // son constantes del proyecto y se citan si contienen espacios.
+        const quote = (value) => /[\s"&()^<>|]/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+        const child = process.platform === 'win32'
+            ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', [command, ...args].map(quote).join(' ')], { stdio: 'inherit' })
+            : spawn(command, args, { stdio: 'inherit' });
         child.on('error', reject);
         child.on('exit', (code, signal) => {
             if (code === 0) resolve();

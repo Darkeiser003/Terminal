@@ -37,6 +37,7 @@ pub fn tabs_create(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     env_id: Option<String>,
+    pane_count: Option<i64>,
 ) -> Option<TabSummary> {
     let env = match env_id.as_deref().filter(|id| !id.is_empty()) {
         Some(id) => state.environment_by_id(id)?,
@@ -45,7 +46,15 @@ pub fn tabs_create(
     // La pestaña nueva hereda el directorio de la que estaba en uso: abrir WSL
     // desde un cmd situado en C:\proyecto empieza en /mnt/c/proyecto.
     let inherited = state.tabs.active_cwd();
-    Some(state.tabs.create_tab(&app, &env, inherited.as_deref()))
+    let pane_count = pane_count
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| (2..=4).contains(value))
+        .unwrap_or(1);
+    Some(
+        state
+            .tabs
+            .create_tab_with_panes(&app, &env, inherited.as_deref(), pane_count),
+    )
 }
 
 /// `tabs:close`
@@ -151,6 +160,7 @@ pub fn pty_resize(state: State<'_, Arc<AppState>>, tab_id: String, cols: i64, ro
 /// dividir o redimensionar la ventana hay que volver a calcular sus anchos,
 /// pero hacerlo escribiendo en el PTY alteraría la entrada que el usuario esté
 /// editando. `TabManager` lo entrega como salida visual y conserva el cursor.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn pty_refresh_banner(
     app: AppHandle,
@@ -160,18 +170,20 @@ pub fn pty_refresh_banner(
     rows: i64,
     pane_count: i64,
     cursor_row: Option<i64>,
-) {
+    cursor_col: Option<i64>,
+) -> bool {
     let Some(viewport) = crate::tabs::valid_viewport(cols, rows) else {
-        return;
+        return false;
     };
     let started = Instant::now();
-    state.tabs.refresh_banner(
+    let applied = state.tabs.refresh_banner(
         &app,
         &tab_id,
         viewport.cols,
         viewport.rows,
         pane_count.max(1) as usize,
         cursor_row.and_then(|row| u16::try_from(row).ok()),
+        cursor_col.and_then(|col| u16::try_from(col).ok()),
     );
     log_info!(
         "Repintado de banner solicitado",
@@ -183,6 +195,7 @@ pub fn pty_refresh_banner(
             "durationMs": started.elapsed().as_millis(),
         })
     );
+    applied
 }
 
 // ---- Entornos (`env:*`) ----
@@ -445,6 +458,19 @@ pub fn profile_import_argument() -> Option<PathBuf> {
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
         if argument == "--import-profile" {
+            return args.next().map(PathBuf::from);
+        }
+    }
+    None
+}
+
+/// Ruta que Windows entrega al verbo «Abrir con WinSlim Terminal». Se usa solo
+/// para elegir la carpeta inicial de la pestaña; el archivo nunca se ejecuta
+/// de forma silenciosa.
+pub fn open_path_argument() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--open-path" {
             return args.next().map(PathBuf::from);
         }
     }

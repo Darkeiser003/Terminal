@@ -422,6 +422,11 @@ fn build_list(
     inventory: crate::environments::Inventory,
     depth: DetectionDepth,
 ) -> InstallList {
+    let started = std::time::Instant::now();
+    let depth_name = match depth {
+        DetectionDepth::Fast => "fast",
+        DetectionDepth::Full => "full",
+    };
     let t = Translator::new(&crate::i18n::active_language());
     let context = install_context(inventory.pkg_manager.clone(), depth);
     let actions = filter_available_actions_with_depth(
@@ -439,6 +444,14 @@ fn build_list(
         .map(|action| action.translated(&t.language))
         .collect();
 
+    log_info!(
+        "Catalogo de acciones preparado",
+        serde_json::json!({
+            "depth": depth_name,
+            "actions": actions.len(),
+            "durationMs": started.elapsed().as_millis() as u64,
+        })
+    );
     state.remember_install_actions(&actions);
     InstallList { actions }
 }
@@ -451,8 +464,10 @@ fn build_list(
 /// dejaría el script roto. Por eso cada familia usa su propio entrecomillado.
 fn wrap_powershell_command(ps_command: &str, kind: ShellKind, transport: Transport) -> String {
     match kind {
-        // Ya estamos en PowerShell: se ejecuta tal cual, sin envolver nada.
-        ShellKind::Powershell => ps_command.to_string(),
+        // Ya estamos en PowerShell. Capturamos errores terminantes para que un
+        // `throw` de una acción no cierre la sesión interactiva ni impida que
+        // `console_ui::decorate` pinte el resultado de la operación.
+        ShellKind::Powershell => format!("try {{ {ps_command} }} catch {{ Write-Error $_ }}"),
         // cmd.exe no expande "$", así que las comillas dobles son seguras (los
         // scripts del catálogo no llevan comillas dobles dentro).
         ShellKind::Cmd => {
@@ -740,12 +755,23 @@ mod tests {
     }
 
     #[test]
-    fn en_powershell_el_script_se_ejecuta_tal_cual_sin_envolverlo() {
+    fn en_powershell_el_script_se_ejecuta_en_la_sesion_sin_perder_sus_variables() {
         let script = "$dest = 'x'; Write-Host $dest";
-        assert_eq!(
-            wrap_powershell_command(script, ShellKind::Powershell, Transport::Native),
-            script
+        let wrapped = wrap_powershell_command(script, ShellKind::Powershell, Transport::Native);
+        assert!(wrapped.starts_with("try { "));
+        assert!(wrapped.contains(script));
+        assert!(wrapped.ends_with(" } catch { Write-Error $_ }"));
+    }
+
+    #[test]
+    fn en_powershell_un_throw_deja_viva_la_terminal_interactiva() {
+        let wrapped = wrap_powershell_command(
+            "throw 'fallo de prueba'",
+            ShellKind::Powershell,
+            Transport::Native,
         );
+        assert!(wrapped.contains("catch { Write-Error $_ }"));
+        assert!(!wrapped.contains("exit"));
     }
 
     #[test]

@@ -39,6 +39,17 @@
     let update = $state<UpdateStatus | null>(null);
     let updating = $state(false);
     let updateError = $state("");
+    /** Inicio del cambio de shell por pestaña. Se consume al completar el
+     * primer `term.write`, que es el instante en que el usuario ya ve la nueva
+     * sesión (el IPC por sí solo no incluye el arranque del inicializador). */
+    const environmentSwitchStarted = new Map<string, number>();
+    // Todas las salidas (incluido el banner que llega como un evento sintético)
+    // pasan por una cola por pestaña. Tauri puede entregar dos eventos desde
+    // hilos distintos y xterm mantiene su propio buffer de escritura; sin una
+    // cola explícita el cursor que guarda `refresh_banner` podía ser el de la
+    // cabecera, no el del prompt, y la siguiente entrada se dibujaba dentro del
+    // fastfetch.
+    const outputQueues = new Map<string, Promise<void>>();
     // KeyboardEvent.ctrlKey no distingue izquierda/derecha. Se conserva el
     // estado físico de ControlRight para ofrecer un chord que no robe los
     // Ctrl+A/C/S/W habituales de la shell.
@@ -201,6 +212,16 @@
     }
 
     onMount(() => {
+        const onEnvironmentSwitchStarted = (event: Event) => {
+            const detail = (event as CustomEvent<{ tabId?: string }>).detail;
+            if (detail?.tabId) {
+                environmentSwitchStarted.set(
+                    detail.tabId,
+                    typeof performance !== 'undefined' ? performance.now() : Date.now(),
+                );
+            }
+        };
+        window.addEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
         const openSettingsFromTerminal = () => {
             panels.show('settings');
             void loadSettings();
@@ -208,18 +229,37 @@
         window.addEventListener('winslim:open-settings', openSettingsFromTerminal);
         const unlisteners: Promise<UnlistenFn>[] = [
             api.onData((tabId, data) => {
-                const term = getTerminal(tabId);
-                // La cola de escritura de xterm puede completar después de que
-                // el usuario cierre la pestaña. No conservar una referencia
-                // destruida evita `_renderer.value.dimensions` al intentar
-                // desplazarla desde el callback tardío.
-                if (!term?.element?.isConnected) return;
-                const bannerLike = /LTerminal|WinSlim|Sistema|System|CPU|Memoria|Memory|Disco|Disk|Kernel/i.test(data);
-                try {
-                    term.write(data, () => {
+                window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
+                const previous = outputQueues.get(tabId) ?? Promise.resolve();
+                const queued = previous.catch(() => undefined).then(() => new Promise<void>((resolve) => {
+                    const term = getTerminal(tabId);
+                    // La cola de escritura de xterm puede completar después de
+                    // que el usuario cierre la pestaña. No conservar una
+                    // referencia destruida evita `_renderer.value.dimensions`
+                    // al intentar desplazarla desde el callback tardío.
+                    if (!term?.element?.isConnected) {
+                        resolve();
+                        return;
+                    }
+                    const bannerLike = /LTerminal|WinSlim|Sistema|System|CPU|Memoria|Memory|Disco|Disk|Kernel/i.test(data);
+                    try {
+                        term.write(data, () => {
                         const current = getTerminal(tabId);
-                        if (!current?.element?.isConnected) return;
+                        if (!current?.element?.isConnected) {
+                            resolve();
+                            return;
+                        }
                         perf.markOnce(`terminal-output:${tabId}`, 'terminal.first-output', { tabId });
+                        const switchStarted = environmentSwitchStarted.get(tabId);
+                        if (switchStarted !== undefined) {
+                            environmentSwitchStarted.delete(tabId);
+                            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                            perf.record('terminal.environment-switch-first-output', 'duration', {
+                                durationMs: Math.round(Math.max(0, now - switchStarted) * 100) / 100,
+                                status: 'ok',
+                                tabId,
+                            });
+                        }
                         if (bannerLike) {
                             perf.timeToOnce(`fastfetch-visible:${tabId}`, 'fastfetch.banner-visible', {
                                 tabId,
@@ -234,10 +274,19 @@
                         }
                         try { current.scrollToBottom(); }
                         catch (error) { console.debug('[App] terminal closed while scrolling', error); }
-                    });
-                } catch (error) {
-                    console.debug('[App] terminal closed while writing', error);
-                }
+                        resolve();
+                        });
+                    } catch (error) {
+                        console.debug('[App] terminal closed while writing', error);
+                        resolve();
+                    }
+                }));
+                outputQueues.set(tabId, queued);
+                void queued.then(() => {
+                    if (outputQueues.get(tabId) !== queued) return;
+                    outputQueues.delete(tabId);
+                    window.dispatchEvent(new CustomEvent('winslim:terminal-output-idle', { detail: { tabId } }));
+                });
             }),
 
             // clear / cls: el backend entrega el marcador ANTES del repintado de
@@ -323,6 +372,8 @@
         window.addEventListener("blur", resetGamingChord);
 
         return () => {
+            window.removeEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
+            environmentSwitchStarted.clear();
             window.removeEventListener('winslim:open-settings', openSettingsFromTerminal);
             window.removeEventListener("error", onError);
             window.removeEventListener("unhandledrejection", onRejection);
@@ -331,6 +382,7 @@
             window.removeEventListener("blur", resetGamingChord);
             for (const pending of unlisteners)
                 void pending.then((stop) => stop());
+            outputQueues.clear();
         };
     });
 </script>
@@ -372,6 +424,8 @@
                     <div
                         class="cell"
                         class:hidden={pane === -1}
+                        class:wide={app.panes.length === 3 && pane === 2}
+                        data-tab-id={tab.id}
                         class:focused={app.panes.length > 1 &&
                             tab.id === app.activeTabId}
                         style="order: {pane}"
@@ -537,6 +591,13 @@
         transition:
             border-color 0.15s ease,
             box-shadow 0.15s ease;
+    }
+
+    /* Con tres paneles, el tercero ocupa toda la fila inferior. El índice se
+       calcula sobre `visibleTabs`, así las pestañas ocultas no alteran qué
+       casilla recibe la regla. */
+    .cell.wide {
+        grid-column: 1 / -1;
     }
 
     /* Cuál recibe lo que se teclea. */

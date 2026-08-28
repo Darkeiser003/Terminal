@@ -59,6 +59,16 @@ if (!minimumSplit || minimumSplit.passed !== true || minimumSplit.geometryValid 
     throw new Error('El E2E no demostró una división útil y sin solapamientos en el tamaño mínimo.');
 }
 
+const responsiveMinimum = events.find((event) => event?.type === 'responsive-minimum');
+const responsiveDimensionsValid = (value) => Number.isFinite(value?.width)
+    && Number.isFinite(value?.height) && value.width > 0 && value.height > 0;
+if (!responsiveMinimum || responsiveMinimum.passed !== true
+    || !responsiveDimensionsValid(responsiveMinimum.configured)
+    || (responsiveMinimum.requested !== null && !responsiveDimensionsValid(responsiveMinimum.requested))
+    || !responsiveDimensionsValid(responsiveMinimum.applied)) {
+    throw new Error('El E2E no registró el mínimo responsive calculado y aplicado.');
+}
+
 const tabIsolation = events.find((event) => event?.type === 'tab-isolation');
 if (!tabIsolation || tabIsolation.passed !== true || tabIsolation.tabs < 3) {
     throw new Error('El E2E no demostró sesiones PTY independientes entre pestañas.');
@@ -68,6 +78,26 @@ const responsive = events.find((event) => event?.type === 'responsive-matrix');
 if (!responsive || responsive.panes < 2 || responsive.cases < 20
     || !responsive.explorerStates?.includes(false) || !responsive.explorerStates?.includes(true)) {
     throw new Error('El E2E no completó la matriz de redimensionado con dos paneles y los dos estados del explorador.');
+}
+
+// Un informe podía quedar en estado «passed» aunque el texto capturado del
+// xterm ya contuviera dos banners o una línea de hardware pegada a la
+// siguiente. La geometría sigue siendo válida en ese caso, por eso se valida
+// también la evidencia textual que dejó cada pane.
+const bannerReady = events.filter((event) => event?.type === 'banner-ready');
+if (bannerReady.length === 0) throw new Error('El E2E no dejó evidencia textual del banner.');
+const bannerHeader = /^(?:WinSlim|LTerminal).*Terminal\b/i;
+const mixedBannerLine = /^(?:Placa|Motherboard)\b.*(?:\bGB\b|\bMHz\b|%|GPU|Memoria|Memory|Fecha|Date)|^(?:GPU)\b.*(?:\bGB\b|Memoria|Memory|Disco|Disk|PC|Kernel|Fecha|Date)|^(?:Entorno|Environment)\b.*(?:WINSLIM|\bPC\b|Kernel|Placa|Motherboard|GPU)/i;
+for (const event of bannerReady) {
+    const previews = Array.isArray(event.preview) ? event.preview : [];
+    if (previews.length === 0) throw new Error('El E2E registró un banner sin contenido visible.');
+    for (const preview of previews) {
+        const lines = String(preview ?? '').replace(/\r/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
+        const headers = lines.filter((line) => bannerHeader.test(line));
+        if (headers.length !== 1 || lines.some((line) => mixedBannerLine.test(line))) {
+            throw new Error(`El E2E detectó un banner duplicado o mezclado: ${JSON.stringify(preview).slice(0, 1200)}`);
+        }
+    }
 }
 
 console.log(`Informe E2E verificado: ${requiredPhases.length} fases, ${events.length} eventos, ${report.durationMs} ms.`);

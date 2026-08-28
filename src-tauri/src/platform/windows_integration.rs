@@ -19,8 +19,8 @@ pub struct WindowsIntegrationStatus {
 }
 
 #[cfg(windows)]
-fn command_value(exe: &std::path::Path) -> String {
-    format!("\"{}\" \"%V\"", exe.display())
+fn command_value(exe: &std::path::Path, placeholder: &str) -> String {
+    format!("\"{}\" \"--open-path\" \"{placeholder}\"", exe.display())
 }
 
 #[cfg(windows)]
@@ -30,11 +30,22 @@ fn key_exists(path: &str) -> bool {
 }
 
 #[cfg(windows)]
+fn context_menu_keys_registered() -> bool {
+    [
+        r"Software\Classes\Directory\Background\shell\WinSlimTerminal",
+        r"Software\Classes\Directory\shell\WinSlimTerminal",
+        r"Software\Classes\*\shell\WinSlimTerminal",
+    ]
+    .into_iter()
+    .all(key_exists)
+}
+
+#[cfg(windows)]
 pub fn status() -> WindowsIntegrationStatus {
     let nsudo_path = super::nsudo_path();
     WindowsIntegrationStatus {
         supported: true,
-        context_menu_registered: key_exists(r"Software\Classes\Directory\Background\shell\WinSlimTerminal"),
+        context_menu_registered: context_menu_keys_registered(),
         protocol_registered: key_exists(r"Software\Classes\winslim\shell\open\command"),
         app_path_registered: key_exists(r"Software\Microsoft\Windows\CurrentVersion\App Paths\winslim-terminal.exe"),
         nsudo_available: nsudo_path.is_some(),
@@ -63,13 +74,24 @@ pub fn set_enabled(enabled: bool) -> Result<WindowsIntegrationStatus, String> {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let command = command_value(&exe);
+    let directory_command = command_value(&exe, "%V");
+    let file_command = command_value(&exe, "%1");
     let keys = [
-        r"Software\Classes\Directory\Background\shell\WinSlimTerminal",
-        r"Software\Classes\Directory\shell\WinSlimTerminal",
+        (
+            r"Software\Classes\Directory\Background\shell\WinSlimTerminal",
+            directory_command.as_str(),
+        ),
+        (
+            r"Software\Classes\Directory\shell\WinSlimTerminal",
+            directory_command.as_str(),
+        ),
+        (
+            r"Software\Classes\*\shell\WinSlimTerminal",
+            file_command.as_str(),
+        ),
     ];
     if enabled {
-        for path in keys {
+        for (path, command) in keys {
             let (key, _) = hkcu
                 .create_subkey(path)
                 .map_err(|error| error.to_string())?;
@@ -113,7 +135,7 @@ pub fn set_enabled(enabled: bool) -> Result<WindowsIntegrationStatus, String> {
                 .map_err(|error| error.to_string())?;
         }
     } else {
-        for path in keys {
+        for (path, _) in keys {
             let _ = hkcu.delete_subkey_all(path);
         }
         let _ = hkcu.delete_subkey_all(r"Software\Classes\winslim");

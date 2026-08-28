@@ -801,7 +801,7 @@
 
                     <label class="field wide">
                         <span>{app.t("settings.language", "Idioma")}</span>
-                        <select bind:value={draft.language}>
+                        <select data-testid="settings-language" bind:value={draft.language}>
                             {#each app.languages as language (language.id)}
                                 <!-- `auto` sale con el nombre del idioma en el
                                      propio idioma activo; los demás se llaman
@@ -1225,7 +1225,7 @@
                     disabled={saving}
                     onclick={reset}
                 >
-                    {app.t("settings.reset", "Restablecer")}
+                    <span data-testid="settings-reset-label">{app.t("settings.reset", "Restablecer")}</span>
                 </button>
                 <button data-testid="settings-save" type="submit" class="primary" disabled={saving}>
                     {app.t("settings.save", "Guardar")}

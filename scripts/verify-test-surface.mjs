@@ -31,6 +31,8 @@ const requiredFiles = [
     'scripts/verify-contracts.mjs',
     'scripts/verify-e2e-report.mjs',
     'scripts/test-e2e-report.mjs',
+    'scripts/test-release-hash.mjs',
+    'scripts/update-release-hash.mjs',
     'scripts/test-frontend-logic.mjs',
     'scripts/verify-test-surface.mjs',
     'scripts/verify-release-artifacts.mjs'
@@ -44,7 +46,7 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:e2e-report', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:e2e-report', 'test:release-hash', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
@@ -53,6 +55,7 @@ check('npm check incluye la verificación de documentación', scripts.check.incl
 check('npm check incluye la verificación de traducciones dinámicas', scripts.check.includes('check:i18n') && read('scripts/verify-i18n.mjs').includes('dynamicActionIds'));
 check('npm check prueba contratos cruzados y lógica frontend ejecutable', scripts.check.includes('check:contracts') && scripts.check.includes('test:frontend-logic'));
 check('npm check prueba el validador del informe E2E', scripts.check.includes('test:e2e-report'));
+check('npm check prueba la actualización no destructiva de hashes', scripts.check.includes('test:release-hash') && read('scripts/test-release-hash.mjs').includes('se conservan las variantes'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));
 check('npm check incluye clippy con warnings como errores', scripts.check.includes('clippy') && scripts.check.includes('-D warnings'));
 check('Verificador de enlaces da más margen a Git y reintenta', links.includes('gitTimeoutMs') && links.includes('gitRetries') && links.includes('git ls-remote'));
@@ -76,6 +79,7 @@ for (const command of handlers) {
 
 const toolbar = read('src/components/Toolbar.svelte');
 const app = read('src/App.svelte');
+const tabs = read('src-tauri/src/terminal/tabs.rs');
 const panels = read('src/lib/panels.svelte.ts');
 const appCss = read('src/styles/app.css');
 for (const id of ['deps', 'projects', 'scripts', 'settings']) {
@@ -118,7 +122,33 @@ check('El comando interno de acciones rápidas persiste su estado', (() => {
 check('Biblioteca conserva Acceso rápido global y traducido', ['scripts.quickAccess', 'const pinned = $derived((data?.pinned ?? []).filter(matches))'].every((marker) => read('src/components/ScriptsPanel.svelte').includes(marker)));
 check('Explorador contiene copiar, cortar, eliminar y pegar', ['explorer.copy', 'explorer.cut', 'explorer.trash', 'explorer.paste'].every((marker) => read('src/components/ExplorerSidebar.svelte').includes(marker)));
 check('Terminal intercepta cortar y eliminar sobre selección editable', ['deleteEditableSelection(true)', 'deleteEditableSelection(false)'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
-check('Terminal reajusta xterm y banner tras resize y preferencias', ['ResizeObserver', 'refreshBanner', 'fitAndReport', 'pendingBannerSettingsRefresh'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
+check('Terminal reajusta xterm y banner tras resize, preferencias y cambios de rejilla', ['ResizeObserver', 'refreshBanner', 'fitAndReport', 'pendingBannerSettingsRefresh', 'pendingPaneCountRefresh', 'lastPaneCount', 'paneCountChanged', 'paneRefreshTimer'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
+check('La nueva pestaña entra en la rejilla antes de montar su xterm',
+    read('src/lib/appState.svelte.ts').includes('const createdId = await this.createTab(entorno, siguiente)')
+        && read('src/lib/appState.svelte.ts').includes('this.panes = nextPanes.slice(0, siguiente)')
+        && read('src/lib/appState.svelte.ts').includes('async createTab(envId?: string, paneCount?: number): Promise<string | null>'));
+check('La creación de una casilla nueva solicita banner compacto al backend',
+    read('src/lib/api.ts').includes('paneCount: paneCount ?? null')
+        && read('src-tauri/src/app/commands.rs').includes('pane_count: Option<i64>')
+        && read('src-tauri/src/terminal/tabs.rs').includes('create_tab_with_panes'));
+check('El E2E valida el banner de la segunda pestaña recién creada',
+    read('tests/e2e/smoke.mjs').includes("rejilla 2 paneles tras crear la segunda pestaña")
+        && read('tests/e2e/smoke.mjs').includes('await assertBannerHeaders(2,'));
+check('El E2E cierra el selector de entornos si solo hay una shell disponible', (() => {
+    const smoke = read('tests/e2e/smoke.mjs');
+    return smoke.includes('async function closeEnvironmentMenu()')
+        && smoke.includes("document.querySelector(\".env-backdrop\")")
+        && smoke.includes('await closeEnvironmentMenu();');
+})());
+check('Ajustes expone un selector de idioma estable para el E2E', read('src/components/SettingsPanel.svelte').includes('data-testid="settings-language"') && read('tests/e2e/smoke.mjs').includes('settings-language'));
+check('Smoke E2E cambia varios idiomas y valida anclas traducidas sin hardcodeos', (() => {
+    const smoke = read('tests/e2e/smoke.mjs');
+    return smoke.includes("markPhase('idiomas y traducciones')")
+        && smoke.includes('loadLocaleCatalog')
+        && smoke.includes('assertLanguageAnchors')
+        && smoke.includes("recordEvent('language-switch'")
+        && smoke.includes('Texto hardcodeado o traducción incompleta');
+})());
 check('Restablecer preferencias repinta los banners abiertos', read('src/lib/appState.svelte.ts').includes("winslim:banner-settings-changed") && read('src/components/TerminalPane.svelte').includes('requestAnimationFrame(refreshBannerForSettings)'));
 check('Preferencias informa los fallos de escritura al frontend', read('src-tauri/src/app/commands.rs').includes('Result<PreferencesPayload, String>') && read('src-tauri/src/app/commands.rs').includes('No se pudieron guardar las preferencias en settings.json'));
 check('E2E comprueba y restaura una opción real del banner', (() => {
@@ -147,6 +177,10 @@ check('La ventana nativa conserva resize y maximizar sin feedback del frontend',
         && !lib.includes('set_size(')
         && !api.includes('window_ensure_usable_size')
         && !read('src/components/TerminalPane.svelte').includes('ensureWindowUsableSize'));
+check('La rejilla de tres terminales ocupa completa la fila inferior',
+    app.includes('class:wide={app.panes.length === 3 && pane === 2}')
+        && app.includes('.cell.wide')
+        && app.includes('grid-column: 1 / -1'));
 check('La configuración nativa deja maximizar y decoraciones activas', (() => {
     const window = JSON.parse(read('src-tauri/tauri.conf.json')).app?.windows?.[0] ?? {};
     return window.resizable === true && window.maximizable === true && window.decorations === true;
@@ -195,6 +229,8 @@ check('Cargo compara el contenido de ConPTY y no solo el tamaño', cargoBuild.in
 const dependenciesPanel = read('src/components/DependenciesPanel.svelte');
 const commonPanel = read('src/components/Panel.svelte');
 const installCommands = read('src-tauri/src/packages/commands.rs');
+const terminalTabs = read('src-tauri/src/terminal/tabs.rs');
+const windowsIntegration = read('src-tauri/src/platform/windows_integration.rs');
 check('Contador de dependencias cuenta entradas visibles y no acciones internas', dependenciesPanel.includes('visibleComponentCount') && dependenciesPanel.includes('groups.reduce') && !dependenciesPanel.includes('count={refreshing ? undefined : actions.length}'));
 check('Contador de dependencias explica su significado al usuario', dependenciesPanel.includes("deps.visibleComponents") && commonPanel.includes('countLabel') && commonPanel.includes('aria-label={countLabel}'));
 check('La primera lista de dependencias no bloquea en sondas lentas',
@@ -206,6 +242,20 @@ check('La primera lista de dependencias no bloquea en sondas lentas',
 check('Las reaperturas de Dependencias comparten la detección en curso',
     dependenciesPanel.includes('refreshInFlight ?? api.refreshInstallActions()')
         && dependenciesPanel.includes('refreshInFlight === request'));
+
+check('El repintado del banner cuenta el reflujo fisico',
+    terminalTabs.includes('fn banner_visual_rows')
+        && terminalTabs.includes('banner_visual_rows(&tab.banner_text, cols)')
+        && terminalTabs.includes('banner_text: String::new()'));
+check('El cambio de rejilla protege el cursor del banner anterior',
+    terminalTabs.includes('cursor_inside_new_banner')
+        && terminalTabs.includes('insert_rows')
+        && terminalTabs.includes('Filas insertadas para proteger el prompt'));
+check('La integración Windows registra y consume rutas de archivos',
+    windowsIntegration.includes('Software\\Classes\\*\\shell\\WinSlimTerminal')
+        && windowsIntegration.includes('--open-path')
+        && read('src-tauri/src/app/commands.rs').includes('pub fn open_path_argument')
+        && read('src-tauri/src/lib.rs').includes('commands::open_path_argument()'));
 
 const smoke = read('tests/e2e/smoke.mjs');
 const e2eReportVerifier = read('scripts/verify-e2e-report.mjs');
@@ -223,6 +273,7 @@ for (const marker of [
     'sessionId'
 ]) check(`Smoke E2E cubre ${marker}`, smoke.includes(marker));
 check('Smoke E2E prueba los comandos internos', smoke.includes(':help') && smoke.includes(':alias'));
+check('Smoke E2E mide el cambio y restauración de shell', smoke.includes("markPhase('cambio de shell')") && smoke.includes('environment-switch-restore') && toolbar.includes('data-testid="environment-option"'));
 check('Smoke E2E valida una respuesta real de la shell', smoke.includes('LTERMINAL_E2E_COMMAND_OK') && smoke.includes('xterm-rows'));
 check('Smoke E2E prueba refrescos consecutivos de entornos', smoke.includes('refresh-environments') && smoke.includes('for (let attempt') && smoke.includes('fin de refrescos concurrentes'));
 check('Smoke E2E prueba clics concurrentes de división', smoke.includes('burstCount') && smoke.includes('crearon demasiados paneles'));
@@ -316,6 +367,12 @@ for (const [name, source] of [['Linux', linuxBuild], ['Windows', windowsBuild]])
 for (const marker of ['x86_64-pc-windows-gnu', 'exclude-all-symbols', 'conpty.dll', 'OpenConsole.exe', 'WebView2Loader.dll', 'wine-smoke']) {
     check(`Build Windows cruzada conserva ${marker}`, linuxWindowsBuild.includes(marker));
 }
+
+check('El cambio de shell mide el primer output visible y evita respawns solapados',
+    app.includes('winslim:environment-switch-started')
+    && app.includes('terminal.environment-switch-first-output')
+    && tabs.includes('Primer output de shell')
+    && toolbar.includes('switchingTabId'));
 
 if (failures.length) {
     console.error(`Superficie de tests incompleta (${failures.length}/${checks.length} comprobaciones fallidas):`);
