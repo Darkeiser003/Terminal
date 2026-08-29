@@ -2,12 +2,30 @@
 node_modules/
 dist/
 release/
+
+# Cachés y temporales de los empaquetadores (Vite, Svelte, Tauri/Cargo).
+# Se mantienen las rutas de configuración y los locks versionados.
+.cache/
+.parcel-cache/
+.turbo/
+.scala-build/
+.bsp/
+.metals/
+/target/
+/build/
+/tmp/
+/temp/
 *.log
+*.log.*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 coverage/
+.nyc_output/
+test-results/
+playwright-report/
+allure-results/
 *.profraw
 lcov.info
 .vite/
@@ -18,8 +36,67 @@ lcov.info
 !.env.example
 lterminal-smoke-*.json
 winslim-terminal-e2e-*.json
+
+# Informes de smoke/E2E que se puedan dejar en la raíz al ejecutar las
+# pruebas manualmente. Los informes oficiales se escriben normalmente en %TEMP%.
+/*-smoke-*.json
+/*-e2e-*.json
+
+# Paquetes de distribución generados fuera de release/ (Windows/Linux/macOS).
+# No se ignoran ejecutables genéricos: algunos recursos nativos pueden ser
+# necesarios para la aplicación.
+*.AppImage
+*.deb
+*.rpm
+*.msi
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.dmg
+*.pkg
+
+# Archivos temporales, volcados y restos de parches.
+*.tmp
+*.temp
+*.pid
+*.pid.lock
+*.dmp
+*.stackdump
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+*~
+
+# Metadatos locales de IDE y herramientas nativas.
+.vs/
+.fleet/
+.history/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.code-workspace
+
+# Cachés/staging de herramientas Linux y AppImage.
+.flatpak-builder/
+/AppDir/
+.ninja_deps
+.ninja_log
+CMakeCache.txt
+CMakeFiles/
+
+# Estado y metadatos del sistema operativo.
 .DS_Store
 Thumbs.db
+desktop.ini
+ehthumbs.db
+Icon
+.AppleDouble/
+.LSOverride
 
 # Rust / Tauri
 src-tauri/target/
