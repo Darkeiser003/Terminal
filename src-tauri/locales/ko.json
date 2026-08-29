@@ -107,6 +107,8 @@
   "terminal.helpFallback": "도움말{topic}: 터미널에서 :help를 사용하거나 내부 명령을 확인하세요.",
   "terminal.internalCommands": "내부 명령: :config  :reload  :repl <이름>  :alias  :help [섹션]  :banner [옵션]  :quick-actions [옵션]",
   "terminal.commandList": ":config  :reload  :repl <이름>  :alias  :help  :banner  :quick-actions",
+  "terminal.creditDarkeiser": "Darkeiser003 · WinSlim Terminal 개발자\n프로젝트를 방문해 주셔서 감사합니다. 개발 과정과 업데이트를 확인하세요:\n프로필: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfrastructure-Web: {cloudProject}",
+  "terminal.creditChristian": "Christianlg97 · WinSlim Terminal 협력자\n이 프로젝트와 다른 프로젝트에 지식, 시간, 자원을 나눠 주고 특히 Windows 지식을 제공해 주셔서 감사합니다.\nWinSlim은 자체 도구, 사용자 설정, 자동화를 갖춘 최적화된 Windows입니다:\n프로필: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
   "startup.errorTitle": "터미널에서 인터페이스를 시작하지 못했습니다",
   "startup.logHint": "Open Settings to find the log folder.",
   "settings.appearance": "외관 스타일",

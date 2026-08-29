@@ -108,16 +108,28 @@ fn has_catalog(language: &str) -> bool {
     CATALOGS.contains_key(language)
 }
 
+/// Normaliza identificadores que llegan desde perfiles importados, variables
+/// de entorno o APIs externas. Los selectores de la app usan `en`, pero es
+/// habitual recibir `EN-us`, `en_US.UTF-8` o espacios; tratarlos como idiomas
+/// desconocidos hacía que la interfaz volviese silenciosamente al español.
+fn catalog_language(language: &str) -> Option<&'static str> {
+    let lowered = language.trim().to_ascii_lowercase();
+    let normalized = lowered.split(['-', '_', '.']).next().unwrap_or("");
+    CATALOGS
+        .keys()
+        .copied()
+        .find(|candidate| *candidate == normalized)
+}
+
 /// Qué idioma se usa de verdad: el elegido en Ajustes si existe, y si la
 /// preferencia es `auto`, el del sistema reducido a su parte base
 /// (`es-ES` -> `es`).
 pub fn resolve_language(preference: &str, system_locale: &str) -> String {
-    if !preference.is_empty() && preference != "auto" {
-        return if has_catalog(preference) {
-            preference.to_string()
-        } else {
-            FALLBACK_LANGUAGE.to_string()
-        };
+    let preference = preference.trim();
+    if !preference.is_empty() && !preference.eq_ignore_ascii_case("auto") {
+        return catalog_language(preference)
+            .unwrap_or(FALLBACK_LANGUAGE)
+            .to_string();
     }
     let base = system_locale
         .to_lowercase()
@@ -169,11 +181,9 @@ pub struct Translator {
 impl Translator {
     pub fn new(language: &str) -> Translator {
         Translator {
-            language: if has_catalog(language) {
-                language.to_string()
-            } else {
-                FALLBACK_LANGUAGE.to_string()
-            },
+            language: catalog_language(language)
+                .unwrap_or(FALLBACK_LANGUAGE)
+                .to_string(),
         }
     }
 
@@ -268,11 +278,9 @@ pub struct CatalogPayload {
 }
 
 pub fn catalog_for(language: &str) -> CatalogPayload {
-    let resolved = if has_catalog(language) {
-        language.to_string()
-    } else {
-        FALLBACK_LANGUAGE.to_string()
-    };
+    let resolved = catalog_language(language)
+        .unwrap_or(FALLBACK_LANGUAGE)
+        .to_string();
     let mut strings = CATALOGS.get(FALLBACK_LANGUAGE).cloned().unwrap_or_default();
     if resolved != FALLBACK_LANGUAGE {
         if let Some(target) = CATALOGS.get(resolved.as_str()) {
@@ -319,6 +327,15 @@ mod tests {
     fn una_preferencia_explicita_manda_sobre_el_sistema() {
         assert_eq!(resolve_language("en", "es-ES"), "en");
         assert_eq!(resolve_language("es", "en-US"), "es");
+    }
+
+    #[test]
+    fn los_identificadores_de_idioma_se_normalizan() {
+        assert_eq!(resolve_language(" EN-us ", "es-ES"), "en");
+        assert_eq!(resolve_language("es_ES.UTF-8", "en-US"), "es");
+        assert_eq!(resolve_language("AUTO", "fr_FR"), "fr");
+        assert_eq!(Translator::new("PT-br").language, "pt");
+        assert_eq!(catalog_for("ZH_cn").language, "zh");
     }
 
     #[test]

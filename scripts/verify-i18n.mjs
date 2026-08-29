@@ -39,9 +39,6 @@ const dynamicActionIds = [
     'windows-vmp-enable',
     'windows-sandbox-enable',
     'windows-hyperv-check',
-    'vmware-download',
-    'vmware-update-download',
-    'vmware-version',
 ];
 for (const id of dynamicActionIds) {
     for (const field of ['label', 'shortLabel']) {

@@ -645,6 +645,13 @@ pub fn resolve_script_aliases(
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, Vec<&ScriptEntry>> = HashMap::new();
 
+    // CMD y PowerShell resuelven nombres sin distinguir mayúsculas. Si aquí
+    // agrupamos de forma sensible a ellas, `Deploy.ps1` y `deploy.bat` llegan
+    // como dos alias distintos y el segundo pisa al primero al cargar el
+    // inicializador. Bash/Fish/Zsh sí conservan la distinción, por lo que solo
+    // normalizamos en las dos familias de Windows.
+    let windows_case_insensitive = matches!(kind, ShellKind::Cmd | ShellKind::Powershell);
+
     for script in scripts {
         let base = script
             .name
@@ -654,17 +661,22 @@ pub fn resolve_script_aliases(
         if alias.is_empty() {
             continue;
         }
-        if !groups.contains_key(&alias) {
-            order.push(alias.clone());
+        let group_key = if windows_case_insensitive {
+            alias.to_ascii_lowercase()
+        } else {
+            alias.clone()
+        };
+        if !groups.contains_key(&group_key) {
+            order.push(group_key.clone());
         }
-        groups.entry(alias).or_default().push(script);
+        groups.entry(group_key).or_default().push(script);
     }
 
     let native = native_type_for(kind);
     order
         .into_iter()
-        .filter_map(|alias| {
-            let candidates = groups.get(&alias)?;
+        .filter_map(|group_key| {
+            let candidates = groups.get(&group_key)?;
             let chosen = match native {
                 Some(native) if candidates.len() > 1 => candidates
                     .iter()
@@ -673,6 +685,20 @@ pub fn resolve_script_aliases(
                     .unwrap_or(candidates[0]),
                 _ => candidates[0],
             };
+            // Conserva la grafía del primer archivo para no cambiar nombres
+            // de alias en Unix. En Windows los nombres son insensibles a
+            // mayúsculas, pero esta grafía sigue siendo válida en ambas
+            // shells y hace determinista la salida.
+            let alias = candidates
+                .first()
+                .map(|script| {
+                    let base = script
+                        .name
+                        .strip_suffix(&script.ext)
+                        .unwrap_or(&script.name);
+                    sanitize_alias_name(base)
+                })
+                .unwrap_or(group_key);
             Some((alias, chosen))
         })
         .collect()
@@ -1155,6 +1181,32 @@ mod tests {
 
         let en_bash = resolve_script_aliases(&scripts, ShellKind::Bash);
         assert_eq!(en_bash[0].1.kind, ScriptType::Shell);
+    }
+
+    #[test]
+    fn cmd_y_powershell_tratan_los_aliases_sin_distinguir_mayusculas() {
+        let scripts = vec![
+            script("Deploy.ps1", ScriptType::Powershell, "C:\\s\\Deploy.ps1"),
+            script("deploy.bat", ScriptType::Batch, "C:\\s\\deploy.bat"),
+        ];
+        let powershell = resolve_script_aliases(&scripts, ShellKind::Powershell);
+        assert_eq!(powershell.len(), 1);
+        assert_eq!(powershell[0].0, "Deploy");
+        assert_eq!(powershell[0].1.kind, ScriptType::Powershell);
+
+        let cmd = resolve_script_aliases(&scripts, ShellKind::Cmd);
+        assert_eq!(cmd.len(), 1);
+        assert_eq!(cmd[0].1.kind, ScriptType::Batch);
+    }
+
+    #[test]
+    fn bash_y_fish_conservan_aliases_con_mayusculas_distintas() {
+        let scripts = vec![
+            script("Deploy.sh", ScriptType::Shell, "/s/Deploy.sh"),
+            script("deploy.sh", ScriptType::Shell, "/s/deploy.sh"),
+        ];
+        assert_eq!(resolve_script_aliases(&scripts, ShellKind::Bash).len(), 2);
+        assert_eq!(resolve_script_aliases(&scripts, ShellKind::Fish).len(), 2);
     }
 
     #[test]

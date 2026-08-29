@@ -247,10 +247,14 @@ check('El repintado del banner cuenta el reflujo fisico',
     terminalTabs.includes('fn banner_visual_rows')
         && terminalTabs.includes('banner_visual_rows(&tab.banner_text, cols)')
         && terminalTabs.includes('banner_text: String::new()'));
-check('El cambio de rejilla protege el cursor del banner anterior',
-    terminalTabs.includes('cursor_inside_new_banner')
-        && terminalTabs.includes('insert_rows')
-        && terminalTabs.includes('Filas insertadas para proteger el prompt'));
+check('El repintado del banner no duplica una salida ya pintada',
+    terminalTabs.includes('tab.banner_text == banner_text')
+        && terminalTabs.includes('tab.banner_rows == new_banner_rows')
+        && terminalTabs.includes('eventos de ConPTY y el IPC'));
+check('El cambio de rejilla acota el cursor fuera del banner',
+    terminalTabs.includes('safe_banner_cursor')
+        && terminalTabs.includes('No restaurar ESC8 a ciegas')
+        && terminalTabs.includes('la_posicion_restaurada_nunca_cae_dentro_del_banner'));
 check('La integración Windows registra y consume rutas de archivos',
     windowsIntegration.includes('Software\\Classes\\*\\shell\\WinSlimTerminal')
         && windowsIntegration.includes('--open-path')
@@ -314,11 +318,11 @@ check('Smoke E2E prueba los cuatro estados de panel', [
 ].every((marker) => smoke.includes(marker)));
 check('Smoke E2E prueba el explorador y su menú contextual', smoke.includes('.explorer') && smoke.includes('rightClick') && smoke.includes('dispatchContextMenu') && smoke.includes('[role="menu"]'));
 check('Smoke E2E prueba los acordeones cerrados y exclusivos', smoke.includes('.operations') && smoke.includes('.types') && smoke.includes('settingsText') && smoke.includes('acordeones exclusivos'));
-check('Smoke E2E prueba las acciones individuales de dependencias sin ejecutarlas', smoke.includes('Compatibilidad Windows') && smoke.includes('data-testid="dependency-action"') && smoke.includes('aparece abierto antes') && !smoke.includes('dependency-bulk-install') && !smoke.includes('dependency-bulk-uninstall'));
+check('Smoke E2E prueba las acciones individuales de dependencias sin ejecutarlas', smoke.includes('Compatibilidad Windows') && smoke.includes('data-testid="dependency-action"') && smoke.includes('aparece abierto antes') && smoke.includes('Dependencias todavía expone') && !smoke.includes('dependency-bulk-install') && !smoke.includes('dependency-bulk-uninstall'));
 check('Smoke E2E adapta el catálogo de dependencias a cada plataforma', smoke.includes('nativeWindows') && smoke.includes('Virtualización') && smoke.includes('platformGroupPattern'));
 check('Smoke E2E comprueba nombres y descripciones del grupo de plataforma', smoke.includes('hasNamedTool') && smoke.includes('hasDescription') && smoke.includes('programa y descripción'));
 check('La sugerencia de herramienta abre dependencias y traduce su nombre', app.includes('suggestion.actionId') && app.includes('panels.show("deps")') && app.includes('.replace("{tool}", suggestion.label)'));
-check('Dependencias diferencia carga inicial de actualización', dependenciesPanel.includes('loading && actions.length === 0') && dependenciesPanel.includes('deps.refreshing'));
+check('Dependencias diferencia carga inicial de actualización sin exponer un botón redundante', dependenciesPanel.includes('loading && actions.length === 0') && dependenciesPanel.includes('refreshInFlight') && !dependenciesPanel.includes('data-testid="dependency-refresh"') && !dependenciesPanel.includes('Actualizando detección'));
 check('Dependencias separa finalidad de requisitos de instalación', (() => {
     const actions = read('src-tauri/src/packages/actions.rs');
     const types = read('src/lib/types.ts');
@@ -348,6 +352,8 @@ check('Host smoke soporta modo estricto', host.includes('--strict'));
 const linuxBuild = read('linux/build.sh');
 const linuxWindowsBuild = read('linux/build-windows.sh');
 const windowsBuild = read('windows/build.ps1');
+const windowsBatch = read('windows/build.bat');
+check('El wrapper BAT no contiene una BOM que rompa cmd.exe', windowsBatch.startsWith('@echo off') && !windowsBatch.startsWith('\uFEFF'));
 check('Build cruzada Linux→Windows ofrece smoke repetido bajo Wine', linuxWindowsBuild.includes('--wine-repeats') && linuxWindowsBuild.includes('for attempt in'));
 check('Build Linux tiene ruta no interactiva', linuxBuild.includes('--non-interactive') && linuxBuild.includes('NON_INTERACTIVE'));
 check('Build WSL pasa modo no interactivo', windowsBuild.includes('--non-interactive'));

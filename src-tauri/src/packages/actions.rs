@@ -3368,9 +3368,10 @@ fn windows_haskell_actions() -> Vec<InstallAction> {
 
 /// Capacidades de virtualización que pertenecen al propio Windows. No se
 /// mezclan con QEMU/libvirt/virt-manager: esos siguen siendo el stack Linux o
-/// WSL. En Windows el equivalente real es Hyper-V/Virtual Machine Platform,
-/// mientras que QEMU, VirtualBox y VMware se ofrecen como aplicaciones nativas
-/// de ciclo de vida completo en el grupo de compatibilidad.
+/// WSL. En Windows el equivalente real es Hyper-V/Virtual Machine Platform;
+/// QEMU y VirtualBox se ofrecen como aplicaciones nativas. VMware se excluye
+/// deliberadamente: su descarga requiere portal/cuenta Broadcom y no es una
+/// instalación automatizable desde esta aplicación.
 fn windows_virtualization_actions() -> Vec<InstallAction> {
     // `output_text` solo considera correcto el código de salida del proceso;
     // una expresión PowerShell que imprime False sigue terminando con código 0.
@@ -3379,8 +3380,6 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
     const HYPERV: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
     const VMP: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
     const SANDBOX: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
-    const VMWARE: &str = "powershell:if (Get-Command vmrun.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'VMware\\VMware Workstation\\vmware.exe'))) { exit 0 } else { exit 1 }";
-    const VMWARE_DOWNLOADS: &str = "https://support.broadcom.com/group/ecx/productdownloads";
     let enable_feature = |feature: &str| {
         format!(
             "$elevated = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','$feature = Get-WindowsOptionalFeature -Online -FeatureName {feature} -ErrorAction SilentlyContinue; if (-not $feature) {{ exit 2 }}; if ($feature.State -eq ''Enabled'') {{ exit 0 }}; Enable-WindowsOptionalFeature -Online -FeatureName {feature} -All -NoRestart -ErrorAction Stop; if (-not $?) {{ exit 3 }}'); if ($elevated.ExitCode -eq 2) {{ Write-Error 'La característica de Windows {feature} no está disponible en esta edición.' }} elseif ($elevated.ExitCode -ne 0) {{ Write-Error ('La activación de {feature} terminó con el código ' + $elevated.ExitCode) }} else {{ Write-Host 'La característica está activada; puede ser necesario reiniciar Windows.' }} }}",
@@ -3396,6 +3395,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         .powershell()
         .group(VIRTUALIZATION_GROUP)
         .subgroup("Hyper-V")
+        .subgroup_description("Plataforma de virtualización de Windows para ejecutar máquinas virtuales.")
         .check(Some(HYPERV))
         .hint("Disponible en Windows Pro, Enterprise y Education; requiere permisos de administrador y normalmente reinicio."),
         InstallAction::new(
@@ -3407,6 +3407,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         .powershell()
         .group(VIRTUALIZATION_GROUP)
         .subgroup("Virtual Machine Platform")
+        .subgroup_description("Componente de Windows que necesitan WSL2 y otras máquinas virtuales.")
         .check(Some(VMP))
         .hint("Es el componente que necesitan WSL2 y varias herramientas de virtualización; puede requerir reinicio."),
         InstallAction::new(
@@ -3418,6 +3419,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         .powershell()
         .group(VIRTUALIZATION_GROUP)
         .subgroup("Windows Sandbox")
+        .subgroup_description("Entorno desechable y aislado para probar software sin tocar el sistema.")
         .check(Some(SANDBOX))
         .hint("Requiere Windows Pro/Enterprise/Education y virtualización habilitada; necesita reinicio."),
         InstallAction::new(
@@ -3429,46 +3431,9 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         .powershell()
         .group(VIRTUALIZATION_GROUP)
         .subgroup("Hyper-V")
+        .subgroup_description("Plataforma de virtualización de Windows para ejecutar máquinas virtuales.")
         .verb("Comprobar")
         .requires(Some(HYPERV)),
-        InstallAction::new(
-            "vmware-download",
-            "Descargar VMware Workstation Pro",
-            format!("Start-Process '{}'", VMWARE_DOWNLOADS),
-        )
-        .short("Abrir descarga oficial de Broadcom")
-        .powershell()
-        .group(VIRTUALIZATION_GROUP)
-        .subgroup("VMware Workstation Pro")
-        .verb("Abrir")
-        .check(Some(VMWARE))
-        .done("Descarga oficial abierta; VMware Workstation Pro todavía no está instalado.")
-        .hint(
-            "La descarga se hace desde el portal oficial de Broadcom y requiere iniciar sesión. Entra en My Downloads > Free Software Downloads > VMware Workstation Pro; esta app no automatiza credenciales ni la instalación.",
-        ),
-        InstallAction::new(
-            "vmware-update-download",
-            "Actualizar VMware Workstation Pro",
-            format!("Start-Process '{}'", VMWARE_DOWNLOADS),
-        )
-        .short("Abrir descarga oficial de actualización")
-        .powershell()
-        .group(VIRTUALIZATION_GROUP)
-        .subgroup("VMware Workstation Pro")
-        .verb("Actualizar")
-        .requires(Some(VMWARE))
-        .done("Descarga oficial de actualización abierta; ejecuta el instalador de Broadcom para completar el proceso."),
-        InstallAction::new(
-            "vmware-version",
-            "Ver versión de VMware Workstation Pro",
-            "$vmrun = Get-Command vmrun.exe -ErrorAction SilentlyContinue; if ($vmrun) { & $vmrun.Source -T ws version } else { $candidates = @((Join-Path $env:ProgramFiles 'VMware\\VMware Workstation\\vmware.exe'), (Join-Path ${env:ProgramFiles(x86)} 'VMware\\VMware Workstation\\vmware.exe')); $vmware = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($vmware) { & $vmware -v } else { Write-Host 'VMware está detectado por su instalación, pero no se encontró un ejecutable de versión.' } }",
-        )
-        .short("Ver versión instalada")
-        .powershell()
-        .group(VIRTUALIZATION_GROUP)
-        .subgroup("VMware Workstation Pro")
-        .verb("Versión")
-        .requires(Some(VMWARE)),
     ]
 }
 
@@ -5127,7 +5092,6 @@ mod tests {
             "winget-virtualbox",
             "windows-hyperv-enable",
             "windows-vmp-enable",
-            "vmware-download",
         ] {
             assert_eq!(buscar(&actions, id).group, VIRTUALIZATION_GROUP, "{id}");
             assert_eq!(
@@ -5186,21 +5150,18 @@ mod tests {
             "windows-sandbox-enable",
             "winget-qemu",
             "winget-virtualbox",
-            "vmware-download",
-            "vmware-update-download",
-            "vmware-version",
         ] {
             assert!(actions.iter().any(|action| action.id == id), "falta {id}");
         }
-        assert!(!actions.iter().any(|action| action.id == "winget-vmware"));
-        let vmware = buscar(&actions, "vmware-download");
-        assert!(vmware
-            .command
-            .contains("https://support.broadcom.com/group/ecx/productdownloads"));
-        assert!(vmware
-            .done
-            .as_deref()
-            .is_some_and(|done| done.contains("todavía no está instalado")));
+        assert!(!actions
+            .iter()
+            .any(|action| action.id.starts_with("vmware-")));
+        assert!(!actions.iter().any(|action| {
+            action
+                .subgroup
+                .as_deref()
+                .is_some_and(|subgroup| subgroup.to_ascii_lowercase().contains("vmware"))
+        }));
         assert!(!actions
             .iter()
             .any(|action| action.id == "compat-virt-manager"));
@@ -5215,7 +5176,7 @@ mod tests {
     #[test]
     fn las_sondas_de_virtualizacion_no_dependen_de_un_exe_en_path() {
         let actions = get_install_actions(&contexto("windows"), &t());
-        for id in ["winget-qemu", "winget-virtualbox", "vmware-download"] {
+        for id in ["winget-qemu", "winget-virtualbox"] {
             let action = buscar(&actions, id);
             assert!(
                 action

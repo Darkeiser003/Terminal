@@ -450,6 +450,21 @@ lo explica en la propia sesión, diciendo además cuál le ha tocado.
 
 ---
 
+### Créditos y easter-eggs
+
+En una línea propia de la terminal, `Darkeiser003`, `darkeiser003`,
+`@darkeiser003` y `@Darkeiser003` muestran una presentación del desarrollo,
+el perfil público y los proyectos [WinSlim Terminal](https://github.com/Darkeiser003/Terminal)
+y [Infraestructura-Web](https://github.com/Darkeiser003/Infraestructura-Web).
+Del mismo modo, `christianlg97` y `@christianlg97` muestran un agradecimiento
+por la colaboración y enlazan el [perfil de Christianlg97](https://github.com/Christianlg97),
+[WinSlim Center Store](https://github.com/Christianlg97/WINSLIM_CENTER_STORE) y
+[WinSlim Update](https://github.com/Christianlg97/WinSlim-Update). Se aceptan
+también las formas con `:` por coherencia con los comandos internos; no se
+interceptan órdenes que contengan esos nombres como parte de otra línea.
+
+---
+
 ## Panel de entorno y dependencias
 
 Dos niveles: grupos temáticos y, dentro, un subgrupo plegable por herramienta.

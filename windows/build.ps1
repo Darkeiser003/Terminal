@@ -206,8 +206,24 @@ function Invoke-Native {
                     Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
                 }
             }
-            & $Command @Arguments | Out-Host
-            return [int]$LASTEXITCODE
+            # Algunos comandos (Tauri incluido) escriben información normal en
+            # stderr. Windows PowerShell 5.1 convierte ese flujo en
+            # NativeCommandError incluso al redirigirlo a una tubería. Guardar
+            # stderr en un temporal y mostrarlo después evita el falso error;
+            # el código de salida sigue siendo la única señal de fallo.
+            $stderrPath = [IO.Path]::GetTempFileName()
+            try {
+                $nativeOutput = @(& $Command @Arguments 2> $stderrPath)
+                $exitCode = [int]$LASTEXITCODE
+                if ($nativeOutput.Count -gt 0) { $nativeOutput | Out-Host }
+                if (Test-Path -LiteralPath $stderrPath) {
+                    $stderrOutput = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($stderrOutput)) { $stderrOutput.TrimEnd() | Out-Host }
+                }
+                return $exitCode
+            } finally {
+                Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+            }
         } catch {
             Write-Host ("    No se pudo iniciar {0}: {1}" -f $Command, $_.Exception.Message) -ForegroundColor DarkGray
             return 9009
@@ -1000,8 +1016,15 @@ Write-Ok 'Dependencias instaladas'
 # tarda mas en descubrirlo despues que en comprobarlo aqui.
 if (-not $SkipChecks) {
     Write-Step 'Comprobando tipos, formato, clippy y pruebas'
-    $code = Invoke-Native 'npm' @('run', 'check')
-    if ($code -ne 0) { throw "Las comprobaciones fallaron (codigo $code). Usa -SkipChecks para saltarlas." }
+    # npm puede salir con 0 en algunos hosts de PowerShell aunque uno de los
+    # procesos encadenados (cargo/clippy) haya escrito un error fatal. Capturar
+    # la salida permite detectar también ese caso y evita imprimir «Todo
+    # verde» después de un `could not compile`.
+    $code = Invoke-Native 'npm' @('run', 'check') -CaptureOutput
+    $checkOutputFailed = $script:LastNativeOutput -match '(?im)\b(?:error:\s+could not compile|error\[E\d+\]:|svelte-check found\s+[1-9]\d*\s+errors?)\b'
+    if ($code -ne 0 -or $checkOutputFailed) {
+        throw "Las comprobaciones fallaron (codigo $code). Usa -SkipChecks para saltarlas."
+    }
     Write-Ok 'Todo verde'
 } else {
     Write-Warn 'Comprobaciones saltadas por peticion (-SkipChecks)'
@@ -1420,8 +1443,16 @@ if ($runExtendedTests) {
             $e2eCode = Invoke-Native 'npm' @('run', 'e2e')
             if ($e2eCode -ne 0) { throw "E2E falló (código $e2eCode). Revisa el informe y el log en $logPath." }
             Assert-E2eReport $e2eReportPath
-            $reportCode = Invoke-Native 'node' @('scripts/verify-e2e-report.mjs', $e2eReportPath)
-            if ($reportCode -ne 0) { throw "El informe E2E está incompleto (código $reportCode): $e2eReportPath" }
+            $reportCode = Invoke-Native 'node' @('scripts/verify-e2e-report.mjs', $e2eReportPath) -CaptureOutput
+            # El verificador escribe «Informe E2E verificado» cuando todo va
+            # bien. Buscar cualquier aparición de «informe E2E» convertía ese
+            # mensaje de éxito en un falso fallo aunque el proceso devolviese
+            # código 0. Solo se consideran errores las formas explícitas del
+            # stack de Node o de los mensajes de rechazo del verificador.
+            $reportOutputFailed = $script:LastNativeOutput -match '(?im)(?:^\s*Error:|^\s*El E2E no\b|\binforme E2E (?:incompleto|no es|no valid[oó]|fall[oó])\b)'
+            if ($reportCode -ne 0 -or $reportOutputFailed) {
+                throw "El informe E2E está incompleto (código $reportCode): $e2eReportPath"
+            }
             Write-Ok 'E2E confirmó todas las fases: ventana, terminal, paneles, comandos, preferencias y redimensionado'
         } finally {
             if ($null -eq $previousE2eBinary) {

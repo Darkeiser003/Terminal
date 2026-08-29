@@ -456,7 +456,7 @@ fn sibling_path(help_path: &str, extension: &str) -> String {
     format!("{base}.{extension}")
 }
 
-pub fn build_cmd_help_dispatcher(help_path: &str) -> String {
+pub fn build_cmd_help_dispatcher(help_path: &str, t: &Translator) -> String {
     let mut lines = vec![
         "@echo off".to_string(),
         "set \"topic=%~1\"".to_string(),
@@ -475,7 +475,12 @@ pub fn build_cmd_help_dispatcher(help_path: &str) -> String {
             ));
         }
     }
-    lines.push("echo Seccion desconocida: %topic%. Usa ayuda para ver las secciones.".to_string());
+    let unknown = t.tp(
+        "terminal.helpFallback",
+        &[("topic", "%topic%".to_string())],
+        "Ayuda{topic}: usa :help desde una terminal o consulta los comandos internos.",
+    );
+    lines.push(format!("echo {unknown}"));
     lines.push("exit /b 2".to_string());
     lines.join("\r\n") + "\r\n"
 }
@@ -490,9 +495,14 @@ pub fn help_runner_path(help_path: &str, kind: ShellKind) -> String {
     sibling_path(help_path, extension)
 }
 
-pub fn build_help_runner(kind: ShellKind, help_path: &str, transport: Transport) -> String {
+pub fn build_help_runner(
+    kind: ShellKind,
+    help_path: &str,
+    transport: Transport,
+    t: &Translator,
+) -> String {
     match kind {
-        ShellKind::Cmd => build_cmd_help_dispatcher(help_path),
+        ShellKind::Cmd => build_cmd_help_dispatcher(help_path, t),
         ShellKind::Powershell => {
             let mut lines = vec![
                 "param([string]$Topic)".to_string(),
@@ -519,7 +529,14 @@ pub fn build_help_runner(kind: ShellKind, help_path: &str, transport: Transport)
                 "    }".to_string(),
                 "}".to_string(),
                 "if ($null -eq $path) {".to_string(),
-                "    Write-Host ('Seccion desconocida: ' + $Topic + '. Usa ayuda para ver las secciones.') -ForegroundColor Yellow".to_string(),
+                format!(
+                    "    Write-Host {} -ForegroundColor Yellow",
+                    quote_windows_double(&t.tp(
+                        "terminal.helpFallback",
+                        &[("topic", "$Topic".to_string())],
+                        "Ayuda{topic}: usa :help desde una terminal o consulta los comandos internos.",
+                    ))
+                ),
                 "    exit 2".to_string(),
                 "}".to_string(),
                 "Write-Host (Get-Content -Raw -LiteralPath $path) -NoNewline".to_string(),
@@ -546,7 +563,14 @@ pub fn build_help_runner(kind: ShellKind, help_path: &str, transport: Transport)
                 ));
             }
             lines.extend([
-                "*) printf 'Seccion desconocida: %s. Usa ayuda para ver las secciones.\\n' \"$topic\"; exit 2 ;;".to_string(),
+                format!(
+                    "*) printf '%s\\n' \"{}\"; exit 2 ;;",
+                    t.tp(
+                        "terminal.helpFallback",
+                        &[("topic", "$topic".to_string())],
+                        "Ayuda{topic}: usa :help desde una terminal o consulta los comandos internos.",
+                    )
+                ),
                 "esac".to_string(),
             ]);
             lines.join("\n") + "\n"
@@ -1010,6 +1034,18 @@ fn is_reserved(name: &str) -> bool {
         || WINDOWS_ALIASES.iter().any(|(alias, _)| *alias == name)
 }
 
+/// Comprueba nombres reservados con la semántica de la shell que los va a
+/// recibir. CMD y PowerShell ignoran mayúsculas al resolver comandos; permitir
+/// `Clear.ps1` o `INSTALL.bat` dejaría que un script del usuario ocultase
+/// `clear`/`install` en Windows. En shells POSIX se mantiene la distinción.
+fn is_reserved_for(kind: ShellKind, name: &str) -> bool {
+    if matches!(kind, ShellKind::Cmd | ShellKind::Powershell) {
+        let normalized = name.to_ascii_lowercase();
+        return is_reserved(&normalized);
+    }
+    is_reserved(name)
+}
+
 /// ¿Puede esta sesión leer los archivos temporales que genera la app?
 ///
 /// Los contenedores no ven el sistema de archivos del host (y pueden caer a sh
@@ -1036,6 +1072,9 @@ pub struct InitOptions<'a> {
     pub manager_label: Option<&'a str>,
     pub platform: &'a str,
     pub windows_manager: Option<&'a str>,
+    /// Imprime el banner desde la shell solo en una pestaña independiente.
+    /// En una rejilla lo pinta xterm después de medir la casilla.
+    pub initial_banner: bool,
 }
 
 pub struct InitScript {
@@ -1081,6 +1120,10 @@ pub fn build_init_script(
 ) -> Option<InitScript> {
     let format = script_format(kind)?;
     let banner_clear_path = options.banner_clear_path.or(options.banner_path);
+    let initial_banner_path = options
+        .initial_banner
+        .then_some(banner_clear_path)
+        .flatten();
     let mut lines: Vec<String> = format.header.iter().map(|line| line.to_string()).collect();
 
     // La primera salida visible debe ser realmente la primera instrucción del
@@ -1090,9 +1133,14 @@ pub fn build_init_script(
     // lentos eso hacía que el cambio de shell pareciera congelado aunque el
     // PTY ya estuviese listo. La limpieza usa comandos nativos y no depende de
     // ningún alias que todavía se vaya a declarar.
+    // El primer banner lo pinta la app una vez que xterm ya conoce las
+    // dimensiones reales de la casilla. Si la shell lo imprime aquí, nace con
+    // el viewport global (y al dividir queda un segundo banner o un prompt
+    // dentro del fastfetch). Los alias `clear`/`sysinfo` siguen usando la ruta
+    // completa más abajo para las acciones explícitas del usuario.
     lines.push(clear_command(
         kind,
-        banner_clear_path,
+        initial_banner_path,
         false,
         options.transport,
         options.app_name,
@@ -1155,7 +1203,7 @@ pub fn build_init_script(
 
     let mut registered: Vec<String> = Vec::new();
     for alias in options.script_aliases {
-        if is_reserved(&alias.alias_name) || alias.launch_command.is_empty() {
+        if is_reserved_for(kind, &alias.alias_name) || alias.launch_command.is_empty() {
             continue;
         }
         lines.push(script_alias_line(kind, alias));
@@ -1197,7 +1245,7 @@ pub fn build_init_script(
         }),
         help_runner: options
             .help_path
-            .map(|path| build_help_runner(kind, path, options.transport)),
+            .map(|path| build_help_runner(kind, path, options.transport, t)),
     })
 }
 
@@ -1238,6 +1286,7 @@ mod tests {
             manager_label: None,
             platform: "windows",
             windows_manager: Some("winget"),
+            initial_banner: true,
         }
     }
 
@@ -1486,6 +1535,40 @@ mod tests {
         assert!(script.content.contains("doskey propio=cosa $*"));
     }
 
+    #[test]
+    fn los_alias_reservados_de_windows_no_se_pueden_saltar_con_mayusculas() {
+        let aliases = [
+            ScriptAlias {
+                alias_name: "Clear".into(),
+                launch_command: "cosa".into(),
+            },
+            ScriptAlias {
+                alias_name: "INSTALL".into(),
+                launch_command: "cosa".into(),
+            },
+            ScriptAlias {
+                alias_name: "MiScript".into(),
+                launch_command: "cosa".into(),
+            },
+        ];
+        let mut opts = options(Transport::Native);
+        opts.script_aliases = &aliases;
+
+        let cmd = build(ShellKind::Cmd, &opts);
+        assert!(!cmd.content.contains("doskey Clear=cosa"));
+        assert!(!cmd.content.contains("doskey INSTALL=cosa"));
+        assert!(cmd.content.contains("doskey MiScript=cosa $*"));
+
+        let powershell = build(ShellKind::Powershell, &opts);
+        assert!(!powershell.content.contains("function Clear {"));
+        assert!(!powershell.content.contains("function INSTALL {"));
+        assert!(powershell.content.contains("function MiScript {"));
+
+        let bash = build(ShellKind::Bash, &opts);
+        assert!(bash.content.contains("alias Clear='"));
+        assert!(bash.content.contains("alias INSTALL='"));
+    }
+
     // ---- Archivo e invocación ----
 
     #[test]
@@ -1677,13 +1760,47 @@ mod tests {
 
     #[test]
     fn los_runners_de_ayuda_aceptan_argumentos_en_cada_shell() {
-        let cmd = build_help_runner(ShellKind::Cmd, "C:\\t\\help.txt", Transport::Native);
+        let cmd = build_help_runner(
+            ShellKind::Cmd,
+            "C:\\t\\help.txt",
+            Transport::Native,
+            &Translator::default(),
+        );
         assert!(cmd.contains("%topic%"));
-        let powershell =
-            build_help_runner(ShellKind::Powershell, "C:\\t\\help.txt", Transport::Native);
+        let powershell = build_help_runner(
+            ShellKind::Powershell,
+            "C:\\t\\help.txt",
+            Transport::Native,
+            &Translator::default(),
+        );
         assert!(powershell.contains("param([string]$Topic)"));
-        let unix = build_help_runner(ShellKind::Bash, "/tmp/help.txt", Transport::Native);
+        let unix = build_help_runner(
+            ShellKind::Bash,
+            "/tmp/help.txt",
+            Transport::Native,
+            &Translator::default(),
+        );
         assert!(unix.contains("paquete|paquetes"));
+    }
+
+    #[test]
+    fn el_error_del_runner_de_ayuda_respeta_el_idioma_activo() {
+        let en = build_help_runner(
+            ShellKind::Cmd,
+            "C:\\t\\help.txt",
+            Transport::Native,
+            &Translator::new("en"),
+        );
+        assert!(en.contains("Help%topic%"));
+        assert!(!en.contains("Ayuda"));
+
+        let es = build_help_runner(
+            ShellKind::Bash,
+            "/tmp/help.txt",
+            Transport::Native,
+            &Translator::new("es"),
+        );
+        assert!(es.contains("Ayuda$topic"));
     }
 
     #[test]

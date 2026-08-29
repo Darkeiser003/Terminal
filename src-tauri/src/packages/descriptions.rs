@@ -149,7 +149,6 @@ pub(super) fn action_description(id: &str) -> Option<&'static str> {
         "windows-hyperv-enable" | "windows-hyperv" => "Hipervisor integrado de Windows para máquinas virtuales y redes aisladas.",
         "windows-vmp-enable" => "Componente de virtualización que habilita WSL2 y otros hipervisores de Windows.",
         "windows-sandbox-enable" => "Entorno de Windows desechable y aislado para probar aplicaciones con seguridad.",
-        "vmware" | "vmware-download" | "vmware-update-download" => "Hipervisor de escritorio para crear y ejecutar máquinas virtuales profesionales.",
         "wsl-install-base" => "Ejecuta distribuciones Linux y sus herramientas directamente dentro de Windows.",
 
         "viewer-image" | "viewer-image-linux" => "Visor de imágenes y gráficos habituales, incluido SVG.",

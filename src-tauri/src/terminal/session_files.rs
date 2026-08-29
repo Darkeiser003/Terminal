@@ -84,6 +84,9 @@ pub struct SessionRequest<'a> {
     /// El texto del banner ya montado. Se recibe hecho para no atar este módulo
     /// a la lectura del hardware.
     pub banner: &'a str,
+    /// La shell solo imprime el banner inicial cuando la pestaña ocupa toda
+    /// la ventana; en una rejilla espera al repintado medido de xterm.
+    pub initial_banner: bool,
 }
 
 /// Escribe el banner y el archivo de inicialización de una pestaña.
@@ -166,6 +169,7 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
             manager_label: request.manager_label,
             platform: std::env::consts::OS,
             windows_manager: request.windows_manager,
+            initial_banner: request.initial_banner,
         },
     );
 

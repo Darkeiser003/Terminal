@@ -32,7 +32,7 @@ const valid = {
         { type: 'responsive-minimum', passed: true, configured: { width: 481, height: 271 }, requested: { width: 512, height: 281 }, applied: { width: 513, height: 282 } },
         { type: 'tab-isolation', passed: true, tabs: 3 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
-        { type: 'banner-ready', preview: ['WinSlim Terminal 1.4.4\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
+        { type: 'banner-ready', promptsVisible: true, preview: ['WinSlim Terminal 1.4.4\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
     ],
 };
 const directory = await mkdtemp(join(tmpdir(), 'lterminal-e2e-report-test-'));
@@ -46,6 +46,12 @@ async function run(name, report) {
 
 try {
     assert.equal((await run('valid', valid)).status, 0, 'un informe completo debe pasar');
+    assert.equal((await run('valid-direct-dependency-card', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'dependencies'
+            ? { ...event, subgroups: 0, entries: 1 }
+            : event),
+    })).status, 0, 'una tarjeta directa de dependencia también debe pasar');
     assert.notEqual((await run('missing-phase', {
         ...valid,
         phases: valid.phases.slice(1),
@@ -85,8 +91,14 @@ try {
             ? { ...event, preview: ['WinSlim Terminal 1.4.4\nPlaca ASUS 1 GB (60%)'] }
             : event),
     })).status, 0, 'un banner mezclado debe fallar');
+    assert.notEqual((await run('missing-prompt', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'banner-ready'
+            ? { ...event, promptsVisible: false }
+            : event),
+    })).status, 0, 'un banner sin prompt visible debe fallar');
 } finally {
     await rm(directory, { recursive: true, force: true });
 }
 
-console.log('Validador E2E probado: informe completo y diez rechazos correctos.');
+console.log('Validador E2E probado: informe completo y once rechazos correctos.');

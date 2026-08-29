@@ -107,6 +107,8 @@
   "terminal.helpFallback": "Aiuto{topic}: usa :help da un terminale o consulta i comandi interni.",
   "terminal.internalCommands": "Comandi interni: :config  :reload  :repl <nome>  :alias  :help [sezione]  :banner [opzioni]  :quick-actions [opzioni]",
   "terminal.commandList": ":config  :reload  :repl <nome>  :alias  :help  :banner  :quick-actions",
+  "terminal.creditDarkeiser": "Darkeiser003 · sviluppatore di WinSlim Terminal\nGrazie per aver visitato questo progetto. Segui lo sviluppo e scopri le novità:\nProfilo: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfrastructure-Web: {cloudProject}",
+  "terminal.creditChristian": "Christianlg97 · collaboratore di WinSlim Terminal\nGrazie per la collaborazione e per le conoscenze, il tempo e le risorse condivise, soprattutto su Windows.\nWinSlim è una versione di Windows ottimizzata con strumenti, personalizzazione e automazione proprie:\nProfilo: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
   "startup.errorTitle": "Il terminale non è riuscito ad avviare l’interfaccia",
   "startup.logHint": "Open Settings to find the log folder.",
   "settings.appearance": "Aspetto",

@@ -1516,9 +1516,22 @@ pub fn build_banner(
     // El ancho depende solo de las columnas reales del panel, no del orden en
     // que se abrió o repintó la pestaña. Así todos los paneles iguales reciben
     // exactamente la misma distribución.
-    let max_line_cols = std::cmp::min(available_cols, 88);
+    // La capa visual del banner comparte la casilla con el scrollbar de
+    // xterm (y sus márgenes internos). En una rejilla esas columnas no forman
+    // parte del ancho realmente pintable; reservar seis evita que el texto
+    // calculado para la rejilla se corte sin elipsis en el borde derecho.
+    let grid_safety_cols = if pane_count > 1 { 6 } else { 0 };
+    let max_line_cols = std::cmp::min(available_cols.saturating_sub(grid_safety_cols), 88);
     let max_sep = std::cmp::min(46, max_line_cols.saturating_sub(2));
-    let sep_len = max_sep.clamp(3, 46);
+    // En una casilla extrema (por ejemplo, mientras el divisor arrastra una
+    // ventana hasta una sola columna) ni siquiera caben tres guiones. Nunca
+    // generar una línea más ancha que el viewport: el separador se adapta al
+    // ancho real y conserva al menos un carácter cuando hay espacio.
+    let sep_len = if max_line_cols < 3 {
+        max_line_cols.max(1)
+    } else {
+        max_sep.clamp(3, 46)
+    };
     let separator = "-".repeat(sep_len);
 
     let mut session_rows = Vec::new();
@@ -1628,14 +1641,30 @@ pub fn build_banner(
     };
 
     let format_row = |label: &str, value: &str| {
-        let label = ellipsize(label, max_label_len);
-        let label_pad = max_label_len.saturating_sub(label.chars().count());
-        let max_val_len = max_line_cols.saturating_sub(max_label_len + 3);
+        // El formato habitual alinea la columna de valores con dos espacios,
+        // pero esos espacios no pueden convertirse en un desbordamiento en
+        // casillas de 1–3 columnas. Se calcula el presupuesto después de
+        // recortar la etiqueta y solo se inserta el hueco que realmente cabe.
+        let label_budget = max_label_len.min(max_line_cols);
+        let label = ellipsize(label, label_budget);
+        let label_len = label.chars().count();
+        let padding = max_label_len
+            .saturating_sub(label_len)
+            .min(max_line_cols.saturating_sub(label_len));
+        let base_len = label_len + padding;
+        let gap = if max_line_cols > base_len {
+            (max_line_cols - base_len).min(2)
+        } else {
+            0
+        };
+        let max_val_len = max_line_cols.saturating_sub(base_len + gap);
         let val_trimmed = ellipsize(value, max_val_len);
 
         format!(
-            "{accent}{label}{RESET}{}  {val_trimmed}",
-            " ".repeat(label_pad)
+            "{accent}{label}{RESET}{}{}{}",
+            " ".repeat(padding),
+            " ".repeat(gap),
+            val_trimmed
         )
     };
 
@@ -1657,11 +1686,7 @@ pub fn build_banner(
         // producía una cabecera difícil de leer y demasiado sensible al
         // ancho del panel. Cada línea se recorta por separado.
         if let Some((system_label, system_value)) = system {
-            let available_system = max_line_cols.saturating_sub(system_label.chars().count() + 2);
-            lines.push(format!(
-                "{accent}{system_label}{RESET}  {}",
-                ellipsize(system_value, available_system)
-            ));
+            lines.push(format_row(system_label, system_value));
         }
         for (label, value) in rows {
             if label == &t.t("banner.system", "Sistema") {
@@ -2140,7 +2165,9 @@ mod tests {
         // Cubre desde un panel estrecho hasta el viewport que puede producir
         // una ventana 8K con una celda de unos 8px: no probamos solo tamaños
         // de escritorio habituales, también los límites que usa el backend.
-        for columnas in [40u16, 55, 60, 80, 120, 200, 320, 480, 768, 960] {
+        for columnas in [
+            1u16, 2, 3, 4, 5, 40, 55, 60, 80, 120, 200, 320, 480, 768, 960,
+        ] {
             let banner = build_banner("cmd.exe", "LTerminal", columnas, 40, 1, &t);
             for linea in banner.lines() {
                 let ancho = crate::current_dir::strip_ansi(linea).chars().count();
@@ -2149,6 +2176,22 @@ mod tests {
                     "linea de {ancho} columnas con terminal de {columnas}: {linea:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn el_banner_de_ancho_extremo_no_desborda_ni_pierde_su_cabecera() {
+        let t = Translator::default();
+        for columnas in [1u16, 2, 3, 4, 5] {
+            let banner = build_banner("cmd.exe", "WinSlim Terminal", columnas, 40, 1, &t);
+            for linea in banner.lines() {
+                let ancho = crate::current_dir::strip_ansi(linea).chars().count();
+                assert!(ancho <= columnas as usize, "{columnas}: {linea:?}");
+            }
+            assert!(
+                banner.lines().next().is_some_and(|linea| !linea.is_empty()),
+                "{columnas}: {banner:?}"
+            );
         }
     }
 

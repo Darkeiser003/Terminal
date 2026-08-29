@@ -243,6 +243,14 @@
                     }
                     const bannerLike = /LTerminal|WinSlim|Sistema|System|CPU|Memoria|Memory|Disco|Disk|Kernel/i.test(data);
                     try {
+                        // El banner se escribe sobre la superficie visible y
+                        // no debe heredar una posición de scrollback antigua
+                        // (la pestaña original suele tener mucho más
+                        // historial que las nuevas). Llevar el viewport al
+                        // final *antes* de procesar el bloque permite que el
+                        // clear/home ANSI parta de una pantalla estable;
+                        // hacerlo después ocultaría precisamente ese banner.
+                        if (bannerLike) term.scrollToBottom();
                         term.write(data, () => {
                         const current = getTerminal(tabId);
                         if (!current?.element?.isConnected) {
@@ -272,6 +280,24 @@
                                 `fastfetch-visible-after-terminal:${tabId}`,
                             );
                         }
+                        // Un repintado sintético del banner empieza con un
+                        // clear/home ANSI y se dibuja deliberadamente en la
+                        // parte superior. Forzar el viewport al fondo justo
+                        // después de `term.write` lo ocultaba en la pestaña
+                        // original, que suele tener más historial que las
+                        // nuevas (especialmente tras un resize extremo). La
+                        // shell normal sí debe seguir llevando el prompt al
+                        // final; xterm ya conserva la posición correcta para
+                        // el bloque visual.
+                        // El banner sintético empieza con clear/home ANSI y
+                        // la versión visible vive en el overlay fijo. Después
+                        // de que xterm termina de procesar el lote hay que
+                        // llevar siempre el viewport al final: si solo se
+                        // hacía antes de `term.write`, el clear dejaba la
+                        // casilla desplazada arriba y el prompt quedaba fuera
+                        // de pantalla hasta que el usuario ejecutaba `clear`.
+                        // Esto también conserva el comportamiento normal de
+                        // una shell que acaba de producir salida.
                         try { current.scrollToBottom(); }
                         catch (error) { console.debug('[App] terminal closed while scrolling', error); }
                         resolve();
@@ -290,10 +316,25 @@
             }),
 
             // clear / cls: el backend entrega el marcador ANTES del repintado de
-            // la shell. Se resetean pantalla e historial y, acto seguido, llegan
-            // el banner y un único prompt nuevos. Al revés quedaba el prompt
-            // viejo de ConPTY flotando encima del banner.
-            api.onClear((tabId) => getTerminal(tabId)?.reset()),
+            // la shell. El reset también debe pasar por la misma cola que los
+            // bloques de salida: hacerlo directamente podía ejecutarse después
+            // del banner sintético y borrarlo justo cuando ya era visible.
+            api.onClear((tabId) => {
+                window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
+                const previous = outputQueues.get(tabId) ?? Promise.resolve();
+                const queued = previous.catch(() => undefined).then(() => {
+                    const term = getTerminal(tabId);
+                    if (!term?.element?.isConnected) return;
+                    try { term.reset(); }
+                    catch (error) { console.debug('[App] terminal closed while resetting', error); }
+                });
+                outputQueues.set(tabId, queued);
+                void queued.then(() => {
+                    if (outputQueues.get(tabId) !== queued) return;
+                    outputQueues.delete(tabId);
+                    window.dispatchEvent(new CustomEvent('winslim:terminal-output-idle', { detail: { tabId } }));
+                });
+            }),
 
             api.onExit((tabId, code) => {
                 const term = getTerminal(tabId);

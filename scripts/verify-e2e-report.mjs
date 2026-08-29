@@ -49,8 +49,13 @@ if (!contextMenu || !contextMenu.actions?.includes('cut') || !contextMenu.action
 }
 
 const dependencies = events.find((event) => event?.type === 'dependencies');
-if (!dependencies || dependencies.groups < 1 || dependencies.subgroups < 1 || dependencies.repeatedLoads < 3) {
-    throw new Error('El E2E no recorrió grupos, submenús y recargas de Entorno y dependencias.');
+// Algunos grupos de Windows quedan con una sola acción aplicable y se
+// representan como tarjetas directas, sin <details>/<summary>. En ese caso
+// `subgroups` es 0 pero `entries` demuestra que el contenido se inspeccionó.
+if (!dependencies || dependencies.groups < 1
+    || (dependencies.subgroups < 1 && dependencies.entries < 1)
+    || dependencies.repeatedLoads < 3) {
+    throw new Error('El E2E no recorrió grupos, acciones/submenús y recargas de Entorno y dependencias.');
 }
 
 const minimumSplit = events.find((event) => event?.type === 'multi-pane-minimum');
@@ -87,8 +92,14 @@ if (!responsive || responsive.panes < 2 || responsive.cases < 20
 const bannerReady = events.filter((event) => event?.type === 'banner-ready');
 if (bannerReady.length === 0) throw new Error('El E2E no dejó evidencia textual del banner.');
 const bannerHeader = /^(?:WinSlim|LTerminal).*Terminal\b/i;
-const mixedBannerLine = /^(?:Placa|Motherboard)\b.*(?:\bGB\b|\bMHz\b|%|GPU|Memoria|Memory|Fecha|Date)|^(?:GPU)\b.*(?:\bGB\b|Memoria|Memory|Disco|Disk|PC|Kernel|Fecha|Date)|^(?:Entorno|Environment)\b.*(?:WINSLIM|\bPC\b|Kernel|Placa|Motherboard|GPU)/i;
+// La GPU puede incluir legítimamente memoria dedicada («1 GB»). Solo es una
+// mezcla si invade otro campo del banner; tratar GB como corrupción hacía
+// fallar informes válidos de Windows.
+const mixedBannerLine = /^(?:Placa|Motherboard)\b.*(?:\bGB\b|\bMHz\b|%|GPU|Memoria|Memory|Fecha|Date)|^(?:GPU)\b.*(?:Memoria|Memory|Disco|Disk|PC|Kernel|Fecha|Date)|^(?:Entorno|Environment)\b.*(?:WINSLIM|\bPC\b|Kernel|Placa|Motherboard|GPU)/i;
 for (const event of bannerReady) {
+    if (event.promptsVisible !== true) {
+        throw new Error('El E2E confirmó el banner pero no dejó visible el prompt de la shell en todos los paneles.');
+    }
     const previews = Array.isArray(event.preview) ? event.preview : [];
     if (previews.length === 0) throw new Error('El E2E registró un banner sin contenido visible.');
     for (const preview of previews) {

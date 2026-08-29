@@ -149,11 +149,25 @@ pub fn run() {
                 // WebView2 puede ignorarlos en un host elevado. Aplicarlos al
                 // contexto usa CoreWebView2EnvironmentOptions y mantiene la
                 // creación automática y estable de la ventana principal.
-                window.additional_browser_args = Some(
+                let mut browser_args = String::from(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --remote-debugging-port=0"
-                        .into(),
+                     --remote-debugging-port=0",
                 );
+                // El binario `e2e:build` es de depuración y se ejecuta en
+                // máquinas recortadas/VM donde WebView2 puede abortar su
+                // proceso GPU antes de abrir DevTools. Solo afecta a la ruta
+                // explícita de WebDriver; las builds normales conservan GPU.
+                if cfg!(debug_assertions)
+                    || std::env::var("LTERMINAL_E2E_DISABLE_GPU").as_deref() == Ok("1")
+                {
+                    // Algunos WebView2 recortados arrancan el proceso GPU aun
+                    // con `--disable-gpu` y terminan antes de que EdgeDriver
+                    // pueda crear la sesiÃ³n. Mantener el GPU en proceso y
+                    // desactivar la composiciÃ³n evita ese crash solo en E2E.
+                    browser_args
+                        .push_str(" --disable-gpu --disable-gpu-compositing --in-process-gpu");
+                }
+                window.additional_browser_args = Some(browser_args);
                 log_info!(
                     "Automatización WebView2 preparada",
                     serde_json::json!({ "remoteDebuggingPort": "dynamic" })

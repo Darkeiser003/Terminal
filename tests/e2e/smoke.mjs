@@ -11,6 +11,10 @@ import { promisify } from 'node:util';
 process.env.WEBKIT_DISABLE_DMABUF_RENDERER ??= '1';
 process.env.TAURI_WEBVIEW_AUTOMATION ??= 'true';
 process.env.LTERMINAL_E2E_WEBDRIVER ??= '1';
+// WebView2 en Windows recortados puede abortar el proceso GPU antes de
+// publicar DevToolsActivePort. El binario de prueba recibe esta señal y usa
+// renderizado software; la build normal no cambia su aceleración.
+if (process.platform === 'win32') process.env.LTERMINAL_E2E_DISABLE_GPU ??= '1';
 
 const driverPath = process.env.TAURI_DRIVER ?? 'tauri-driver';
 const nativeDriver = process.env.TAURI_NATIVE_DRIVER;
@@ -131,6 +135,10 @@ let phaseStartedAt = smokeStartedAt;
 let phaseName = 'driver';
 const smokeReportPath = process.env.LTERMINAL_SMOKE_REPORT
     ?? join(tmpdir(), `lterminal-smoke-${smokeToken}.json`);
+const captureScreenshots = process.env.E2E_CAPTURE_SCREENSHOTS !== '0';
+const captureDirectory = process.env.E2E_CAPTURE_DIR
+    ?? join(tmpdir(), `winslim-terminal-e2e-captures-${smokeToken}`);
+if (captureScreenshots) await mkdir(captureDirectory, { recursive: true });
 const smokeReport = {
     schemaVersion: 1,
     token: smokeToken,
@@ -147,6 +155,7 @@ const smokeReport = {
     limits: { ...WINDOW_LIMITS, ratio: 0.25 },
     phases: phaseTimings,
     events: [],
+    captures: [],
     performance: {
         events: [],
         summary: {},
@@ -154,6 +163,8 @@ const smokeReport = {
     options: {
         forceShellRefresh: FORCE_SHELL_REFRESH,
         pollIntervalMs: POLL_INTERVAL_MS,
+        captureScreenshots,
+        captureDirectory: captureScreenshots ? captureDirectory : null,
     },
     status: 'running',
     reportPath: smokeReportPath,
@@ -188,6 +199,32 @@ async function request(path, method = 'GET', body) {
         throw new Error(`${method} ${path}: ${JSON.stringify(payload.value ?? payload)}`);
     }
     return payload.value;
+}
+
+// Las comprobaciones DOM confirman el estado lógico, pero no detectan una
+// trama parcialmente repintada en xterm. Guardamos capturas PNG en los
+// puntos de transición que históricamente daban problemas y las enlazamos al
+// informe para poder inspeccionarlas después de una ejecución real.
+async function captureScreenshot(label) {
+    if (!captureScreenshots || !sessionId) return null;
+    const safeLabel = String(label).replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 120) || 'capture';
+    const index = String(smokeReport.captures.length + 1).padStart(2, '0');
+    const path = join(captureDirectory, `${index}-${safeLabel}.png`);
+    try {
+        const encoded = await request(`/session/${sessionId}/screenshot`);
+        if (typeof encoded !== 'string' || encoded.length < 32) {
+            throw new Error(`respuesta de screenshot no válida (${typeof encoded})`);
+        }
+        await writeFile(path, Buffer.from(encoded, 'base64'));
+        smokeReport.captures.push({ label: safeLabel, path, elapsedMs: Date.now() - smokeStartedAt });
+        recordEvent('screenshot', { label: safeLabel, path });
+        process.stdout.write(`E2E captura: ${path}\n`);
+        return path;
+    } catch (error) {
+        recordEvent('screenshot-error', { label: safeLabel, error: error instanceof Error ? error.message : String(error) });
+        process.stderr.write(`E2E no pudo guardar la captura ${safeLabel}: ${error}\n`);
+        return null;
+    }
 }
 
 async function waitForDriver() {
@@ -591,6 +628,28 @@ async function sendTerminalLine(line, pane = null) {
     return sendTerminalKeys(line, pane, { enter: true, settle: true });
 }
 
+// La activación de una pestaña y el focus de xterm llegan en frames distintos
+// en WebView2 reducido. Un único reintento cubre esa ventana sin convertir una
+// respuesta ausente en un falso verde: el marcador sigue siendo obligatorio y
+// se comprueba en la casilla visible después de cada envío.
+async function sendAndWaitForMarker(marker, pane = null, timeoutMs = 15000) {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        await sendTerminalLine(`echo ${marker}`, pane);
+        try {
+            await waitUntil(async () => {
+                const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
+                return (await textOf(rows)).includes(marker);
+            }, timeoutMs, `respuesta PTY del marcador ${marker}`);
+            if (attempt > 0) recordEvent('pty-marker-retry', { marker, attempt: attempt + 1 });
+            return;
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError;
+}
+
 async function rightClick(element) {
     await request(`/session/${sessionId}/actions`, 'POST', {
         actions: [{
@@ -638,22 +697,127 @@ function bannerLooksReady(text) {
     // secciones universales que deben quedar en cada panel. En modo compacto
     // la sesión sustituye a la cabecera como evidencia de que el banner
     // completo terminó de escribirse.
-    return /CPU|Procesador|Processor/i.test(text)
-        && /Memoria|Memory|RAM/i.test(text)
-        && /Sistema|System|Entorno|Environment|Sesion|Session|Uptime|Tiempo activo/i.test(text);
+    // El usuario puede ocultar cualquier campo del banner desde Ajustes.
+    // No exigir CPU aquí: el E2E debe validar la integridad del bloque
+    // visible, no imponer el perfil completo ni fallar por una preferencia
+    // persistida de la instalación que ejecuta la prueba.
+    const fields = [
+        /Sistema|System/i, /PC|Equipo|Host/i, /Kernel/i,
+        /Entorno|Environment/i, /Placa|Motherboard/i,
+        /CPU|Procesador|Processor/i, /GPU/i,
+        /Memoria|Memory|RAM/i, /Disco|Disk|Storage/i,
+        /Uptime|Tiempo activo/i, /Fecha|Date/i,
+    ];
+    return /Memoria|Memory|RAM/i.test(text)
+        && /Sistema|System|Entorno|Environment/i.test(text)
+        && fields.filter((field) => field.test(text)).length >= 6;
+}
+
+// En rejilla el banner se mantiene además como una capa fija de la interfaz.
+// La evidencia funcional debe leer esa capa cuando xterm está mostrando el
+// buffer de una entrada larga (su scrollback puede quedar temporalmente vacío),
+// pero conserva el texto xterm cuando ya contiene una cabecera completa.
+async function visualBannerTexts(expected) {
+    const rows = await findAll('.cell:not(.hidden) .xterm-rows');
+    const texts = await Promise.all(rows.map((row) => textOf(row[elementKey])));
+    const overlays = await findAll('.cell:not(.hidden) [data-testid="banner-overlay"]');
+    const overlayTexts = await Promise.all(overlays.map((overlay) => textOf(overlay[elementKey])));
+    return texts.slice(0, expected).map((text, index) =>
+        overlayTexts[index] ? overlayTexts[index] : text,
+    );
+}
+
+async function rawTerminalTexts(expected) {
+    // El prompt puede pertenecer a una capa xterm que WebDriver no expone en
+    // `.xterm-rows` durante un repintado (el canvas sí lo muestra). Leer la
+    // celda completa conserva esa evidencia sin mezclarla con la decisión de
+    // qué capa aporta el banner.
+    const cells = await findAll('.cell:not(.hidden)');
+    const texts = await Promise.all(cells.map((cell) => textOf(cell[elementKey])));
+    return texts.slice(0, expected);
+}
+
+async function promptStates(expected) {
+    const hosts = await findAll('.tab-pane:not(.hidden)[data-prompt-visible]');
+    return Promise.all(hosts.slice(0, expected).map((host) => attribute(host[elementKey], 'data-prompt-visible')));
+}
+
+async function promptBannerGeometry(expected) {
+    const cells = await findAll('.cell:not(.hidden)');
+    return Promise.all(cells.slice(0, expected).map((cell) => request(
+        '/session/' + sessionId + '/execute/sync',
+        'POST',
+        {
+        script: `const cell = arguments[0];
+            const overlay = cell.querySelector('[data-testid="banner-overlay"]');
+            const host = cell.querySelector('.tab-pane');
+              const rows = cell.querySelector('.xterm-rows');
+              const viewport = cell.querySelector('.xterm-viewport');
+              const cursorNode = cell.querySelector('.xterm-cursor');
+            const bannerRect = overlay?.getBoundingClientRect();
+            const cursorRect = cursorNode?.getBoundingClientRect();
+            const promptCandidates = rows ? [...rows.children]
+                .filter((node) => /^(?:PS\\s+)?(?:[A-Za-z]:\\\\.+[>❯$#]|[^\\s@]+@[^\\s:]+:.+[❯$#]|(?:~|\\/).*[❯$#])(?:.*)?$/u.test((node.textContent || '').trim()))
+                  .map((node, index) => { const rect = node.getBoundingClientRect(); const style = getComputedStyle(node); return { index, text: (node.textContent || '').trim(), top: Math.round(rect.top), bottom: Math.round(rect.bottom), display: style.display, visibility: style.visibility, opacity: style.opacity }; })
+                .sort((left, right) => right.top - left.top) : [];
+            const prompt = promptCandidates[0];
+            const cursorViewportRow = Number.parseInt(host?.dataset.promptCursorViewportRow ?? '', 10);
+            const bannerRows = Number.parseInt(host?.dataset.promptBannerRows ?? '', 10);
+            // El overlay ocupa el bloque de texto más el separador/padding de
+            // la rejilla. La fila lógica de xterm es la única evidencia fiable
+            // cuando WebView2 deja xterm-rows con coordenadas de un frame
+            // anterior; si cae dentro de esa reserva el prompt queda detrás
+            // del fastfetch aunque el DOM todavía contenga su texto.
+            const logicalSafe = Number.isFinite(cursorViewportRow)
+                && Number.isFinite(bannerRows)
+                && cursorViewportRow >= bannerRows + 2;
+            const visualSafe = Boolean(bannerRect && cursorRect
+                && cursorRect.top >= bannerRect.bottom - 1);
+            return {
+                overlap: Boolean(bannerRect && prompt && prompt.top < bannerRect.bottom - 1),
+                logicalSafe: logicalSafe || visualSafe,
+                visualSafe,
+                bannerBottom: bannerRect ? Math.round(bannerRect.bottom) : null,
+                promptTop: prompt?.top ?? null,
+                  cursorRect: cursorRect ? { top: Math.round(cursorRect.top), bottom: Math.round(cursorRect.bottom) } : null,
+                  promptCandidates,
+                  cursorRow: host?.dataset.promptCursorRow ?? null,
+                  cursorViewportRow: host?.dataset.promptCursorViewportRow ?? null,
+                  baseY: host?.dataset.promptBaseY ?? null,
+                  viewportRows: host?.dataset.promptViewportRows ?? null,
+                  viewportScrollTop: viewport ? Math.round(viewport.scrollTop) : null,
+                  rowsRect: rows ? (() => { const rect = rows.getBoundingClientRect(); return { top: Math.round(rect.top), bottom: Math.round(rect.bottom), height: Math.round(rect.height) }; })() : null,
+                bannerRows: host?.dataset.promptBannerRows ?? null,
+            };`,
+        args: [{ [elementKey]: cell[elementKey] }],
+        },
+    )));
 }
 
 async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
     const startedAt = Date.now();
     const deadline = startedAt + timeoutMs;
     let lastSnapshot = [];
+    let lastRawSnapshot = [];
+    let lastPromptState = [];
     while (Date.now() < deadline) {
         const panes = await visiblePanes();
         const rows = await findAll('.cell:not(.hidden) .xterm-rows');
         if (panes.length >= expected && rows.length >= expected) {
-            const texts = await Promise.all(rows.map((row) => textOf(row[elementKey])));
+            const texts = await visualBannerTexts(expected);
+            const rawTexts = await rawTerminalTexts(expected);
+            const promptState = await promptStates(expected);
             lastSnapshot = texts;
+            lastRawSnapshot = rawTexts;
+            lastPromptState = promptState;
             const visibleTexts = texts.slice(0, expected);
+            // El banner puede vivir en una capa visual separada del xterm;
+            // comprobar el prompt sobre el texto crudo evita que esa capa
+            // oculte la evidencia de que la shell sigue lista para escribir.
+            const promptsVisible = rawTexts.length >= expected
+                && (rawTexts.every(promptLooksVisible)
+                    || (promptState.length >= expected
+                        && promptState.every((value) => value === 'true')));
             const hasCompleteHeader = visibleTexts.some((text) =>
                 /LTerminal|WinSlim|Terminal/i.test(text)
                 && /Sistema|System/i.test(text)
@@ -673,7 +837,7 @@ async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
             );
             const minimalBanner = visibleTexts.every((text) =>
                 /LTerminal|WinSlim|Terminal/i.test(text)
-                && /CPU|Procesador|Processor/i.test(text)
+                && /Memoria|Memory|RAM|Sistema|System|CPU|Procesador|Processor/i.test(text)
             );
             const partialBanner = visibleTexts.every((text) => {
                 const markers = [
@@ -689,7 +853,13 @@ async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
                 ].filter((marker) => marker.test(text)).length;
                 return markers >= 2 && /❯|\$|#|>/.test(text);
             });
-            const contentReady = visibleTexts.every(bannerLooksReady) || minimalBanner || partialBanner;
+            // No considerar listo un panel mientras conserve una cola de una
+            // línea envuelta. Las aserciones de cabeceras llegan después y
+            // antes el smoke podía devolver aquí un estado "partial" verde.
+            const visualAnomalies = visibleTexts.map(bannerTextAnomalies);
+            const contentReady = visualAnomalies.every((items) => items.length === 0)
+                && promptsVisible
+                && (visibleTexts.every(bannerLooksReady) || minimalBanner || partialBanner);
             if (contentReady && (hasCompleteHeader || compactBanner || tinyBanner || minimalBanner || partialBanner)) {
                 if (geometry.panes.length >= expected
                     && geometry.panes.slice(0, expected).every((pane) =>
@@ -700,6 +870,7 @@ async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
                         expected,
                         compact: !hasCompleteHeader,
                         partial: (minimalBanner || partialBanner) && !compactBanner && !hasCompleteHeader,
+                        promptsVisible,
                         preview: visibleTexts.map((text) => text.slice(-1200)),
                         geometry,
                     });
@@ -710,7 +881,7 @@ async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
     const geometry = await contentGeometry().catch(() => null);
-    throw new Error(`El banner no quedó listo en ${expected} panel(es) tras ${timeoutMs} ms: ${JSON.stringify({ lastSnapshot, geometry }).slice(0, 1800)}`);
+    throw new Error(`El banner no quedó listo en ${expected} panel(es) tras ${timeoutMs} ms: ${JSON.stringify({ lastSnapshot, lastRawSnapshot, lastPromptState, geometry }).slice(0, 2600)}`);
 }
 
 function firstNonEmptyTerminalLine(text) {
@@ -718,6 +889,20 @@ function firstNonEmptyTerminalLine(text) {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .find(Boolean) ?? '';
+}
+
+function promptLooksVisible(text) {
+    const lines = String(text ?? '')
+        .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+        .replace(/\x1b[78]/g, '')
+        .replace(/\r/g, '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+    // El prompt puede llevar una orden parcialmente escrita, pero siempre
+    // conserva su terminador. La línea debe empezar por una ruta Windows,
+    // `PS`, una ruta POSIX o el formato usuario@host de Linux.
+    return lines.some((line) => /^(?:PS\s+)?(?:[A-Za-z]:\\.+[>❯$#]|[^\s@]+@[^\s:]+:.+[❯$#]|(?:~|\/).*[❯$#])(?:.*)?$/u.test(line));
 }
 
 function bannerTextAnomalies(text) {
@@ -731,12 +916,24 @@ function bannerTextAnomalies(text) {
     if (headers.length !== 1) anomalies.push(`cabeceras=${headers.length}`);
     const suspicious = [
         /^(?:Placa|Motherboard)\b.*(?:\bGB\b|\bMHz\b|%|GPU|Memoria|Memory|Fecha|Date)/i,
-        /^(?:GPU)\b.*(?:\bGB\b|Memoria|Memory|Disco|Disk|PC|Kernel|Fecha|Date)/i,
+        // La GPU puede incluir legítimamente su memoria dedicada («1 GB»).
+        // Solo es una mezcla si invade otro campo del banner.
+        /^(?:GPU)\b.*(?:Memoria|Memory|Disco|Disk|PC|Kernel|Fecha|Date)/i,
         /^(?:Entorno|Environment)\b.*(?:WINSLIM|\bPC\b|Kernel|Placa|Motherboard|GPU)/i,
         /^(?:Fecha(?: y hora)?|Date(?: and time)?)\b.*(?:Sistema|System|CPU|Memoria|Memory|Disco|Disk|PC|Kernel|GPU)/i,
     ];
     for (const line of lines) {
         if (suspicious.some((pattern) => pattern.test(line))) anomalies.push(`línea mezclada: ${line}`);
+    }
+    // Una continuación de una línea envuelta del banner anterior puede
+    // parecer texto perfectamente válido y dejar todos los encabezados
+    // correctos. El caso observado en las capturas era exactamente
+    // «s (1 GB)»: la etiqueta GPU había quedado partida al reducir la rejilla.
+    // No aceptar estos fragmentos evita que el smoke dé verde a una pantalla
+    // que todavía tiene residuos visuales.
+    const orphanContinuation = /^(?:[a-z]\s+\(\d+(?:\.\d+)?\s+GB\)|[a-z]\)|\d+(?:\.\d+)?\s+GB\))/i;
+    for (const line of lines) {
+        if (orphanContinuation.test(line)) anomalies.push(`continuación huérfana: ${line}`);
     }
     // Un prompt dentro del bloque significa que el repintado restauró el
     // cursor antes de terminar de escribir el banner. Es el síntoma que las
@@ -752,6 +949,22 @@ function bannerTextAnomalies(text) {
     return anomalies;
 }
 
+function inputInsideBanner(text, marker) {
+    const lines = String(text ?? '')
+        .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+        .replace(/\x1b[78]/g, '')
+        .replace(/\r/g, '')
+        .split('\n');
+    const markerLine = lines.findIndex((line) => line.includes(marker));
+    if (markerLine < 0) return false;
+    const field = /^(?:Sistema|System|PC|Equipo|Host|Kernel|Entorno|Environment|Placa|Motherboard|CPU|Procesador|Processor|GPU|Memoria|Memory|RAM|Disco|Disk|Storage|Uptime|Tiempo activo|Fecha(?: y hora)?|Date(?: and time)?)\b/i;
+    const lastBannerField = lines.reduce((last, line, index) => field.test(line.trim()) ? index : last, -1);
+    // El eco de la orden es correcto después del bloque informativo. Si aparece
+    // antes de su último campo, la shell recibió la tecla con el cursor dentro
+    // del fastfetch (el fallo que las capturas manuales mostraron).
+    return lastBannerField >= 0 && markerLine <= lastBannerField;
+}
+
 /**
  * Comprueba la evidencia visual que el smoke anterior dejaba pasar como
  * «partial»: una casilla que empieza por GPU/Uptime puede contener datos
@@ -765,23 +978,39 @@ async function assertBannerHeaders(expected, label) {
             const panes = await visiblePanes();
             const rows = await findAll('.cell:not(.hidden) .xterm-rows');
             if (panes.length !== expected || rows.length < expected) return false;
-            const texts = await Promise.all(rows.slice(0, expected).map((row) => textOf(row[elementKey])));
+            const texts = await visualBannerTexts(expected);
+            const rawTexts = await rawTerminalTexts(expected);
+            const promptGeometry = await promptBannerGeometry(expected);
             const headers = texts.map(firstNonEmptyTerminalLine);
             const modes = texts.map((text) => /Hardware:|Sesión:|Session:/i.test(text) ? 'full' : 'compact');
             const anomalies = texts.map(bannerTextAnomalies);
-            last = { panes: panes.length, rows: rows.length, headers, modes, anomalies };
+            last = { panes: panes.length, rows: rows.length, headers, modes, anomalies, promptGeometry };
             const allStartAtHeader = headers.every((header) => /^(?:WinSlim|LTerminal).*Terminal/i.test(header));
             const forbiddenContinuation = /^(?:GPU|Memoria|Memory|Uptime|Tiempo activo|Disco|Disk|PC|Kernel|Entorno|Environment)\b/i;
             const sameMode = new Set(modes).size <= 1;
             return allStartAtHeader
                 && !headers.some((header) => forbiddenContinuation.test(header))
+                && rawTexts.every(promptLooksVisible)
+                // `.xterm-rows` es la capa de accesibilidad de xterm y puede
+                // conservar coordenadas antiguas mientras el canvas ya ha
+                // desplazado el prompt (especialmente tras CSI L/resize).
+                // Conservamos la geometría en el informe para diagnóstico,
+                // pero la evidencia de visibilidad es `rawTexts`/canvas; no
+                // convertir una coordenada DOM obsoleta en un falso fallo de
+                // la build.
+                && promptGeometry.every(({ promptTop, logicalSafe }) => promptTop !== null && logicalSafe)
                 && anomalies.every((items) => items.length === 0)
                 && sameMode;
         }, 5000, `${label}: cabeceras de banner`);
     } catch (error) {
         throw new Error(`${label}: cabeceras inconsistentes (${JSON.stringify(last)})`, { cause: error });
     }
-    recordEvent('banner-headers-consistent', { label, expected, headers: last.headers });
+    recordEvent('banner-headers-consistent', {
+        label,
+        expected,
+        headers: last.headers,
+        promptGeometry: last.promptGeometry,
+    });
     return last;
 }
 
@@ -795,7 +1024,10 @@ async function assertTinyPanesClean(expected, label) {
         // Por debajo de 12 filas el backend no pinta banner. Solo aceptamos
         // el prompt/espacio; una cola de Sesión, GPU o una segunda cabecera es
         // precisamente el residuo que este caso intenta detectar.
-        return texts.every((text) => !/(?:WinSlim|LTerminal).*Terminal|Sistema|System|CPU|Memoria|Memory|Uptime|Tiempo activo|Disco|Disk|GPU|Placa|Motherboard|Kernel|Entorno|Environment/i.test(text));
+        return texts.every((text) =>
+            !/(?:WinSlim|LTerminal).*Terminal|Sistema|System|CPU|Memoria|Memory|Uptime|Tiempo activo|Disco|Disk|GPU|Placa|Motherboard|Kernel|Entorno|Environment/i.test(text)
+            && !bannerTextAnomalies(text).some((item) => item.startsWith('continuación huérfana')),
+        );
     }, 5000, `${label}: casillas bajas sin residuos`);
     recordEvent('banner-hidden-tiny-pane', { expected, preview: last });
 }
@@ -1215,7 +1447,15 @@ try {
     // WebDriver puede saltarse los límites nativos si se le pide un tamaño
     // superior; no lo usamos como prueba de usuario. Medimos exactamente el
     // techo soportado por la configuración: 7680x4320 (8K).
-    const maximumRect = await resizeWindow(WINDOW_LIMITS.maxWidth, WINDOW_LIMITS.maxHeight);
+    // En monitores menores que 8K el driver puede aceptar el rectÃ¡ngulo
+    // mÃ¡ximo lÃ³gico aunque el compositor lo reduzca fuera de la pantalla.
+    // AquÃ­ solo validamos los lÃ­mites nativos; la geometrÃ­a del banner se
+    // comprueba en tamaÃ±os visibles y reales inmediatamente despuÃ©s.
+    const maximumRect = await resizeWindow(
+        WINDOW_LIMITS.maxWidth,
+        WINDOW_LIMITS.maxHeight,
+        { waitForBanner: false },
+    );
     assertWindowBounds(maximumRect, 'El máximo configurado');
     await resizeWindow(980, 640);
 
@@ -1253,11 +1493,7 @@ try {
             }
             return false;
         }, 5000, `activación de pestaña ${index + 1}`);
-        await sendTerminalLine(`echo ${tabMarkers[index]}`);
-        await waitUntil(async () => {
-            const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-            return (await textOf(rows)).includes(tabMarkers[index]);
-        }, 15000, `respuesta PTY de pestaña ${index + 1}`);
+        await sendAndWaitForMarker(tabMarkers[index]);
     }
     for (let index = 0; index < tabMarkers.length; index += 1) {
         const freshTabs = await findAll('.tab');
@@ -1270,12 +1506,11 @@ try {
             }
             return false;
         }, 5000, `vista visible de pestaÃ±a ${index + 1}`);
-        await sendTerminalLine(`echo ${tabMarkers[index]}`);
+        await sendAndWaitForMarker(tabMarkers[index]);
         await waitUntil(async () => {
             const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
             const text = await textOf(rows);
-            return text.includes(tabMarkers[index])
-                && tabMarkers.every((marker, markerIndex) => markerIndex === index || !text.includes(marker));
+            return tabMarkers.every((marker, markerIndex) => markerIndex === index || !text.includes(marker));
         }, 10000, `aislamiento de salida en pestaña ${index + 1}`);
     }
     recordEvent('tab-isolation', { tabs: tabMarkers.length, passed: true });
@@ -1290,6 +1525,26 @@ try {
         const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
         return (await textOf(rows)).includes('LTERMINAL_E2E_COMMAND_OK');
     }, 15000, 'respuesta de la terminal');
+    // Easter-eggs de autoría: se prueban las formas públicas que no llevan
+    // `:` para garantizar que el parser no dependa de mayúsculas ni del `@`.
+    await sendTerminalLine('@Darkeiser003');
+    await waitUntil(async () => {
+        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
+        const text = await textOf(rows);
+        return text.includes('https://github.com/Darkeiser003')
+            && text.includes('https://github.com/Darkeiser003/Infraestructura-Web');
+    }, 10000, 'easter-egg de Darkeiser003');
+    await sendTerminalLine('CHRISTIANLG97');
+    await waitUntil(async () => {
+        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
+        const text = await textOf(rows);
+        return text.includes('https://github.com/Christianlg97')
+            && text.includes('https://github.com/Christianlg97/WINSLIM_CENTER_STORE');
+    }, 10000, 'easter-egg de Christianlg97');
+    recordEvent('author-easter-eggs', {
+        aliases: ['Darkeiser003', 'darkeiser003', '@darkeiser003', '@Darkeiser003', 'christianlg97', '@christianlg97'],
+        passed: true,
+    });
 
     markPhase('acciones concurrentes');
     // Varias detecciones pueden terminar en cualquier orden. Los clics se
@@ -1646,19 +1901,15 @@ try {
     await click(await findWhenReady('[data-testid="toolbar-dependencies"]'));
     await findWhenReady('[role="dialog"] .filters');
     await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0, 20000, 'grupos de dependencias');
-    // `load()` pinta primero el inventario rápido y lanza después una
-    // re-detección lenta en segundo plano. Si se recorren los <details>
-    // mientras esa respuesta sustituye `actions`, Svelte puede cerrar o
-    // reconstruir el grupo que WebDriver iba a pulsar y WebKit responde
-    // "element not interactable". Esperar a que el botón deje de estar
-    // deshabilitado hace estable el DOM que se va a inspeccionar.
-    await waitUntil(async () => {
-        const refreshButton = await find('[data-testid="dependency-refresh"]');
-        return (await attribute(refreshButton, 'disabled')) === null;
-    // WSL y los gestores de paquetes usan timeouts deliberados. La lista ya
-    // está pintada; este margen corresponde solo a su verificación exacta.
-    }, 90000, 'fin de la re-detección de dependencias');
-    await findWhenReady('.dependency-actions');
+    // `load()` pinta primero el inventario rápido y completa la detección en
+    // segundo plano. La actualización ya no se expone como botón: evitar una
+    // segunda acción que hacía competir a WebDriver con la sustitución de la
+    // lista también elimina un estado visual sin utilidad para el usuario.
+    await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0,
+        90000, 'fin de la detección de dependencias');
+    if ((await findAll('[data-testid="dependency-refresh"]')).length > 0) {
+        throw new Error('Dependencias todavía expone el botón de actualización eliminado');
+    }
     const dependencyGroups = await findAll('[data-testid="dependency-group"]');
     for (const group of dependencyGroups) {
         if ((await attribute(group[elementKey], 'open')) !== null) {
@@ -1667,7 +1918,7 @@ try {
     }
     const dependencyText = (await Promise.all(dependencyGroups.map((item) => textOf(item[elementKey])))).join('\n');
     // Linux ofrece compatibilidad Windows (Wine/Bottles/CrossOver), mientras
-    // Windows ofrece virtualización nativa (Hyper-V/QEMU/VirtualBox/VMware).
+    // Windows ofrece virtualización nativa (Hyper-V/QEMU/VirtualBox).
     // El E2E debe comprobar el contrato de la plataforma, no una etiqueta fija.
     const nativeWindows = process.platform === 'win32';
     const platformGroupPattern = nativeWindows
@@ -1689,15 +1940,20 @@ try {
     if (!compatibilityId) throw new Error(`No se pudo localizar el grupo de ${platformGroupLabel}`);
     await click(compatibilityId);
     const subgroupSummaries = await findAllWithin(compatibilityId, '[data-testid="dependency-subgroup"] > summary');
-    const subgroupText = (await Promise.all(subgroupSummaries.map((item) => textOf(item[elementKey])))).join('\n');
+    // Una herramienta con una sola acción se muestra como tarjeta directa,
+    // no como un acordeón vacío. El contrato debe inspeccionar ambas formas:
+    // en Windows recortado Hyper-V/Sandbox suelen quedar precisamente en esa
+    // representación porque sus acciones de actualizar/comprobar no aplican.
+    const platformEntries = await findAllWithin(compatibilityId, '[data-testid="dependency-subgroup"], .tool');
+    const subgroupText = (await Promise.all(platformEntries.map((item) => textOf(item[elementKey])))).join('\n');
     const hasNamedTool = nativeWindows
-        ? /Hyper-V|Virtual Machine Platform|Windows Sandbox|QEMU|VirtualBox|VMware/i.test(subgroupText)
+        ? /Hyper-V|Virtual Machine Platform|Windows Sandbox|QEMU|VirtualBox/i.test(subgroupText)
         : /Bottles|Steam|Lutris|QEMU|Wine|Proton|MinGW|CrossOver/i.test(subgroupText);
-    const hasDescription = /Gestiona|Ejecuta|Instala|Organiza|Proporciona|Interfaz|Traduce|Compila|Alternativa|Manages|Runs|Installs|Organizes|Provides|Interface|Translates|Builds|Alternative/i.test(subgroupText);
+    const hasDescription = /Gestiona|Ejecuta|Instala|Organiza|Proporciona|Interfaz|Traduce|Compila|Alternativa|Configura|Activa|Habilita|Plataforma|máquina|Manages|Runs|Installs|Organizes|Provides|Interface|Translates|Builds|Alternative|Configure|Enable|Platform|machine/i.test(subgroupText);
     if (!hasNamedTool || !hasDescription) {
         throw new Error(`${platformGroupLabel} no muestra programa y descripción en sus submenús`);
     }
-    if (subgroupSummaries.length === 0) throw new Error(`${platformGroupLabel} no contiene submenús`);
+    if (platformEntries.length === 0) throw new Error(`${platformGroupLabel} no contiene acciones visibles`);
     if (!nativeWindows) {
         // Array.find no espera promesas: localizar CrossOver con el mismo patrón
         // explícito usado para el grupo evita que vuelva a degradarse a una fila
@@ -1769,6 +2025,7 @@ try {
     recordEvent('dependencies', {
         groups: dependencyGroups.length,
         subgroups: subgroupNames.length,
+        entries: platformEntries.length,
         repeatedLoads: 3,
         platformGroup: platformGroupLabel,
     });
@@ -1807,6 +2064,7 @@ try {
         const actual = await resizeWindow(width, height, { waitForBanner: false });
         const banner = await waitForBannerPanes(target, 20000);
         await assertBannerHeaders(target, `rejilla ${target} paneles tras ${currentPaneCount}`);
+        await captureScreenshot(`transicion-${currentPaneCount}-a-${target}-paneles`);
         paneTransitions.push({
             from: currentPaneCount,
             to: target,
@@ -1830,6 +2088,7 @@ try {
     }
     const burstBanner = await waitForBannerPanes(4, 20000);
     await assertBannerHeaders(4, 'rejilla 4 paneles tras clics concurrentes');
+    await captureScreenshot('rejilla-4-estable-clics-concurrentes');
     paneTransitions.push({ from: 4, to: 4, burst: true, elapsedMs: burstBanner.elapsedMs });
     const stablePaneCount = currentPaneCount;
     const finalCount = await waitForPaneCount(stablePaneCount, 5000);
@@ -1853,8 +2112,7 @@ try {
     // el repintado pendiente cuando la shell haya terminado de ecoar la orden.
     await sendTerminalKeys('', focusedPane, { enter: true, settle: true });
     await waitForBannerPanes(stablePaneCount, 20000);
-    const raceRows = await findAll('.cell:not(.hidden) .xterm-rows');
-    const raceTexts = await Promise.all(raceRows.slice(0, stablePaneCount).map((row) => textOf(row[elementKey])));
+    const raceTexts = await visualBannerTexts(stablePaneCount);
     const raceHeaders = raceTexts.map(firstNonEmptyTerminalLine);
     if (!raceHeaders.every((header) => /^(?:WinSlim|LTerminal).*Terminal/i.test(header))) {
         throw new Error(`El repintado con entrada larga dejó una cabecera desplazada: ${JSON.stringify(raceHeaders)}`);
@@ -1862,11 +2120,27 @@ try {
     if (raceHeaders.some((header) => header.includes('LTERMINAL_LONG_INPUT'))) {
         throw new Error(`La entrada de la shell atravesó el fastfetch: ${JSON.stringify(raceHeaders)}`);
     }
+    const leakedInput = raceTexts
+        .map((text, index) => inputInsideBanner(text, 'LTERMINAL_LONG_INPUT') ? index + 1 : null)
+        .filter((index) => index !== null);
+    // No usar la capa visual como sustituto de esta comprobación: el overlay
+    // garantiza que el banner siga visible, pero no puede ocultar que xterm
+    // haya recibido el eco en una fila reservada. Leemos siempre el buffer
+    // crudo para detectar la escritura real de la shell.
+    const rawRaceTexts = await rawTerminalTexts(stablePaneCount);
+    const rawLeaks = rawRaceTexts
+        .map((text, index) => inputInsideBanner(text, 'LTERMINAL_LONG_INPUT') ? index + 1 : null)
+        .filter((index) => index !== null);
+    leakedInput.push(...rawLeaks.filter((index) => !leakedInput.includes(index)));
+    if (leakedInput.length > 0) {
+        throw new Error(`La entrada larga quedó dentro del fastfetch en panel(es): ${leakedInput.join(', ')}`);
+    }
     recordEvent('banner-input-race', {
         panes: stablePaneCount,
         inputLength: longInput.length,
         headers: raceHeaders,
     });
+    await captureScreenshot('entrada-larga-resize-repintado');
 
     // No hay una lista finita de resoluciones «intermedias» en el sistema:
     // se prueban proporciones representativas respecto al máximo real que
@@ -1989,6 +2263,7 @@ try {
         throw new Error('El banner no dejó texto reconocible tras redimensionar varias veces');
     }
     process.stdout.write(`E2E banner tamaños OK: ${bannerSizes.join(', ')}\n`);
+    await captureScreenshot('fastfetch-final-tras-redimensionados');
 
     if (panelVisibilityInitial) {
         await click(await findWhenReady('[data-testid="toolbar-settings"]'));
@@ -2018,6 +2293,11 @@ try {
 } catch (error) {
     smokeReport.status = 'failed';
     smokeReport.error = error instanceof Error ? error.stack ?? error.message : String(error);
+    // Una captura en el punto exacto del fallo es imprescindible para
+    // distinguir un problema de lógica DOM de un repintado roto de xterm.
+    // Se conserva junto al informe cuando el smoke falla, igual que el perfil
+    // WebView2 de diagnóstico.
+    await captureScreenshot('fallo');
     throw error;
 } finally {
     if (sessionId) await request(`/session/${sessionId}`, 'DELETE').catch(() => {});

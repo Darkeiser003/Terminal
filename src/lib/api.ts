@@ -159,7 +159,7 @@ export const refreshBanner = (
     paneCount: number,
     cursorRow?: number,
     cursorCol?: number,
-) => invokeLogged<boolean>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow, cursorCol });
+) => invokeLogged<{ applied: boolean; text: string }>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow, cursorCol });
 
 // ---- Entornos ----
 

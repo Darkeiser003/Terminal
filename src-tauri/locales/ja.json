@@ -107,6 +107,8 @@
   "terminal.helpFallback": "ヘルプ{topic}: ターミナルで :help を使用するか、内部コマンドを確認してください。",
   "terminal.internalCommands": "内部コマンド: :config  :reload  :repl <名前>  :alias  :help [セクション]  :banner [オプション]  :quick-actions [オプション]",
   "terminal.commandList": ":config  :reload  :repl <名前>  :alias  :help  :banner  :quick-actions",
+  "terminal.creditDarkeiser": "Darkeiser003 · WinSlim Terminal 開発者\nこのプロジェクトをご覧いただきありがとうございます。開発と更新情報はこちら：\nプロフィール: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfrastructure-Web: {cloudProject}",
+  "terminal.creditChristian": "Christianlg97 · WinSlim Terminal 協力者\nこのプロジェクトや他のプロジェクトへの協力、特に Windows の知識、時間、リソースに感謝します。\nWinSlim は独自のツール、カスタマイズ、自動化を備えた最適化 Windows です：\nプロフィール: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
   "startup.errorTitle": "ターミナルはインターフェースを起動できませんでした",
   "startup.logHint": "Open Settings to find the log folder.",
   "settings.appearance": "外観スタイル",

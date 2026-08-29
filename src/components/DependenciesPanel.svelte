@@ -160,20 +160,17 @@
         )
     );
 
-    /** Se está re-detectando el entorno en segundo plano. La lista ya está a la
-     *  vista; esto solo marca que los contadores pueden cambiar. */
-    let refreshing = $state(false);
     /** Evita que una detección lenta de una apertura anterior pise la lista de
      *  una apertura posterior del panel. */
     let loadSerial = 0;
     /** Las reaperturas se unen a la detección que ya está en curso. Lanzar una
      *  segunda competiría por WSL y los gestores de paquetes; descartarla sin
-     *  esperar, en cambio, dejaba `refreshing` bloqueado al cambiar el serial. */
+     *  esperar, en cambio, dejaría una respuesta huérfana al cambiar el serial. */
     let refreshInFlight: ReturnType<typeof api.refreshInstallActions> | null = null;
     // La detección completa ejecuta sondas externas y puede tardar decenas de
     // segundos en Windows. Al reabrir el panel poco después no hay motivo para
-    // repetirla: la lista visible sigue siendo válida y el botón permite forzar
-    // una comprobación cuando el usuario acaba de instalar algo.
+    // repetirla: la lista visible sigue siendo válida y la detección se renueva
+    // automáticamente cuando caduca esta ventana.
     const REFRESH_CACHE_MS = 60_000;
     let refreshedAt = 0;
 
@@ -204,17 +201,15 @@
     /** Re-detecta el entorno y sustituye la lista si algo ha cambiado. Un fallo
      *  aquí no borra lo que ya se está enseñando: lo de antes sigue siendo
      *  válido, solo puede estar desactualizado. */
-    async function refresh(force = false): Promise<boolean> {
+    async function refresh(): Promise<boolean> {
         const serial = loadSerial;
         if (
-            !force &&
             !refreshInFlight &&
             refreshedAt > 0 &&
             Date.now() - refreshedAt < REFRESH_CACHE_MS
         ) {
             return true;
         }
-        refreshing = true;
         const request = refreshInFlight ?? api.refreshInstallActions();
         refreshInFlight = request;
         let ok = true;
@@ -231,7 +226,6 @@
         } finally {
             if (refreshInFlight === request) {
                 refreshInFlight = null;
-                refreshing = false;
             }
         }
         return ok;
@@ -321,11 +315,9 @@
     subtitle={error ||
         (loading && actions.length === 0
             ? app.t('deps.loading', 'Detectando…')
-            : refreshing
-              ? app.t('deps.refreshing', 'Actualizando detección…')
-              : app.t('deps.onlyApplicable', 'Solo se muestran acciones aplicables a este sistema.'))}
+            : app.t('deps.onlyApplicable', 'Solo se muestran acciones aplicables a este sistema.'))}
     error={Boolean(error)}
-    count={loading || refreshing ? undefined : visibleComponentCount}
+    count={loading ? undefined : visibleComponentCount}
     countLabel={app
         .t('deps.visibleComponents', '{count} visible components')
         .replace('{count}', String(visibleComponentCount))}
@@ -343,20 +335,6 @@
             <option value="missing">{app.t('deps.filterMissing', 'No instaladas')}</option>
         </select>
     </div>
-    <div class="dependency-actions">
-        <div class="dependency-buttons">
-            <button
-                type="button"
-                class="run secondary"
-                data-testid="dependency-refresh"
-                disabled={refreshing || running !== ''}
-                onclick={() => void refresh(true)}
-            >
-                {refreshing ? app.t('deps.refreshing', 'Actualizando…') : app.t('deps.refresh', 'Actualizar detección')}
-            </button>
-        </div>
-    </div>
-
     {#if !loading && actions.length === 0}
         <div class="empty">
             {app.t('deps.allReady', 'Todo lo detectado está listo; no hay instalaciones pendientes.')}
@@ -546,13 +524,6 @@
         font: inherit;
     }
 
-    .dependency-actions {
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        padding: 4px 6px 0;
-    }
-
     .description {
         margin-top: 3px;
         color: var(--text);
@@ -561,31 +532,9 @@
         overflow-wrap: anywhere;
     }
 
-    .dependency-buttons {
-        display: flex;
-        flex: 0 0 auto;
-        min-width: 0;
-        flex-wrap: wrap;
-        justify-content: flex-start;
-        gap: 5px;
-    }
-
-    .dependency-buttons .run {
-        margin-left: 0;
-    }
-
     @container (max-width: 360px) {
         .filters {
             grid-template-columns: minmax(0, 1fr);
-        }
-
-        .dependency-actions {
-            align-items: stretch;
-            flex-direction: column;
-        }
-
-        .dependency-buttons .run {
-            flex: 1 1 170px;
         }
 
         .item-row {

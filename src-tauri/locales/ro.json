@@ -107,6 +107,8 @@
   "terminal.helpFallback": "Ajutor{topic}: folosește :help într-un terminal sau consultă comenzile interne.",
   "terminal.internalCommands": "Comenzi interne: :config  :reload  :repl <nume>  :alias  :help [secțiune]  :banner [opțiuni]  :quick-actions [opțiuni]",
   "terminal.commandList": ":config  :reload  :repl <nume>  :alias  :help  :banner  :quick-actions",
+  "terminal.creditDarkeiser": "Darkeiser003 · dezvoltator WinSlim Terminal\nÎți mulțumim că ai vizitat proiectul. Urmărește dezvoltarea și noutățile:\nProfil: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfrastructure-Web: {cloudProject}",
+  "terminal.creditChristian": "Christianlg97 · colaborator WinSlim Terminal\nÎți mulțumim pentru cooperare și pentru cunoștințele, timpul și resursele oferite, mai ales despre Windows.\nWinSlim este o versiune Windows optimizată, cu instrumente, personalizare și automatizare proprii:\nProfil: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
   "startup.errorTitle": "Terminalul nu a putut porni interfața",
   "startup.logHint": "Open Settings to find the log folder.",
   "settings.appearance": "Aspect",

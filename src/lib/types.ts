@@ -195,7 +195,7 @@ export interface WindowsIntegrationStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'alias' | 'help' | 'banner' | 'quickActions';
+    action: 'config' | 'reload' | 'repl' | 'alias' | 'help' | 'banner' | 'quickActions' | 'darkeiser003' | 'christianlg97';
     argument?: string;
 }
 

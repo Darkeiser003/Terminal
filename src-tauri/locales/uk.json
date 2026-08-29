@@ -107,6 +107,8 @@
   "terminal.helpFallback": "Довідка{topic}: скористайтеся :help у терміналі або перегляньте внутрішні команди.",
   "terminal.internalCommands": "Внутрішні команди: :config  :reload  :repl <назва>  :alias  :help [розділ]  :banner [параметри]  :quick-actions [параметри]",
   "terminal.commandList": ":config  :reload  :repl <назва>  :alias  :help  :banner  :quick-actions",
+  "terminal.creditDarkeiser": "Darkeiser003 · розробник WinSlim Terminal\nДякуємо за відвідування проєкту. Слідкуйте за розробкою та новинами:\nПрофіль: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfrastructure-Web: {cloudProject}",
+  "terminal.creditChristian": "Christianlg97 · учасник WinSlim Terminal\nДякуємо за співпрацю, знання, час і ресурси, особливо щодо Windows.\nWinSlim — оптимізована версія Windows із власними інструментами, налаштуванням та автоматизацією:\nПрофіль: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
   "startup.errorTitle": "Терміналу не вдалося запустити інтерфейс",
   "startup.logHint": "Open Settings to find the log folder.",
   "settings.appearance": "Зовнішній вигляд",

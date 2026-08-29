@@ -107,6 +107,8 @@
   "terminal.helpFallback": "المساعدة{topic}: استخدم :help من الطرفية أو راجع الأوامر الداخلية.",
   "terminal.internalCommands": "الأوامر الداخلية: :config  :reload  :repl <الاسم>  :alias  :help [القسم]  :banner [الخيارات]  :quick-actions [الخيارات]",
   "terminal.commandList": ":config  :reload  :repl <الاسم>  :alias  :help  :banner  :quick-actions",
+  "terminal.creditDarkeiser": "Darkeiser003 · مطور WinSlim Terminal\nشكرًا لزيارتك هذا المشروع. تابع التطوير وآخر التحديثات:\nالملف الشخصي: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfrastructure-Web: {cloudProject}",
+  "terminal.creditChristian": "Christianlg97 · مساهم في WinSlim Terminal\nشكرًا لتعاونك ومعرفتك ووقتك ومواردك، وخاصة خبرتك في Windows.\nWinSlim إصدار Windows محسّن بأدوات وتخصيص وأتمتة خاصة:\nالملف الشخصي: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
   "startup.errorTitle": "تعذّر على الطرفية بدء الواجهة",
   "startup.logHint": "Open Settings to find the log folder.",
   "settings.appearance": "المظهر",

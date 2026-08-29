@@ -107,6 +107,8 @@
   "terminal.helpFallback": "帮助{topic}：请在终端中使用 :help 或查看内部命令。",
   "terminal.internalCommands": "内部命令：:config  :reload  :repl <名称>  :alias  :help [部分]  :banner [选项]  :quick-actions [选项]",
   "terminal.commandList": ":config  :reload  :repl <名称>  :alias  :help  :banner  :quick-actions",
+  "terminal.creditDarkeiser": "Darkeiser003 · WinSlim Terminal 开发者\n感谢访问此项目。欢迎关注开发进展和最新变化：\n个人资料：{darkeiserProfile}\nWinSlim Terminal：{terminalProject}\nInfrastructure-Web：{cloudProject}",
+  "terminal.creditChristian": "Christianlg97 · WinSlim Terminal 协作者\n感谢你在本项目及其他项目中的合作，以及分享 Windows 方面的知识、时间和资源。\nWinSlim 是一个优化的 Windows 版本，包含自有工具、定制和自动化功能：\n个人资料：{christianProfile}\nWinSlim Center Store：{winslimStore}\nWinSlim Update：{winslimUpdate}",
   "startup.errorTitle": "终端无法启动界面",
   "startup.logHint": "Open Settings to find the log folder.",
   "settings.appearance": "外观风格",

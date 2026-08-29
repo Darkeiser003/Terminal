@@ -160,6 +160,15 @@ pub fn pty_resize(state: State<'_, Arc<AppState>>, tab_id: String, cols: i64, ro
 /// dividir o redimensionar la ventana hay que volver a calcular sus anchos,
 /// pero hacerlo escribiendo en el PTY alteraría la entrada que el usuario esté
 /// editando. `TabManager` lo entrega como salida visual y conserva el cursor.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BannerRefreshResult {
+    pub applied: bool,
+    /// Texto sin CRLF de transporte; el frontend lo puede mostrar como una
+    /// capa fija sin depender del scrollback de xterm.
+    pub text: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn pty_refresh_banner(
@@ -171,11 +180,23 @@ pub fn pty_refresh_banner(
     pane_count: i64,
     cursor_row: Option<i64>,
     cursor_col: Option<i64>,
-) -> bool {
+) -> BannerRefreshResult {
     let Some(viewport) = crate::tabs::valid_viewport(cols, rows) else {
-        return false;
+        return BannerRefreshResult {
+            applied: false,
+            text: String::new(),
+        };
     };
     let started = Instant::now();
+    let text = state
+        .tabs
+        .banner_for_viewport(
+            &tab_id,
+            viewport.cols,
+            viewport.rows,
+            pane_count.max(1) as usize,
+        )
+        .unwrap_or_default();
     let applied = state.tabs.refresh_banner(
         &app,
         &tab_id,
@@ -192,10 +213,13 @@ pub fn pty_refresh_banner(
             "cols": viewport.cols,
             "rows": viewport.rows,
             "paneCount": pane_count.max(1),
+            "cursorRow": cursor_row,
+            "cursorCol": cursor_col,
+            "applied": applied,
             "durationMs": started.elapsed().as_millis(),
         })
     );
-    applied
+    BannerRefreshResult { applied, text }
 }
 
 // ---- Entornos (`env:*`) ----

@@ -38,6 +38,12 @@ assert.equal(localization.platformBrandText('LTerminal', 'unknown', 'Otro'), 'LT
 
 const defaults = await readFile('src-tauri/default_settings.toml', 'utf8');
 const terminalPane = await readFile('src/components/TerminalPane.svelte', 'utf8');
+assert(terminalPane.includes('function isDirectCreditAlias(line: string): boolean'),
+    'TerminalPane debe preseleccionar los easter-eggs sin `:`');
+assert(terminalPane.includes("candidate.trimStart().startsWith(':') || isDirectCreditAlias(candidate)"),
+    'Las líneas de crédito deben interceptarse antes de enviarse a la shell');
+assert(terminalPane.includes("terminal.creditDarkeiser") && terminalPane.includes("terminal.creditChristian"),
+    'Los easter-eggs deben usar claves localizadas');
 const refreshBannerStart = terminalPane.indexOf('function refreshBannerNow()');
 const fitAndReportStart = terminalPane.indexOf('function fitAndReport()');
 assert(refreshBannerStart >= 0 && fitAndReportStart > refreshBannerStart, 'No se pudo delimitar refreshBannerNow');
@@ -48,6 +54,11 @@ assert(paneResizeBlock.includes('if (paneCountChanged) pendingPaneCountRefresh =
     'Un cambio de rejilla debe forzar el primer repintado sin cursor');
 assert(paneResizeBlock.includes('pendingPaneCountRefresh = true;\n                            pendingBannerRefresh = true;'),
     'El repintado de rejilla debe reintentarse después del lote inicial');
+assert(!paneResizeBlock.includes('pendingPaneCountRefresh = false; }, 900'),
+    'El estado pendiente de rejilla no debe expirar mientras el usuario escribe');
+assert(!terminalPane.slice(terminalPane.indexOf('function flushPendingBannerSettingsRefresh()'), fitAndReportStart)
+    .includes('pendingPaneCountRefresh = false;'),
+    'Al terminar una edición no se debe descartar la rejilla pendiente antes del IPC');
 const configuredShortcuts = [...defaults.matchAll(/^shortcut\w+\s*=\s*"([^"]+)"/gm)].map((match) => match[1]);
 assert.equal(configuredShortcuts.length, shortcuts.SHORTCUT_PREFERENCE_KEYS.length);
 const normalizedDefaults = configuredShortcuts.map(shortcuts.normalizeShortcut);
