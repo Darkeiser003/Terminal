@@ -3,12 +3,20 @@ import path from 'node:path';
 
 const root = process.cwd();
 const ignored = new Set(['node_modules', 'dist', 'release', 'target', '.git']);
+
+// linux/build.sh aparta temporalmente la instalación Windows en un directorio
+// `.node_modules.windows.<pid>`. No forma parte del árbol fuente y contiene
+// README de terceros con enlaces relativos que no son responsabilidad del
+// proyecto; ignorarlo evita falsos positivos durante la build cruzada.
+function isIgnored(name) {
+    return ignored.has(name) || /^\.node_modules\.windows(?:\.|$)/.test(name);
+}
 const markdown = [];
 const textExtensions = new Set(['.md', '.mjs', '.rs', '.ts', '.svelte', '.sh', '.ps1', '.json']);
 
 function walk(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-        if (ignored.has(entry.name)) continue;
+        if (isIgnored(entry.name)) continue;
         const full = path.join(directory, entry.name);
         if (entry.isDirectory()) walk(full);
         else if (entry.isFile() && path.extname(entry.name) === '.md') markdown.push(full);
@@ -37,7 +45,7 @@ for (const directory of ['src', 'src-tauri', 'scripts', 'tests', 'linux', 'windo
     while (pending.length) {
         const current = pending.pop();
         for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-            if (ignored.has(entry.name)) continue;
+            if (isIgnored(entry.name)) continue;
             const full = path.join(current, entry.name);
             if (entry.isDirectory()) pending.push(full);
             else if (entry.isFile() && textExtensions.has(path.extname(entry.name))) {

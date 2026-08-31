@@ -31,6 +31,7 @@ const valid = {
         { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
         { type: 'responsive-minimum', passed: true, configured: { width: 481, height: 271 }, requested: { width: 512, height: 281 }, applied: { width: 513, height: 282 } },
         { type: 'tab-isolation', passed: true, tabs: 3 },
+        { type: 'shell-startup-performance', passed: true, samples: 4, maxMs: 740, limitMs: 2500 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
         { type: 'banner-ready', promptsVisible: true, preview: ['WinSlim Terminal 1.4.4\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
     ],
@@ -80,6 +81,16 @@ try {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'tab-isolation'),
     })).status, 0, 'falta la evidencia de aislamiento entre pestañas');
+    assert.notEqual((await run('missing-shell-startup', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'shell-startup-performance'),
+    })).status, 0, 'falta la evidencia de tiempo de arranque de la shell');
+    assert.notEqual((await run('slow-shell-startup', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'shell-startup-performance'
+            ? { ...event, maxMs: event.limitMs }
+            : event),
+    })).status, 0, 'el timeout completo de ConPTY no puede pasar');
     assert.notEqual((await run('missing-responsive-matrix', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'responsive-matrix'),
@@ -101,4 +112,4 @@ try {
     await rm(directory, { recursive: true, force: true });
 }
 
-console.log('Validador E2E probado: informe completo y once rechazos correctos.');
+console.log('Validador E2E probado: informe completo y trece rechazos correctos.');

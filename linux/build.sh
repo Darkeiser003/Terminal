@@ -48,7 +48,11 @@ export NPM_CONFIG_LOGLEVEL=error
 export CARGO_TERM_QUIET=true
 # La batería es deliberadamente secuencial y Cargo queda limitado para que una
 # validación larga no congele el escritorio ni agote la RAM de una VM pequeña.
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+# La batería completa compila también los tests en perfil debug; en WSL/VM el
+# enlazado de una sola biblioteca puede superar varios GiB. Un trabajo por
+# defecto evita OOM no deterministas; quien tenga margen puede subirlo con
+# CARGO_BUILD_JOBS=2 (o más) explícitamente.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 
 CLEAN=0
@@ -58,7 +62,9 @@ ALLOW_OFFLINE_CHECKS=0
 AUTO_INSTALL=1
 VERSION_OVERRIDE=""
 EXTENDED_TESTS=1
-INSTALL_E2E_DRIVER=0
+# La ruta predeterminada es una release verificable: si falta el driver, se
+# intenta instalar automáticamente para no publicar un AppImage sin E2E.
+INSTALL_E2E_DRIVER=1
 E2E_DRIVER_PATH="${TAURI_NATIVE_DRIVER:-}"
 CROSS_WINDOWS=0
 NON_INTERACTIVE=0
@@ -100,7 +106,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         -h|--help)
             echo "Uso: $0 [--fast] [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
-            echo "Sin opciones: muestra un selector interactivo; Enter conserva los valores actuales."
+    echo "Sin opciones: release completa AppImage + checks estrictos + smoke + bateria ampliada + E2E."
             exit 0
             ;;
         *)
@@ -309,7 +315,7 @@ smoke_log_ready() {
     # Un token también se escribe en el error de frontend sin PTY. Exigir los
     # hitos de la misma ejecución evita que el build pase solo porque WebView
     # llegó a pintar una ventana o porque quedó un log antiguo.
-    grep -Fq "Ventana inicial mostrada" "$path" || return 1
+    grep -Fq "Ventana inicial preparada" "$path" || return 1
     grep -Fq "pty spawneado" "$path" || return 1
     grep -Fq "Frontend y terminal preparados" "$path" || return 1
     ! grep -Fq "Frontend preparado pero sin sesión PTY" "$path"
@@ -594,9 +600,18 @@ install_e2e_driver() {
     case "$manager" in
         apt-get)
             package=""
-            if apt-cache show webkit2gtk-driver >/dev/null 2>&1; then
+            # `apt-cache show` también devuelve 0 para paquetes virtuales o
+            # referencias sin candidato instalable. Comprobamos el campo
+            # Candidate para evitar seleccionar un nombre que apt no puede
+            # resolver (p. ej. Ubuntu 24.10 ofrece webkitgtk-webdriver).
+            apt_package_available() {
+                local candidate
+                candidate="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+                [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
+            }
+            if apt_package_available webkit2gtk-driver; then
                 package="webkit2gtk-driver"
-            elif apt-cache show webkitgtk-webdriver >/dev/null 2>&1; then
+            elif apt_package_available webkitgtk-webdriver; then
                 package="webkitgtk-webdriver"
             fi
             [ -n "$package" ] || {

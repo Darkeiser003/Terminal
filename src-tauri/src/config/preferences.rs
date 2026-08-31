@@ -143,7 +143,8 @@ pub struct Preferences {
     pub auto_open_first_group: bool,
     pub show_system_banner: bool,
     /// Identificadores del banner que no se muestran, separados por comas.
-    /// Vacío conserva el perfil completo de fábrica.
+    /// Vacío representa el perfil completo cuando se solicita explícitamente;
+    /// los valores de fábrica usan el preset esencial definido en TOML.
     pub banner_hidden_items: String,
     pub show_dependencies_panel: bool,
     pub show_projects_panel: bool,

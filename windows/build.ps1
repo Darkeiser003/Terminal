@@ -2,9 +2,8 @@
 <#
     Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
 
-    Produce por defecto la carpeta desempaquetada con el .exe, conpty.dll,
-    OpenConsole.exe y WebView2Loader.dll. Con -Installer genera además un instalador NSIS con el
-    WebView2 offline incluido; el porqué está en src-tauri/BUNDLE.md.
+    Produce por defecto la carpeta desempaquetada con el .exe y un instalador
+    NSIS con WebView2 offline incluido; el porqué está en src-tauri/BUNDLE.md.
 
     Requisitos: Node.js >= 22.12 y el toolchain de Rust (rustup/cargo). La
     carpeta desempaquetada necesita WebView2 ya instalado; el instalador
@@ -16,6 +15,7 @@ param(
     [switch]$Clean,
     [switch]$NoRun,
     [switch]$Installer,
+    [switch]$NoInstaller,
     [switch]$SkipChecks,
     [switch]$AllowOfflineChecks,
     [string]$Version,
@@ -30,6 +30,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if ($Installer.IsPresent -and $NoInstaller.IsPresent) {
+    throw '-Installer y -NoInstaller no se pueden combinar.'
+}
+# Una ejecución sin opciones debe generar una release publicable. El instalador
+# se puede desactivar explícitamente para iteraciones rápidas o portables.
+if (-not $NoInstaller.IsPresent) {
+    $Installer = [switch]::new($true)
+}
+
 if ($Help) {
     Write-Host 'Uso: powershell -ExecutionPolicy Bypass -File windows\build.ps1 [opciones]'
     Write-Host '  -Clean                Limpia dependencias y target antes de compilar.'
@@ -41,11 +50,12 @@ if ($Help) {
     Write-Host '  -StrictTests          Hace fallar la build si faltan sondas opcionales.'
     Write-Host '  -AllowOfflineChecks   Convierte comprobaciones externas en avisos.'
     Write-Host '  -CrossLinux            Ejecuta tambien la build Linux dentro de WSL.'
-    Write-Host '  -Installer             Genera ademas el instalador NSIS offline.'
+    Write-Host '  -Installer             Activa el instalador NSIS offline (ya es predeterminado).'
+    Write-Host '  -NoInstaller           Desactiva el instalador NSIS predeterminado.'
     Write-Host '  -InstallE2eDriver     Instala tauri-driver si falta.'
     Write-Host '  -Version X.Y.Z        Sobrescribe la version del paquete.'
     Write-Host '  -NonInteractive        No espera entrada del usuario.'
-    Write-Host '  Sin opciones           Muestra un selector interactivo; Enter conserva los valores actuales.'
+    Write-Host '  Sin opciones           Release completa: EXE + NSIS, checks estrictos, smoke, bateria ampliada y E2E.'
     exit 0
 }
 
@@ -78,6 +88,26 @@ function Write-Step ($Message) {
 function Write-Ok   ($Message) { Write-Host "    OK: $Message" -ForegroundColor Green }
 function Write-Warn ($Message) { Write-Host "    AVISO: $Message" -ForegroundColor Yellow }
 function Write-Err  ($Message) { Write-Host "    ERROR: $Message" -ForegroundColor Red }
+
+function Get-Sha256Hash {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # `Get-FileHash` vive en Microsoft.PowerShell.Utility y algunos hosts
+    # mínimos no cargan ese módulo aunque sí puedan ejecutar el resto de la
+    # build. La implementación .NET está disponible desde PowerShell 5 y
+    # evita que una release ya compilada falle solo al generar SHA256SUMS.
+    $stream = [IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
 
 function Read-BuildChoice {
     param(
@@ -112,7 +142,7 @@ if ($interactiveBuild) {
     Write-Host 'Configuración de build (Enter conserva el valor actual):' -ForegroundColor Cyan
     $Clean = Read-BuildChoice 'Limpiar dependencias y target antes de compilar' $Clean
     $Fast = Read-BuildChoice 'Usar perfil rápido de desarrollo' $Fast
-    $Installer = Read-BuildChoice 'Generar también instalador NSIS offline' $Installer
+    $Installer = [switch]::new((Read-BuildChoice 'Generar también instalador NSIS offline' $Installer.IsPresent))
     $SkipChecks = Read-BuildChoice 'Saltar comprobaciones locales' $SkipChecks
     $AllowOfflineChecks = Read-BuildChoice 'Convertir comprobaciones externas en avisos' $AllowOfflineChecks
     if (-not $FullTests.IsPresent -and -not $StrictTests.IsPresent) {
@@ -145,7 +175,9 @@ function Invoke-Native {
         # ResourceUnavailable antes de asignar LASTEXITCODE. Se convierte en
         # el 9009 convencional de «comando no encontrado» para que la batería
         # lo clasifique como ausente y continúe hasta el E2E.
-        $LASTEXITCODE = 0
+        # No inicializar $LASTEXITCODE dentro de esta función: PowerShell crea
+        # una variable local que oculta el valor real actualizado por el EXE y
+        # convertiría cualquier fallo nativo (incluido WSL/E2E) en código 0.
         try {
             $script:LastNativeOutput = ''
             if ($CaptureOutput) {
@@ -285,7 +317,7 @@ function Show-SmokeDiagnostics {
     }
     $markers = @(
         @{ Name = 'ARRANQUE'; Pattern = 'ARRANQUE' },
-        @{ Name = 'Ventana inicial'; Pattern = 'Ventana inicial mostrada' },
+        @{ Name = 'Ventana inicial'; Pattern = 'Ventana inicial preparada' },
         @{ Name = 'PTY preparado'; Pattern = 'Preparando pty' },
         @{ Name = 'PTY creado'; Pattern = 'pty spawneado' },
         @{ Name = 'Error de PTY'; Pattern = 'No se pudo spawnear el pty|Frontend preparado pero sin sesión PTY' },
@@ -300,7 +332,7 @@ function Show-SmokeDiagnostics {
         Write-Err 'Comprueba especialmente conpty.dll/OpenConsole.exe, WebView2Loader.dll y el cmd.exe del sistema.'
     } elseif ($text -match 'No se pudo spawnear el pty|Frontend preparado pero sin sesión PTY') {
         Write-Err 'La ventana sí llegó a iniciar, pero la primera shell no consiguió crear un PTY; por eso el E2E no se lanza.'
-    } elseif ($text -notmatch 'Ventana inicial mostrada') {
+    } elseif ($text -notmatch 'Ventana inicial preparada') {
         Write-Err 'No se confirmó la ventana inicial; el fallo está antes del frontend (normalmente WebView2 o el ejecutable).'
     } else {
         Write-Err 'La ventana está viva, pero no confirmó frontend + PTY dentro del tiempo permitido.'
@@ -373,7 +405,6 @@ function Get-MsEdgeDriverVersion {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $LASTEXITCODE = 0
         try {
             $output = @(& $Path '--version' 2>&1)
             $code = [int]$LASTEXITCODE
@@ -1209,6 +1240,14 @@ $previousSmokeToken = $env:LTERMINAL_SMOKE_TOKEN
 $previousLogFile = $env:LTERMINAL_LOG_FILE
 $previousSmokeAutoExit = $env:LTERMINAL_SMOKE_AUTO_EXIT
 $process = $null
+# Algunas builds del WebView pueden crear un segundo proceso de la app durante
+# el arranque (el primero confirma el smoke y el segundo queda sin ventana).
+# Recordar los PIDs previos permite limpiar únicamente los que pertenecen a
+# esta prueba, sin cerrar una instancia que ya estuviera abierta al comenzar.
+$preSmokeProcessIds = @(
+    Get-Process -Name 'winslim-terminal' -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Id
+)
 try {
     $env:LTERMINAL_SMOKE_TOKEN = $smokeToken
     # La app debe cerrar su PTY de forma ordenada. TerminateProcess sobre el
@@ -1255,6 +1294,18 @@ try {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         }
     }
+    # La salida ordenada puede dejar un proceso hermano durante unos cientos
+    # de milisegundos. Esperarlo aquí evita que la copia de la carpeta portable
+    # falle con "archivo en uso" aunque el proceso principal ya haya terminado.
+    for ($cleanupAttempt = 0; $cleanupAttempt -lt 8; $cleanupAttempt++) {
+        $smokeRemainders = @(
+            Get-Process -Name 'winslim-terminal' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Id -notin $preSmokeProcessIds }
+        )
+        if (-not $smokeRemainders) { break }
+        $smokeRemainders | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 250
+    }
     if ($null -eq $previousSmokeToken) {
         Remove-Item Env:LTERMINAL_SMOKE_TOKEN -ErrorAction SilentlyContinue
     } else {
@@ -1282,7 +1333,7 @@ try {
 # -NoExtendedTests explícito para que una build no parezca verificada cuando
 # solo arrancó la ventana.
 $runExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
-$strictExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
+$strictExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent -or (-not $NoExtendedTests.IsPresent)
 $strictProbeFailure = $false
 if ($NoExtendedTests -and ($FullTests.IsPresent -or $StrictTests.IsPresent)) {
     throw '-NoExtendedTests no se puede combinar con -FullTests ni -StrictTests.'
@@ -1514,7 +1565,7 @@ Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 # dos formas, pero asi la carpeta de destino queda igual que la de aqui.
 Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath $zipPath -Force
 
-$hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
+$hash = Get-Sha256Hash $zipPath
 $checksumManifest = Join-Path $releaseOut 'SHA256SUMS.txt'
 $hashCode = Invoke-Native 'node' @(
     'scripts/update-release-hash.mjs',

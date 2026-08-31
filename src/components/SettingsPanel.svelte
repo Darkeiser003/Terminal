@@ -153,7 +153,7 @@
         if (!draft) return;
         draft.bannerHiddenItems = preset === "full"
             ? ""
-            : ["host", "kernel", "environment", "motherboard", "gpu", "datetime"].join(",");
+            : ["host", "kernel", "environment", "motherboard", "gpu", "storage", "datetime"].join(",");
     }
 
     async function save(event: SubmitEvent): Promise<void> {
@@ -744,7 +744,7 @@
                             <small
                                 >{app.t(
                                     "settings.showBannerHint",
-                                    "Banner al crear una sesión nueva.",
+                                    "Imprime el resumen una vez dentro de la salida de la terminal.",
                                 )}</small
                             >
                         </span>
@@ -752,7 +752,7 @@
                     <div class="banner-settings">
                         <div class="heading">
                             <strong>{app.t("settings.bannerSections", "Información del banner")}</strong>
-                            <span>{app.t("settings.bannerSectionsHint", "El mínimo siempre reserva cinco filas para escribir. Guarda los cambios para repintar las pestañas.")}</span>
+                            <span>{app.t("settings.bannerSectionsHint", "Solo esencial ocupa unas 5–8 líneas. Guarda para imprimir el cambio en la salida del terminal.")}</span>
                         </div>
                         <div class="banner-presets">
                             <button type="button" class="secondary" onclick={() => setBannerPreset("full")}>

@@ -43,12 +43,9 @@
      * primer `term.write`, que es el instante en que el usuario ya ve la nueva
      * sesión (el IPC por sí solo no incluye el arranque del inicializador). */
     const environmentSwitchStarted = new Map<string, number>();
-    // Todas las salidas (incluido el banner que llega como un evento sintético)
-    // pasan por una cola por pestaña. Tauri puede entregar dos eventos desde
-    // hilos distintos y xterm mantiene su propio buffer de escritura; sin una
-    // cola explícita el cursor que guarda `refresh_banner` podía ser el de la
-    // cabecera, no el del prompt, y la siguiente entrada se dibujaba dentro del
-    // fastfetch.
+    // Toda la salida del PTY pasa por una cola por pestaña. Tauri puede entregar
+    // eventos desde hilos distintos y xterm mantiene su propio buffer de
+    // escritura; serializarlos conserva el orden exacto de la shell.
     const outputQueues = new Map<string, Promise<void>>();
     // KeyboardEvent.ctrlKey no distingue izquierda/derecha. Se conserva el
     // estado físico de ControlRight para ofrecer un chord que no robe los
@@ -241,16 +238,7 @@
                         resolve();
                         return;
                     }
-                    const bannerLike = /LTerminal|WinSlim|Sistema|System|CPU|Memoria|Memory|Disco|Disk|Kernel/i.test(data);
                     try {
-                        // El banner se escribe sobre la superficie visible y
-                        // no debe heredar una posición de scrollback antigua
-                        // (la pestaña original suele tener mucho más
-                        // historial que las nuevas). Llevar el viewport al
-                        // final *antes* de procesar el bloque permite que el
-                        // clear/home ANSI parta de una pantalla estable;
-                        // hacerlo después ocultaría precisamente ese banner.
-                        if (bannerLike) term.scrollToBottom();
                         term.write(data, () => {
                         const current = getTerminal(tabId);
                         if (!current?.element?.isConnected) {
@@ -268,36 +256,9 @@
                                 tabId,
                             });
                         }
-                        if (bannerLike) {
-                            perf.timeToOnce(`fastfetch-visible:${tabId}`, 'fastfetch.banner-visible', {
-                                tabId,
-                                source: 'pty-output',
-                            });
-                            perf.measureFrom(
-                                `terminal-mounted:${tabId}`,
-                                'fastfetch.banner-visible-after-terminal',
-                                { tabId, source: 'pty-output' },
-                                `fastfetch-visible-after-terminal:${tabId}`,
-                            );
-                        }
-                        // Un repintado sintético del banner empieza con un
-                        // clear/home ANSI y se dibuja deliberadamente en la
-                        // parte superior. Forzar el viewport al fondo justo
-                        // después de `term.write` lo ocultaba en la pestaña
-                        // original, que suele tener más historial que las
-                        // nuevas (especialmente tras un resize extremo). La
-                        // shell normal sí debe seguir llevando el prompt al
-                        // final; xterm ya conserva la posición correcta para
-                        // el bloque visual.
-                        // El banner sintético empieza con clear/home ANSI y
-                        // la versión visible vive en el overlay fijo. Después
-                        // de que xterm termina de procesar el lote hay que
-                        // llevar siempre el viewport al final: si solo se
-                        // hacía antes de `term.write`, el clear dejaba la
-                        // casilla desplazada arriba y el prompt quedaba fuera
-                        // de pantalla hasta que el usuario ejecutaba `clear`.
-                        // Esto también conserva el comportamiento normal de
-                        // una shell que acaba de producir salida.
+                        // Toda salida nueva (incluido el banner inicial o el
+                        // que pide Ajustes) pasa por esta cola y devuelve la
+                        // vista al prompt sin superponer capas DOM.
                         try { current.scrollToBottom(); }
                         catch (error) { console.debug('[App] terminal closed while scrolling', error); }
                         resolve();
@@ -316,18 +277,33 @@
             }),
 
             // clear / cls: el backend entrega el marcador ANTES del repintado de
-            // la shell. El reset también debe pasar por la misma cola que los
-            // bloques de salida: hacerlo directamente podía ejecutarse después
-            // del banner sintético y borrarlo justo cuando ya era visible.
+            // la shell. El borrado también debe pasar por la misma cola que los
+            // bloques de salida: hacerlo directamente podría ejecutarse después
+            // de datos posteriores y borrar el buffer en el orden equivocado.
+            //
+            // El `cls`/`clear` nativo que viene justo después ya limpia la
+            // pantalla y coloca el cursor en las mismas coordenadas que
+            // CMD/ConPTY. Aquí solo hay que eliminar el historial de xterm.
+            // Tanto `reset()` (RIS) como `clear()` recolocan el buffer/cursor
+            // local antes de ese repintado y desincronizan ambas posiciones:
+            // el siguiente texto termina una fila debajo del prompt.
+            // CSI 3 J borra únicamente las líneas guardadas y conserva el
+            // cursor; su callback mantiene el orden con los datos siguientes.
             api.onClear((tabId) => {
                 window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
                 const previous = outputQueues.get(tabId) ?? Promise.resolve();
-                const queued = previous.catch(() => undefined).then(() => {
+                const queued = previous.catch(() => undefined).then(() => new Promise<void>((resolve) => {
                     const term = getTerminal(tabId);
-                    if (!term?.element?.isConnected) return;
-                    try { term.reset(); }
-                    catch (error) { console.debug('[App] terminal closed while resetting', error); }
-                });
+                    if (!term?.element?.isConnected) {
+                        resolve();
+                        return;
+                    }
+                    try { term.write('\x1b[3J', resolve); }
+                    catch (error) {
+                        console.debug('[App] terminal closed while clearing scrollback', error);
+                        resolve();
+                    }
+                }));
                 outputQueues.set(tabId, queued);
                 void queued.then(() => {
                     if (outputQueues.get(tabId) !== queued) return;

@@ -28,6 +28,8 @@ identificador y rutas de datos propias por plataforma (`src-tauri/src/config/ide
 - [Scripts npm](#scripts-npm)
 - [Compilación y distribución](#compilación-y-distribución)
 - [Arquitectura](#arquitectura)
+- [Flujo completo del proyecto](docs/PROJECT-FLOW.md)
+- [Auditoría técnica y controles](docs/AUDIT-2026-08-30.md)
 - [Contrato IPC](#contrato-ipc)
 - [Seguridad](#seguridad)
 - [Entornos y shells](#entornos-y-shells)
@@ -163,6 +165,7 @@ directamente en la terminal.
 |---|---|
 | `npm start` | Arranca la aplicación en desarrollo (Vite + `cargo run`). |
 | `npm run check` | Ciclo completo: versión, metadatos, recursos, arquitectura, documentación, enlaces, fuentes de instalación, catálogo WinGet cuando se ejecuta en Windows, `svelte-check`, formato, análisis estático y pruebas Rust. **Es lo que hay que pasar antes de compilar.** |
+| `npm run check:local` | Validación rápida sin red: contratos, documentación, i18n, lógica frontend y pruebas locales. |
 | `npm run check:workspace` | Comprueba que las cachés, salidas y directorio temporal se puedan leer y escribir; detecta un `chown`/`chmod` pendiente antes de una build. |
 | `npm run check:install-sources` | Sondea 16 fuentes que usa el catálogo (WinGet, Chocolatey, Flathub y los registros de los principales ecosistemas) y distingue una caída de red de un error del código. |
 | `npm run check:i18n` | Comprueba la paridad de los 15 catálogos, textos visibles, marcadores dinámicos y fugas de idioma en búsquedas y comandos internos. |
@@ -171,7 +174,8 @@ directamente en la terminal.
 | `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o Acciones rápidas sin comprobar. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
-| `npm run dist:win` | Ejecuta la build completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera la carpeta desempaquetada y su ZIP. |
+| `npm run build:fast` | Atajo multiplataforma para `build` con `LTERMINAL_SKIP_CHECKS=1`; útil durante el desarrollo, no sustituye una release completa. |
+| `npm run dist:win` | Ejecuta la release completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera EXE, carpeta desempaquetada, ZIP e instalador NSIS offline. |
 | `npm run dist:win:fast` | Build de desarrollo rápida de Windows: usa compilación incremental, omite LTO y conserva símbolos; ejecuta solo el smoke mínimo y salta las comprobaciones previas. No es una release. |
 | `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido y ejecuta la batería ampliada/E2E. |
 | `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64 y verifica los binarios nativos y los scripts integrados. `--wine-smoke` requiere `WINE_SMOKE_PREFIX` apuntando a un prefijo que ya tenga WebView2 Runtime. |
@@ -197,9 +201,9 @@ normal. Los artefactos rápidos quedan en `release/dev/` y llevan el sufijo
 ## Compilación y distribución
 
 ```powershell
-windows\build.ps1          # o build.bat, para doble clic
+windows\build.ps1          # o build.bat: EXE + NSIS + checks + smoke + E2E
 windows\build.ps1 -Fast -NoExtendedTests -SkipChecks  # iteración rápida de desarrollo
-windows\build.ps1 -Installer -NoRun  # release Windows instalable (NSIS + WebView2 offline)
+windows\build.ps1 -NoInstaller -NoRun  # solo portable, si se necesita explícitamente
 ```
 
 ```bash
@@ -208,11 +212,14 @@ linux/build.sh --fast --no-extended-tests --skip-checks  # iteración rápida de
 ```
 
 Al ejecutar `windows\build.ps1` o `linux/build.sh` sin argumentos desde una
-consola interactiva aparece un selector previo para activar o desactivar cada
-opción de build. Enter conserva el valor predeterminado actual. Las ejecuciones
-con argumentos explícitos, `-NonInteractive`/`--non-interactive` o entrada
-redirigida no preguntan nada, por lo que el uso automatizado y CI mantienen su
-comportamiento anterior.
+consola interactiva aparece un selector previo. Sus valores predeterminados son
+la release más completa: perfil optimizado, checks estrictos, artefacto final,
+smoke, batería ampliada y E2E; en Windows incluye EXE y NSIS offline, y en
+Linux incluye el AppImage. Enter conserva esos valores. Las ejecuciones con
+argumentos explícitos, `-NonInteractive`/`--non-interactive` o entrada
+redirigida no preguntan nada y mantienen igualmente la ruta completa, salvo que
+se solicite una excepción (`-NoInstaller`, `-NoExtendedTests`, `-SkipChecks`,
+`--fast`, etc.).
 
 Para validar la compatibilidad Windows desde Linux:
 
@@ -252,10 +259,11 @@ Tauri dispara dentro de `prebuild`, `-NoRun`/`--no-run` no lanza la app al
 terminar. Si Windows no tiene DNS o acceso temporal a Internet, usa
 `-AllowOfflineChecks`: convierte en avisos los enlaces, fuentes externas,
 catálogo WinGet y registros externos, pero conserva
-`svelte-check`, clippy y las pruebas Rust. Para la batería completa usa `-FullTests` en Windows
-o `--full-tests`/`--extended-tests` en Linux; `--install-e2e-driver` permite
-que Linux intente instalar el driver nativo de WebKitGTK cuando la distribución
-lo ofrece. En Windows, `-FullTests` ejecuta toda la batería y exige que las
+`svelte-check`, clippy y las pruebas Rust. La batería completa se ejecuta por
+defecto; `-FullTests` en Windows o `--full-tests`/`--extended-tests` en Linux
+la fuerzan explícitamente. Linux intenta instalar automáticamente el driver
+nativo de WebKitGTK si falta; `--no-install` impide instalaciones automáticas.
+En Windows, `-FullTests` ejecuta toda la batería y exige que las
 herramientas instaladas respondan, pero conserva como diagnóstico las opcionales
 que falten; `-StrictTests` convierte también esas ausencias en fallo. La build Linux ejecuta por defecto la batería ampliada y prepara
 automáticamente `dash`, PostgreSQL cliente, Fortran y Bottles (Flatpak); usa
@@ -267,8 +275,9 @@ actualización completa de `pacman` de forma explícita.
 En Windows, la batería ampliada se ejecuta automáticamente tanto en modo
 interactivo como no interactivo; solo `-NoExtendedTests` la omite. Las sondas de shells y herramientas se
 acumulan aunque alguna falle, de modo que el E2E no se pierde por un único
-runtime averiado; `-FullTests` informa después del E2E de los programas instalados
-que no respondieron, y `-StrictTests` incluye también los ausentes. El informe
+runtime averiado; la ruta completa hace fallar las herramientas instaladas que
+no respondan y deja como aviso las opcionales ausentes. `-StrictTests` incluye
+también esas ausencias. El informe
 E2E se guarda en `%TEMP%\winslim-terminal-e2e-<id>.json`.
 
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
@@ -290,6 +299,12 @@ También respeta la plataforma: las fuentes AUR no bloquean una build nativa de
 Windows y sí se comprueban en Linux o dentro de WSL; las URLs fijas de fixtures
 de tests y el esquema remoto de Tauri no se consideran dependencias de red del
 build.
+Los enlaces que solo son destinos informativos de una acción de usuario se
+comprueban igualmente, pero están marcados como no bloqueantes: por ejemplo,
+`www.codeweavers.com` se abre en el navegador y no aporta ningún archivo al
+binario. Si ese tercero responde con timeout/5xx, el informe muestra un aviso y
+la build estricta continúa; una URL que sí sea fuente o dependencia de build
+sigue siendo un fallo estricto.
 
 Si el equipo está temporalmente sin DNS o sin acceso a Internet, se puede
 comprobar y compilar con `LTERMINAL_LINK_CHECK=warn npm run check` o anteponer
@@ -329,6 +344,20 @@ no tendrá un adjunto compatible.
 
 Dos lados con una separación estricta: un backend en Rust que es el único que
 toca el sistema, y un frontend en Svelte que solo pinta.
+
+La descripción exhaustiva, con el orden de build/arranque, el flujo PTY/IPC,
+el inventario de los 190 archivos y los diagramas Mermaid está en
+[docs/PROJECT-FLOW.md](docs/PROJECT-FLOW.md). El banner se imprime una sola vez
+como salida normal del PTY dentro de `terminal-host`, por lo que comparte
+scrollback, cursor y selección con la shell sin superponerse a ellos.
+
+Para el recorrido corto del proyecto, usa [docs/SIMPLE-FLOW.md](docs/SIMPLE-FLOW.md):
+agrupa desarrollo, validación local y release, y marca qué rutas deben seguir
+separadas por depender del PTY, la red o permisos del sistema.
+
+La auditoría reproducible de esta reorganización, con riesgos residuales y la
+batería exacta de comandos ejecutados, está en
+[docs/AUDIT-2026-08-30.md](docs/AUDIT-2026-08-30.md).
 
 ```
 src-tauri/src/
@@ -426,12 +455,17 @@ Se inyectan al crear una pestaña, solo en shells reales.
 | Alias | Qué hace |
 |---|---|
 | `edit`, `ip`, `ll`, `ls`, `pwd` | Vocabulario común a todas las shells reales. El nombre y la intención son iguales; cambia únicamente el comando nativo que hay detrás. |
-| `clear`, `cls` | Limpieza real de pantalla e historial, más el banner. |
+| `clear`, `cls` | Limpieza real de pantalla e historial. |
 | `sysinfo` | Reimprime el banner del sistema. |
 | `ayuda` | Ayuda explicada: qué hace cada alias, qué gestor los atiende y qué scripts se han registrado. Se lee de un archivo generado por sesión, así que ocupa varias líneas y va traducida. |
 | `nsudo` | Solo si el ejecutable existe en la máquina. |
 | `install`, `update`, `upgrade`, `uninstall`, `remove`, `search` | Se traducen al gestor de paquetes real del entorno. |
 | *(uno por script)* | Cada script de la **Biblioteca** registra su propio alias. |
+
+El banner inicial usa **Solo esencial** (5–8 líneas) y se imprime una única vez
+como salida normal del terminal. Para solicitar todos los campos usa Ajustes o
+`:banner preset full`; el cambio se añade al scrollback sin mover la selección
+ni superponerse al código.
 
 Los alias de gestor de paquetes se resuelven según el entorno: Windows elige
 entre winget, Chocolatey o Scoop al crear la pestaña; las shells Unix eligen
@@ -726,6 +760,7 @@ editarlos, ejecutar
 | `terminalCursorColor` | `#rrggbb` | color del cursor |
 | `uiDensity` | `comfortable`, `compact` | `comfortable` |
 | `showSystemBanner` | booleano | `true` |
+| `bannerHiddenItems` | lista de campos | `host,kernel,environment,motherboard,gpu,storage,datetime` (**Solo esencial**, 5–8 líneas) |
 | `scriptsHereDepth` | 0–10 | `3` |
 | `autoStartDocker` | booleano | `true` |
 | `exclusiveAccordionGroups` | booleano | `true` |
@@ -800,9 +835,8 @@ procesos y cierre. Para investigar una sesión concreta se puede usar
 También se registran métricas segmentadas del WebView: `sinceStartMs` es el
 tiempo desde que cargó el frontend y `durationMs` la operación concreta.
 Incluyen `app.initial-load`, `app.ui-shell-visible`, disponibilidad para
-escribir, `fastfetch.banner-visible` y
-`fastfetch.banner-visible-after-terminal`, montaje y resize de cada terminal,
-repintado del banner, `ui.panel.visible` para cada menú/panel e `ipc.*` para
+escribir, `fastfetch.banner-visible`, montaje y resize de cada terminal,
+impresión explícita del banner, `ui.panel.visible` para cada menú/panel e `ipc.*` para
 cada llamada relevante al backend. Las entradas de teclado, parseo de cada
 tecla y cada píxel de resize se agrupan para no inundar el archivo.
 

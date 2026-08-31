@@ -122,7 +122,7 @@ check('El comando interno de acciones rápidas persiste su estado', (() => {
 check('Biblioteca conserva Acceso rápido global y traducido', ['scripts.quickAccess', 'const pinned = $derived((data?.pinned ?? []).filter(matches))'].every((marker) => read('src/components/ScriptsPanel.svelte').includes(marker)));
 check('Explorador contiene copiar, cortar, eliminar y pegar', ['explorer.copy', 'explorer.cut', 'explorer.trash', 'explorer.paste'].every((marker) => read('src/components/ExplorerSidebar.svelte').includes(marker)));
 check('Terminal intercepta cortar y eliminar sobre selección editable', ['deleteEditableSelection(true)', 'deleteEditableSelection(false)'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
-check('Terminal reajusta xterm y banner tras resize, preferencias y cambios de rejilla', ['ResizeObserver', 'refreshBanner', 'fitAndReport', 'pendingBannerSettingsRefresh', 'pendingPaneCountRefresh', 'lastPaneCount', 'paneCountChanged', 'paneRefreshTimer'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker)));
+check('Terminal reajusta xterm y conserva el banner en el mismo scrollback', ['ResizeObserver', 'printBanner', 'fitAndReport', 'terminal-host'].every((marker) => read('src/components/TerminalPane.svelte').includes(marker) || read('src/lib/api.ts').includes(marker)));
 check('La nueva pestaña entra en la rejilla antes de montar su xterm',
     read('src/lib/appState.svelte.ts').includes('const createdId = await this.createTab(entorno, siguiente)')
         && read('src/lib/appState.svelte.ts').includes('this.panes = nextPanes.slice(0, siguiente)')
@@ -133,7 +133,8 @@ check('La creación de una casilla nueva solicita banner compacto al backend',
         && read('src-tauri/src/terminal/tabs.rs').includes('create_tab_with_panes'));
 check('El E2E valida el banner de la segunda pestaña recién creada',
     read('tests/e2e/smoke.mjs').includes("rejilla 2 paneles tras crear la segunda pestaña")
-        && read('tests/e2e/smoke.mjs').includes('await assertBannerHeaders(2,'));
+        && read('tests/e2e/smoke.mjs').includes('await assertBannerHeaders(2,')
+        && read('tests/e2e/smoke.mjs').includes("createdPaneCompact: tinyGrid || modes[expected - 1] === 'compact'"));
 check('El E2E cierra el selector de entornos si solo hay una shell disponible', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
     return smoke.includes('async function closeEnvironmentMenu()')
@@ -149,7 +150,7 @@ check('Smoke E2E cambia varios idiomas y valida anclas traducidas sin hardcodeos
         && smoke.includes("recordEvent('language-switch'")
         && smoke.includes('Texto hardcodeado o traducción incompleta');
 })());
-check('Restablecer preferencias repinta los banners abiertos', read('src/lib/appState.svelte.ts').includes("winslim:banner-settings-changed") && read('src/components/TerminalPane.svelte').includes('requestAnimationFrame(refreshBannerForSettings)'));
+check('Restablecer preferencias imprime el banner explícito', read('src/lib/appState.svelte.ts').includes("winslim:banner-settings-changed") && read('src/components/TerminalPane.svelte').includes('requestBannerPrint'));
 check('Preferencias informa los fallos de escritura al frontend', read('src-tauri/src/app/commands.rs').includes('Result<PreferencesPayload, String>') && read('src-tauri/src/app/commands.rs').includes('No se pudieron guardar las preferencias en settings.json'));
 check('E2E comprueba y restaura una opción real del banner', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
@@ -166,7 +167,7 @@ check('E2E comprueba ambos estados de Acciones rápidas y restaura la visibilida
         && smoke.includes('panelVisibilityInitial');
 })());
 check('E2E cierra Ajustes antes de interactuar con la interfaz inferior', read('tests/e2e/smoke.mjs').includes('Ajustes es modal: cerrarlo siempre'));
-check('Frontend registra métricas segmentadas', ['recordPerformance', 'app.initial-load', 'fastfetch.banner-visible'].every((marker) => read('src/lib/performance.ts').includes(marker) || app.includes(marker) || api.includes(marker)) && read('src/components/TerminalPane.svelte').includes('app.ready-for-input'));
+check('Frontend registra métricas segmentadas', ['recordPerformance', 'app.initial-load', 'fastfetch.banner-visible'].every((marker) => read('src/lib/performance.ts').includes(marker) || app.includes(marker) || api.includes(marker) || read('src/components/TerminalPane.svelte').includes(marker)) && read('src/components/TerminalPane.svelte').includes('app.ready-for-input'));
 check('Paneles registran apertura hasta geometría visible', ['ui.panel.visible', 'requestAnimationFrame'].every((marker) => read('src/components/Panel.svelte').includes(marker)));
 check('Backend expone el comando de métricas frontend', lib.includes('log_frontend_performance') && read('src-tauri/src/app/commands.rs').includes('Métrica de rendimiento frontend'));
 check('Atajos usan un contrato compartido', shortcuts.includes('SHORTCUT_PREFERENCE_KEYS') && shortcuts.includes('matchesShortcut') && app.includes('from "./lib/shortcuts"'));
@@ -242,19 +243,42 @@ check('La primera lista de dependencias no bloquea en sondas lentas',
 check('Las reaperturas de Dependencias comparten la detección en curso',
     dependenciesPanel.includes('refreshInFlight ?? api.refreshInstallActions()')
         && dependenciesPanel.includes('refreshInFlight === request'));
+check('Dependencias se organiza por secciones de uso y no como una lista plana',
+    dependenciesPanel.includes('SECTION_GROUPS')
+        && dependenciesPanel.includes("id: 'environments'")
+        && dependenciesPanel.includes("id: 'development'")
+        && dependenciesPanel.includes("id: 'platforms'")
+        && dependenciesPanel.includes('const sections = $derived.by')
+        && dependenciesPanel.includes('data-testid="dependency-sections"')
+        && dependenciesPanel.includes('data-testid="dependency-section"'));
+check('Cada grupo de dependencias explica su contenido antes de desplegarlo',
+    dependenciesPanel.includes('function groupDescription')
+        && dependenciesPanel.includes('class="group-heading"')
+        && dependenciesPanel.includes('groupDescription(group.key)'));
 
-check('El repintado del banner cuenta el reflujo fisico',
-    terminalTabs.includes('fn banner_visual_rows')
-        && terminalTabs.includes('banner_visual_rows(&tab.banner_text, cols)')
-        && terminalTabs.includes('banner_text: String::new()'));
-check('El repintado del banner no duplica una salida ya pintada',
-    terminalTabs.includes('tab.banner_text == banner_text')
-        && terminalTabs.includes('tab.banner_rows == new_banner_rows')
-        && terminalTabs.includes('eventos de ConPTY y el IPC'));
-check('El cambio de rejilla acota el cursor fuera del banner',
-    terminalTabs.includes('safe_banner_cursor')
-        && terminalTabs.includes('No restaurar ESC8 a ciegas')
-        && terminalTabs.includes('la_posicion_restaurada_nunca_cae_dentro_del_banner'));
+const terminalPane = read('src/components/TerminalPane.svelte');
+check('Banner y código comparten un único xterm sin superposición',
+    terminalPane.includes('data-testid="terminal-host"')
+        && terminalPane.includes('term.open(terminalHost)')
+        && !terminalPane.includes('banner-header'));
+check('El banner se imprime como salida PTY normal',
+    terminalTabs.includes('initial_banner: true')
+        && terminalTabs.includes('Outbound::Data')
+        && terminalTabs.includes('print_banner'));
+check('El resize solo ajusta xterm y no repinta automáticamente',
+    terminalPane.includes('api.resize(tabId, cols, rows)')
+        && !terminalPane.includes('api.refreshBanner'));
+check('Clear borra el historial sin reiniciar el cursor y el E2E lo repite',
+    app.includes("term.write('\\x1b[3J', resolve)")
+        && !app.includes('term.clear()')
+        && !app.includes('term.reset()')
+        && read('tests/e2e/smoke.mjs').includes('assertClearKeepsInputOnPromptRow')
+        && read('tests/e2e/smoke.mjs').includes("recordEvent('clear-prompt-row', { attempts"));
+check('El E2E rechaza prompts que conservan el wrap de un tamaño anterior',
+    terminalPane.includes('const restoredPrompt = tinyViewportPrompt')
+        && terminalPane.includes('restoredPrompt.length <= term.cols')
+        && read('tests/e2e/smoke.mjs').includes('assertPromptReflowsAfterResize')
+        && read('tests/e2e/smoke.mjs').includes("recordEvent('prompt-resize-reflow'"));
 check('La integración Windows registra y consume rutas de archivos',
     windowsIntegration.includes('Software\\Classes\\*\\shell\\WinSlimTerminal')
         && windowsIntegration.includes('--open-path')
@@ -277,6 +301,9 @@ for (const marker of [
     'sessionId'
 ]) check(`Smoke E2E cubre ${marker}`, smoke.includes(marker));
 check('Smoke E2E prueba los comandos internos', smoke.includes(':help') && smoke.includes(':alias'));
+check('Smoke E2E conserva capturas de la organización de Dependencias',
+    smoke.includes("captureScreenshot('dependencias-secciones-plegadas')")
+        && smoke.includes("captureScreenshot('dependencias-plataforma-desplegada')"));
 check('Smoke E2E mide el cambio y restauración de shell', smoke.includes("markPhase('cambio de shell')") && smoke.includes('environment-switch-restore') && toolbar.includes('data-testid="environment-option"'));
 check('Smoke E2E valida una respuesta real de la shell', smoke.includes('LTERMINAL_E2E_COMMAND_OK') && smoke.includes('xterm-rows'));
 check('Smoke E2E prueba refrescos consecutivos de entornos', smoke.includes('refresh-environments') && smoke.includes('for (let attempt') && smoke.includes('fin de refrescos concurrentes'));
@@ -379,6 +406,16 @@ check('El cambio de shell mide el primer output visible y evita respawns solapad
     && app.includes('terminal.environment-switch-first-output')
     && tabs.includes('Primer output de shell')
     && toolbar.includes('switchingTabId'));
+check('Backend responde las dos sondas VT que bloquean el arranque de ConPTY',
+    tabs.includes('STARTUP_CURSOR_REPORT')
+    && tabs.includes('STARTUP_ATTRIBUTES_REPORT')
+    && tabs.includes('startup_attributes_query_pending')
+    && tabs.includes('la_consulta_de_atributos_recibe_la_misma_respuesta_que_xterm'));
+check('E2E rechaza el timeout de tres segundos al iniciar una shell',
+    smoke.includes('E2E_SHELL_STARTUP_LIMIT_MS')
+    && smoke.includes("recordEvent('shell-startup-performance'")
+    && e2eReportVerifier.includes("event?.type === 'shell-startup-performance'")
+    && read('scripts/test-e2e-report.mjs').includes("run('slow-shell-startup'"));
 
 if (failures.length) {
     console.error(`Superficie de tests incompleta (${failures.length}/${checks.length} comprobaciones fallidas):`);

@@ -117,11 +117,11 @@ fn powershell_aliases(platform: &str) -> Vec<(&'static str, String)> {
 ///   1. marcador: la app vacía pantalla e historial ANTES del repintado,
 ///   2. borrado nativo (deja limpio también el buffer interno de ConPTY, lo que
 ///      evita que un repintado posterior resucite lo borrado),
-///   3. banner, leído del archivo que la app genera por pestaña.
+///   3. opcionalmente, imprime un archivo proporcionado por el llamador.
 ///
-/// El banner lo imprime la SHELL, no la app: así forma parte del buffer de
-/// ConPTY y sobrevive a los repintados (si lo pintara la app, el primer
-/// redimensionado se lo llevaría por delante).
+/// El banner automático se pasa a este comando para imprimirlo una sola vez;
+/// el parámetro de archivo también se conserva para la ruta explícita de
+/// `sysinfo` y para los tests de compatibilidad.
 pub fn clear_command(
     kind: ShellKind,
     banner_path: Option<&str>,
@@ -205,17 +205,15 @@ pub fn clear_command(
 /// Redefine clear/cls en la shell. En PowerShell hay que forzar los alias: la
 /// resolución de comandos da prioridad a los alias integrados
 /// (`clear` -> `Clear-Host`) sobre cualquier función que definamos.
-fn clear_alias_lines(
-    kind: ShellKind,
-    banner_clear_path: Option<&str>,
-    transport: Transport,
-    app_name: &str,
-) -> Vec<String> {
+fn clear_alias_lines(kind: ShellKind, transport: Transport, app_name: &str) -> Vec<String> {
     if kind == ShellKind::Cmd {
-        let body = clear_command(kind, banner_clear_path, true, transport, app_name);
+        // `clear` solo limpia xterm. Si volviera a imprimir el fastfetch aquí,
+        // reaparecería dentro del scrollback y volvería a competir con la
+        // selección del usuario.
+        let body = clear_command(kind, None, true, transport, app_name);
         return vec![format!("doskey cls={body}"), format!("doskey clear={body}")];
     }
-    let body = clear_command(kind, banner_clear_path, false, transport, app_name);
+    let body = clear_command(kind, None, false, transport, app_name);
 
     if kind == ShellKind::Powershell {
         // -Option AllScope es obligatorio: los alias integrados clear/cls ya lo
@@ -741,10 +739,7 @@ fn render_session(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions
     section(lines, &t.t("help.session", "Sesión"));
     lines.push(help_row(
         "clear / cls",
-        &t.t(
-            "help.clear",
-            "Limpia pantalla, historial y repinta el banner.",
-        ),
+        &t.t("help.clear", "Limpia pantalla e historial."),
     ));
     lines.push(help_row(
         "sysinfo",
@@ -1051,11 +1046,11 @@ fn is_reserved_for(kind: ShellKind, name: &str) -> bool {
 /// Los contenedores no ven el sistema de archivos del host (y pueden caer a sh
 /// aunque se prefiera bash), la shell de un móvil por ADB tampoco, y el cmd.exe
 /// de Wine solo ve el prefijo como `Z:\...`, no la ruta POSIX del temporal. En
-/// esos tres transportes no se escribe inicialización ninguna: ni alias, ni
-/// `sysinfo`, ni banner impreso por la shell.
+/// esos tres transportes no se escribe inicialización ninguna: ni alias ni
+/// `sysinfo`; el backend entrega el banner como salida PTY al primer resize.
 ///
-/// Importa fuera de este módulo porque decide QUIÉN pinta el banner: la shell
-/// (leyendo el archivo) o la propia aplicación (escribiéndolo en el xterm).
+/// Importa fuera de este módulo para centralizar la decisión de si el
+/// transporte puede cargar los archivos temporales del host.
 pub fn transport_loads_host_files(transport: Transport) -> bool {
     transport.loads_host_files()
 }
@@ -1072,8 +1067,7 @@ pub struct InitOptions<'a> {
     pub manager_label: Option<&'a str>,
     pub platform: &'a str,
     pub windows_manager: Option<&'a str>,
-    /// Imprime el banner desde la shell solo en una pestaña independiente.
-    /// En una rejilla lo pinta xterm después de medir la casilla.
+    /// La inicialización imprime el banner una sola vez cuando es posible.
     pub initial_banner: bool,
 }
 
@@ -1133,11 +1127,9 @@ pub fn build_init_script(
     // lentos eso hacía que el cambio de shell pareciera congelado aunque el
     // PTY ya estuviese listo. La limpieza usa comandos nativos y no depende de
     // ningún alias que todavía se vaya a declarar.
-    // El primer banner lo pinta la app una vez que xterm ya conoce las
-    // dimensiones reales de la casilla. Si la shell lo imprime aquí, nace con
-    // el viewport global (y al dividir queda un segundo banner o un prompt
-    // dentro del fastfetch). Los alias `clear`/`sysinfo` siguen usando la ruta
-    // completa más abajo para las acciones explícitas del usuario.
+    // El banner inicial se imprime aquí una sola vez, después de limpiar la
+    // pantalla. `sysinfo` conserva la misma ruta para una solicitud explícita;
+    // `clear` sólo limpia el scrollback y no vuelve a mostrarlo.
     lines.push(clear_command(
         kind,
         initial_banner_path,
@@ -1175,12 +1167,7 @@ pub fn build_init_script(
         }
     }
 
-    lines.extend(clear_alias_lines(
-        kind,
-        banner_clear_path,
-        options.transport,
-        options.app_name,
-    ));
+    lines.extend(clear_alias_lines(kind, options.transport, options.app_name));
 
     // install / update / upgrade / uninstall / remove sobre el gestor de
     // paquetes real de este entorno.
@@ -1392,6 +1379,20 @@ mod tests {
         assert!(bash.content.contains("cls() { clear; }"));
         let fish = build(ShellKind::Fish, &options(Transport::Native));
         assert!(fish.content.contains("function cls; clear; end"));
+    }
+
+    #[test]
+    fn clear_no_reimprime_la_cabecera_pero_sysinfo_si_la_ofrece() {
+        let mut opts = options(Transport::Native);
+        opts.banner_path = Some("C:\\temp\\banner.txt");
+        opts.banner_clear_path = Some("C:\\temp\\bannerclear.txt");
+        opts.initial_banner = false;
+        let script = build(ShellKind::Cmd, &opts);
+        assert!(script.content.contains("doskey clear=") && script.content.contains("doskey cls="));
+        assert!(!script.content.contains("bannerclear.txt"));
+        assert!(script
+            .content
+            .contains("doskey sysinfo=type \"C:\\temp\\banner.txt\""));
     }
 
     #[test]

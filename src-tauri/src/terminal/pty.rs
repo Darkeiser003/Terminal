@@ -37,11 +37,11 @@ pub fn sideloaded_conpty() -> Option<std::path::PathBuf> {
 /// línea.
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Tamaño de la ventana, no el 80x24 de manual. La shell escribe su banner y su
-/// primer prompt en cuanto arranca, antes de que el frontend haya podido medir
-/// nada; naciendo con el tamaño real, ese texto ya sale bien colocado y no hay
-/// que reflujarlo después. En ConPTY además cada resize es un repintado
-/// completo del buffer, así que evitarlo se nota.
+/// Tamaño de la ventana, no el 80x24 de manual. La shell escribe su primer
+/// prompt en cuanto arranca, antes de que el frontend haya podido medir nada;
+/// nacer con el tamaño real evita que ese prompt se reajuste después. El
+/// El banner pertenece al PTY y se emite una sola vez durante la inicialización.
+/// Los resize posteriores solo ajustan dimensiones y no vuelven a imprimirlo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
     pub cols: u16,

@@ -10,11 +10,12 @@
     "dev": "vite",
     "prebuild": "node scripts/prebuild.mjs",
     "build": "node scripts/build-frontend.mjs",
+    "build:fast": "node scripts/build-fast.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "start": "tauri dev",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun -NonInteractive -FullTests",
-    "dist:win:fast": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun -NonInteractive -NoExtendedTests -Fast -SkipChecks",
+    "dist:win:fast": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -NoRun -NonInteractive -NoExtendedTests -Fast -SkipChecks -NoInstaller",
     "dist:win:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -Installer -NoRun -NonInteractive -FullTests",
     "dist:win:linux": "bash linux/build-windows.sh",
     "dist:win:linux:fast": "bash linux/build-windows.sh --fast --skip-checks",
@@ -42,6 +43,7 @@
     "test:release-hash": "node scripts/test-release-hash.mjs",
     "check:test-surface": "node scripts/verify-test-surface.mjs",
     "check:logic": "node scripts/verify-logic-surface.mjs",
+    "check:local": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:e2e-report && npm run test:release-hash && npm run check:test-surface && npm run check:logic",
     "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:e2e-report && npm run test:release-hash && npm run check:test-surface && npm run check:logic && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {

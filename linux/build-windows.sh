@@ -295,7 +295,7 @@ run_wine_smoke() {
         [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
         fail "Wine mantuvo el proceso, pero no llegó a cargar WebView2Loader.dll."
     fi
-    for marker in "\"smokeToken\":\"$smoke_token\"" 'Ventana inicial mostrada' 'pty spawneado' 'Frontend y terminal preparados'; do
+    for marker in "\"smokeToken\":\"$smoke_token\"" 'Ventana inicial preparada' 'pty spawneado' 'Frontend y terminal preparados'; do
         if ! grep -Fq "$marker" "$app_log"; then
             echo "      Log de la app:" >&2
             sed 's/^/        /' "$app_log" >&2 || true

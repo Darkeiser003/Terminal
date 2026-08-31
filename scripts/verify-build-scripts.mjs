@@ -26,6 +26,16 @@ const installerLoaderPreparation = files.windows.indexOf('Ensure-WebView2Loader 
 const installerBundleBuild = files.windows.indexOf('tauri.windows.installer.conf.json', installerBlock);
 const e2eBlock = files.windows.indexOf("Write-Step 'E2E ampliado");
 const strictProbeThrow = files.windows.indexOf('if ($strictProbeFailure)');
+const invokeNativeStart = files.windows.indexOf('function Invoke-Native {');
+const invokeNativeEnd = files.windows.indexOf('\nfunction Assert-E2eReport', invokeNativeStart);
+const invokeNativeBlock = invokeNativeStart >= 0 && invokeNativeEnd > invokeNativeStart
+    ? files.windows.slice(invokeNativeStart, invokeNativeEnd)
+    : '';
+const crossLinuxStart = files.windows.indexOf('function Invoke-CrossLinuxTests {');
+const crossLinuxEnd = files.windows.indexOf('\n$WindowsDir', crossLinuxStart);
+const crossLinuxBlock = crossLinuxStart >= 0 && crossLinuxEnd > crossLinuxStart
+    ? files.windows.slice(crossLinuxStart, crossLinuxEnd)
+    : '';
 
 const checks = [
     ['Linux ejecuta la batería estática', files.linux.includes('npm run check')],
@@ -39,6 +49,7 @@ const checks = [
     ['Windows ofrece selector interactivo con valores predeterminados y conserva CI', files.windows.includes('Read-BuildChoice') && files.windows.includes('$interactiveBuild') && files.windows.includes('$hasExplicitBuildOptions') && files.windows.includes('$isCiEnvironment') && files.windows.includes('Enter conserva el valor actual')],
     ['Windows captura stderr de Java sin convertirlo en NativeCommandError', files.windows.includes('$isJavaProbe = [IO.Path]::GetFileNameWithoutExtension($Command) -ieq \'java\'') && files.windows.includes('New-Object System.Diagnostics.ProcessStartInfo') && files.windows.includes('$processInfo.RedirectStandardError = $true') && files.windows.includes('$process.WaitForExit()') && files.windows.includes('$exitCode = [int]$process.ExitCode')],
     ['Windows une stderr informativo de comandos nativos sin falsos NativeCommandError', files.windows.includes('$nativeOutput = @(& $Command @Arguments 2> $stderrPath)') && files.windows.includes('el código de salida sigue siendo la única señal de fallo')],
+    ['Windows no oculta el código nativo con una variable LASTEXITCODE local', invokeNativeBlock.includes('$exitCode = [int]$LASTEXITCODE') && !/\$LASTEXITCODE\s*=/.test(invokeNativeBlock)],
     ['Windows no empaqueta un ejecutable antiguo cuando Tauri deja errores aunque npm devuelva cero', files.windows.includes("Invoke-Native 'npm' $Arguments -CaptureOutput") && files.windows.includes('$script:LastNativeOutput -match') && files.windows.includes('failed to build app') && files.windows.includes('could not compile')],
     ['Windows no convierte avisos stderr de rustc en fallos al buscar rust-lld', files.windows.includes('$sysrootOutput = @(& rustc --print sysroot 2>&1)') && files.windows.includes("$ErrorActionPreference = 'Continue'") && files.windows.includes("Where-Object { $_ -match '^[A-Za-z]:\\\\|^/' }")],
     ['WinGet evita falsos fallos por consultas concurrentes y reintenta tras actualizar la fuente', files.winget.includes('LTERMINAL_WINGET_CONCURRENCY') && files.winget.includes('?? 1') && files.winget.includes("source', 'update")],
@@ -75,6 +86,7 @@ const checks = [
     ['Windows instala automáticamente tauri-driver cuando E2E lo necesita', files.windows.includes('se instalará automáticamente con cargo') && !files.windows.includes("-and $InstallE2eDriver -and") && files.windows.includes('tauri-driver no apareció en PATH')],
     ['Windows prepara Edge WebDriver compatible sin exigir Microsoft Edge', files.windows.includes('Get-WebView2RuntimeVersion') && files.windows.includes('LATEST_RELEASE_') && files.windows.includes('msedgedriver.microsoft.com') && files.windows.includes('sin instalar Microsoft Edge') && files.windows.includes('$env:TAURI_NATIVE_DRIVER = $nativeE2eDriver')],
     ['Linux puede lanzar E2E', files.linux.includes('npm run e2e')],
+    ['Linux aborta la build cuando falla E2E', /if ![\s\S]*npm run e2e; then[\s\S]*E2E falló[\s\S]*exit 1[\s\S]*fi/.test(files.linux)],
     ['E2E Linux pasa el driver nativo', files.linux.includes('TAURI_NATIVE_DRIVER=')],
     ['Windows puede lanzar E2E', files.windows.includes("@('run', 'e2e')")],
     ['Windows automatiza la propia release sin recompilar un segundo perfil', files.windows.includes('$env:E2E_BINARY = Join-Path $distDir') && !files.windows.includes("@('run', 'e2e:build')")],
@@ -115,6 +127,7 @@ const checks = [
     ['Linux conserva artefactos y hashes de todas las variantes de release', files.linux.includes('scripts/update-release-hash.mjs') && files.linux.includes('No borres AppImage ni SHA256SUMS anteriores') && !files.linux.includes('rm -f "$RELEASE_DIR"/LTerminal-*.AppImage')],
     ['El actualizador de hashes hace upsert por artefacto y escribe atómicamente', files.releaseHash.includes('fields[1].replace(/^\\*/, \'\') !== artifact') && files.releaseHash.includes('await rename(temporary, target)') && files.releaseHash.includes('kept.push(`${hash}  ${artifact}`)')],
     ['Windows puede iniciar pruebas Linux cruzadas', files.windows.includes('$CrossLinux') && files.windows.includes('Invoke-CrossLinuxTests')],
+    ['Windows aborta si la build WSL devuelve un código distinto de cero', crossLinuxBlock.includes("$code = Invoke-Native 'wsl.exe'") && crossLinuxBlock.includes('if ($code -ne 0)') && crossLinuxBlock.includes('throw "Las pruebas Linux en WSL fallaron')],
     ['Windows propaga el perfil y exclusiones de tests a WSL', files.windows.includes('$linuxFlags') && files.windows.includes('if ($Fast)') && files.windows.includes('--no-extended-tests')],
     ['Windows instala WSL si falta', files.windows.includes('Microsoft.WSL') && files.windows.includes('--install') && files.windows.includes('Ubuntu')],
     ['Windows convierte la ruta del proyecto para WSL', files.windows.includes('wslpath') && files.windows.includes('wslRoot')],

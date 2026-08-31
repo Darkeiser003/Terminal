@@ -380,9 +380,15 @@ class AppStore {
     async savePreferences(patch: Partial<Preferences>): Promise<void> {
         const operation = this.preferencesSaveQueue.then(async () => {
             if (!this.preferences) return;
-            this.applyPayload(await api.savePreferences({ ...this.preferences, ...patch }));
+            const before = this.preferences;
+            const payload = await api.savePreferences({ ...this.preferences, ...patch });
+            const after = payload.preferences;
+            const bannerChanged = before.showSystemBanner !== after.showSystemBanner
+                || before.bannerHiddenItems !== after.bannerHiddenItems
+                || before.fastfetchColor !== after.fastfetchColor;
+            this.applyPayload(payload);
             if (typeof window !== 'undefined') {
-                window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed'));
+                window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged } }));
             }
         });
         // Dejar la cola viva después de un fallo permite que un segundo intento
@@ -399,7 +405,7 @@ class AppStore {
     async resetPreferences(): Promise<void> {
         this.applyPayload(await api.resetPreferences());
         if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed'));
+            window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged: true } }));
         }
     }
 

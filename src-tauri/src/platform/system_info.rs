@@ -1,5 +1,6 @@
 //! Panel de información del sistema estilo fastfetch/neofetch, que se imprime
-//! al abrir cada pestaña y bajo demanda con el alias `sysinfo`.
+//! una vez como salida normal al abrir cada pestaña y bajo demanda con
+//! `sysinfo` o `:banner preset full`.
 //!
 //! Port de `electron/main/systemInfo.js`. Donde el original usaba el módulo
 //! `os` de Node, aquí está el crate `sysinfo`; el resto (identidad real del SO,
@@ -831,7 +832,8 @@ fn cached_disks() -> Vec<DiskRow> {
     DISK_CACHE.lock().clone().unwrap_or_default()
 }
 
-/// Indica si el repintado progresivo ya puede mostrar todos los datos lentos.
+/// Indica si ya están disponibles todos los datos lentos para una impresión
+/// explícita del banner.
 pub fn banner_data_ready() -> bool {
     hardware_data_ready() && disks_data_ready()
 }
@@ -1229,9 +1231,9 @@ fn username() -> String {
 
 /// El nombre de la terminal, arriba del todo y centrado sobre las cajas.
 ///
-/// Va en el banner y no en un texto de bienvenida suelto porque `clear` repinta
-/// el banner y borra todo lo demás: sin esto, una pestaña recién limpiada no
-/// dice en ningún sitio qué terminal se está usando. El nombre sale de la
+/// Va en el banner, que permanece separado del scrollback aunque `clear` borre
+/// la salida de la shell: así una pestaña recién limpiada sigue diciendo qué
+/// terminal se está usando. El nombre sale de la
 /// identidad de la plataforma, así que cada build enseña el suyo — «WinSlim
 /// Terminal» en Windows y «LTerminal» en Linux y macOS — sin nada que tocar
 /// aquí al compilar para la otra.
@@ -1402,6 +1404,13 @@ pub fn build_banner(
         app_name.trim()
     };
 
+    // Las pruebas unitarias deben ser reproducibles y no depender del
+    // settings.json del usuario que lanza `cargo test` (la E2E cambia esas
+    // preferencias deliberadamente). El binario real sigue leyendo siempre
+    // la configuración persistente.
+    #[cfg(test)]
+    let prefs = crate::preferences::Preferences::default();
+    #[cfg(not(test))]
     let prefs = crate::preferences::current();
     let accent = hex_to_ansi(&prefs.fastfetch_color);
     let hardware = banner_hardware();
@@ -1516,12 +1525,9 @@ pub fn build_banner(
     // El ancho depende solo de las columnas reales del panel, no del orden en
     // que se abrió o repintó la pestaña. Así todos los paneles iguales reciben
     // exactamente la misma distribución.
-    // La capa visual del banner comparte la casilla con el scrollbar de
-    // xterm (y sus márgenes internos). En una rejilla esas columnas no forman
-    // parte del ancho realmente pintable; reservar seis evita que el texto
-    // calculado para la rejilla se corte sin elipsis en el borde derecho.
-    let grid_safety_cols = if pane_count > 1 { 6 } else { 0 };
-    let max_line_cols = std::cmp::min(available_cols.saturating_sub(grid_safety_cols), 88);
+    // `columns` representa exactamente el ancho de texto disponible de xterm;
+    // no hay que reservar columnas para una capa flotante.
+    let max_line_cols = std::cmp::min(available_cols, 88);
     let max_sep = std::cmp::min(46, max_line_cols.saturating_sub(2));
     // En una casilla extrema (por ejemplo, mientras el divisor arrastra una
     // ventana hasta una sola columna) ni siquiera caben tres guiones. Nunca
@@ -1578,11 +1584,9 @@ pub fn build_banner(
     // Con 25 filas o más cabe el formato legible (secciones, aire y divisor
     // antes del prompt). El umbral anterior de 40 activaba el modo compacto
     // en una ventana normal y hacía que fastfetch pareciera una lista pegada.
-    // El modo compacto necesita al menos la cabecera, el separador y diez
-    // filas de datos. Si la casilla es menor, cualquier banner se desplazaría
-    // y dejaría solo su cola visible (o duplicaría líneas al redimensionar).
-    // En ese tamaño se oculta de forma explícita: el prompt queda limpio y el
-    // banner reaparece automáticamente al recuperar altura.
+    // El modo compacto necesita espacio para el prompt además de sus datos.
+    // En casillas menores se omite de forma explícita para no desplazar la
+    // entrada; una nueva sesión o una orden explícita podrá volver a mostrarlo.
     if rows > 0 && usize::from(rows) < 12 {
         return String::new();
     }
@@ -1612,9 +1616,8 @@ pub fn build_banner(
             };
         }
 
-        // El orden es deliberado: en el mínimo real caben la cabecera, CPU y
-        // Uptime. El Uptime tiene su propia línea, así nunca se pega al final
-        // de Memoria ni provoca un salto visual por falta de anchura.
+        // El orden es deliberado: en el perfil esencial caben CPU, Uptime y
+        // Memoria además del título y el sistema.
         take_row!(hardware_rows, &cpu_label);
         take_row!(session_rows, &uptime_label);
         take_row!(hardware_rows, &memory_label);
@@ -1673,7 +1676,7 @@ pub fn build_banner(
         // discos o una etiqueta traducida se peguen a otra información y
         // hagan que xterm envuelva una línea. La lista se recorta al espacio
         // real disponible al final de la función, dejando que el contenido
-        // aparezca por fases a medida que crece la ventana.
+        // aparezca completo en una única salida, sin depender de repintados.
         let title_text = ellipsize(&format!("{display_name} {version}"), max_line_cols);
         let system = system_rows
             .iter()
@@ -2044,10 +2047,14 @@ mod tests {
         assert!(banner.contains("Sistema"), "{banner}");
         assert!(banner.contains("CPU"), "{banner}");
         assert!(banner.contains("Memoria"), "{banner}");
-        // Algunos runtimes compatibles (Wine, Sandbox durante el arranque y
-        // ciertos contenedores) no exponen discos a sysinfo. Las filas de
-        // almacenamiento se prueban aparte con datos deterministas.
-        assert!(banner.contains("Kernel"), "{banner}");
+        // El perfil esencial oculta Kernel por defecto para conservar un
+        // bloque breve (5–8 líneas). Cuando el usuario activa ese elemento
+        // (perfil completo o Ajustes), sí debe aparecer; la aserción respeta
+        // ambos perfiles sin depender del host donde corre el test.
+        let prefs = crate::preferences::Preferences::default();
+        if banner_item_enabled(&prefs.banner_hidden_items, "kernel") {
+            assert!(banner.contains("Kernel"), "{banner}");
+        }
         assert!(
             banner.contains(&t.t("banner.uptime", "Tiempo activo")),
             "{banner}"

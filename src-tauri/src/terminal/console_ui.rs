@@ -23,8 +23,8 @@
 //! Todo se emite con los medios de CADA shell, no con los de la app: la
 //! decoración forma parte del buffer de la terminal igual que el resto de la
 //! salida, así que sobrevive al scroll, a los repintados de ConPTY y a un
-//! `clear` posterior. Es el mismo motivo por el que el banner del sistema lo
-//! imprime la shell y no la app.
+//! `clear` posterior. El banner del sistema también forma parte del mismo
+//! buffer, aunque se emite una sola vez durante el arranque de la sesión.
 //!
 //! ## Colores en cmd.exe
 //!

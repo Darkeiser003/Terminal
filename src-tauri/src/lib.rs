@@ -192,7 +192,7 @@ pub fn run() {
             commands::pty_input,
             commands::internal_command_parse,
             commands::pty_resize,
-            commands::pty_refresh_banner,
+            commands::pty_print_banner,
             commands::env_list,
             commands::env_refresh,
             commands::env_switch,
@@ -251,8 +251,8 @@ pub fn run() {
             let state = app.state::<std::sync::Arc<AppState>>();
 
             // La primera pestaña se crea antes de mostrar la ventana: su shell
-            // ya está escribiendo el banner mientras el frontend monta el
-            // xterm, y la salida se le entrega en cuanto avisa con `tabs_ready`.
+            // prepara aliases y el banner esencial para imprimirlo una sola vez
+            // dentro del xterm cuando el frontend confirme el tamaño real.
             let tab_started = Instant::now();
             match state.default_environment() {
                 Some(env) => {
@@ -273,9 +273,8 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(identity::current().name)?;
-                window.show()?;
                 log_info!(
-                    "Ventana inicial mostrada",
+                    "Ventana inicial preparada (aún oculta)",
                     serde_json::json!({
                         "firstTabMs": first_tab_ms,
                         "setupMs": setup_started.elapsed().as_millis(),

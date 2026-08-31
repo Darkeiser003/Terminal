@@ -39,9 +39,8 @@ pub enum Transport {
 }
 
 impl Transport {
-    /// Docker, ADB y Wine no llegan a los temporales del host: allí el banner
-    /// lo escribe la app en el xterm y no se intenta cargar inicialización
-    /// ninguna.
+    /// Docker, ADB y Wine no llegan a los temporales del host: allí el backend
+    /// entrega el banner como salida PTY y no carga aliases del host.
     pub fn loads_host_files(self) -> bool {
         matches!(self, Transport::Native | Transport::Msys | Transport::Wsl)
     }

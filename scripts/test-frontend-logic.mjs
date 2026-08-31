@@ -44,21 +44,12 @@ assert(terminalPane.includes("candidate.trimStart().startsWith(':') || isDirectC
     'Las líneas de crédito deben interceptarse antes de enviarse a la shell');
 assert(terminalPane.includes("terminal.creditDarkeiser") && terminalPane.includes("terminal.creditChristian"),
     'Los easter-eggs deben usar claves localizadas');
-const refreshBannerStart = terminalPane.indexOf('function refreshBannerNow()');
 const fitAndReportStart = terminalPane.indexOf('function fitAndReport()');
-assert(refreshBannerStart >= 0 && fitAndReportStart > refreshBannerStart, 'No se pudo delimitar refreshBannerNow');
-assert(!terminalPane.slice(refreshBannerStart, fitAndReportStart).includes('paneCountChanged'),
-    'refreshBannerNow no debe leer paneCountChanged fuera del alcance de fitAndReport');
 const paneResizeBlock = terminalPane.slice(fitAndReportStart);
-assert(paneResizeBlock.includes('if (paneCountChanged) pendingPaneCountRefresh = true;'),
-    'Un cambio de rejilla debe forzar el primer repintado sin cursor');
-assert(paneResizeBlock.includes('pendingPaneCountRefresh = true;\n                            pendingBannerRefresh = true;'),
-    'El repintado de rejilla debe reintentarse después del lote inicial');
-assert(!paneResizeBlock.includes('pendingPaneCountRefresh = false; }, 900'),
-    'El estado pendiente de rejilla no debe expirar mientras el usuario escribe');
-assert(!terminalPane.slice(terminalPane.indexOf('function flushPendingBannerSettingsRefresh()'), fitAndReportStart)
-    .includes('pendingPaneCountRefresh = false;'),
-    'Al terminar una edición no se debe descartar la rejilla pendiente antes del IPC');
+assert(terminalPane.includes('term.open(terminalHost)')
+    && terminalPane.includes('data-testid="terminal-host"')
+    && terminalPane.includes('function requestBannerPrint'),
+    'El banner y el código deben compartir el mismo xterm');
 const configuredShortcuts = [...defaults.matchAll(/^shortcut\w+\s*=\s*"([^"]+)"/gm)].map((match) => match[1]);
 assert.equal(configuredShortcuts.length, shortcuts.SHORTCUT_PREFERENCE_KEYS.length);
 const normalizedDefaults = configuredShortcuts.map(shortcuts.normalizeShortcut);

@@ -152,14 +152,7 @@ export const setWindowsIntegration = (enabled: boolean) =>
 export const resize = (tabId: string, cols: number, rows: number) =>
     invokeLogged<void>('pty_resize', { tabId, cols, rows });
 
-export const refreshBanner = (
-    tabId: string,
-    cols: number,
-    rows: number,
-    paneCount: number,
-    cursorRow?: number,
-    cursorCol?: number,
-) => invokeLogged<{ applied: boolean; text: string }>('pty_refresh_banner', { tabId, cols, rows, paneCount, cursorRow, cursorCol });
+export const printBanner = (tabId: string) => invokeLogged<boolean>('pty_print_banner', { tabId });
 
 // ---- Entornos ----
 

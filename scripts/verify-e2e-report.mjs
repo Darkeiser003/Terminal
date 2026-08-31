@@ -79,6 +79,13 @@ if (!tabIsolation || tabIsolation.passed !== true || tabIsolation.tabs < 3) {
     throw new Error('El E2E no demostró sesiones PTY independientes entre pestañas.');
 }
 
+const shellStartup = events.find((event) => event?.type === 'shell-startup-performance');
+if (!shellStartup || shellStartup.passed !== true || shellStartup.samples < 1
+    || !Number.isFinite(shellStartup.maxMs) || !Number.isFinite(shellStartup.limitMs)
+    || shellStartup.maxMs >= shellStartup.limitMs) {
+    throw new Error('El E2E no demostró que la shell evitase el timeout inicial de ConPTY.');
+}
+
 const responsive = events.find((event) => event?.type === 'responsive-matrix');
 if (!responsive || responsive.panes < 2 || responsive.cases < 20
     || !responsive.explorerStates?.includes(false) || !responsive.explorerStates?.includes(true)) {
@@ -91,7 +98,9 @@ if (!responsive || responsive.panes < 2 || responsive.cases < 20
 // también la evidencia textual que dejó cada pane.
 const bannerReady = events.filter((event) => event?.type === 'banner-ready');
 if (bannerReady.length === 0) throw new Error('El E2E no dejó evidencia textual del banner.');
-const bannerHeader = /^(?:WinSlim|LTerminal).*Terminal\b/i;
+// Linux usa la cabecera compacta «LTerminal 1.4.4»; Windows mantiene
+// «WinSlim Terminal». Ambas representan un único bloque válido.
+const bannerHeader = /^(?:LTerminal\b|WinSlim\b.*\bTerminal\b)/i;
 // La GPU puede incluir legítimamente memoria dedicada («1 GB»). Solo es una
 // mezcla si invade otro campo del banner; tratar GB como corrupción hacía
 // fallar informes válidos de Windows.
@@ -105,7 +114,16 @@ for (const event of bannerReady) {
     for (const preview of previews) {
         const lines = String(preview ?? '').replace(/\r/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
         const headers = lines.filter((line) => bannerHeader.test(line));
-        if (headers.length !== 1 || lines.some((line) => mixedBannerLine.test(line))) {
+        // En el mínimo responsive la marca puede quedar fuera del viewport y
+        // el preview empieza por Sistema/CPU. Aceptar esa forma solo cuando
+        // conserva CPU, memoria, uptime y un prompt; cualquier mezcla sigue
+        // siendo un fallo real.
+        const compactWithoutHeader = headers.length === 0
+            && /CPU|Procesador|Processor/i.test(preview)
+            && /Memoria|Memory|RAM/i.test(preview)
+            && /Uptime|Tiempo activo|Sesion|Session/i.test(preview)
+            && /(?:@[^\s:]+:.*[>$#]|[A-Za-z]:\\.*[>$#])/i.test(preview);
+        if ((!compactWithoutHeader && headers.length !== 1) || lines.some((line) => mixedBannerLine.test(line))) {
             throw new Error(`El E2E detectó un banner duplicado o mezclado: ${JSON.stringify(preview).slice(0, 1200)}`);
         }
     }

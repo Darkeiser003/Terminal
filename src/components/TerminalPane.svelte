@@ -24,15 +24,19 @@
     let { tabId, active }: Props = $props();
 
     let host: HTMLDivElement;
+    let terminalHost: HTMLDivElement;
     let term: Terminal | undefined;
     let fitAddon: FitAddon | undefined;
     let observer: ResizeObserver | undefined;
     let mirroredLine: string | null = '';
-    // En rejilla el banner es una cabecera de la interfaz, no parte del
-    // scrollback editable: esta copia visible permanece fija aunque una
-    // entrada larga haga reflow y desplace el buffer de xterm.
-    let bannerOverlay = $state('');
-    // Las promesas de resize/repintado pueden resolver después de desmontar
+    // La shell puede aceptar teclas antes de que el banner inicial haya
+    // terminado de llegar al xterm (sobre todo en pestañas creadas en segundo
+    // plano). Retenerlas brevemente conserva la entrada del usuario y evita
+    // que el eco se escriba dentro de una línea del banner.
+    let inputReady = false;
+    let queuedInput = '';
+    let inputReleaseTimer: number | undefined;
+    // Las promesas de resize/impresión pueden resolver después de desmontar
     // una pestaña. Marcar el ciclo de vida evita que un callback tardío vuelva
     // a escribir un banner en un xterm ya destruido o en una pestaña reciclada.
     let destroyed = false;
@@ -125,7 +129,7 @@
             if (preset === 'full' || preset === 'completo') current.clear();
             else if (preset === 'compact' || preset === 'compacto') {
                 current.clear();
-                for (const id of ['host', 'kernel', 'environment', 'motherboard', 'gpu', 'datetime']) current.add(id);
+                for (const id of ['host', 'kernel', 'environment', 'motherboard', 'gpu', 'storage', 'datetime']) current.add(id);
             } else {
                 term?.writeln(`\r\n${app.t('terminal.bannerProfiles', 'Available profiles: compact | full')}`);
                 return;
@@ -252,92 +256,85 @@
     /** Último tamaño enviado al backend. Evita mandar un resize por cada píxel
      *  mientras se arrastra el borde de la ventana. */
     let lastSize = { cols: 0, rows: 0 };
-    /** Número de repintado solicitado. Un ResizeObserver puede entregar varias
-     *  medidas seguidas; las respuestas antiguas no deben volver a pintar un
-     *  banner con las dimensiones anteriores. */
-    let bannerRefreshSerial = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
-    // El número de paneles puede cambiar sin que cambien las columnas/filas
-    // de este xterm. En ese caso también hay que repintar el banner: el modo
-    // de una casilla única es distinto del modo compacto de una rejilla.
-    let lastPaneCount = 0;
-    let paneRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     let initialPromptTimer: number | undefined;
-    // El fastfetch es salida visual, pero la línea que el usuario está
-    // editando pertenece al PTY. Nunca se debe repintar el banner mientras esa
-    // línea está viva: si el banner crece al estrechar la ventana, podría
-    // ocupar justamente las filas donde xterm ha envuelto el texto escrito.
+    let tinyViewportCleared = false;
+    // Cuando el frontend tiene que reescribir el prompt en una casilla
+    // estrecha, xterm puede conservar ese wrap aunque después sobren
+    // columnas. Guardar la línea lógica permite recomponerla al recuperar
+    // espacio, en vez de dejar `C:\\Users\\Admini` + `strador>` para siempre.
+    let tinyViewportPrompt = '';
     let userEditing = false;
-    let pendingBannerSettingsRefresh = false;
-    let pendingPaneCountRefresh = false;
-    // El backend puede emitir el prompt y un repintado sintético en eventos
-    // consecutivos. Esperar a que App.svelte vacíe la cola de `term.write`
-    // garantiza que `cursorY` pertenece al prompt real, nunca a una fila del
-    // banner que todavía estaba entrando en xterm.
+    // Esperar a que App.svelte vacíe la cola de `term.write` evita recalcular
+    // el banner mientras la shell todavía está entregando un bloque de
+    // salida; xterm conserva así un orden visual estable.
     let terminalOutputBusy = false;
-    let pendingBannerRefresh = false;
-    let promptRepairTimer: number | undefined;
-    // `refresh_banner` emite salida visual, que a su vez provoca los eventos
-    // busy/idle del terminal. Mientras el IPC sigue en vuelo no se debe
-    // encadenar otro repintado desde ese idle: hacerlo crea un bucle de
-    // cabeceras sintÃ©ticas y termina mezclÃ¡ndolas con el prompt.
+    // Una redimensión de xterm mientras procesa un bloque de salida puede
+    // dejar filas rasterizadas con columnas antiguas (el síntoma visual es
+    // texto de un comando mezclado con GPU/CPU). Se difiere hasta que la cola
+    // de escritura confirma que el terminal quedó inactivo.
+    let fitAfterOutput = false;
+    let fitQuietTimer: number | undefined;
+    let lastOutputFinishedAt = 0;
+    let bannerActivationTimer: number | undefined;
+    let inputReadyTimer: number | undefined;
+    let pendingBannerPrint = false;
+    // Mientras una solicitud sigue en vuelo no se encadena otra
+    // desde el evento idle; así se evita trabajo duplicado durante un resize.
     let bannerRefreshInFlight = false;
-    // En una pestaña única la shell ya posee el banner y xterm lo refluje de
-    // forma nativa al cambiar de ancho. Volver a inyectarlo en cada resize
-    // desincroniza el cursor de ConPTY; las rejillas sí usan el repintado
-    // controlado porque cada casilla cambia de modo.
-    let hasCompletedBannerPaint = false;
-    let lastBannerRefreshRequest = { cols: 0, rows: 0, panes: 0, at: 0 };
 
     function eventBelongsToPane(event: Event): boolean {
         return (event as CustomEvent<{ tabId?: string }>).detail?.tabId === tabId;
     }
 
     function onTerminalOutputBusy(event: Event): void {
-        if (eventBelongsToPane(event)) terminalOutputBusy = true;
-    }
-
-    function schedulePromptRepair(attempt = 0): void {
-        if (promptRepairTimer !== undefined || destroyed || userEditing || terminalOutputBusy
-            || terminalPromptVisible()) return;
-        promptRepairTimer = window.setTimeout(() => {
-            promptRepairTimer = undefined;
-            if (destroyed || userEditing || terminalOutputBusy || terminalPromptVisible()) return;
-            const activeBuffer = term?.buffer.active;
-            const cursorViewportRow = activeBuffer?.cursorY ?? 0;
-            const bannerRows = bannerOverlay
-                ? Math.max(0, bannerOverlay.split('\n').length - 1)
-                : 0;
-            const cursorLine = activeBuffer?.getLine((activeBuffer.baseY ?? 0) + cursorViewportRow)
-                ?.translateToString(true).trim() ?? '';
-            // Solo reparar si la fila activa conserva una forma de prompt. Si
-            // la shell estÃ¡ ejecutando un comando, no hay que inyectar Enter
-            // aunque todavÃ­a no haya vuelto a pintar su prompt.
-            const looksLikePrompt = /(?:[A-Za-z]:\\.+[>â¯$#]|[^\s@]+@[^\s:]+:.+[â¯$#]|(?:~|\/).*[â¯$#])\s*$/u.test(cursorLine);
-            if (bannerRows > 0 && (looksLikePrompt || cursorLine === '')) {
-                void api.sendInput(tabId, '\r');
-            }
-            // ConPTY puede redibujar una fila tarde tras el resize. Repetir la
-            // observaciÃ³n unos pocos frames corrige ese desplazamiento sin
-            // convertir una orden en Enter: cada intento exige un prompt real.
-            if (attempt < 6 && (!terminalPromptVisible() || promptCursorBehindBanner())) {
-                schedulePromptRepair(attempt + 1);
-            }
-        }, 180 + attempt * 40);
+        if (!eventBelongsToPane(event)) return;
+        terminalOutputBusy = true;
+        // El banner inicial puede llegar en varios bloques desde ConPTY. Si
+        // entra otro bloque antes del margen de 700 ms, el temporizador que
+        // libera la entrada deja de ser válido: cancelarlo evita que el eco
+        // del primer comando se inserte entre dos líneas del banner.
+        if (inputReleaseTimer) {
+            window.clearTimeout(inputReleaseTimer);
+            inputReleaseTimer = undefined;
+        }
     }
 
     function onTerminalOutputIdle(event: Event): void {
         if (!eventBelongsToPane(event)) return;
         terminalOutputBusy = false;
-        // Un espejo vacío solo indica que no estamos escribiendo; no demuestra
-        // que exista un prompt (puede haber una orden ejecutándose o el cursor
-        // estar sobre el banner). Consultar siempre el buffer real evita que
-        // el E2E dé por bueno un panel cuyo prompt no se ve.
-        const promptVisible = terminalPromptVisible();
-        if (!promptVisible && pendingBannerRefresh) schedulePromptRepair();
-        if (!pendingBannerRefresh || userEditing || bannerRefreshInFlight) return;
-        pendingBannerRefresh = false;
-        requestAnimationFrame(refreshBannerNow);
+        lastOutputFinishedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (!inputReady && terminalStartupReady() && !inputReleaseTimer) {
+            // El callback de `term.write` confirma el parseo, pero el canvas
+            // puede necesitar otro frame para rasterizar las últimas líneas.
+            // Esperar 700 ms antes de soltar la entrada evita que el primer
+            // comando se pinte encima del banner en pestañas nuevas.
+            inputReleaseTimer = window.setTimeout(() => {
+                inputReleaseTimer = undefined;
+                if (destroyed || inputReady) return;
+                inputReady = true;
+                if (inputReadyTimer) window.clearTimeout(inputReadyTimer);
+                inputReadyTimer = undefined;
+                if (queuedInput) {
+                    const pending = queuedInput;
+                    queuedInput = '';
+                    void api.sendInput(tabId, pending);
+                }
+            }, 700);
+        }
+        if (fitAfterOutput) {
+            fitAfterOutput = false;
+            // Dejar un pequeño margen permite que el renderer de xterm vacíe
+            // su frame pendiente antes de recalcular el ancho de las líneas.
+            if (fitQuietTimer) window.clearTimeout(fitQuietTimer);
+            fitQuietTimer = window.setTimeout(() => {
+                fitQuietTimer = undefined;
+                requestAnimationFrame(() => fitAndReport());
+            }, 250);
+        }
+        if (!pendingBannerPrint || userEditing || bannerRefreshInFlight) return;
+        pendingBannerPrint = false;
+        requestAnimationFrame(() => requestBannerPrint());
     }
 
     /** Diagnóstico estructural para E2E. No guarda texto ni códigos de teclas:
@@ -358,44 +355,44 @@
         return 'non-ascii';
     }
 
-    function bannerOverlayText(value: string): string {
-        return value
-            .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
-            .replace(/\x1b[78]/g, '')
-            .replace(/\r/g, '')
-            .trim();
+    function requestBannerPrint(event?: Event): void {
+        if (event && (event as CustomEvent<{ bannerChanged?: boolean }>).detail?.bannerChanged !== true) return;
+        // Las casillas ocultas conservan su scrollback y no deben acumular una
+        // impresión pendiente para el momento en que vuelvan a la rejilla:
+        // ese momento puede coincidir con un comando todavía en curso y
+        // mezclar su eco con el banner. El siguiente `sysinfo` explícito o un
+        // cambio de preferencia con la casilla activa actualizará su salida.
+        if (!active) return;
+        if (destroyed || !term || userEditing || terminalOutputBusy || bannerRefreshInFlight) {
+            pendingBannerPrint = true;
+            return;
+        }
+        pendingBannerPrint = false;
+        bannerRefreshInFlight = true;
+        void api.printBanner(tabId).then((applied) => {
+            if (applied) {
+                perf.timeToOnce(`fastfetch-visible:${tabId}`, 'fastfetch.banner-visible', { tabId, source: 'pty-output' });
+            }
+        }).catch((error) => {
+            pendingBannerPrint = true;
+            console.error('[TerminalPane] impresión de banner fallida', error);
+        }).finally(() => {
+            bannerRefreshInFlight = false;
+            if (pendingBannerPrint && !userEditing && !terminalOutputBusy) window.setTimeout(() => requestBannerPrint(), 80);
+        });
     }
 
     function terminalPromptVisible(): boolean {
         if (!term) return false;
         const buffer = term.buffer.active;
         const cursorAbsoluteRow = buffer.baseY + buffer.cursorY;
-        const cursorViewportRow = buffer.cursorY;
-        // No basta con encontrar cualquier prompt reciente: tras un clear/home
-        // el buffer puede conservar un prompt antiguo justo debajo del banner,
-        // mientras el cursor real sigue en otra fila. El overlay conoce cuántas
-        // filas ocupa el fastfetch; una línea válida debe pertenecer al entorno
-        // del cursor y quedar después de ese bloque.
-        const bannerRows = bannerOverlay
-            ? Math.max(0, bannerOverlay.split('\n').length - 1)
-            : 0;
-        const reservedRows = bannerRows + 2;
         if (host) {
             host.dataset.promptCursorRow = String(cursorAbsoluteRow);
             host.dataset.promptCursorViewportRow = String(buffer.cursorY);
             host.dataset.promptBaseY = String(buffer.baseY);
             host.dataset.promptViewportRows = String(term.rows);
-            host.dataset.promptBannerRows = String(bannerRows);
         }
-        // Una fila de xterm puede conservar texto de un frame anterior aunque
-        // el cursor real siga detrÃ¡s del overlay. En ese estado no hay prompt
-        // utilizable: obligamos a la ruta de reparaciÃ³n a pedir uno nuevo a la
-        // shell, en vez de confiar en el DOM stale.
-        if (cursorViewportRow < reservedRows) {
-            if (host) host.dataset.promptVisible = 'false';
-            return false;
-        }
-        const start = Math.max(0, cursorAbsoluteRow - 2, bannerRows);
+        const start = Math.max(0, cursorAbsoluteRow - 2);
         const end = Math.min(buffer.length - 1, cursorAbsoluteRow + 1);
         for (let row = start; row <= end; row += 1) {
             const text = buffer.getLine(row)?.translateToString(true).trimEnd() ?? '';
@@ -412,7 +409,7 @@
         // repintado el cursor puede quedar momentáneamente sobre una métrica
         // del banner. Solo es prompt si conserva el terminador que usa una
         // shell interactiva (`>`, `❯`, `$` o `#`).
-        if (cursorAbsoluteRow >= bannerRows && cursorLine && /[>❯$#]\s*$/u.test(cursorLine)) {
+        if (cursorLine && /[>❯$#]\s*$/u.test(cursorLine)) {
             if (host) host.dataset.promptVisible = 'true';
             return true;
         }
@@ -420,211 +417,145 @@
         return false;
     }
 
-    function promptCursorBehindBanner(): boolean {
-        if (!term || !bannerOverlay) return false;
-        const cursorViewportRow = term.buffer.active.cursorY;
-        const bannerRows = Math.max(0, bannerOverlay.split('\n').length - 1);
-        // En rejilla el separador y su padding inferior ocupan casi dos filas
-        // adicionales aunque no formen parte del texto del banner. Un cursor
-        // exactamente en `bannerRows` sigue quedando tapado; se considera
-        // seguro solo después de esa reserva visual.
-        const reservedRows = bannerRows + 2;
-        return cursorViewportRow < reservedRows;
-    }
-
-    function refreshBannerNow(): void {
-        // Una pestaña que sale de la rejilla conserva su xterm e historial,
-        // pero deja de tener una superficie visible. Los temporizadores y los
-        // eventos idle que quedaron de la transición pueden llegar después de
-        // ocultarla; no deben seguir enviando repintados con sus dimensiones
-        // antiguas (eso mantenía una casilla fantasma en 122x30 y competía con
-        // el banner de los paneles visibles).
-        if (destroyed || !term || !active) return;
-        if (userEditing || terminalOutputBusy) {
-            pendingBannerRefresh = true;
-            pendingPaneCountRefresh = true;
-            return;
-        }
-        if (bannerRefreshInFlight) {
-            pendingBannerRefresh = true;
-            return;
-        }
-        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-        const panes = Math.max(1, app.panes.length);
-        if (lastBannerRefreshRequest.cols === term.cols
-            && lastBannerRefreshRequest.rows === term.rows
-            && lastBannerRefreshRequest.panes === panes
-            && now - lastBannerRefreshRequest.at < 250) {
-            pendingBannerRefresh = true;
-            window.setTimeout(() => {
-                if (!bannerRefreshInFlight && pendingBannerRefresh && !userEditing && !terminalOutputBusy) {
-                    refreshBannerNow();
-                }
-            }, 250);
-            return;
-        }
-        // La respuesta indica si el backend pudo proteger el cursor. Si la
-        // shell aún estaba redibujando, no se pierde la solicitud: el backend
-        // la deja pendiente y el siguiente lote de salida volverá a intentarlo.
-        pendingBannerRefresh = true;
-        bannerRefreshInFlight = true;
-        lastBannerRefreshRequest = { cols: term.cols, rows: term.rows, panes, at: now };
+    function terminalStartupReady(): boolean {
+        if (!term) return false;
+        // En una casilla demasiado baja el banner se omite por diseño: basta
+        // con que xterm tenga una línea utilizable para liberar la entrada.
+        if (term.rows < 12) return terminalPromptVisible();
         const buffer = term.buffer.active;
-        const cursorRow = buffer.cursorY;
-        const cursorCol = buffer.cursorX;
-        void api.refreshBanner(
-            tabId,
-            term.cols,
-            term.rows,
-            panes,
-            // Solo se llama cuando no hay edición ni salida pendiente; en ese
-            // punto xterm ya tiene la posición que usará la siguiente salida.
-            // El backend la acota al área inferior y nunca restaura una fila
-            // del banner que pudiera haber quedado de un frame anterior.
-            cursorRow,
-            cursorCol,
-        ).then((result) => {
-            if (destroyed) return;
-            bannerOverlay = bannerOverlayText(result.text);
-            if (result.applied) {
-                const firstPaint = !hasCompletedBannerPaint;
-                pendingBannerRefresh = false;
-                pendingPaneCountRefresh = false;
-                hasCompletedBannerPaint = true;
-                // En una rejilla cada PTY puede conservar el scroll offset del
-                // banner anterior. El prompt sí está en el buffer, pero queda
-                // fuera de la captura (sobre todo en las casillas nuevas).
-                // Llevar al final después del repintado solo afecta a la
-                // transición visual; no escribe nada en la shell ni cambia
-                // una línea que el usuario esté editando.
-                const currentTerm = term;
-                // El espejo puede quedar en `null` tras una secuencia de foco,
-                // pegado o una tecla de control que no sea texto editable. En
-                // ese estado no conocemos la línea, pero `userEditing` sigue
-                // siendo la salvaguarda que evita tocar una orden viva; el
-                // scroll de la vista sí es siempre seguro.
-                if (panes > 1 && currentTerm && !userEditing
-                    && (mirroredLine === '' || mirroredLine === null)) {
-                    currentTerm.scrollToBottom();
-                    currentTerm.refresh(0, Math.max(0, currentTerm.rows - 1));
-                }
-                // El repintado ANSI se entrega como salida sintética y no
-                // mueve el cursor interno de ConPTY. Si durante la limpieza
-                // se había borrado la fila del prompt, una línea vacía fuerza
-                // a la shell a emitirlo de nuevo en la posición ya estable.
-                // `userEditing` es la salvaguarda autoritativa; el espejo puede
-                // quedar obsoleto tras una transiciÃ³n de foco y no debe impedir
-                // recuperar un prompt que sigue oculto bajo el overlay.
-                // En rejilla el prompt puede haber sido borrado por la
-                // limpieza de la capa xterm y se puede solicitar de inmediato.
-                const promptVisibleAfterPaint = terminalPromptVisible();
-                const promptBehindBannerAfterPaint = promptCursorBehindBanner();
-                if (panes > 1 && !userEditing
-                    && (!promptVisibleAfterPaint || promptBehindBannerAfterPaint)) {
-                    // El prompt puede haber sido borrado durante la limpieza;
-                    // la rutina escalonada lo recupera cuando la fila activa
-                    // vuelve a pertenecer a la shell.
-                    schedulePromptRepair();
-                } else if (panes === 1 && !terminalPromptVisible()
-                    && (firstPaint || mirroredLine === '' || mirroredLine === null)) {
-                    // Para una sola shell esperamos otro frame: ConPTY puede
-                    // terminar SIGWINCH después de resolver el IPC. El Enter
-                    // inmediato era el que a veces escribía la ruta sobre
-                    // `PC`; esta comprobación tardía solo se ejecuta si el
-                    // prompt sigue ausente.
-                    schedulePromptRepair();
-                }
-            }
-        }).catch((error) => {
-            if (!destroyed) {
-                // No perder un repintado por un fallo transitorio del IPC: el
-                // siguiente idle/resize lo reintentará con el mismo viewport.
-                pendingBannerRefresh = true;
-                console.error('[TerminalPane] refresh banner settings failed', error);
-            }
-        }).finally(() => {
-            bannerRefreshInFlight = false;
-            if (!destroyed && pendingBannerRefresh && !userEditing && !terminalOutputBusy) {
-                window.setTimeout(() => {
-                    if (!bannerRefreshInFlight && pendingBannerRefresh && !userEditing && !terminalOutputBusy) {
-                        refreshBannerNow();
-                    }
-                }, 80);
-            }
-        });
-    }
-
-    function refreshBannerForSettings(): void {
-        if (!term) return;
-        // El panel puede guardar mientras el usuario está escribiendo. No se
-        // debe borrar su línea, pero tampoco perder el cambio: se reintenta
-        // justo después de que Enter/Backspace deje libre el prompt.
-        if (userEditing) {
-            pendingBannerSettingsRefresh = true;
-            return;
+        const start = Math.max(0, buffer.length - Math.max(term.rows + 20, 64));
+        let text = '';
+        for (let row = start; row < buffer.length; row += 1) {
+            text += `${buffer.getLine(row)?.translateToString(true) ?? ''}\n`;
         }
-        refreshBannerNow();
+        const titleIndex = Math.max(
+            text.lastIndexOf('WinSlim Terminal'),
+            text.lastIndexOf('LTerminal'),
+        );
+        const latestBanner = titleIndex >= 0 ? text.slice(titleIndex) : text;
+        const separatorCount = (latestBanner.match(/-{20,}/g) ?? []).length;
+        // El perfil completo tiene separador de apertura y cierre. El perfil
+        // esencial no dibuja marcos, pero siempre conserva CPU/Memoria/Uptime;
+        // exigir sus dos filas evita liberar la entrada al ver solo la cabecera
+        // mientras el resto del bloque aún llega desde la PTY.
+        const fullBannerComplete = separatorCount >= 2;
+        const compactBannerComplete = separatorCount === 0
+            && /(?:Uptime|Tiempo activo)/i.test(latestBanner)
+            && /(?:Memory|Memoria)/i.test(latestBanner);
+        return terminalPromptVisible()
+            && /(?:WinSlim Terminal|LTerminal)\s+\d/i.test(latestBanner)
+            && (fullBannerComplete || compactBannerComplete);
     }
 
     function flushPendingBannerSettingsRefresh(): void {
-        if (userEditing || (!pendingBannerSettingsRefresh && !pendingPaneCountRefresh && !pendingBannerRefresh)) return;
-        pendingBannerSettingsRefresh = false;
-        pendingBannerRefresh = false;
-        // Esperar un frame permite que la shell termine de pintar el prompt
-        // tras Enter antes de que el banner restaure su cursor visual.
-        requestAnimationFrame(refreshBannerForSettings);
+        if (userEditing || !pendingBannerPrint) return;
+        pendingBannerPrint = false;
+        // Esperar un frame deja que xterm termine el eco de Enter antes de
+        // recalcular la altura de su región.
+        requestAnimationFrame(() => requestBannerPrint());
     }
 
     function fitAndReport(): void {
         if (destroyed || !term || !fitAddon || !active) return;
-        // Proteger contra accesos cuando el nodo host ya no exista.
-        if (!host) {
-            console.debug('[TerminalPane] fitAndReport: host is null, skipping');
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (terminalOutputBusy || now - lastOutputFinishedAt < 250) {
+            fitAfterOutput = true;
+            if (!terminalOutputBusy && !fitQuietTimer) {
+                fitQuietTimer = window.setTimeout(() => {
+                    fitQuietTimer = undefined;
+                    requestAnimationFrame(() => fitAndReport());
+                    }, Math.max(1, 250 - (now - lastOutputFinishedAt)));
+            }
+            return;
+        }
+        // La caja medible es exclusivamente la región inferior de xterm.
+        if (!host || !terminalHost) {
+            console.debug('[TerminalPane] fitAndReport: layout host is null, skipping');
             return;
         }
         // Un panel oculto mide 0: ajustarlo ahí daría un tamaño absurdo que
         // luego habría que deshacer.
-        if (host.clientWidth === 0 || host.clientHeight === 0) return;
+        if (terminalHost.clientWidth === 0 || terminalHost.clientHeight === 0) return;
         try {
             const dims = fitAddon.proposeDimensions();
             if (dims) {
+                // `CSI 2J` solo se procesa en xterm: el PTY no sabe que su
+                // prompt ha desaparecido del canvas. Guardarlo antes del
+                // resize permite restaurar la misma línea tras limpiar una
+                // casilla baja y mantiene sincronizados el cursor visual y
+                // el cursor real de la shell.
+                const bufferBeforeResize = term.buffer.active;
+                const cursorRowBeforeResize = bufferBeforeResize.baseY + bufferBeforeResize.cursorY;
+                let promptBeforeResize = '';
+                for (let row = Math.max(0, cursorRowBeforeResize - 2); row <= cursorRowBeforeResize; row += 1) {
+                    const line = bufferBeforeResize.getLine(row)?.translateToString(true).trimEnd() ?? '';
+                    if (/^(?:PS\s+)?(?:[A-Za-z]:\\.+[>❯$#]|[^\s@]+@[^\s:]+:.+[❯$#]|(?:~|\/).*[>❯$#])\s*$/u.test(line)) {
+                        promptBeforeResize = line;
+                    }
+                }
                 // Verificar que el alto total ocupado por las filas no sobrepase la caja
                 // usable del host para evitar que la última línea de comandos se solape con el borde.
                 const core = (term as any)._core;
                 const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
                 if (cellHeight && cellHeight > 0) {
-                    const style = window.getComputedStyle(host);
+                    const style = window.getComputedStyle(terminalHost);
                     const paddingTop = parseFloat(style.paddingTop) || 0;
                     const paddingBottom = parseFloat(style.paddingBottom) || 0;
-                    const availableHeight = host.clientHeight - paddingTop - paddingBottom;
+                    const availableHeight = terminalHost.clientHeight - paddingTop - paddingBottom;
                     if (dims.rows * cellHeight > availableHeight && dims.rows > 1) {
                         dims.rows -= 1;
                     }
                 }
                 term.resize(dims.cols, dims.rows);
+                // Cuando una ventana ya mostraba un banner largo y se reduce
+                // por debajo del mínimo útil, sus últimas líneas seguirían
+                // visibles en la pantalla aunque el backend deje de generar
+                // banner. Limpiar solo el viewport (no el scrollback) elimina
+                // ese residuo sin borrar el historial del usuario. Mientras
+                // se edita no tocamos la pantalla: el siguiente resize o la
+                // salida de la shell hará la limpieza cuando sea segura.
+                const tinyViewportChanged = term.cols !== lastSize.cols || term.rows !== lastSize.rows;
+                if (term.rows < 12
+                    && !userEditing
+                    && (promptBeforeResize || tinyViewportPrompt)
+                    && (!tinyViewportCleared || tinyViewportChanged)) {
+                    if (promptBeforeResize) tinyViewportPrompt = promptBeforeResize;
+                    term.write(`\x1b[2J\x1b[H${tinyViewportPrompt}`);
+                    tinyViewportCleared = true;
+                } else if (term.rows >= 12) {
+                    tinyViewportCleared = false;
+                    // Si una geometría anterior obligó a reescribir el prompt,
+                    // hacerlo una vez más con el ancho actual elimina el wrap
+                    // residual. En cuanto cabe completo ya no hace falta
+                    // conservar la copia.
+                    if (!userEditing && tinyViewportPrompt) {
+                        if (promptBeforeResize) tinyViewportPrompt = promptBeforeResize;
+                        const restoredPrompt = tinyViewportPrompt;
+                        term.write(`\x1b[2J\x1b[H${restoredPrompt}`);
+                        if (restoredPrompt.length <= term.cols) tinyViewportPrompt = '';
+                    }
+                    // Una reducción fuerte de columnas también puede dejar
+                    // el prompt recortado aunque sobren filas. Reescribirlo
+                    // fuerza a xterm a envolver la ruta con las dimensiones
+                    // nuevas; el scrollback continúa intacto.
+                    else if (!userEditing
+                        && promptBeforeResize
+                        && term.cols < lastSize.cols
+                        && promptBeforeResize.length >= term.cols) {
+                        tinyViewportPrompt = promptBeforeResize;
+                        term.write(`\x1b[2J\x1b[H${promptBeforeResize}`);
+                    }
+                }
             } else {
                 fitAddon.fit();
             }
-            // xterm puede conservar píxeles del canvas anterior cuando el
-            // panel cambia varias veces de tamaño en una misma ráfaga. El
-            // buffer lógico ya está correcto (el DOM del smoke lo confirma),
-            // pero el compositor deja "fantasmas" de banners antiguos. Una
-            // invalidación completa del rango visible obliga al renderer a
-            // repintar también las filas vacías.
+            // Invalidar el rango visible tras cambiar la caja de xterm evita
+            // residuos del canvas anterior en WebView2.
             const refreshRows = () => {
                 if (destroyed || !term) return;
-                // No tocar directamente los canvas: WebView2 puede ejecutar
-                // este callback después de que xterm haya pintado el nuevo
-                // buffer, dejando un panel aparentemente vacío aunque el DOM
-                // siga conteniendo el banner. La API pública marca las filas
-                // sucias y deja que el renderer coordine el atlas de texturas.
                 term.refresh(0, Math.max(0, term.rows - 1));
             };
             refreshRows();
-            // El addon de ajuste puede terminar el resize del canvas en el
-            // frame siguiente. Repetir la invalidación después de ese frame
-            // evita que el compositor conserve una capa de la geometría
-            // anterior durante una ráfaga de redimensionados.
             requestAnimationFrame(refreshRows);
             // El inspector del WebView y algunos gestores de ventanas cambian
             // el viewport sin emitir un resize convencional. Exponer las
@@ -636,28 +567,8 @@
             console.error('[TerminalPane] fitAndReport error', err);
             return;
         }
-        const paneCount = Math.max(1, app.panes.length);
-        const paneCountChanged = paneCount !== lastPaneCount;
-        // Un cambio de filas/columnas también requiere sincronizar el banner
-        // aunque siga habiendo una sola casilla. Si se omite esta dimensión,
-        // el banner que imprimió la shell queda recortado en la parte superior
-        // (por ejemplo, solo «Sesión») al encoger la ventana.
-        const viewportChanged = term.cols !== lastSize.cols || term.rows !== lastSize.rows;
-        if (term.cols === lastSize.cols && term.rows === lastSize.rows && !paneCountChanged) return;
-        lastPaneCount = paneCount;
+        if (term.cols === lastSize.cols && term.rows === lastSize.rows) return;
         lastSize = { cols: term.cols, rows: term.rows };
-        const serial = ++bannerRefreshSerial;
-        const editingAtResize = userEditing;
-        // Un cambio de rejilla invalida el cursor del viewport anterior. El
-        // primer repintado debe ignorarlo y tener un reintento explícito si la
-        // shell todavía está entregando su lote de arranque.
-        if (paneCountChanged) pendingPaneCountRefresh = true;
-        // No resetear xterm antes del resize: la shell todavía conserva la
-        // posición real de su prompt y ConPTY la repinta al recibir SIGWINCH.
-        // Si se vacía solo el frontend aquí, ese prompt aparece en la fila
-        // actual y el repintado del banner puede restaurarlo dentro de sus
-        // secciones. `refresh_banner` limpia las filas antiguas de forma
-        // coordinada y conserva el historial posterior.
         if (resizeTimer) clearTimeout(resizeTimer);
         const cols = term.cols;
         const rows = term.rows;
@@ -666,54 +577,6 @@
             resizeTimer = undefined;
             if (destroyed) return;
             void api.resize(tabId, cols, rows).then(() => {
-                if (destroyed || serial !== bannerRefreshSerial) return;
-                // Dar margen suficiente a la shell para procesar el resize y
-                // repintar su prompt antes de guardar/restaurar el cursor del
-                // banner. En ConPTY/WebView2 el SIGWINCH puede llegar después
-                // de varios frames, y 120 ms dejaba el prompt intercalado en
-                // «PC» al maximizar la ventana.
-                window.setTimeout(() => {
-                    if (destroyed || serial !== bannerRefreshSerial) return;
-                    // También se conserva el estado capturado al empezar el
-                    // resize: si había texto en edición, no se repinta justo
-                    // después de Enter, cuando todavía puede estar saliendo
-                    // la respuesta del comando.
-                    if (editingAtResize || userEditing) {
-                        // Un cambio de rejilla no se puede perder solo porque
-                        // el usuario estuviera editando la línea al dividir.
-                        // Se vuelve a pintar al terminar esa edición, cuando
-                        // el cursor ya no corre riesgo de ser sobrescrito.
-                        if (paneCountChanged) pendingPaneCountRefresh = true;
-                        pendingBannerRefresh = true;
-                        return;
-                    }
-                    const refreshSinglePane = paneCount > 1
-                        || paneCountChanged
-                        // Tras cualquier cambio de viewport hay que llevar el
-                        // banner al origen visible. La ruta de repintado de
-                        // una sola terminal limpia la superficie completa
-                        // antes de escribirlo, por lo que no compite con el
-                        // reflujo de ConPTY ni deja solo la cola de «Sesión».
-                        || viewportChanged
-                        || !hasCompletedBannerPaint
-                        || pendingBannerSettingsRefresh;
-                    if (refreshSinglePane) refreshBannerNow();
-                    if (paneCountChanged) {
-                        // La shell puede tener todavía encolado el banner que
-                        // escribió durante su inicialización. Un segundo
-                        // repintado, cuando ese lote ya llegó a xterm, evita
-                        // que reaparezca una cabecera completa sobre el modo
-                        // compacto de la rejilla.
-                        if (paneRefreshTimer) clearTimeout(paneRefreshTimer);
-                        paneRefreshTimer = setTimeout(() => {
-                            paneRefreshTimer = undefined;
-                            pendingPaneCountRefresh = true;
-                            pendingBannerRefresh = true;
-                            if (!destroyed && serial === bannerRefreshSerial) refreshBannerNow();
-                        }, 450);
-                    }
-                }, 400);
-            }).then(() => {
                 if (destroyed) return;
                 const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
                 perf.record('terminal.resize', 'duration', {
@@ -724,8 +587,6 @@
                 });
             }).catch((error) => {
                 if (destroyed) return;
-                pendingBannerRefresh = true;
-                if (paneCountChanged) pendingPaneCountRefresh = true;
                 console.error('[TerminalPane] resize failed', error);
                 perf.record('terminal.resize', 'duration', {
                     durationMs: Math.round(Math.max(0, (typeof performance !== 'undefined' ? performance.now() : Date.now()) - resizeStartedAt) * 100) / 100,
@@ -734,7 +595,7 @@
                     details: { cols, rows, error: String(error).slice(0, 300) },
                 });
             });
-        }, 60);
+        }, 250);
     }
 
     onMount(() => {
@@ -758,10 +619,15 @@
         });
         fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
-        term.open(host);
+        term.open(terminalHost);
         mountFinished('ok', { cols: term.cols, rows: term.rows });
 
         term.onData((data) => {
+            if (!inputReady) {
+                queuedInput += data;
+                exposeInputMirror('startup-queued');
+                return;
+            }
             // Si el usuario había desplazado el historial, cualquier entrada
             // nueva debe devolverle a la línea que está editando.
             term?.scrollToBottom();
@@ -867,7 +733,7 @@
         });
 
         observer = new ResizeObserver(() => fitAndReport());
-        observer.observe(host);
+        observer.observe(terminalHost);
         window.addEventListener('resize', fitAndReport);
 
         registerTerminal(tabId, term);
@@ -880,7 +746,6 @@
             tabId,
             details: { cols: term.cols, rows: term.rows },
         });
-        window.addEventListener('winslim:banner-settings-changed', refreshBannerForSettings);
         window.addEventListener('winslim:terminal-output-busy', onTerminalOutputBusy);
         window.addEventListener('winslim:terminal-output-idle', onTerminalOutputIdle);
 
@@ -898,8 +763,8 @@
             }
         }, 4500);
 
-        // Solo ahora existe un xterm donde pintar: el backend suelta todo lo
-        // que el pty escribió mientras tanto (banner + primer prompt).
+        // Solo ahora existe un xterm donde pintar: el backend suelta la salida
+        // que el PTY escribió mientras se montaba la interfaz.
         void api.markTabReady(tabId)
             .then(() => api.markFrontendReady(tabId))
             .then(() => {
@@ -911,6 +776,21 @@
                     `ready-for-input-after-mount:${tabId}`,
                 );
                 perf.timeToOnce('app-ready-for-input', 'app.ready-for-input', { tabId });
+                // Algunas shells no dejan un prompt reconocible (REPL,
+                // dispositivos o contenedores). Liberar la cola en un límite
+                // acotado evita bloquearlas indefinidamente; las shells host
+                // normales se liberan antes por `terminal-output-idle`.
+                inputReadyTimer = window.setTimeout(() => {
+                    inputReadyTimer = undefined;
+                    if (!destroyed && !inputReady) {
+                        inputReady = true;
+                        if (queuedInput) {
+                            const pending = queuedInput;
+                            queuedInput = '';
+                            void api.sendInput(tabId, pending);
+                        }
+                    }
+                }, 8000);
             })
             .catch((error) => {
                 handshakeFinished('error', { error: String(error).slice(0, 300) });
@@ -923,10 +803,11 @@
         observer?.disconnect();
         window.removeEventListener('resize', fitAndReport);
         if (resizeTimer) clearTimeout(resizeTimer);
-        if (paneRefreshTimer) clearTimeout(paneRefreshTimer);
+        if (fitQuietTimer) window.clearTimeout(fitQuietTimer);
+        if (bannerActivationTimer) window.clearTimeout(bannerActivationTimer);
+        if (inputReadyTimer) window.clearTimeout(inputReadyTimer);
+        if (inputReleaseTimer) window.clearTimeout(inputReleaseTimer);
         if (initialPromptTimer) clearTimeout(initialPromptTimer);
-        if (promptRepairTimer !== undefined) window.clearTimeout(promptRepairTimer);
-        window.removeEventListener('winslim:banner-settings-changed', refreshBannerForSettings);
         window.removeEventListener('winslim:terminal-output-busy', onTerminalOutputBusy);
         window.removeEventListener('winslim:terminal-output-idle', onTerminalOutputIdle);
         unregisterTerminal(tabId);
@@ -1073,6 +954,17 @@
         app.panes.length;
         requestAnimationFrame(() => {
             fitAndReport();
+            if (pendingBannerPrint) {
+                // Al activar una pestaña puede quedar salida del comando que
+                // se lanzó justo antes de cambiar de vista. No inyectar el
+                // banner en ese primer frame: esperar a que la shell y xterm
+                // terminen ese bloque evita mezclar el eco con la cabecera.
+                if (bannerActivationTimer) window.clearTimeout(bannerActivationTimer);
+                bannerActivationTimer = window.setTimeout(() => {
+                    bannerActivationTimer = undefined;
+                    if (!destroyed && active && pendingBannerPrint) requestBannerPrint();
+                }, 700);
+            }
             if (esLaActiva) term?.focus();
         });
         const timer = setTimeout(() => {
@@ -1126,9 +1018,7 @@
     onmouseup={handleMouseUp}
     role="presentation"
 >
-    {#if active && bannerOverlay}
-        <pre class="banner-overlay" data-testid="banner-overlay">{bannerOverlay}</pre>
-    {/if}
+    <div class="terminal-host" data-testid="terminal-host" bind:this={terminalHost}></div>
 </div>
 
 {#if menu}
@@ -1170,52 +1060,25 @@
     .tab-pane {
         position: absolute;
         inset: 0;
-        padding: var(--terminal-padding);
+        display: flex;
+        min-width: 0;
+        min-height: 0;
+        flex-direction: column;
         background: var(--terminal-bg);
         overflow: hidden;
     }
 
-    .tab-pane.multiventana {
-        padding: 6px 8px;
-    }
-
-    .banner-overlay {
-        position: absolute;
-        /* Por encima del canvas de xterm, pero por debajo de los menús
-           contextuales globales (z-index 60/61). Con 100 el fondo opaco del
-           banner podía tapar un menú abierto sobre la parte superior de la
-           terminal, aunque el menú siguiera siendo interactuable. */
-        z-index: 10;
-        top: var(--terminal-padding);
-        right: var(--terminal-padding);
-        left: var(--terminal-padding);
-        /* El prompt pertenece a xterm y se mantiene en la zona inferior.
-           Reservar dos filas completas evita que, cuando el banner compacto
-           se parte por ancho, el prompt quede pegado o parezca escrito dentro
-           de la última métrica (el residuo que aparecía al redimensionar). */
-        max-height: calc(100% - 3.5em);
-        margin: 0;
+    .terminal-host {
+        position: relative;
+        min-width: 0;
+        min-height: 0;
+        flex: 1 1 auto;
+        padding: 0;
         overflow: hidden;
-        background: var(--terminal-bg);
-        color: var(--text);
-        font: inherit;
-        line-height: inherit;
-        /* El backend ya recorta cada línea al número real de columnas. Si
-           aquí permitimos `pre-wrap`, el navegador vuelve a partir CPU/RAM y
-           desplaza el final sobre la fila del prompt en paneles estrechos. */
-        white-space: pre;
-        overflow-wrap: normal;
-        pointer-events: none;
     }
 
-    .tab-pane.multiventana .banner-overlay {
-        top: 6px;
-        right: 8px;
-        left: 8px;
-        max-height: calc(100% - 3.5em);
-        border-bottom: 1px dashed var(--muted);
-        padding-bottom: 0.5em;
-        box-sizing: border-box;
+    .tab-pane.multiventana .terminal-host {
+        padding: 0;
     }
 
     .menu-backdrop {

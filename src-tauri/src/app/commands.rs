@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::environments::Environment;
 use crate::preferences::{
@@ -73,9 +73,6 @@ pub fn tabs_activate(state: State<'_, Arc<AppState>>, tab_id: String) {
 #[tauri::command]
 pub fn tabs_ready(app: AppHandle, state: State<'_, Arc<AppState>>, tab_id: String) {
     state.tabs.mark_ready(&app, &tab_id);
-    state
-        .tabs
-        .refresh_banner_when_system_info_ready(&app, &tab_id);
     // La detección completa habla con WSL, Docker y adb. Se inicia únicamente
     // cuando xterm ya puede recibir y pintar la salida de la primera pestaña,
     // para que esas sondas no compitan con el camino crítico del arranque.
@@ -107,6 +104,13 @@ pub fn frontend_ready(
         "Frontend y terminal preparados",
         serde_json::json!({ "tabId": tab_id, "smokeToken": smoke_token })
     );
+    // La ventana se creó con `visible: false`. Mostrarla aquí evita el frame
+    // blanco inicial: el WebView ya cargó CSS, el grid y el primer xterm.
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .show()
+            .map_err(|error| format!("No se pudo mostrar la ventana inicial: {error}"))?;
+    }
     // El build de Windows arranca una instancia temporal. Cerrar el proceso
     // desde PowerShell con TerminateProcess mientras el hijo aún está
     // conectando al ConPTY provoca precisamente el diálogo 0xc0000142 que
@@ -147,79 +151,34 @@ pub fn internal_command_parse(
 
 /// `pty-resize`
 #[tauri::command]
-pub fn pty_resize(state: State<'_, Arc<AppState>>, tab_id: String, cols: i64, rows: i64) {
-    let Some(viewport) = crate::tabs::valid_viewport(cols, rows) else {
-        return;
-    };
-    state.tabs.resize(&tab_id, viewport.cols, viewport.rows);
-}
-
-/// Redibuja la cabecera informativa sin enviar ningún comando a la shell.
-///
-/// El banner se generó antes de que xterm pudiera medir el panel. Después de
-/// dividir o redimensionar la ventana hay que volver a calcular sus anchos,
-/// pero hacerlo escribiendo en el PTY alteraría la entrada que el usuario esté
-/// editando. `TabManager` lo entrega como salida visual y conserva el cursor.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BannerRefreshResult {
-    pub applied: bool,
-    /// Texto sin CRLF de transporte; el frontend lo puede mostrar como una
-    /// capa fija sin depender del scrollback de xterm.
-    pub text: String,
-}
-
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub fn pty_refresh_banner(
+pub fn pty_resize(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     tab_id: String,
     cols: i64,
     rows: i64,
-    pane_count: i64,
-    cursor_row: Option<i64>,
-    cursor_col: Option<i64>,
-) -> BannerRefreshResult {
+) {
     let Some(viewport) = crate::tabs::valid_viewport(cols, rows) else {
-        return BannerRefreshResult {
-            applied: false,
-            text: String::new(),
-        };
+        return;
     };
-    let started = Instant::now();
-    let text = state
+    state
         .tabs
-        .banner_for_viewport(
-            &tab_id,
-            viewport.cols,
-            viewport.rows,
-            pane_count.max(1) as usize,
-        )
-        .unwrap_or_default();
-    let applied = state.tabs.refresh_banner(
-        &app,
-        &tab_id,
-        viewport.cols,
-        viewport.rows,
-        pane_count.max(1) as usize,
-        cursor_row.and_then(|row| u16::try_from(row).ok()),
-        cursor_col.and_then(|col| u16::try_from(col).ok()),
-    );
+        .resize(&app, &tab_id, viewport.cols, viewport.rows);
+}
+
+#[tauri::command]
+pub fn pty_print_banner(app: AppHandle, state: State<'_, Arc<AppState>>, tab_id: String) -> bool {
+    let started = Instant::now();
+    let applied = state.tabs.print_banner(&app, &tab_id);
     log_info!(
-        "Repintado de banner solicitado",
+        "Impresión explícita de banner solicitada",
         serde_json::json!({
             "tabId": tab_id,
-            "cols": viewport.cols,
-            "rows": viewport.rows,
-            "paneCount": pane_count.max(1),
-            "cursorRow": cursor_row,
-            "cursorCol": cursor_col,
             "applied": applied,
             "durationMs": started.elapsed().as_millis(),
         })
     );
-    BannerRefreshResult { applied, text }
+    applied
 }
 
 // ---- Entornos (`env:*`) ----
@@ -344,7 +303,10 @@ pub fn settings_get() -> PreferencesPayload {
 /// `settings:save`. Lo que llegue se valida antes de guardarlo: el frontend no
 /// puede escribir valores fuera de rango ni claves desconocidas.
 #[tauri::command(async)]
-pub fn settings_save(incoming: Value) -> Result<PreferencesPayload, String> {
+pub fn settings_save(
+    state: State<'_, Arc<AppState>>,
+    incoming: Value,
+) -> Result<PreferencesPayload, String> {
     let sanitized = preferences::sanitize_preferences(&incoming);
     let Value::Object(patch) = serde_json::to_value(&sanitized)
         .map_err(|error| format!("Las preferencias no se pudieron serializar: {error}"))?
@@ -353,6 +315,7 @@ pub fn settings_save(incoming: Value) -> Result<PreferencesPayload, String> {
     };
     let saved = settings::save_settings(&patch)
         .ok_or_else(|| "No se pudieron guardar las preferencias en settings.json".to_string())?;
+    state.tabs.refresh_all_banner_files();
     Ok(payload_for(preferences::sanitize_preferences(
         &Value::Object(saved),
     )))
@@ -360,7 +323,7 @@ pub fn settings_save(incoming: Value) -> Result<PreferencesPayload, String> {
 
 /// `settings:reset`
 #[tauri::command(async)]
-pub fn settings_reset() -> Result<PreferencesPayload, String> {
+pub fn settings_reset(state: State<'_, Arc<AppState>>) -> Result<PreferencesPayload, String> {
     let defaults = Preferences::default();
     let Value::Object(patch) = serde_json::to_value(&defaults)
         .map_err(|error| format!("Las preferencias no se pudieron serializar: {error}"))?
@@ -370,6 +333,7 @@ pub fn settings_reset() -> Result<PreferencesPayload, String> {
     let saved = settings::save_settings(&patch).ok_or_else(|| {
         "No se pudieron restablecer las preferencias en settings.json".to_string()
     })?;
+    state.tabs.refresh_all_banner_files();
     log_info!("Preferencias restablecidas");
     Ok(payload_for(preferences::sanitize_preferences(
         &Value::Object(saved),

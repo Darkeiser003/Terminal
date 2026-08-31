@@ -1,5 +1,5 @@
-//! Archivos temporales de cada pestaña: banner, ayuda e inicialización de la
-//! shell.
+//! Archivos temporales de cada pestaña: datos del banner, ayuda e
+//! inicialización de la shell.
 //!
 //! Port de la parte de `electron/main.js` que escribe `banner-<tab>.txt`,
 //! `bannerclear-<tab>.txt`, `help-<tab>.txt` e `init-<tab>.<ext>`.
@@ -13,12 +13,12 @@ use crate::environments::Environment;
 use crate::i18n::Translator;
 use crate::paths;
 
-/// El banner lo imprime la SHELL (`type`/`cat`), no la app, y en cmd.exe eso
-/// significa pasar por la página de códigos OEM de la consola (850 en un
-/// Windows en español), donde un archivo UTF-8 se vería como galimatías. Se
-/// reduce a ASCII: se quitan las tildes y los caracteres de dibujo de cajas,
-/// que es lo único no ASCII que genera el banner. Las secuencias de color son
-/// ASCII y se conservan.
+/// El alias explícito `sysinfo` puede imprimir el archivo desde la SHELL
+/// (`type`/`cat`). En cmd.exe eso significa pasar por la página de códigos OEM
+/// de la consola (850 en un Windows en español), donde un archivo UTF-8 se
+/// vería como galimatías. Se reduce a ASCII: se quitan las tildes y los
+/// caracteres de dibujo de cajas, que es lo único no ASCII que genera el
+/// banner. Las secuencias de color son ASCII y se conservan.
 pub fn to_console_ascii(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -68,7 +68,8 @@ pub struct SessionFiles {
     /// temporal no era escribible: ahí la terminal funciona igual, solo se
     /// queda sin alias).
     pub init_command: Option<String>,
-    /// El banner que tiene que pintar la app cuando no lo pinta la shell.
+    /// Texto que se imprime en el PTY al iniciar la sesión y que `sysinfo`
+    /// puede mostrar de nuevo bajo demanda.
     pub banner_text: String,
 }
 
@@ -84,8 +85,7 @@ pub struct SessionRequest<'a> {
     /// El texto del banner ya montado. Se recibe hecho para no atar este módulo
     /// a la lectura del hardware.
     pub banner: &'a str,
-    /// La shell solo imprime el banner inicial cuando la pestaña ocupa toda
-    /// la ventana; en una rejilla espera al repintado medido de xterm.
+    /// Indica si el script de inicialización debe imprimir el banner una vez.
     pub initial_banner: bool,
 }
 
@@ -130,8 +130,8 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
         }
     }
 
-    // Docker, ADB y Wine no llegan a los temporales del host: allí el banner lo
-    // escribe la app en el xterm y no se intenta cargar inicialización ninguna.
+    // Docker, ADB y Wine no llegan a los temporales del host: el backend
+    // entregará el banner como salida PTY en el primer resize real.
     if !alias_profiles::transport_loads_host_files(request.env.transport) {
         return SessionFiles {
             init_command: None,
@@ -258,9 +258,8 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
     }
 }
 
-/// Actualiza los archivos que usa `sysinfo`/`clear` después de un resize o de
-/// cambiar el entorno. Sin esto la terminal podía mostrar el banner nuevo en
-/// xterm, pero el alias seguía leyendo el ancho y el aviso de la sesión vieja.
+/// Actualiza el archivo que usa `sysinfo` después de una nueva sesión o de una
+/// solicitud explícita. `clear` no imprime otra copia del fastfetch.
 pub fn refresh_banner_files(tab_id: &str, note: Option<&str>, banner: &str) {
     let Some(dir) = dir() else {
         return;

@@ -22,6 +22,11 @@ const ignoredDirectories = new Set(['target', 'node_modules', 'dist', '.git', 'v
 // escanea como documentación volveríamos a consultar las mismas diez URLs y
 // duplicaríamos el coste de cada build.
 const ignoredFiles = new Set(['Cargo.lock', 'verify-install-sources.mjs']);
+// Algunos enlaces aparecen únicamente como destinos de acciones del usuario
+// (abrir una página de descargas/documentación). No son artefactos ni fuentes
+// necesarias para compilar; se siguen comprobando, pero una caída temporal del
+// tercero no puede invalidar una release reproducible.
+const nonBlockingHosts = new Set(['codeweavers.com', 'www.codeweavers.com']);
 const execFileAsync = promisify(execFile);
 const urlPattern = /https?:\/\/[^\s<>"'`\\]+/g;
 const trailingPunctuation = /[),.;:!?\]}]+$/;
@@ -74,6 +79,14 @@ function skipReason(url) {
         return null;
     } catch {
         return 'URL inválida';
+    }
+}
+
+function isNonBlockingExternal(url) {
+    try {
+        return nonBlockingHosts.has(new URL(url).hostname.toLowerCase());
+    } catch {
+        return false;
     }
 }
 
@@ -204,6 +217,12 @@ for (let index = 0; index < urls.length; index += 1) {
     else if (result.warning) {
         warnings.push({ url, where, result });
         console.warn(`  ⚠ ${result.status} ${url} — ${result.error} [${where}]`);
+    } else if (isNonBlockingExternal(url)) {
+        // El enlace sigue siendo visible en el informe para detectar cambios,
+        // pero su disponibilidad no es un requisito del binario.
+        const softResult = { ...result, warning: true, error: `fuente externa no crítica: ${result.error}` };
+        warnings.push({ url, where, result: softResult });
+        console.warn(`  ⚠ ${result.status} ${url} — ${softResult.error} [${where}]`);
     } else {
         failures.push({ url, where, result });
         console.error(`  ✘ ${result.error} ${url} [${where}]`);

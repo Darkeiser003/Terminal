@@ -44,6 +44,77 @@
         actions: InstallAction[];
     }
 
+    interface Group {
+        name: string;
+        /** Clave estable: no depende del idioma de la interfaz. */
+        key: string | null;
+        total: number;
+        entries: Entry[];
+    }
+
+    interface Section {
+        id: string;
+        title: string;
+        description: string;
+        groups: Group[];
+    }
+
+    /** El catálogo usa grupos técnicos. La persona que abre el panel, en
+     *  cambio, suele pensar primero en qué quiere preparar: su terminal, su
+     *  stack de desarrollo o una plataforma concreta. Estas son las cuatro
+     *  secciones de navegación, en el orden en que conviene recorrerlas. */
+    const SECTION_GROUPS = [
+        { id: 'maintenance', keys: ['group.updates'] },
+        { id: 'environments', keys: ['group.shells', 'group.wsl', 'group.windowsCompat'] },
+        { id: 'development', keys: ['group.languages', 'group.frameworks', 'group.tools', 'group.viewers'] },
+        { id: 'platforms', keys: ['group.containers', 'group.android', 'group.network', 'group.virt'] }
+    ] as const;
+
+    function sectionCopy(id: string): { title: string; description: string } {
+        switch (id) {
+            case 'maintenance':
+                return {
+                    title: app.t('deps.section.maintenance', 'Mantenimiento'),
+                    description: app.t('deps.section.maintenanceHint', 'Actualiza la aplicación y las herramientas ya instaladas.')
+                };
+            case 'environments':
+                return {
+                    title: app.t('deps.section.environments', 'Entornos de ejecución'),
+                    description: app.t('deps.section.environmentsHint', 'Terminales y sistemas donde se abren las pestañas.')
+                };
+            case 'development':
+                return {
+                    title: app.t('deps.section.development', 'Desarrollo'),
+                    description: app.t('deps.section.developmentHint', 'Lenguajes, gestores de paquetes y herramientas para crear proyectos.')
+                };
+            default:
+                return {
+                    title: app.t('deps.section.platforms', 'Plataformas e integración'),
+                    description: app.t('deps.section.platformsHint', 'Contenedores, dispositivos, red y virtualización.')
+                };
+        }
+    }
+
+    /** Una frase responde "qué va aquí" antes de desplegar un acordeón. */
+    function groupDescription(key: string | null): string {
+        const copy: Record<string, [string, string]> = {
+            'group.updates': ['deps.group.updates', 'Aplicación y paquetes ya instalados'],
+            'group.shells': ['deps.group.shells', 'CMD, PowerShell y otras consolas'],
+            'group.wsl': ['deps.group.wsl', 'Distribuciones Linux integradas con Windows'],
+            'group.windowsCompat': ['deps.group.windowsCompat', 'Compatibilidad para ejecutar software de Windows'],
+            'group.languages': ['deps.group.languages', 'Intérpretes, compiladores y sus gestores'],
+            'group.frameworks': ['deps.group.frameworks', 'Ecosistemas y herramientas de cada lenguaje'],
+            'group.tools': ['deps.group.tools', 'Git, compilación, diagnóstico y utilidades de desarrollo'],
+            'group.viewers': ['deps.group.viewers', 'Editores y visores para trabajar con archivos'],
+            'group.containers': ['deps.group.containers', 'Docker, Kubernetes e imágenes de contenedor'],
+            'group.android': ['deps.group.android', 'ADB y herramientas para dispositivos Android'],
+            'group.network': ['deps.group.network', 'SSH, VPN y acceso a equipos remotos'],
+            'group.virt': ['deps.group.virt', 'Máquinas virtuales y características de virtualización']
+        };
+        const [translationKey, fallback] = copy[key ?? ''] ?? ['deps.group.other', 'Otras herramientas disponibles'];
+        return app.t(translationKey, fallback);
+    }
+
     /** Dentro de un apartado manda el estado, no el orden del catálogo: lo que
      *  ya está en el sistema va arriba (es donde se busca "ver versión" o
      *  "desinstalar") y lo que falta, abajo. A igualdad de estado, alfabético,
@@ -70,17 +141,19 @@
     }
 
     const groups = $derived.by(() => {
-        const byGroup = new Map<string, InstallAction[]>();
+        const byGroup = new Map<string, { name: string; key: string | null; actions: InstallAction[] }>();
         for (const action of actions) {
             // El backend manda el apartado en español y su clave; se traduce
-            // aquí, que es donde está el catálogo del idioma activo.
+            // aquí, que es donde está el catálogo del idioma activo. La clave
+            // estable evita que una traducción altere la organización visual.
             const name = translateGroupTitle(action.group, action.groupKey);
-            const list = byGroup.get(name);
-            if (list) list.push(action);
-            else byGroup.set(name, [action]);
+            const id = action.groupKey ?? action.group;
+            const group = byGroup.get(id);
+            if (group) group.actions.push(action);
+            else byGroup.set(id, { name, key: action.groupKey ?? null, actions: [action] });
         }
 
-        return [...byGroup.entries()].map(([name, groupActions]) => {
+        return [...byGroup.values()].map(({ name, key, actions: groupActions }): Group => {
             // Las herramientas que traen varias acciones se pliegan bajo su
             // propio nombre en vez de formar una lista larga y repetitiva. Las
             // sueltas entran en la MISMA lista, para que el orden salga de
@@ -137,7 +210,7 @@
             });
             return {
                 name,
-                key: groupActions[0].groupKey,
+                key,
                 total: groupActions.length,
                 entries: filteredEntries.sort(byStateThenName)
             };
@@ -147,6 +220,32 @@
             const needle = query.trim();
             return !needle || includesLocalized(app.t('deps.updateApp', 'Actualizar la terminal'), needle, app.catalog.language);
         });
+    });
+
+    /** Los apartados siguen existiendo para buscar y filtrar, pero ya no se
+     *  presentan como una lista plana: cada uno aparece donde corresponde.
+     *  Un grupo nuevo del backend cae en "Otras herramientas" en vez de perderse
+     *  o romper el orden de los grupos conocidos. */
+    const sections = $derived.by(() => {
+        const placed = new Set<string>();
+        const ordered: Section[] = SECTION_GROUPS.map(({ id, keys }) => {
+            const sectionGroups = keys.flatMap((key) => {
+                const group = groups.find((candidate) => candidate.key === key);
+                if (group) placed.add(group.name);
+                return group ? [group] : [];
+            });
+            return { id, ...sectionCopy(id), groups: sectionGroups };
+        }).filter((section) => section.groups.length > 0);
+        const otherGroups = groups.filter((group) => !placed.has(group.name));
+        if (otherGroups.length) {
+            ordered.push({
+                id: 'other',
+                title: app.t('deps.section.other', 'Otras herramientas'),
+                description: app.t('deps.section.otherHint', 'Componentes disponibles que no pertenecen a una categoría principal.'),
+                groups: otherGroups
+            });
+        }
+        return ordered;
     });
 
     // El catálogo contiene varias acciones por herramienta (instalar,
@@ -294,6 +393,10 @@
      *  Con veinte apartados, abrir uno por defecto ocupa espacio innecesario. */
     const autoOpenFirst = $derived(app.preferences?.autoOpenFirstGroup ?? false);
 
+    function shouldAutoOpen(group: Group): boolean {
+        return autoOpenFirst && groups[0]?.name === group.name;
+    }
+
     /** Con el acordeón exclusivo, abrir un apartado cierra sus hermanos. Se
      *  cierran solo los HERMANOS: cerrar "todo lo que no sea yo" plegaría el
      *  apartado padre al abrir un subgrupo, y este desaparecería en el mismo
@@ -311,7 +414,7 @@
 
 <Panel
     id="deps"
-    title={app.t('deps.header', 'Entorno y componentes')}
+    title={app.t('deps.header', 'Entornos y dependencias')}
     subtitle={error ||
         (loading && actions.length === 0
             ? app.t('deps.loading', 'Detectando…')
@@ -341,59 +444,87 @@
         </div>
     {/if}
 
-    {#each groups as group, groupIndex (group.name)}
-        <details
-            class="group"
-            data-testid="dependency-group"
-            class:languages={group.key === 'group.languages'}
-            open={autoOpenFirst && groupIndex === 0}
-            ontoggle={onToggle}
-        >
-            <summary class="group-title">
-                {group.name}
-                <span class="count">{group.entries.length + (group.key === 'group.updates' ? 1 : 0)}</span>
-            </summary>
-
-            <!-- La propia terminal va la primera del apartado: actualizar la
-                 app es lo que se viene a buscar aquí antes que actualizar los
-                 repositorios clonados. -->
-            {#if group.key === 'group.updates'}
-                {@render selfUpdate()}
-            {/if}
-
-            <div class:compact-grid={group.key === 'group.languages'}>
-            {#each group.entries as entry (entry.name)}
-                {#if entry.actions.length === 1}
-                    <!-- Una herramienta con una sola acción disponible no gana
-                         nada con un plegable propio: se muestra directamente.
-                         Pero conserva su nombre y su sangrado, para que se lea
-                         en la misma columna que sus vecinas y en el sitio en el
-                         que el orden alfabético la ha puesto. Sin esto, la fila
-                         decía "Instalar Visual Studio Code (winget)" y parecía
-                         archivada bajo la «I». -->
-                    <div class="tool" class:installed={entry.installed}>
-                        {@render item(entry.actions[0], false, entry.name, entry.description)}
+    <div class="sections" data-testid="dependency-sections">
+        {#each sections as section (section.id)}
+            <section
+                class="section"
+                data-testid="dependency-section"
+                data-section-id={section.id}
+                aria-labelledby={`dependency-section-${section.id}`}
+            >
+                <header class="section-header">
+                    <div>
+                        <h3 id={`dependency-section-${section.id}`}>{section.title}</h3>
+                        <p>{section.description}</p>
                     </div>
-                {:else}
-                    <details class="subgroup" class:installed={entry.installed} data-testid="dependency-subgroup" ontoggle={onToggle}>
-                        <summary class="subgroup-title">
-                            <span class="subgroup-heading">
-                                <span>{entry.name}</span>
-                                {#if entry.description}
-                                    <small>{entry.description}</small>
-                                {/if}
+                    <span class="section-count">
+                        {section.groups.reduce(
+                            (total, group) => total + group.entries.length + (group.key === 'group.updates' ? 1 : 0),
+                            0
+                        )}
+                    </span>
+                </header>
+
+                {#each section.groups as group (group.name)}
+                    <details
+                        class="group"
+                        data-testid="dependency-group"
+                        data-group-key={group.key ?? undefined}
+                        class:languages={group.key === 'group.languages'}
+                        open={shouldAutoOpen(group)}
+                        ontoggle={onToggle}
+                    >
+                        <summary class="group-title">
+                            <span class="group-heading">
+                                <span>{group.name}</span>
+                                <small>{groupDescription(group.key)}</small>
                             </span>
-                            <span class="count">{entry.actions.length}</span>
+                            <span class="count">{group.entries.length + (group.key === 'group.updates' ? 1 : 0)}</span>
                         </summary>
-                        {#each entry.actions as action (action.id)}
-                            {@render item(action, true, undefined, undefined, !entry.description)}
+
+                        <!-- La propia terminal va la primera del apartado: actualizar la
+                             app es lo que se viene a buscar aquí antes que actualizar los
+                             repositorios clonados. -->
+                        {#if group.key === 'group.updates'}
+                            {@render selfUpdate()}
+                        {/if}
+
+                        <div class:compact-grid={group.key === 'group.languages'}>
+                        {#each group.entries as entry (entry.name)}
+                            {#if entry.actions.length === 1}
+                                <!-- Una herramienta con una sola acción disponible no gana
+                                     nada con un plegable propio: se muestra directamente.
+                                     Pero conserva su nombre y su sangrado, para que se lea
+                                     en la misma columna que sus vecinas y en el sitio en el
+                                     que el orden alfabético la ha puesto. Sin esto, la fila
+                                     decía "Instalar Visual Studio Code (winget)" y parecía
+                                     archivada bajo la «I». -->
+                                <div class="tool" class:installed={entry.installed}>
+                                    {@render item(entry.actions[0], false, entry.name, entry.description)}
+                                </div>
+                            {:else}
+                                <details class="subgroup" class:installed={entry.installed} data-testid="dependency-subgroup" ontoggle={onToggle}>
+                                    <summary class="subgroup-title">
+                                        <span class="subgroup-heading">
+                                            <span>{entry.name}</span>
+                                            {#if entry.description}
+                                                <small>{entry.description}</small>
+                                            {/if}
+                                        </span>
+                                        <span class="count">{entry.actions.length}</span>
+                                    </summary>
+                                    {#each entry.actions as action (action.id)}
+                                        {@render item(action, true, undefined, undefined, !entry.description)}
+                                    {/each}
+                                </details>
+                            {/if}
                         {/each}
+                        </div>
                     </details>
-                {/if}
-            {/each}
-            </div>
-        </details>
-    {/each}
+                {/each}
+            </section>
+        {/each}
+    </div>
 </Panel>
 
 <!-- La actualización de la propia terminal. No pasa por `item`: no es una
@@ -549,17 +680,79 @@
     }
 
     .group {
-        margin: 8px 0;
+        margin: 6px 0;
         border: 1px solid var(--border);
         border-radius: 6px;
         background: rgba(0, 0, 0, 0.2);
         overflow: hidden;
     }
 
+    .sections {
+        width: 100%;
+        min-width: 0;
+        padding: 8px;
+    }
+
+    .section {
+        min-width: 0;
+    }
+
+    .section + .section {
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid var(--border);
+    }
+
+    .section-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 2px 4px;
+    }
+
+    .section-header > div {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .section-header h3,
+    .section-header p {
+        margin: 0;
+    }
+
+    .section-header h3 {
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.35;
+    }
+
+    .section-header p {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+    }
+
+    .section-count {
+        flex: 0 0 auto;
+        min-width: 18px;
+        padding: 2px 6px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.2;
+        text-align: center;
+    }
+
     .group-title {
         display: flex;
-        justify-content: space-between;
+        justify-content: flex-start;
         align-items: center;
+        gap: 8px;
         padding: 9px 12px;
         background: var(--surface-alt);
         color: var(--accent);
@@ -569,6 +762,45 @@
         list-style: none;
         line-height: 1.25;
         transition: background 0.15s ease;
+    }
+
+    .group-title::before,
+    .subgroup-title::before {
+        content: '›';
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 0.75;
+        transform: rotate(0deg);
+        transition: color 0.15s ease, transform 0.15s ease;
+    }
+
+    .group[open] > .group-title::before,
+    .subgroup[open] > .subgroup-title::before {
+        color: var(--accent);
+        transform: rotate(90deg);
+    }
+
+    .group-heading {
+        display: flex;
+        flex: 1 1 auto;
+        flex-direction: column;
+        min-width: 0;
+        gap: 2px;
+    }
+
+    .group-heading > span {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .group-heading small {
+        min-width: 0;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 400;
+        line-height: 1.25;
+        overflow-wrap: anywhere;
     }
 
     .group-title::-webkit-details-marker,
@@ -618,19 +850,17 @@
     }
 
     .subgroup-heading > span:first-child {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        min-width: 0;
+        overflow-wrap: anywhere;
     }
 
     .subgroup-heading small {
-        overflow: hidden;
+        min-width: 0;
         color: var(--muted);
         font-size: 10px;
         font-weight: 400;
         line-height: 1.25;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        overflow-wrap: anywhere;
     }
 
     .subgroup-title:hover {
@@ -640,13 +870,7 @@
 
     /* Marca lo que ya está en el sistema */
     .subgroup.installed > .subgroup-title::before {
-        content: '';
-        flex: 0 0 auto;
-        width: 6px;
-        height: 6px;
-        margin-right: -2px;
-        border-radius: 50%;
-        background: #4ec9b0;
+        color: #4ec9b0;
     }
 
     .subgroup-title .count {
