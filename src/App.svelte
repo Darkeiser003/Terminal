@@ -204,6 +204,7 @@
             matchesShortcut(event, preferences.shortcutToggleExplorer)
         ) {
             event.preventDefault();
+            if (preferences.showExplorerPanel === false) return;
             app.explorerVisible = !app.explorerVisible;
         }
     }
@@ -224,6 +225,23 @@
             void loadSettings();
         };
         window.addEventListener('winslim:open-settings', openSettingsFromTerminal);
+        const openPanelFromTerminal = (event: Event) => {
+            const panel = (event as CustomEvent<{ panel?: string }>).detail?.panel;
+            if (panel === 'deps') {
+                panels.show('deps');
+                void loadDeps();
+            } else if (panel === 'projects') {
+                panels.show('projects');
+                void loadProjects();
+            } else if (panel === 'scripts') {
+                panels.show('scripts');
+                void loadScripts();
+            } else if (panel === 'settings') {
+                panels.show('settings');
+                void loadSettings();
+            }
+        };
+        window.addEventListener('winslim:open-panel', openPanelFromTerminal);
         const unlisteners: Promise<UnlistenFn>[] = [
             api.onData((tabId, data) => {
                 window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
@@ -281,14 +299,16 @@
             // bloques de salida: hacerlo directamente podría ejecutarse después
             // de datos posteriores y borrar el buffer en el orden equivocado.
             //
-            // El `cls`/`clear` nativo que viene justo después ya limpia la
-            // pantalla y coloca el cursor en las mismas coordenadas que
-            // CMD/ConPTY. Aquí solo hay que eliminar el historial de xterm.
-            // Tanto `reset()` (RIS) como `clear()` recolocan el buffer/cursor
-            // local antes de ese repintado y desincronizan ambas posiciones:
-            // el siguiente texto termina una fila debajo del prompt.
-            // CSI 3 J borra únicamente las líneas guardadas y conserva el
-            // cursor; su callback mantiene el orden con los datos siguientes.
+            // El marcador llega antes de que CMD/ConPTY repinte el prompt.
+            // Hay que borrar tanto la pantalla visible como el scrollback,
+            // pero conservar la posición del cursor que ya tiene la shell.
+            // Si solo se enviaba CSI 3 J, la fila del prompt anterior quedaba
+            // visible y el prompt nuevo aparecía debajo como una línea
+            // duplicada; si además se hacía HOME, xterm y cmd quedaban
+            // desincronizados y la entrada empezaba en la fila siguiente.
+            // No usamos RIS/reset: restablece modos y buffer local de xterm en
+            // un momento distinto al de la shell y vuelve a desincronizar la
+            // fila donde se escribe la siguiente entrada.
             api.onClear((tabId) => {
                 window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
                 const previous = outputQueues.get(tabId) ?? Promise.resolve();
@@ -298,7 +318,7 @@
                         resolve();
                         return;
                     }
-                    try { term.write('\x1b[3J', resolve); }
+                    try { term.write('\x1b[2J\x1b[3J', resolve); }
                     catch (error) {
                         console.debug('[App] terminal closed while clearing scrollback', error);
                         resolve();
@@ -362,6 +382,12 @@
             .catch((cause) => {
                 initialLoad('error', { error: String(cause).slice(0, 300) });
                 startupError = String(cause);
+                // La ventana se mantiene oculta durante un arranque correcto
+                // para no enseñar un frame blanco. Si la carga falla antes de
+                // crear el PTY, revelar el error es la única ruta recuperable.
+                void api.revealWindow().catch((revealError) => {
+                    console.error('[App] no se pudo mostrar el error de arranque', revealError);
+                });
                 void api.reportFrontendError({
                     message: `No se pudo iniciar la interfaz: ${startupError}`,
                 });
@@ -392,6 +418,7 @@
             window.removeEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
             environmentSwitchStarted.clear();
             window.removeEventListener('winslim:open-settings', openSettingsFromTerminal);
+            window.removeEventListener('winslim:open-panel', openPanelFromTerminal);
             window.removeEventListener("error", onError);
             window.removeEventListener("unhandledrejection", onRejection);
             window.removeEventListener("keydown", onGamingNavigationKeyDown, true);

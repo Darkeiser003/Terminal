@@ -650,6 +650,8 @@
   "settings.savedNote": "Zapisano. Domyślne środowisko i opcje Docker zostaną zastosowane przy następnym uruchomieniu.",
   "settings.sections": "Kategorie preferencji",
   "settings.showBannerHint": "Wydrukuj podsumowanie systemu raz w wyjściu terminala.",
+  "settings.clearReprintBanner": "Ponownie wyświetl fastfetch po clear",
+  "settings.clearReprintBannerHint": "Po wyczyszczeniu ekranu ponownie pokaż podsumowanie systemu.",
   "settings.startupEnv": "Początkowe środowisko",
   "settings.startupPanels": "Panele przy uruchomieniu",
   "settings.startupPanelsHint": "Panele boczne wyświetlane jako otwarte przy uruchomieniu aplikacji.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Użycie dysków.",
   "settings.banner.uptime.description": "Czas od uruchomienia.",
   "settings.banner.datetime.description": "Bieżąca data i godzina.",
-  "deps.visibleComponents": "{count} widocznych komponentów"
+  "deps.visibleComponents": "{count} widocznych komponentów",
+  "terminal.dynamicOutput": "{text}"
 }

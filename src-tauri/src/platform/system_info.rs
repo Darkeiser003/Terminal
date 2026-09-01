@@ -1218,10 +1218,6 @@ fn storage_rows(disks: &[DiskRow], compact: bool, storage_label: &str) -> Vec<(S
         .collect()
 }
 
-fn compact_storage(pane_count: usize, rows: u16) -> bool {
-    pane_count >= 4 || (if rows == 0 { 24 } else { rows as usize }) < 22
-}
-
 #[allow(dead_code)]
 fn username() -> String {
     std::env::var("USERNAME")
@@ -1395,7 +1391,7 @@ pub fn build_banner(
     app_name: &str,
     columns: u16,
     rows: u16,
-    pane_count: usize,
+    _pane_count: usize,
     t: &Translator,
 ) -> String {
     let display_name = if app_name.trim().is_empty() {
@@ -1511,7 +1507,10 @@ pub fn build_banner(
     if show("storage") && !disks.is_empty() {
         hardware_rows.extend(storage_rows(
             &disks,
-            compact_storage(pane_count, rows),
+            // El banner usa un único perfil en todas las casillas. Resumir los
+            // discos evita que una máquina con varias unidades vuelva a crear
+            // una variante más alta en una de las ventanas.
+            true,
             &t.t("banner.storage", "Disco"),
         ));
     }
@@ -1573,34 +1572,15 @@ pub fn build_banner(
     lines.push(format!("{BOLD}{accent}{title}{RESET}"));
     lines.push(format!("\x1b[90m{separator}{RESET}"));
 
-    // Una terminal con muy pocas filas no puede enseñar las tres secciones
-    // completas: el prompt desplazaría justo la CPU y la memoria fuera de la
-    // vista. Conservamos la identidad y los datos esenciales en una línea por
-    // campo; el modo normal sigue mostrando todas las secciones y discos.
-    // El inspector acoplado y el explorador pueden dejar una casilla de unas
-    // 20 filas aunque la ventana exterior parezca grande. Durante el primer
-    // frame tras un resize el PTY puede conservar temporalmente el tamaño
-    // anterior; solo se compacta cuando el viewport es realmente bajo.
-    // Con 25 filas o más cabe el formato legible (secciones, aire y divisor
-    // antes del prompt). El umbral anterior de 40 activaba el modo compacto
-    // en una ventana normal y hacía que fastfetch pareciera una lista pegada.
-    // El modo compacto necesita espacio para el prompt además de sus datos.
-    // En casillas menores se omite de forma explícita para no desplazar la
-    // entrada; una nueva sesión o una orden explícita podrá volver a mostrarlo.
+    // Todas las casillas usan el mismo perfil esencial. Antes esta decisión
+    // dependía de filas, columnas y número de paneles: la primera pestaña de
+    // una rejilla podía conservar el formato completo mientras las nuevas
+    // nacían compactas. Un formato único evita esa mezcla y hace que el banner
+    // sea estable al dividir la ventana o mover una pestaña.
     if rows > 0 && usize::from(rows) < 12 {
         return String::new();
     }
-    let compact_vertical = rows > 0 && usize::from(rows) <= 24;
-    // Una división de tres o cuatro paneles puede conservar muchas filas en
-    // el PTY, pero cada celda ya no tiene anchura suficiente para tres
-    // secciones completas. Compactar también por anchura evita que el banner
-    // empuje el prompt fuera de la vista durante un redimensionado.
-    // Una vista dividida debe ser homogénea aunque una de sus casillas sea
-    // más ancha (por ejemplo, la tercera de la rejilla 1+2). Si cada panel
-    // decide por separado entre el formato completo y el compacto, al pasar
-    // de 2 a 3/4 quedan cabeceras visualmente distintas y es fácil confundir
-    // un repintado pendiente con una parte perdida del banner.
-    let compact_layout = compact_vertical || available_cols < 88 || pane_count > 1;
+    let compact_layout = true;
     let compact_rows = if compact_layout {
         let cpu_label = t.t("banner.cpu", "CPU");
         let memory_label = t.t("banner.memory", "Memoria");
@@ -1798,14 +1778,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].1.contains("2 unidades"));
         assert!(rows[0].1.contains("400.0 GB / 700.0 GB"));
-    }
-
-    #[test]
-    fn el_espacio_vertical_tambien_activa_el_modo_compacto() {
-        assert!(compact_storage(4, 40));
-        assert!(compact_storage(1, 21));
-        assert!(!compact_storage(2, 22));
-        assert!(!compact_storage(1, 0));
     }
 
     #[test]
@@ -2063,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn el_banner_legible_separa_secciones_y_prompt() {
+    fn el_banner_legible_mantiene_un_formato_compacto_unico() {
         let banner = build_banner(
             "cmd.exe",
             "WinSlim Terminal",
@@ -2073,14 +2045,44 @@ mod tests {
             &Translator::default(),
         );
         let lines: Vec<String> = banner.lines().map(crate::current_dir::strip_ansi).collect();
-        assert!(lines.iter().any(|line| line.is_empty()), "{banner}");
         assert!(
-            lines.iter().filter(|line| line.starts_with("---")).count() >= 2,
+            lines.iter().any(|line| line.starts_with("Sistema  ")),
             "{banner}"
         );
-        assert!(lines.iter().any(|line| line == "Sistema:"), "{banner}");
-        assert!(lines.iter().any(|line| line == "Hardware:"), "{banner}");
-        assert!(lines.iter().any(|line| line == "Sesión:"), "{banner}");
+        assert!(lines.iter().any(|line| line.starts_with("CPU")), "{banner}");
+        assert!(
+            lines.iter().any(|line| line.starts_with("Memoria")),
+            "{banner}"
+        );
+        assert!(!lines.iter().any(|line| line == "Hardware:"), "{banner}");
+        assert!(!lines.iter().any(|line| line == "Sesión:"), "{banner}");
+    }
+
+    #[test]
+    fn el_banner_mantiene_el_mismo_formato_al_cambiar_la_rejilla() {
+        let t = Translator::default();
+        for (columns, rows) in [(120, 40), (120, 20), (60, 14)] {
+            let single = build_banner("cmd.exe", "WinSlim Terminal", columns, rows, 1, &t);
+            let grid = build_banner("cmd.exe", "WinSlim Terminal", columns, rows, 4, &t);
+            let strip = |value: String| {
+                value
+                    .lines()
+                    .map(crate::current_dir::strip_ansi)
+                    .collect::<Vec<_>>()
+            };
+            let single_lines = strip(single);
+            let grid_lines = strip(grid);
+            assert_eq!(
+                single_lines.iter().any(|line| line.starts_with("CPU")),
+                grid_lines.iter().any(|line| line.starts_with("CPU")),
+                "el perfil cambió para {columns}x{rows}"
+            );
+            assert_eq!(
+                single_lines.iter().any(|line| line == "Hardware:"),
+                grid_lines.iter().any(|line| line == "Hardware:"),
+                "el banner completo reapareció para {columns}x{rows}"
+            );
+        }
     }
 
     #[test]

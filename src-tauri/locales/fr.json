@@ -650,6 +650,8 @@
   "settings.savedNote": "Enregistré. L'environnement par défaut et Docker s'appliqueront au prochain démarrage.",
   "settings.sections": "Catégories de préférences",
   "settings.showBannerHint": "Afficher une fois le résumé du système dans la sortie du terminal.",
+  "settings.clearReprintBanner": "Réafficher fastfetch avec clear",
+  "settings.clearReprintBannerHint": "Après avoir effacé l’écran, afficher à nouveau le résumé système.",
   "settings.startupEnv": "Environnement au démarrage",
   "settings.startupPanels": "Panneaux au démarrage",
   "settings.startupPanelsHint": "Panneaux latéraux affichés au lancement de l'application.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Utilisation des disques.",
   "settings.banner.uptime.description": "Durée depuis le démarrage.",
   "settings.banner.datetime.description": "Date et heure actuelles.",
-  "deps.visibleComponents": "{count} composants visibles"
+  "deps.visibleComponents": "{count} composants visibles",
+  "terminal.dynamicOutput": "{text}"
 }

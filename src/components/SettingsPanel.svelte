@@ -749,6 +749,27 @@
                             >
                         </span>
                     </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-clear-reprint-banner"
+                            bind:checked={draft.clearReprintBanner}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.clearReprintBanner",
+                                    "Reimprimir fastfetch al ejecutar clear",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.clearReprintBannerHint",
+                                    "Después de limpiar la pantalla, vuelve a mostrar el resumen del sistema.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
                     <div class="banner-settings">
                         <div class="heading">
                             <strong>{app.t("settings.bannerSections", "Información del banner")}</strong>
@@ -909,6 +930,7 @@
                     </label>
                     <label class="check">
                         <input
+                            data-testid="settings-exclusive-groups"
                             type="checkbox"
                             bind:checked={draft.exclusiveAccordionGroups}
                         />
@@ -929,6 +951,7 @@
                     </label>
                     <label class="check">
                         <input
+                            data-testid="settings-auto-open-first"
                             type="checkbox"
                             bind:checked={draft.autoOpenFirstGroup}
                         />

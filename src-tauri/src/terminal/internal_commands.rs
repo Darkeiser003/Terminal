@@ -31,13 +31,20 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         return None;
     }
     let action = match name.as_str() {
-        "config" if argument.is_none() => "config",
+        "config" | "settings" if argument.is_none() => "config",
         "reload" if argument.is_none() => "reload",
         "repl" if argument.is_some() => "repl",
+        "shell" | "env" | "environment" => "shell",
         "alias" if argument.is_none() => "alias",
         "help" => "help",
         "banner" => "banner",
         "quick-actions" | "quickactions" => "quickActions",
+        "panel" | "open" => "panel",
+        "theme" => "theme",
+        "font" | "fuente" => "font",
+        "language" | "lang" | "idioma" => "language",
+        "terminal" | "term" => "terminal",
+        "panes" | "layout" | "grid" => "panes",
         "darkeiser003" if argument.is_none() => "darkeiser003",
         "christianlg97" if argument.is_none() => "christianlg97",
         _ => return None,
@@ -59,7 +66,10 @@ mod tests {
             Some("python")
         );
         assert_eq!(parse(":config").unwrap().action, "config");
+        assert_eq!(parse(":settings").unwrap().action, "config");
         assert_eq!(parse(":reload").unwrap().action, "reload");
+        assert_eq!(parse(":shell powershell").unwrap().action, "shell");
+        assert_eq!(parse(":env list").unwrap().action, "shell");
         assert_eq!(
             parse(":help paquetes").unwrap().argument.as_deref(),
             Some("paquetes")
@@ -73,6 +83,12 @@ mod tests {
             parse(":quickactions off").unwrap().argument.as_deref(),
             Some("off")
         );
+        assert_eq!(parse(":open deps").unwrap().action, "panel");
+        assert_eq!(parse(":theme list").unwrap().action, "theme");
+        assert_eq!(parse(":font jetbrains").unwrap().action, "font");
+        assert_eq!(parse(":lang es").unwrap().action, "language");
+        assert_eq!(parse(":terminal fontsize 14").unwrap().action, "terminal");
+        assert_eq!(parse(":layout 4").unwrap().action, "panes");
         assert_eq!(parse(":banner preset compact").unwrap().action, "banner");
         assert_eq!(
             parse(":banner preset compact").unwrap().argument.as_deref(),

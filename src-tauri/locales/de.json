@@ -650,6 +650,8 @@
   "settings.savedNote": "Gespeichert. Standardumgebung und Docker werden beim nächsten Start angewendet.",
   "settings.sections": "Einstellungskategorien",
   "settings.showBannerHint": "Die Systemübersicht einmal in der Terminalausgabe ausgeben.",
+  "settings.clearReprintBanner": "Fastfetch bei clear erneut anzeigen",
+  "settings.clearReprintBannerHint": "Nach dem Leeren des Bildschirms die Systemübersicht erneut anzeigen.",
   "settings.startupEnv": "Startumgebung",
   "settings.startupPanels": "Panels beim Start",
   "settings.startupPanelsHint": "Beim App-Start geöffnet gezeigte Seitenleisten.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Laufwerksauslastung.",
   "settings.banner.uptime.description": "Zeit seit dem Start.",
   "settings.banner.datetime.description": "Aktuelles Datum und Uhrzeit.",
-  "deps.visibleComponents": "{count} sichtbare Komponenten"
+  "deps.visibleComponents": "{count} sichtbare Komponenten",
+  "terminal.dynamicOutput": "{text}"
 }

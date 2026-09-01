@@ -42,6 +42,14 @@ winslim-terminal-e2e-*.json
 /*-smoke-*.json
 /*-e2e-*.json
 
+# Evidencia local de auditorías y builds. La documentación mantenida vive en
+# docs/; los registros y capturas temporales no deben volver al repositorio.
+/AUDIT-*.md
+audit-*.log
+build-*.log
+link-check.log
+*-e2e-captures*/
+
 # Paquetes de distribución generados fuera de release/ (Windows/Linux/macOS).
 # No se ignoran ejecutables genéricos: algunos recursos nativos pueden ser
 # necesarios para la aplicación.

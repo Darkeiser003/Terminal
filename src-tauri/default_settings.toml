@@ -10,6 +10,8 @@ autoStartDocker = false
 exclusiveAccordionGroups = true
 autoOpenFirstGroup = false
 showSystemBanner = true
+# `clear`/`cls` vuelve a mostrar el mismo fastfetch tras limpiar la pantalla.
+clearReprintBanner = true
 # Elementos ocultos del banner, separados por comas. Vacío = información completa.
 bannerHiddenItems = "host,kernel,environment,motherboard,gpu,storage,datetime"
 showDependenciesPanel = true

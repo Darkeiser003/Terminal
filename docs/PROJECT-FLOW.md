@@ -56,8 +56,30 @@ Consecuencias:
    lo que nunca pueden solaparse como dos capas.
 3. El perfil inicial es **Solo esencial** (aprox. 5–8 líneas). El perfil
    completo se solicita desde Ajustes o `:banner preset full`.
-4. `clear/cls` limpia pantalla e historial, pero no vuelve a imprimir el
-   banner. `sysinfo` y `:banner preset full` son solicitudes explícitas.
+4. `clear/cls` limpia pantalla e historial y, por defecto, vuelve a imprimir el
+   fastfetch esencial (`clearReprintBanner`). La preferencia se puede desactivar
+   desde Ajustes; `sysinfo` y `:banner preset full` siguen siendo solicitudes
+   explícitas de un banner.
+
+### Cambios de idioma y recuperación del arranque
+
+El idioma no solo afecta al DOM. `settings_save` y `settings_reset` actualizan
+los banners y llaman a `TabManager::refresh_all_help_files`, que reconstruye la
+ayuda, sus temas y el selector para cada pestaña que carga archivos del host.
+Los alias ya apuntan a esas rutas estables, por lo que una shell viva empieza a
+leer el idioma nuevo en la siguiente invocación de `ayuda` o `help`.
+
+Al lanzar un archivo desde la Biblioteca, el ejecutor mantiene la sintaxis de
+su tipo (`.ps1`, `.cmd`, `.sh`, Python, Node, etc.) y añade la variable de
+entorno `LTERMINAL_LANGUAGE` al comando. Los scripts pueden leerla para
+localizar sus menús y mensajes; WinSlim no traduce código arbitrario ni los
+comandos propios del intérprete.
+
+La ventana se crea inicialmente oculta para evitar el frame blanco. El camino
+normal la muestra en `frontend_ready`, después de que xterm y la primera PTY
+estén listos. Si `app.load()` falla antes de llegar ahí, el frontend invoca
+`frontend_reveal` y deja visible `startupError`; así un fallo de recursos o IPC
+no se confunde con una aplicación congelada.
 
 ## 2. Build: orden exacto
 
@@ -173,6 +195,13 @@ código de salida. El script PowerShell sigue este orden:
    salvo `--no-run`, la lanza.
 10. Con `--full-tests`, prepara `tauri-driver`/`WebKitWebDriver` y ejecuta el
     mismo E2E. Con `--cross-windows` delega en `linux/build-windows.sh`.
+
+La verificación final debe ejecutarse sobre el artefacto publicado, no solo
+sobre `target/`: `linux/validate-release.sh` comprueba el runtime y
+`--appimage-version`, mientras el smoke/E2E abre el AppImage y confirma la
+primera PTY. Los avisos de WSLg (por ejemplo DRI3) o de herramientas opcionales
+ausentes se registran como avisos; solo un fallo de ventana, IPC, PTY o informe
+E2E detiene la build.
 
 `linux/build-windows.sh` comprueba MinGW y el target GNU, usa un `CARGO_TARGET_DIR`
 aislado, ejecuta `npm run build`, compila el PE Windows con Cargo, copia los
@@ -328,8 +357,18 @@ una línea que empieza por `:` (o en `@darkeiser003`/`@christianlg97`), llama a
 `internal_command_parse`, borra la línea con DEL y ejecuta en este orden lógico:
 
 * `:config` abre Ajustes.
+* `:settings` es el mismo comando con un nombre alternativo.
 * `:reload` refresca entornos.
+* `:shell list|current|<id o nombre>` enumera, consulta o cambia el entorno de
+  la pestaña actual; `:env` y `:environment` son alias del mismo comando.
 * `:repl <nombre>` crea una pestaña para el REPL detectado.
+* `:panel <settings|deps|projects|scripts|explorer|close>` abre/cierra paneles;
+  `:open` es su alias.
+* `:theme`, `:font` y `:language` enumeran o aplican los catálogos disponibles.
+* `:terminal list|<parámetro> <valor>` consulta o cambia los parámetros de
+  xterm (fuente, cursor, colores, scrollback, densidad y comportamiento).
+* `:panes 1|2|3|4|cycle` fija o rota la rejilla visible; `:layout` y `:grid`
+  son alias.
 * `:banner hide|show|toggle|preset|list` guarda `bannerHiddenItems`; el cambio
   imprime una copia normal del banner cuando termina la edición. El preset
   predeterminado **compact/solo esencial** oculta host, kernel, entorno, placa,
@@ -338,6 +377,8 @@ una línea que empieza por `:` (o en `@darkeiser003`/`@christianlg97`), llama a
 * `:quick-actions on|off|toggle|list` guarda `showQuickActions`.
 * `:help`/`:alias` invoca el alias de ayuda de la shell cuando el transporte
   puede leer archivos del host; en REPL/contenedor muestra fallback.
+* Las órdenes sin prefijo `:` no entran en esta ruta: se envían a la shell para
+  que las resuelvan sus alias, funciones y comandos nativos.
 * Los dos alias de créditos escriben enlaces, no ejecutan comandos del host.
 
 ### Panel de entorno y dependencias
@@ -356,7 +397,10 @@ una línea que empieza por `:` (o en `@darkeiser003`/`@christianlg97`), llama a
    conserva favoritos mediante `scripts_pin`. Ejecutar llama a `scripts_run`;
    si la extensión necesita otra familia de shell, Rust crea/adopta una pestaña
    compatible y devuelve `tabId`. Abrir usa `scripts_open` y el visor del
-   sistema.
+   sistema. Los scripts integrados registran los alias `adb-manager`,
+   `docker-manager`, `kubernetes-manager`, `network-manager`, `service-manager`
+   y `ssh-manager`; la ayuda de cada sesión enumera además los nombres de los
+   scripts personales detectados.
 
 ### Explorador
 

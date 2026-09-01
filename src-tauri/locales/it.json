@@ -650,6 +650,8 @@
   "settings.savedNote": "Salvato. L'ambiente predefinito e Docker saranno applicati al prossimo avvio.",
   "settings.sections": "Categorie di preferenze",
   "settings.showBannerHint": "Stampa una volta il riepilogo del sistema nell'output del terminale.",
+  "settings.clearReprintBanner": "Mostra di nuovo fastfetch con clear",
+  "settings.clearReprintBannerHint": "Dopo aver pulito lo schermo, mostra di nuovo il riepilogo del sistema.",
   "settings.startupEnv": "Ambiente all'avvio",
   "settings.startupPanels": "Pannelli all'avvio",
   "settings.startupPanelsHint": "Pannelli laterali mostrati aperti all'avvio dell'app.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Uso delle unità.",
   "settings.banner.uptime.description": "Tempo dall’avvio.",
   "settings.banner.datetime.description": "Data e ora correnti.",
-  "deps.visibleComponents": "{count} componenti visibili"
+  "deps.visibleComponents": "{count} componenti visibili",
+  "terminal.dynamicOutput": "{text}"
 }

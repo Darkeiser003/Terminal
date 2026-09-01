@@ -650,6 +650,8 @@
   "settings.savedNote": "저장되었습니다. 기본 시작 환경과 Docker 옵션은 다음 시작 시 적용됩니다.",
   "settings.sections": "환경설정 분류",
   "settings.showBannerHint": "시스템 요약을 터미널 출력에 한 번 표시합니다.",
+  "settings.clearReprintBanner": "clear 실행 시 fastfetch 다시 표시",
+  "settings.clearReprintBannerHint": "화면을 지운 후 시스템 요약을 다시 표시합니다.",
   "settings.startupEnv": "기본 시작 환경",
   "settings.startupPanels": "시작 시 열 패널",
   "settings.startupPanelsHint": "앱을 시작할 때 기본으로 표시되는 사이드 패널입니다.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "드라이브 사용량입니다.",
   "settings.banner.uptime.description": "부팅 후 경과한 시간입니다.",
   "settings.banner.datetime.description": "현재 날짜와 시간입니다.",
-  "deps.visibleComponents": "표시된 구성 요소 {count}개"
+  "deps.visibleComponents": "표시된 구성 요소 {count}개",
+  "terminal.dynamicOutput": "{text}"
 }

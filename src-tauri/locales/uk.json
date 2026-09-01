@@ -650,6 +650,8 @@
   "settings.savedNote": "Збережено. Початкове оточення та параметри Docker застосуються при наступному запуску.",
   "settings.sections": "Категорії налаштувань",
   "settings.showBannerHint": "Один раз вивести зведення про систему у виводі термінала.",
+  "settings.clearReprintBanner": "Повторно показувати fastfetch під час clear",
+  "settings.clearReprintBannerHint": "Після очищення екрана знову показувати зведення про систему.",
   "settings.startupEnv": "Початкове оточення",
   "settings.startupPanels": "Панелі при запуску",
   "settings.startupPanelsHint": "Бічні панелі, відкриті при запуску додатка.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Використання дисків.",
   "settings.banner.uptime.description": "Час від завантаження.",
   "settings.banner.datetime.description": "Поточні дата й час.",
-  "deps.visibleComponents": "Видимі компоненти: {count}"
+  "deps.visibleComponents": "Видимі компоненти: {count}",
+  "terminal.dynamicOutput": "{text}"
 }

@@ -130,6 +130,20 @@ pub fn frontend_ready(
     Ok(())
 }
 
+/// Muestra la ventana cuando la carga inicial de datos falla antes de que haya
+/// un xterm capaz de llamar a `frontend_ready`. La ventana se crea oculta para
+/// evitar el frame blanco, pero un error visible es preferible a dejar el
+/// proceso aparentemente muerto sin ninguna explicación.
+#[tauri::command]
+pub fn frontend_reveal(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("No se encontró la ventana principal".into());
+    };
+    window
+        .show()
+        .map_err(|error| format!("No se pudo mostrar la ventana de recuperación: {error}"))
+}
+
 // ---- pty (`pty-*`) ----
 
 /// `pty-input`
@@ -316,6 +330,7 @@ pub fn settings_save(
     let saved = settings::save_settings(&patch)
         .ok_or_else(|| "No se pudieron guardar las preferencias en settings.json".to_string())?;
     state.tabs.refresh_all_banner_files();
+    state.tabs.refresh_all_help_files();
     Ok(payload_for(preferences::sanitize_preferences(
         &Value::Object(saved),
     )))
@@ -334,6 +349,7 @@ pub fn settings_reset(state: State<'_, Arc<AppState>>) -> Result<PreferencesPayl
         "No se pudieron restablecer las preferencias en settings.json".to_string()
     })?;
     state.tabs.refresh_all_banner_files();
+    state.tabs.refresh_all_help_files();
     log_info!("Preferencias restablecidas");
     Ok(payload_for(preferences::sanitize_preferences(
         &Value::Object(saved),

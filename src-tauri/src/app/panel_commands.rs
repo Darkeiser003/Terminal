@@ -754,6 +754,7 @@ pub fn scripts_run(
 
     let Some(command) =
         scripts::build_launch_command(&script, env.kind, as_admin, &args, &launch_context(&env))
+            .map(|command| scripts::with_active_language(env.kind, command))
     else {
         return ActionResult::failed_t(
             "error.notAuthorised",

@@ -121,7 +121,8 @@ fn powershell_aliases(platform: &str) -> Vec<(&'static str, String)> {
 ///
 /// El banner automático se pasa a este comando para imprimirlo una sola vez;
 /// el parámetro de archivo también se conserva para la ruta explícita de
-/// `sysinfo` y para los tests de compatibilidad.
+/// `sysinfo` y para los tests de compatibilidad. El alias de `clear` añade la
+/// misma lectura detrás de un indicador configurable por pestaña.
 pub fn clear_command(
     kind: ShellKind,
     banner_path: Option<&str>,
@@ -205,15 +206,32 @@ pub fn clear_command(
 /// Redefine clear/cls en la shell. En PowerShell hay que forzar los alias: la
 /// resolución de comandos da prioridad a los alias integrados
 /// (`clear` -> `Clear-Host`) sobre cualquier función que definamos.
-fn clear_alias_lines(kind: ShellKind, transport: Transport, app_name: &str) -> Vec<String> {
+fn clear_alias_lines(
+    kind: ShellKind,
+    banner_path: Option<&str>,
+    clear_banner_flag_path: Option<&str>,
+    transport: Transport,
+    app_name: &str,
+) -> Vec<String> {
     if kind == ShellKind::Cmd {
-        // `clear` solo limpia xterm. Si volviera a imprimir el fastfetch aquí,
-        // reaparecería dentro del scrollback y volvería a competir con la
-        // selección del usuario.
-        let body = clear_command(kind, None, true, transport, app_name);
+        let body = clear_command_with_toggle(
+            kind,
+            banner_path,
+            clear_banner_flag_path,
+            true,
+            transport,
+            app_name,
+        );
         return vec![format!("doskey cls={body}"), format!("doskey clear={body}")];
     }
-    let body = clear_command(kind, None, false, transport, app_name);
+    let body = clear_command_with_toggle(
+        kind,
+        banner_path,
+        clear_banner_flag_path,
+        false,
+        transport,
+        app_name,
+    );
 
     if kind == ShellKind::Powershell {
         // -Option AllScope es obligatorio: los alias integrados clear/cls ya lo
@@ -240,6 +258,42 @@ fn clear_alias_lines(kind: ShellKind, transport: Transport, app_name: &str) -> V
         format!("clear() {{ {body}; }}"),
         "cls() { clear; }".to_string(),
     ]
+}
+
+/// Construye el alias de limpieza y, cuando hay archivos de sesión, añade la
+/// lectura condicional del fastfetch. El indicador se puede activar o quitar
+/// mientras la shell sigue abierta, por lo que guardar Preferencias cambia el
+/// comportamiento de `clear` sin redefinir aliases ni reiniciar pestañas.
+fn clear_command_with_toggle(
+    kind: ShellKind,
+    banner_path: Option<&str>,
+    clear_banner_flag_path: Option<&str>,
+    inside_doskey_macro: bool,
+    transport: Transport,
+    app_name: &str,
+) -> String {
+    let body = clear_command(kind, None, inside_doskey_macro, transport, app_name);
+    let (Some(banner), Some(flag)) = (banner_path, clear_banner_flag_path) else {
+        return body;
+    };
+    let print_banner = match kind {
+        ShellKind::Cmd => format!("if exist \"{flag}\" @type \"{banner}\""),
+        ShellKind::Powershell => format!(
+            "if (Test-Path -LiteralPath '{flag}') {{ Write-Host (Get-Content -Raw '{banner}') -NoNewline }}"
+        ),
+        ShellKind::Fish => format!(
+            "if test -f '{}'; cat '{}'; end",
+            unix_path_for(flag, transport),
+            unix_path_for(banner, transport)
+        ),
+        _ => format!(
+            "if [ -f '{}' ]; then cat '{}'; fi",
+            unix_path_for(flag, transport),
+            unix_path_for(banner, transport)
+        ),
+    };
+    let separator = if kind == ShellKind::Cmd { " $T " } else { "; " };
+    format!("{body}{separator}{print_banner}")
 }
 
 fn quote_windows_double(path: &str) -> String {
@@ -331,9 +385,14 @@ fn sysinfo_alias_line(kind: ShellKind, banner_path: Option<&str>, transport: Tra
 // shells. `install` instala aquí llame el sistema a su gestor winget, apt o
 // pacman, y quien abre la terminal no tiene que saber cuál le toca.
 
-const HELP_TITLE_COLOR: &str = "\x1b[1;36m";
-const HELP_SECTION_COLOR: &str = "\x1b[1;33m";
-const HELP_CMD_COLOR: &str = "\x1b[38;5;250m";
+// Colores ANSI de alto contraste. Los códigos anteriores usaban cian/amarillo
+// normales y un gris de 256 colores para los comandos; en algunas paletas de
+// xterm ese gris se confundía con el texto normal y parecía que `help` no tenía
+// formato. Los tonos brillantes pertenecen a la paleta básica y funcionan igual
+// en CMD, PowerShell, bash, WSL y los REPL que entienden VT.
+const HELP_TITLE_COLOR: &str = "\x1b[1;96m";
+const HELP_SECTION_COLOR: &str = "\x1b[1;93m";
+const HELP_CMD_COLOR: &str = "\x1b[1;92m";
 const HELP_RESET: &str = "\x1b[0m";
 
 fn help_row(command: &str, description: &str) -> String {
@@ -675,7 +734,13 @@ pub fn build_help_topic_text(
 }
 
 fn section(lines: &mut Vec<String>, title: &str) {
-    lines.push(format!("{HELP_SECTION_COLOR}{title}{HELP_RESET}"));
+    // Cada bloque empieza separado del anterior. Así la ayuda sigue siendo
+    // legible incluso cuando la consola tiene muchas columnas o una fuente
+    // pequeña, sin depender del ajuste visual del terminal.
+    if !matches!(lines.last(), Some(last) if last.is_empty()) {
+        lines.push(String::new());
+    }
+    lines.push(format!("{HELP_SECTION_COLOR}> {title}{HELP_RESET}"));
 }
 
 fn render_packages(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions<'_>) {
@@ -691,7 +756,7 @@ fn render_packages(lines: &mut Vec<String>, t: &Translator, options: &HelpOption
         ),
     };
     lines.push(format!(
-        "{HELP_SECTION_COLOR}{}{HELP_RESET} — {packages_note}",
+        "{HELP_SECTION_COLOR}> {}{HELP_RESET} — {packages_note}",
         t.t("help.packages", "Paquetes")
     ));
     lines.push(help_row(
@@ -770,7 +835,7 @@ fn render_session(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions
         ));
     }
     lines.push(
-        "    Los nombres se traducen a la sintaxis de la shell actual; el vocabulario es común."
+        "    Estos alias no llevan : y sí se envían a la shell actual; la aplicación solo los prepara al crear la pestaña."
             .to_string(),
     );
     lines.push(String::new());
@@ -778,15 +843,23 @@ fn render_session(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions
 
 fn render_internal(lines: &mut Vec<String>, app_name: &str) {
     section(lines, &format!("Comandos internos de {app_name}"));
-    lines.push("    Se reconocen únicamente al empezar la línea con : y no se envían al proceso de la shell.".to_string());
+    lines.push("    Empiezan por :; los procesa la aplicación y no se envían a cmd, PowerShell, bash ni a un REPL.".to_string());
+    lines.push("    Sirven para consultar o cambiar la interfaz, preferencias, paneles, entorno y rejilla.".to_string());
     lines.push(help_row(
         ":help [sección]",
         "Muestra la ayuda completa o una sección concreta.",
     ));
-    lines.push(help_row(":config", "Abre Ajustes de la aplicación."));
+    lines.push(help_row(
+        ":config / :settings",
+        "Abre Ajustes de la aplicación.",
+    ));
     lines.push(help_row(
         ":reload",
         "Actualiza el inventario de entornos, shells y herramientas.",
+    ));
+    lines.push(help_row(
+        ":shell [list|current|<nombre>]",
+        "Enumera, muestra o cambia la shell/entorno de la pestaña actual sin tocar las demás.",
     ));
     lines.push(help_row(
         ":repl <nombre>",
@@ -804,8 +877,34 @@ fn render_internal(lines: &mut Vec<String>, app_name: &str) {
         ":quick-actions on|off|toggle|list",
         "Muestra u oculta el submenú de acciones rápidas de la Biblioteca.",
     ));
+    lines.push(help_row(
+        ":panel <settings|deps|projects|scripts|explorer|close>",
+        "Abre, cierra o enumera los paneles principales sin usar el ratón.",
+    ));
+    lines.push(help_row(
+        ":theme [list|<id>]",
+        "Enumera o aplica un tema de interfaz.",
+    ));
+    lines.push(help_row(
+        ":font [list|<id>]",
+        "Enumera o aplica una fuente de terminal.",
+    ));
+    lines.push(help_row(
+        ":language [list|<id>]",
+        "Enumera o cambia el idioma de la interfaz.",
+    ));
+    lines.push(help_row(
+        ":terminal [list|<parámetro> <valor>]",
+        "Muestra o cambia fuente, tamaño, cursor, colores, scrollback, densidad y otros parámetros de xterm.",
+    ));
+    lines.push(help_row(
+        ":panes [1|2|3|4|cycle]",
+        "Muestra o cambia directamente el número de terminales visibles en la rejilla.",
+    ));
+    lines.push("    Alias equivalentes: :open para :panel; :env para :shell; :term para :terminal; :layout/:grid para :panes.".to_string());
+    lines.push("    Ejemplos: :shell powershell · :panel settings · :theme ocean · :terminal font-size 14 · :panes 2".to_string());
     lines.push(
-        "    Si una orden no aparece aquí, se deja intacta para que la interprete la shell."
+        "    Si una línea no empieza por : (y no es un crédito reconocido), se deja intacta para que la interprete la shell."
             .to_string(),
     );
     lines.push(String::new());
@@ -835,16 +934,16 @@ fn render_aliases(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
         "install ...",
         "Alias de paquetes; usa help paquetes.",
     ));
-    lines.push(help_row(
-        "scripts de Biblioteca",
-        "Cada script ejecutable puede aparecer como alias, sin argumentos o con sus argumentos.",
-    ));
-    lines.push(format!(
-        "    Alias de scripts detectados en esta sesión: {}",
-        options.script_names.len()
-    ));
-    if !options.script_names.is_empty() {
-        lines.push(format!("    {}", options.script_names.join(", ")));
+    if options.script_names.is_empty() {
+        lines.push(help_row(
+            "scripts Biblioteca",
+            "No hay scripts ejecutables registrados en esta sesión.",
+        ));
+    } else {
+        lines.push(help_row(
+            &options.script_names.join(", "),
+            "Scripts de la Biblioteca registrados en esta sesión.",
+        ));
     }
     lines.push(
         "    clear, cls, sysinfo, ayuda y help son comandos reservados de la aplicación."
@@ -859,10 +958,14 @@ fn render_library(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
     lines.push("    Favoritos conserva accesos; Ruta actual muestra el contenido del directorio de la pestaña.".to_string());
     lines.push("    Un script se puede ejecutar sin argumentos para abrir su propio menú, o con parámetros extra.".to_string());
     lines.push("    Las acciones rápidas incluyen SSH, red, servicios, Docker, Kubernetes y ADB cuando la herramienta existe.".to_string());
-    lines.push(format!(
-        "    Esta pestaña tiene {} alias de scripts registrados.",
-        options.script_names.len()
-    ));
+    if options.script_names.is_empty() {
+        lines.push("    Scripts registrados en esta sesión: (ninguno detectado).".to_string());
+    } else {
+        lines.push(format!(
+            "    Scripts registrados en esta sesión: {}",
+            options.script_names.join(", ")
+        ));
+    }
     lines.push(String::new());
 }
 
@@ -937,7 +1040,7 @@ fn help_alias_line(
         } else {
             script_names.join(", ")
         };
-        let message = format!("Alias fijos: {fixed} -- Scripts detectados: {scripts}");
+        let message = format!("Alias fijos: {fixed} -- Scripts de Biblioteca: {scripts}");
         return match kind {
             ShellKind::Cmd => format!("doskey ayuda=echo {message}"),
             ShellKind::Powershell => format!(
@@ -1060,6 +1163,7 @@ pub struct InitOptions<'a> {
     pub script_aliases: &'a [ScriptAlias],
     pub banner_path: Option<&'a str>,
     pub banner_clear_path: Option<&'a str>,
+    pub clear_banner_flag_path: Option<&'a str>,
     pub help_path: Option<&'a str>,
     pub transport: Transport,
     pub app_name: &'a str,
@@ -1129,7 +1233,8 @@ pub fn build_init_script(
     // ningún alias que todavía se vaya a declarar.
     // El banner inicial se imprime aquí una sola vez, después de limpiar la
     // pantalla. `sysinfo` conserva la misma ruta para una solicitud explícita;
-    // `clear` sólo limpia el scrollback y no vuelve a mostrarlo.
+    // el alias de `clear` decide después si vuelve a mostrarlo consultando su
+    // indicador de preferencias.
     lines.push(clear_command(
         kind,
         initial_banner_path,
@@ -1167,7 +1272,13 @@ pub fn build_init_script(
         }
     }
 
-    lines.extend(clear_alias_lines(kind, options.transport, options.app_name));
+    lines.extend(clear_alias_lines(
+        kind,
+        options.banner_clear_path,
+        options.clear_banner_flag_path,
+        options.transport,
+        options.app_name,
+    ));
 
     // install / update / upgrade / uninstall / remove sobre el gestor de
     // paquetes real de este entorno.
@@ -1266,6 +1377,7 @@ mod tests {
             script_aliases: &[],
             banner_path: None,
             banner_clear_path: None,
+            clear_banner_flag_path: None,
             help_path: None,
             transport,
             app_name: "WinSlim Terminal",
@@ -1382,14 +1494,20 @@ mod tests {
     }
 
     #[test]
-    fn clear_no_reimprime_la_cabecera_pero_sysinfo_si_la_ofrece() {
+    fn clear_reimprime_el_banner_a_traves_de_un_indicador() {
         let mut opts = options(Transport::Native);
         opts.banner_path = Some("C:\\temp\\banner.txt");
         opts.banner_clear_path = Some("C:\\temp\\bannerclear.txt");
+        opts.clear_banner_flag_path = Some("C:\\temp\\clear-banner.flag");
         opts.initial_banner = false;
         let script = build(ShellKind::Cmd, &opts);
         assert!(script.content.contains("doskey clear=") && script.content.contains("doskey cls="));
-        assert!(!script.content.contains("bannerclear.txt"));
+        assert!(script
+            .content
+            .contains("if exist \"C:\\temp\\clear-banner.flag\""));
+        assert!(script
+            .content
+            .contains("type \"C:\\temp\\bannerclear.txt\""));
         assert!(script
             .content
             .contains("doskey sysinfo=type \"C:\\temp\\banner.txt\""));
@@ -1752,6 +1870,9 @@ mod tests {
             build_help_topic_text(&Translator::default(), &opciones, HelpTopic::Internal);
         assert!(internos.contains("Comandos internos de App"));
         assert!(internos.contains(":quick-actions on|off|toggle|list"));
+        assert!(internos.contains(":shell [list|current|<nombre>]"));
+        assert!(internos.contains(":terminal [list|<parámetro> <valor>]"));
+        assert!(internos.contains(":panel <settings|deps|projects|scripts|explorer|close>"));
         assert_eq!(
             HelpTopic::from_argument(Some("help")),
             Some(HelpTopic::General)
@@ -1833,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn la_ayuda_cuenta_los_scripts_registrados() {
+    fn la_ayuda_documenta_scripts_con_nombres_concretos() {
         let nombres = vec!["uno".to_string(), "dos".to_string()];
         let texto = build_help_text(
             &Translator::default(),
@@ -1845,8 +1966,10 @@ mod tests {
                 script_names: &nombres,
             },
         );
-        assert!(texto.contains("Alias de scripts detectados en esta sesión: 2"));
+        let etiqueta_antigua = ["(uno por ", "script)"].concat();
+        assert!(!texto.contains(&etiqueta_antigua));
         assert!(texto.contains("uno, dos"));
+        assert!(texto.contains("Scripts de la Biblioteca registrados en esta sesión."));
     }
 
     #[test]
@@ -1928,5 +2051,23 @@ mod tests {
             corta.find("Esta ayuda.").unwrap(),
             larga.find("Desinstala.").unwrap()
         );
+    }
+
+    #[test]
+    fn la_ayuda_conserva_color_y_separacion_de_bloques() {
+        let texto = build_help_text(
+            &Translator::default(),
+            &HelpOptions {
+                app_name: "App",
+                env_label: "cmd.exe",
+                manager_label: Some("winget"),
+                has_nsudo: false,
+                script_names: &[],
+            },
+        );
+        assert!(texto.contains("\x1b[1;96mApp\x1b[0m"));
+        assert!(texto.contains("\x1b[1;93m> Paquetes\x1b[0m"));
+        assert!(texto.contains("\x1b[1;92minstall <paquete>"));
+        assert!(texto.contains("\r\n\r\n"));
     }
 }

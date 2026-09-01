@@ -116,6 +116,9 @@ export const activateTab = (tabId: string) => invokeLogged<void>('tabs_activate'
 export const markTabReady = (tabId: string) => invokeLogged<void>('tabs_ready', { tabId });
 export const markFrontendReady = (tabId: string) => invokeLogged<void>('frontend_ready', { tabId });
 
+/** Hace visible la ventana si la carga inicial falla antes de montar un xterm. */
+export const revealWindow = () => invokeLogged<void>('frontend_reveal');
+
 // ---- pty ----
 
 export const sendInput = (tabId: string, data: string) => invokeLogged<void>('pty_input', { tabId, data });

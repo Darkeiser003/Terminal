@@ -103,6 +103,7 @@ export interface Preferences {
     exclusiveAccordionGroups: boolean;
     autoOpenFirstGroup: boolean;
     showSystemBanner: boolean;
+    clearReprintBanner: boolean;
     bannerHiddenItems: string;
     showDependenciesPanel: boolean;
     showProjectsPanel: boolean;
@@ -195,7 +196,7 @@ export interface WindowsIntegrationStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'alias' | 'help' | 'banner' | 'quickActions' | 'darkeiser003' | 'christianlg97';
+    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'darkeiser003' | 'christianlg97';
     argument?: string;
 }
 

@@ -650,6 +650,8 @@
   "settings.savedNote": "Сохранено. Начальное окружение и параметры Docker применятся при следующем запуске.",
   "settings.sections": "Категории настроек",
   "settings.showBannerHint": "Один раз вывести сводку о системе в выводе терминала.",
+  "settings.clearReprintBanner": "Повторно показывать fastfetch при clear",
+  "settings.clearReprintBannerHint": "После очистки экрана снова показывать сводку о системе.",
   "settings.startupEnv": "Начальное окружение",
   "settings.startupPanels": "Панели при запуске",
   "settings.startupPanelsHint": "Боковые панели, открытые при запуске приложения.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Использование дисков.",
   "settings.banner.uptime.description": "Время с момента загрузки.",
   "settings.banner.datetime.description": "Текущие дата и время.",
-  "deps.visibleComponents": "Видимые компоненты: {count}"
+  "deps.visibleComponents": "Видимые компоненты: {count}",
+  "terminal.dynamicOutput": "{text}"
 }

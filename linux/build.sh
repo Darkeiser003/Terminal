@@ -326,7 +326,11 @@ on_error() {
     printf '\n\033[31mLa build falló en: %s (código %s)\033[0m\n' "$CURRENT_STEP" "$code" >&2
     echo "Revisa los mensajes de arriba." >&2
 }
-trap 'restore_node_modules; cleanup_smoke_process' EXIT
+# Cerrar primero cualquier AppImage/WebKit de smoke o E2E. En WSL el checkout
+# vive en /mnt/c y un proceso hijo mantiene abiertos ficheros de node_modules;
+# intentar restaurarlo antes de liberar esos handles produce EACCES y oculta
+# el resultado real de la prueba.
+trap 'cleanup_smoke_process; restore_node_modules' EXIT
 trap on_error ERR
 
 # rustup, nvm y compañía instalan en el HOME y dejan el PATH preparado en un

@@ -650,6 +650,8 @@
   "settings.savedNote": "تم الحفظ. سيتم تطبيق البيئة الافتراضية وخيارات Docker في التشغيل القادم.",
   "settings.sections": "فئات التفضيلات",
   "settings.showBannerHint": "طباعة ملخص النظام مرة واحدة في مخرجات الطرفية.",
+  "settings.clearReprintBanner": "إعادة عرض fastfetch عند تنفيذ clear",
+  "settings.clearReprintBannerHint": "بعد مسح الشاشة، اعرض ملخص النظام مرة أخرى.",
   "settings.startupEnv": "بيئة التشغيل الأولى",
   "settings.startupPanels": "اللوحات عند البدء",
   "settings.startupPanelsHint": "اللوحات الجانبية المعروضة مفتوحة عند تشغيل التطبيق.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "استخدام محركات الأقراص.",
   "settings.banner.uptime.description": "الوقت منذ الإقلاع.",
   "settings.banner.datetime.description": "التاريخ والوقت الحاليان.",
-  "deps.visibleComponents": "{count} مكونات ظاهرة"
+  "deps.visibleComponents": "{count} مكونات ظاهرة",
+  "terminal.dynamicOutput": "{text}"
 }

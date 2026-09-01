@@ -12,7 +12,7 @@ pub mod types;
 
 pub use launch::{
     build_cd_command, build_launch_command, environment_kinds_for_script, resolve_script_aliases,
-    LaunchContext,
+    with_active_language, LaunchContext,
 };
 pub use scan::{
     list_all_scripts, list_scripts, normalize_here_depth, nsudo_available, ScanOptions, ScanResult,

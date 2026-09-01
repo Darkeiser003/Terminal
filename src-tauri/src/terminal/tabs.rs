@@ -191,6 +191,7 @@ static SCRIPT_ALIAS_CACHE: once_cell::sync::Lazy<Mutex<Option<ScriptAliasCache>>
 const SCRIPT_ALIAS_CACHE_TTL: Duration = Duration::from_secs(2);
 
 fn script_alias_cache_key(env: &Environment, folder: &Path, manual_aliases: &str) -> String {
+    let language = crate::i18n::active_language();
     let modified = std::fs::metadata(folder)
         .and_then(|metadata| metadata.modified())
         .ok()
@@ -201,7 +202,7 @@ fn script_alias_cache_key(env: &Environment, folder: &Path, manual_aliases: &str
     manual_aliases.hash(&mut manual_hasher);
     let manual_hash = manual_hasher.finish();
     format!(
-        "{}|{:?}|{:?}|{}|{}|{}|{}|{}",
+        "{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}",
         env.id,
         env.kind,
         env.transport,
@@ -210,6 +211,7 @@ fn script_alias_cache_key(env: &Environment, folder: &Path, manual_aliases: &str
         folder.to_string_lossy(),
         modified,
         manual_hash,
+        language,
     )
 }
 
@@ -241,7 +243,8 @@ fn script_aliases_for(env: &Environment) -> Vec<crate::alias_profiles::ScriptAli
         .into_iter()
         .filter_map(|(alias_name, script)| {
             let launch_command =
-                crate::scripts::build_launch_command(script, env.kind, false, "", &context)?;
+                crate::scripts::build_launch_command(script, env.kind, false, "", &context)
+                    .map(|command| crate::scripts::with_active_language(env.kind, command))?;
             Some(crate::alias_profiles::ScriptAlias {
                 alias_name,
                 launch_command,
@@ -446,6 +449,11 @@ struct Tab {
     /// La shell está esperando el Enter de una pausa, no un comando. Ver
     /// `write_command`.
     awaiting_pause: bool,
+    /// Comandos solicitados por paneles mientras una shell nueva todavía está
+    /// ejecutando su inicializador. Se liberan después del marcador de
+    /// limpieza, cuando ya acepta entrada; sin esta cola el primer script
+    /// podía perderse al cambiar de cmd a PowerShell (o a otra shell).
+    pending_commands: VecDeque<String>,
 }
 
 impl Tab {
@@ -628,6 +636,7 @@ impl TabManager {
         for message in pending {
             message.emit(app, tab_id);
         }
+        self.flush_pending_commands(tab_id);
     }
 
     /// Entrega una salida suponiendo que `outbound_lock` ya está tomado.
@@ -721,6 +730,7 @@ impl TabManager {
                 here_manual: false,
                 explorer_dir: None,
                 awaiting_pause: false,
+                pending_commands: VecDeque::new(),
             });
             registry.active_tab_id = Some(id.clone());
             id
@@ -773,6 +783,7 @@ impl TabManager {
             tab.startup_started_at = Some(startup_started_at);
             tab.pending_init_command = None;
             tab.initial_banner_pending = false;
+            tab.pending_commands.clear();
             tab.generation
         };
 
@@ -935,6 +946,7 @@ impl TabManager {
                         // de la shell. Los cambios posteriores solo ocurren
                         // por una orden explícita del usuario.
                         initial_banner: true,
+                        clear_reprint_banner: crate::preferences::current().clear_reprint_banner,
                     },
                     &t,
                 );
@@ -1221,6 +1233,7 @@ impl TabManager {
                         serde_json::json!({ "tabId": tab_id, "generation": generation })
                     );
                 }
+                self.flush_pending_commands(tab_id);
             }
         }
     }
@@ -1408,15 +1421,56 @@ impl TabManager {
     /// terminal wine cmd /c ver". Un Enter previo cierra la pausa pendiente
     /// antes de escribir nada.
     pub fn write_command(&self, tab_id: &str, command: &str) -> bool {
-        let pending = {
+        let (pending, queued) = {
             let mut registry = self.registry.lock();
-            match registry.find_mut(tab_id) {
-                Some(tab) => std::mem::replace(&mut tab.awaiting_pause, false),
-                None => return false,
+            let Some(tab) = registry.find_mut(tab_id) else {
+                return false;
+            };
+            let pending = std::mem::replace(&mut tab.awaiting_pause, false);
+            if tab.initializing {
+                let prefix = if pending { "\r" } else { "" };
+                tab.pending_commands
+                    .push_back(format!("{prefix}{command}\r"));
+                (pending, true)
+            } else {
+                (pending, false)
             }
         };
+        if queued {
+            log_debug!(
+                "Comando de panel encolado durante la inicialización de la shell",
+                serde_json::json!({ "tabId": tab_id })
+            );
+            return true;
+        }
         let prefix = if pending { "\r" } else { "" };
         self.write(tab_id, &format!("{prefix}{command}\r"))
+    }
+
+    /// Libera los comandos de panel que llegaron mientras la shell ejecutaba
+    /// su inicializador. Se llama justo después de emitir el marcador de
+    /// limpieza/banner; `write` conserva el orden de la cola y evita que el
+    /// primer script se pierda en la transición de entorno.
+    fn flush_pending_commands(&self, tab_id: &str) {
+        let commands = {
+            let mut registry = self.registry.lock();
+            let Some(tab) = registry.find_mut(tab_id) else {
+                return;
+            };
+            if tab.initializing {
+                return;
+            }
+            tab.pending_commands.drain(..).collect::<Vec<_>>()
+        };
+        for command in commands {
+            if !self.write(tab_id, &command) {
+                log_warn!(
+                    "No se pudo liberar un comando de panel encolado",
+                    serde_json::json!({ "tabId": tab_id })
+                );
+                break;
+            }
+        }
     }
 
     /// Marca (o desmarca) que la pestaña se ha quedado esperando el Enter de
@@ -1503,6 +1557,7 @@ impl TabManager {
                 serde_json::json!({ "tabId": tab_id, "cols": cols, "rows": rows })
             );
         }
+        self.flush_pending_commands(tab_id);
     }
 
     fn refresh_initial_banner_files(&self, tab_id: &str, cols: u16, rows: u16, pane_count: usize) {
@@ -1564,6 +1619,56 @@ impl TabManager {
         };
         for (tab_id, viewport, pane_count) in targets {
             self.refresh_initial_banner_files(&tab_id, viewport.cols, viewport.rows, pane_count);
+        }
+    }
+
+    /// Regenera la ayuda de todas las pestañas que cargan archivos del host.
+    /// Las shells ya tienen el alias apuntando a `help-<tab>.txt`, por lo que
+    /// cambiar el idioma no requiere reiniciar el proceso: basta con sustituir
+    /// el contenido y sus temas auxiliares.
+    pub fn refresh_all_help_files(&self) {
+        let targets = {
+            let registry = self.registry.lock();
+            registry
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.env.clone().map(|env| (tab.id.clone(), env)))
+                .collect::<Vec<_>>()
+        };
+        let Some(dir) = crate::session_files::dir() else {
+            return;
+        };
+        let t = crate::i18n::Translator::new(&active_language());
+        for (tab_id, env) in targets {
+            if !env.transport.loads_host_files() {
+                continue;
+            }
+            let help_path = dir.join(format!("help-{tab_id}.txt"));
+            let aliases = script_aliases_for(&env);
+            let nsudo_path = crate::platform::nsudo_path();
+            let windows_manager = windows_package_manager();
+            let manager_label = windows_manager
+                .and_then(crate::package_aliases::windows_manager_by_id)
+                .map(|manager| manager.label);
+            let help_path_string = help_path.to_string_lossy().to_string();
+            let options = crate::alias_profiles::InitOptions {
+                nsudo_path: nsudo_path.as_deref(),
+                script_aliases: &aliases,
+                banner_path: None,
+                banner_clear_path: None,
+                clear_banner_flag_path: None,
+                help_path: Some(&help_path_string),
+                transport: env.transport,
+                app_name: crate::identity::current().name,
+                env_label: &env.label,
+                manager_label,
+                platform: std::env::consts::OS,
+                windows_manager,
+                initial_banner: false,
+            };
+            if let Some(script) = crate::alias_profiles::build_init_script(env.kind, &t, &options) {
+                crate::session_files::write_help_files(&tab_id, &help_path, env.kind, &script);
+            }
         }
     }
 
@@ -1805,9 +1910,56 @@ mod tests {
             here_manual: false,
             explorer_dir: None,
             awaiting_pause: false,
+            pending_commands: VecDeque::new(),
         });
         assert!(!registry.find("tab-1").unwrap().ready);
         assert!(registry.find("tab-2").is_none());
+    }
+
+    #[test]
+    fn un_comando_de_panel_se_encola_hasta_que_la_shell_esta_lista() {
+        let manager = TabManager::new(Viewport::default());
+        let mut registry = manager.registry.lock();
+        registry.tabs.push(Tab {
+            id: "tab-queue".into(),
+            label: "Windows PowerShell".into(),
+            env_id: Some("powershell".into()),
+            env: None,
+            cwd: None,
+            generation: 1,
+            startup_started_at: None,
+            session: None,
+            ready: false,
+            pending: VecDeque::new(),
+            last_clear_marker: None,
+            output_buffer: String::new(),
+            cwd_buffer: String::new(),
+            last_missing_command: None,
+            banner_rows: 0,
+            banner_text: String::new(),
+            viewport: Viewport::default(),
+            pane_count: 1,
+            initializing: true,
+            startup_cursor_query_pending: false,
+            startup_attributes_query_pending: false,
+            pending_init_command: None,
+            initial_banner_pending: false,
+            here_scripts_dir: None,
+            here_manual: false,
+            explorer_dir: None,
+            awaiting_pause: false,
+            pending_commands: VecDeque::new(),
+        });
+        drop(registry);
+
+        assert!(manager.write_command("tab-queue", "echo script.ps1"));
+        let registry = manager.registry.lock();
+        let tab = registry.find("tab-queue").expect("pestaña encolada");
+        assert_eq!(tab.pending_commands.len(), 1);
+        assert_eq!(
+            tab.pending_commands.front().map(String::as_str),
+            Some("echo script.ps1\r")
+        );
     }
 
     #[test]
@@ -1856,6 +2008,7 @@ mod tests {
             here_manual: false,
             explorer_dir: None,
             awaiting_pause: false,
+            pending_commands: VecDeque::new(),
         };
         let value = serde_json::to_value(tab.summary()).unwrap();
         assert_eq!(value["id"], serde_json::json!("tab-3"));

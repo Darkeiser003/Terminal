@@ -35,6 +35,11 @@
     let updating = $state(false);
     let selfError = $state('');
 
+    /** El estado explícito solo guarda lo que la persona ha tocado. Si no hay
+     *  una entrada, se aplica la preferencia común: todas cerradas o únicamente
+     *  la primera abierta cuando `autoOpenFirstGroup` está activo. */
+    let openSections = $state<Record<string, boolean>>({});
+
     /** Una entrada de la lista: o una acción suelta, o una herramienta con
      *  todas las suyas plegadas bajo su nombre. */
     interface Entry {
@@ -274,6 +279,13 @@
     let refreshedAt = 0;
 
     export async function load(): Promise<void> {
+        // Cada apertura del panel empieza con los apartados plegados. El
+        // estado de un `<details>` vive en el DOM y, al volver a mostrar el
+        // panel, podía conservar la primera sección abierta aunque la
+        // preferencia «Abrir la primera lista automáticamente» estuviera
+        // desactivada. Solo se reabre la primera cuando la preferencia lo
+        // solicita explícitamente mediante `sectionIsOpen`.
+        openSections = {};
         const serial = ++loadSerial;
         // Primero lo YA detectado, que no toca el sistema y llega al instante.
         // Antes se pedía la detección completa antes de pintar nada y el panel
@@ -397,6 +409,27 @@
         return autoOpenFirst && groups[0]?.name === group.name;
     }
 
+    function sectionIsOpen(id: string): boolean {
+        return openSections[id] ?? (autoOpenFirst && sections[0]?.id === id);
+    }
+
+    function onSectionToggle(event: Event): void {
+        const details = event.currentTarget as HTMLDetailsElement;
+        const id = details.dataset.sectionId;
+        if (id) openSections[id] = details.open;
+        if (!details.open || !app.preferences?.exclusiveAccordionGroups) return;
+        const parent = details.parentElement;
+        if (!parent) return;
+        // La preferencia se aplica también a las secciones grandes del panel,
+        // no solo a los grupos internos. Al abrir una, la anterior se cierra.
+        for (const other of parent.children) {
+            if (other === details || !(other instanceof HTMLDetailsElement)) continue;
+            other.open = false;
+            const otherId = other.dataset.sectionId;
+            if (otherId) openSections[otherId] = false;
+        }
+    }
+
     /** Con el acordeón exclusivo, abrir un apartado cierra sus hermanos. Se
      *  cierran solo los HERMANOS: cerrar "todo lo que no sea yo" plegaría el
      *  apartado padre al abrir un subgrupo, y este desaparecería en el mismo
@@ -446,13 +479,15 @@
 
     <div class="sections" data-testid="dependency-sections">
         {#each sections as section (section.id)}
-            <section
+            <details
                 class="section"
                 data-testid="dependency-section"
                 data-section-id={section.id}
                 aria-labelledby={`dependency-section-${section.id}`}
+                open={sectionIsOpen(section.id)}
+                ontoggle={onSectionToggle}
             >
-                <header class="section-header">
+                <summary class="section-header">
                     <div>
                         <h3 id={`dependency-section-${section.id}`}>{section.title}</h3>
                         <p>{section.description}</p>
@@ -463,7 +498,7 @@
                             0
                         )}
                     </span>
-                </header>
+                </summary>
 
                 {#each section.groups as group (group.name)}
                     <details
@@ -522,7 +557,7 @@
                         </div>
                     </details>
                 {/each}
-            </section>
+            </details>
         {/each}
     </div>
 </Panel>
@@ -695,11 +730,12 @@
 
     .section {
         min-width: 0;
+        overflow: hidden;
     }
 
     .section + .section {
-        margin-top: 16px;
-        padding-top: 14px;
+        margin-top: 8px;
+        padding-top: 8px;
         border-top: 1px solid var(--border);
     }
 
@@ -708,7 +744,38 @@
         align-items: flex-start;
         justify-content: space-between;
         gap: 12px;
-        padding: 0 2px 4px;
+        padding: 4px 2px 6px;
+        cursor: pointer;
+        list-style: none;
+    }
+
+    .section-header::-webkit-details-marker {
+        display: none;
+    }
+
+    .section-header::before {
+        content: '›';
+        flex: 0 0 auto;
+        margin-top: 1px;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 0.9;
+        transform: rotate(0deg);
+        transition: color 0.15s ease, transform 0.15s ease;
+    }
+
+    .section[open] > .section-header::before {
+        color: var(--accent);
+        transform: rotate(90deg);
+    }
+
+    .section:not([open]) > .section-header {
+        padding-bottom: 4px;
+    }
+
+    .section-header:hover h3,
+    .section-header:focus-visible h3 {
+        color: var(--text);
     }
 
     .section-header > div {

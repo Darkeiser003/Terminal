@@ -142,6 +142,8 @@ pub struct Preferences {
     pub exclusive_accordion_groups: bool,
     pub auto_open_first_group: bool,
     pub show_system_banner: bool,
+    /// Si `clear`/`cls` debe volver a imprimir el fastfetch de la pestaña.
+    pub clear_reprint_banner: bool,
     /// Identificadores del banner que no se muestran, separados por comas.
     /// Vacío representa el perfil completo cuando se solicita explícitamente;
     /// los valores de fábrica usan el preset esencial definido en TOML.
@@ -463,6 +465,10 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             defaults.auto_open_first_group,
         ),
         show_system_banner: bool_or_default(get("showSystemBanner"), defaults.show_system_banner),
+        clear_reprint_banner: bool_or_default(
+            get("clearReprintBanner"),
+            defaults.clear_reprint_banner,
+        ),
         banner_hidden_items: sanitize_banner_hidden_items(
             get("bannerHiddenItems"),
             &defaults.banner_hidden_items,
@@ -744,6 +750,7 @@ mod tests {
         assert_eq!(parsed["terminalFontSize"], json!(12));
         assert_eq!(parsed["scriptsHereDepth"], json!(3));
         assert_eq!(parsed["viewportRows"], json!(24));
+        assert_eq!(parsed["clearReprintBanner"], json!(true));
         assert_eq!(parsed["showDependenciesPanel"], json!(true));
         assert_eq!(parsed["showProjectsPanel"], json!(true));
         assert_eq!(parsed["showScriptsPanel"], json!(true));

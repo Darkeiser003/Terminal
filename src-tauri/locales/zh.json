@@ -650,6 +650,8 @@
   "settings.savedNote": "设置已保存。默认启动环境与 Docker 选项将在下次启动时生效。",
   "settings.sections": "偏好设置分类",
   "settings.showBannerHint": "在终端输出中打印一次系统摘要。",
+  "settings.clearReprintBanner": "执行 clear 时重新显示 fastfetch",
+  "settings.clearReprintBannerHint": "清除屏幕后，再次显示系统摘要。",
   "settings.startupEnv": "默认启动环境",
   "settings.startupPanels": "启动时打开的面板",
   "settings.startupPanelsHint": "启动应用时默认展示的侧边面板。",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "驱动器使用量。",
   "settings.banner.uptime.description": "自启动以来的时间。",
   "settings.banner.datetime.description": "当前日期和时间。",
-  "deps.visibleComponents": "可见组件：{count}"
+  "deps.visibleComponents": "可见组件：{count}",
+  "terminal.dynamicOutput": "{text}"
 }

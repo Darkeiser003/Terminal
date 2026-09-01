@@ -189,6 +189,7 @@ pub fn run() {
             commands::tabs_activate,
             commands::tabs_ready,
             commands::frontend_ready,
+            commands::frontend_reveal,
             commands::pty_input,
             commands::internal_command_parse,
             commands::pty_resize,

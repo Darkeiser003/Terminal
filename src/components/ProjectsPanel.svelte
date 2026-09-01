@@ -32,9 +32,20 @@
     let busy = $state('');
     /** La release consultada de un repositorio, para poder elegir su adjunto. */
     let release = $state<{ fullName: string; release: Release | null } | null>(null);
-    /** Qué fila tiene abierto el plegable de acciones. */
-    let expanded = $state('');
+    /** Filas con el plegable de acciones abierto. La preferencia de acordeón
+     *  se aplica también aquí: con exclusividad se conserva una sola; si se
+     *  desactiva, varias filas pueden permanecer abiertas. */
+    let expanded = $state<string[]>([]);
+    const exclusiveGroups = $derived(app.preferences?.exclusiveAccordionGroups ?? false);
     let loadSerial = 0;
+
+    function toggleExpanded(fullName: string): void {
+        if (expanded.includes(fullName)) {
+            expanded = expanded.filter((value) => value !== fullName);
+        } else {
+            expanded = exclusiveGroups ? [fullName] : [...expanded, fullName];
+        }
+    }
 
     export async function load(next?: Mode): Promise<void> {
         if (next) mode = next;
@@ -171,6 +182,12 @@
             if (!result.release) {
                 status = app.t('projects.noRelease', 'Ese repositorio no tiene releases publicadas.');
             }
+        } catch (cause) {
+            // Un fallo de red no debe convertirse en una promesa rechazada sin
+            // dueño: además de dejar un error global, la interfaz se quedaba
+            // sin explicación aunque `busy` sí volviera a liberarse.
+            statusError = true;
+            status = String(cause);
         } finally {
             busy = '';
         }
@@ -443,12 +460,12 @@
                     type="button"
                     class="icon"
                     title={app.t('projects.more', 'Más acciones')}
-                    onclick={() => (expanded = expanded === fullName ? '' : fullName)}
+                    onclick={() => toggleExpanded(fullName)}
                 >⋯</button>
             </div>
         </div>
 
-        {#if expanded === fullName}
+        {#if expanded.includes(fullName)}
             <div class="more">
                 <button type="button" onclick={() => api.openInGithub(fullName)}>
                     {app.t('projects.github', 'GitHub')}

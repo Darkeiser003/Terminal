@@ -131,10 +131,11 @@ check('La creación de una casilla nueva solicita banner compacto al backend',
     read('src/lib/api.ts').includes('paneCount: paneCount ?? null')
         && read('src-tauri/src/app/commands.rs').includes('pane_count: Option<i64>')
         && read('src-tauri/src/terminal/tabs.rs').includes('create_tab_with_panes'));
-check('El E2E valida el banner de la segunda pestaña recién creada',
+check('El E2E valida un formato de banner único en toda la rejilla',
     read('tests/e2e/smoke.mjs').includes("rejilla 2 paneles tras crear la segunda pestaña")
         && read('tests/e2e/smoke.mjs').includes('await assertBannerHeaders(2,')
-        && read('tests/e2e/smoke.mjs').includes("createdPaneCompact: tinyGrid || modes[expected - 1] === 'compact'"));
+        && read('tests/e2e/smoke.mjs').includes('sameBannerMode: tinyGrid || modes.every((mode) => mode === modes[0])')
+        && !read('tests/e2e/smoke.mjs').includes('createdPaneCompact: tinyGrid || modes[expected - 1] === \'compact\''));
 check('El E2E cierra el selector de entornos si solo hay una shell disponible', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
     return smoke.includes('async function closeEnvironmentMenu()')
@@ -158,6 +159,18 @@ check('E2E comprueba y restaura una opción real del banner', (() => {
         && smoke.includes('banner localizado tras cambiar CPU')
         && smoke.includes('banner localizado tras restaurar CPU')
         && smoke.includes("name: 'banner.cpu'");
+})());
+check('E2E comprueba los dos estados del fastfetch automático de clear', (() => {
+    const smoke = read('tests/e2e/smoke.mjs');
+    const settings = read('src/components/SettingsPanel.svelte');
+    const defaults = read('src-tauri/default_settings.toml');
+    const preferences = read('src-tauri/src/config/preferences.rs');
+    return settings.includes('data-testid="settings-clear-reprint-banner"')
+        && smoke.includes('clear sin fastfetch cuando la opción está desactivada')
+        && smoke.includes('clear con fastfetch cuando la opción está activada')
+        && smoke.includes('restauración persistida del fastfetch tras clear')
+        && defaults.includes('clearReprintBanner = true')
+        && preferences.includes('clear_reprint_banner');
 })());
 check('E2E comprueba ambos estados de Acciones rápidas y restaura la visibilidad', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
@@ -257,6 +270,11 @@ check('Cada grupo de dependencias explica su contenido antes de desplegarlo',
         && dependenciesPanel.includes('groupDescription(group.key)'));
 
 const terminalPane = read('src/components/TerminalPane.svelte');
+const indexHtml = read('index.html');
+check('El primer frame del WebView ya nace oscuro',
+    indexHtml.includes('<meta name="color-scheme" content="dark">')
+        && indexHtml.includes('background: #080808')
+        && indexHtml.includes('html, body, #app'));
 check('Banner y código comparten un único xterm sin superposición',
     terminalPane.includes('data-testid="terminal-host"')
         && terminalPane.includes('term.open(terminalHost)')
@@ -269,7 +287,7 @@ check('El resize solo ajusta xterm y no repinta automáticamente',
     terminalPane.includes('api.resize(tabId, cols, rows)')
         && !terminalPane.includes('api.refreshBanner'));
 check('Clear borra el historial sin reiniciar el cursor y el E2E lo repite',
-    app.includes("term.write('\\x1b[3J', resolve)")
+    app.includes("term.write('\\x1b[2J\\x1b[3J', resolve)")
         && !app.includes('term.clear()')
         && !app.includes('term.reset()')
         && read('tests/e2e/smoke.mjs').includes('assertClearKeepsInputOnPromptRow')

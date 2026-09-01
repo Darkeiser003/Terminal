@@ -644,6 +644,8 @@
   "settings.sections": "Secciones de preferencias",
   "settings.showBanner": "Mostrar información del sistema",
   "settings.showBannerHint": "Imprimir el resumen del sistema una vez en la salida de la terminal.",
+  "settings.clearReprintBanner": "Reimprimir fastfetch al ejecutar clear",
+  "settings.clearReprintBannerHint": "Después de limpiar la pantalla, vuelve a mostrar el resumen del sistema.",
   "settings.startupEnv": "Entorno de arranque",
   "settings.startupPanels": "Paneles al arrancar",
   "settings.startupPanelsHint": "Paneles secundarios abiertos al iniciar la aplicación.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Uso de unidades.",
   "settings.banner.uptime.description": "Tiempo desde el arranque.",
   "settings.banner.datetime.description": "Fecha y hora actuales.",
-  "deps.visibleComponents": "{count} componentes visibles"
+  "deps.visibleComponents": "{count} componentes visibles",
+  "terminal.dynamicOutput": "{text}"
 }

@@ -650,6 +650,8 @@
   "settings.savedNote": "保存されました。デフォルト環境と Docker 設定は次回起動時に適用されます。",
   "settings.sections": "環境設定の分類",
   "settings.showBannerHint": "システム概要をターミナル出力に一度だけ表示します。",
+  "settings.clearReprintBanner": "clear 実行時に fastfetch を再表示",
+  "settings.clearReprintBannerHint": "画面を消去した後、システム概要をもう一度表示します。",
   "settings.startupEnv": "起動時のデフォルト環境",
   "settings.startupPanels": "起動時に開くパネル",
   "settings.startupPanelsHint": "アプリ起動時にデフォルトで表示するサイドパネル。",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "ドライブの使用量。",
   "settings.banner.uptime.description": "起動してからの時間。",
   "settings.banner.datetime.description": "現在の日付と時刻。",
-  "deps.visibleComponents": "表示中のコンポーネント {count} 件"
+  "deps.visibleComponents": "表示中のコンポーネント {count} 件",
+  "terminal.dynamicOutput": "{text}"
 }

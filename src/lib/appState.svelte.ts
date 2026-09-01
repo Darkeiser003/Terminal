@@ -214,6 +214,19 @@ class AppStore {
         }
     }
 
+    /** Establece directamente el número de casillas visibles. Se usa por la
+     *  consola interna (`:panes 1|2|3|4`) además del botón que rota el diseño.
+     *  Reutilizar el ciclo existente conserva la lógica de abrir las pestañas
+     *  que falten y evita dos algoritmos que pudieran desincronizar la rejilla. */
+    async setPaneCount(count: number): Promise<void> {
+        const target = Math.min(MAX_PANES, Math.max(1, Math.trunc(count)));
+        for (let attempts = 0; attempts < MAX_PANES; attempts += 1) {
+            const current = this.panes.length < 2 ? 1 : this.panes.length;
+            if (current === target) return;
+            await this.cyclePanes();
+        }
+    }
+
     private async cyclePanesOnce(): Promise<void> {
         const actual = this.panes.length < 2 ? 1 : this.panes.length;
         const siguiente = (actual % MAX_PANES) + 1;
@@ -403,10 +416,18 @@ class AppStore {
     /** Vuelve a los valores de fábrica. El backend es quien decide cuáles son:
      *  aquí no hay una segunda copia que se pudiera desincronizar. */
     async resetPreferences(): Promise<void> {
-        this.applyPayload(await api.resetPreferences());
-        if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged: true } }));
-        }
+        const operation = this.preferencesSaveQueue.then(async () => {
+            this.applyPayload(await api.resetPreferences());
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged: true } }));
+            }
+        });
+        // Reset también entra en la cola: no puede terminar antes de un
+        // guardado lanzado por un comando interno ni ser pisado por él después.
+        this.preferencesSaveQueue = operation.catch((error) => {
+            console.error('[AppStore] preference reset failed', error);
+        });
+        return operation;
     }
 
     /** Recarga las preferencias desde el backend, que es la única fuente: el

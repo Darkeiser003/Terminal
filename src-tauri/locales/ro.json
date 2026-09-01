@@ -650,6 +650,8 @@
   "settings.savedNote": "Salvat. Mediul implicit și opțiunile Docker se vor aplica la următoarea pornire.",
   "settings.sections": "Categorii de preferințe",
   "settings.showBannerHint": "Afișează o singură dată rezumatul sistemului în ieșirea terminalului.",
+  "settings.clearReprintBanner": "Reafișează fastfetch la executarea clear",
+  "settings.clearReprintBannerHint": "După golirea ecranului, afișează din nou rezumatul sistemului.",
   "settings.startupEnv": "Mediu de pornire",
   "settings.startupPanels": "Panouri la pornire",
   "settings.startupPanelsHint": "Panouri laterale afișate deschise la lansarea aplicației.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Utilizarea unităților.",
   "settings.banner.uptime.description": "Timp de la pornire.",
   "settings.banner.datetime.description": "Data și ora curente.",
-  "deps.visibleComponents": "{count} componente vizibile"
+  "deps.visibleComponents": "{count} componente vizibile",
+  "terminal.dynamicOutput": "{text}"
 }

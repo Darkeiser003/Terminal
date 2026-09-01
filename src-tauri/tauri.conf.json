@@ -19,7 +19,7 @@
         "minHeight": 270,
         "maxWidth": 7680,
         "maxHeight": 4320,
-        "backgroundColor": "#0d0d0d",
+        "backgroundColor": "#080808",
         "resizable": true,
         "maximizable": true,
         "decorations": true,

@@ -57,6 +57,53 @@ fn is_windows_family(kind: ShellKind) -> bool {
     matches!(kind, ShellKind::Cmd | ShellKind::Powershell)
 }
 
+/// Hace que el idioma elegido en WinSlim llegue también al script que se va a
+/// ejecutar. Los comandos y nombres de alias siguen siendo estables; solo se
+/// añade una variable de entorno que un script puede leer para traducir su
+/// salida. Los identificadores válidos salen del catálogo (`es`, `en`, etc.),
+/// pero se sanea aquí de todos modos porque `LaunchContext` también se usa en
+/// pruebas y desde código de integración.
+fn with_script_language(kind: ShellKind, command: String, language: Option<&str>) -> String {
+    let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) else {
+        return command;
+    };
+    let safe: String = language
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        .collect();
+    if safe.is_empty() {
+        return command;
+    }
+    match kind {
+        ShellKind::Powershell => {
+            format!(
+                "$env:LTERMINAL_LANGUAGE='{}'; {}",
+                safe.replace('\'', "''"),
+                command
+            )
+        }
+        ShellKind::Cmd => format!("set \"LTERMINAL_LANGUAGE={}\" && {}", safe, command),
+        ShellKind::Fish => format!(
+            "set -lx LTERMINAL_LANGUAGE '{}'; {}",
+            safe.replace('\'', "\\'").replace('\\', "\\\\"),
+            command
+        ),
+        _ => format!(
+            "export LTERMINAL_LANGUAGE='{}'; {}",
+            safe.replace('\'', "'\\''"),
+            command
+        ),
+    }
+}
+
+/// Añade el idioma activo de WinSlim al comando que se escribe en la shell.
+/// El ejecutable y sus argumentos no se traducen: los scripts reciben
+/// `LTERMINAL_LANGUAGE` para que puedan escoger sus textos.
+pub fn with_active_language(kind: ShellKind, command: String) -> String {
+    let language = crate::i18n::active_language();
+    with_script_language(kind, command, Some(&language))
+}
+
 /// Comillas al estilo Windows (cmd/PowerShell): dobles. El carácter `"` no
 /// puede aparecer en un nombre de archivo de Windows, así que este escapado es
 /// solo defensa en profundidad, nunca debería activarse en la práctica.
@@ -999,6 +1046,38 @@ mod tests {
         } else {
             assert!(cmd.starts_with("python3 "), "{cmd}");
         }
+    }
+
+    #[test]
+    fn el_idioma_se_expone_a_los_scripts_sin_traducir_el_comando() {
+        assert_eq!(
+            with_script_language(ShellKind::Powershell, "& script.ps1".into(), Some("en")),
+            "$env:LTERMINAL_LANGUAGE='en'; & script.ps1"
+        );
+        assert_eq!(
+            with_script_language(ShellKind::Cmd, "call script.cmd".into(), Some("es")),
+            "set \"LTERMINAL_LANGUAGE=es\" && call script.cmd"
+        );
+        assert_eq!(
+            with_script_language(ShellKind::Bash, "bash script.sh".into(), Some("fr")),
+            "export LTERMINAL_LANGUAGE='fr'; bash script.sh"
+        );
+        assert_eq!(
+            with_script_language(ShellKind::Fish, "fish script.fish".into(), Some("de")),
+            "set -lx LTERMINAL_LANGUAGE 'de'; fish script.fish"
+        );
+    }
+
+    #[test]
+    fn el_identificador_de_idioma_no_permite_inyeccion_de_shell() {
+        assert_eq!(
+            with_script_language(
+                ShellKind::Bash,
+                "bash script.sh".into(),
+                Some("en; rm -rf /"),
+            ),
+            "export LTERMINAL_LANGUAGE='enrm-rf'; bash script.sh"
+        );
     }
 
     #[test]

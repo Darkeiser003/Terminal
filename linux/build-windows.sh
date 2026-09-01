@@ -39,6 +39,7 @@ SKIP_CHECKS=0
 ALLOW_OFFLINE_CHECKS=0
 CLEAN=0
 FAST_BUILD=0
+NON_INTERACTIVE=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -70,8 +71,9 @@ while [ "$#" -gt 0 ]; do
         --allow-offline-checks) ALLOW_OFFLINE_CHECKS=1 ;;
         --clean) CLEAN=1 ;;
         --fast) FAST_BUILD=1 ;;
+        --non-interactive) NON_INTERACTIVE=1 ;;
         -h|--help)
-            echo "Uso: $0 [--fast] [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean]"
+            echo "Uso: $0 [--fast] [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean] [--non-interactive]"
             exit 0
             ;;
         *)

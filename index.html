@@ -4,7 +4,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
     <title>LTerminal</title>
+    <!-- Pintado crítico antes de que cargue el bundle: evita el frame blanco
+         del WebView mientras Svelte y app.css todavía están iniciando. -->
+    <style>
+        html, body, #app {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            background: #080808;
+            color: #d7d7d7;
+        }
+    </style>
 </head>
 
 <body>

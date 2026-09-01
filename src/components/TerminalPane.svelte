@@ -12,9 +12,11 @@
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
     import { compareLocalized, foldLocalized } from '../lib/localization';
+    import { panels, type PanelId } from '../lib/panels.svelte';
     import * as perf from '../lib/performance';
     import { cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
+    import type { Environment, Preferences } from '../lib/types';
 
     interface Props {
         tabId: string;
@@ -59,6 +61,13 @@
         let result = app.t(key, fallback);
         for (const [name, value] of Object.entries(values)) result = result.replaceAll(`{${name}}`, String(value));
         return result;
+    }
+
+    // Las salidas de los comandos internos pasan por el catálogo. El texto
+    // puede contener nombres dinámicos de entornos/temas, por eso se inyecta
+    // como `{text}` después de resolver el idioma activo.
+    function writeInternal(text: string): void {
+        term?.writeln(translated('terminal.dynamicOutput', '{text}', { text }));
     }
 
     function bannerItemLabel(id: string): string {
@@ -184,9 +193,278 @@
         term?.writeln(`\r\n${translated('terminal.quickActionsStatus', 'Quick actions: {state}', { state })}.`);
     }
 
-    async function runInternal(line: string): Promise<boolean> {
+    function environmentMatches(environment: Environment, wanted: string): boolean {
+        const query = foldLocalized(wanted, app.catalog.language);
+        return [environment.id, environment.label, environment.shell ?? '', environment.language ?? '']
+            .some((value) => foldLocalized(value, app.catalog.language) === query)
+            || [environment.id, environment.label, environment.shell ?? '', environment.language ?? '']
+                .some((value) => foldLocalized(value, app.catalog.language).includes(query));
+    }
+
+    function writeShellList(): void {
+        const shells = app.environments.filter((environment) => !environment.repl);
+        writeInternal('\r\nShells y entornos disponibles:');
+        if (!shells.length) {
+            writeInternal('  (todavía no hay entornos detectados; prueba :reload)');
+            return;
+        }
+        for (const environment of shells) {
+            const marker = environment.id === app.activeTab?.envId ? '*' : ' ';
+            const availability = environment.available ? '' : ' [no disponible]';
+            writeInternal(` ${marker} ${environment.id} — ${environment.label}${availability}`);
+        }
+        writeInternal('Uso: :shell <id o nombre> | :shell current | :shell list');
+    }
+
+    async function configureShell(argument?: string): Promise<void> {
+        const wanted = argument?.trim() ?? '';
+        if (!wanted || ['list', 'lista', 'help', 'ayuda'].includes(wanted.toLowerCase())) {
+            writeShellList();
+            return;
+        }
+        if (['current', 'actual'].includes(wanted.toLowerCase())) {
+            const current = app.environments.find((environment) => environment.id === app.activeTab?.envId);
+            writeInternal(`\r\nShell actual: ${current?.label ?? app.activeTab?.label ?? '(desconocida)'}`);
+            return;
+        }
+        const environment = app.environments.find((candidate) => !candidate.repl && environmentMatches(candidate, wanted));
+        if (!environment) {
+            writeInternal(`\r\n[No se encontró la shell o entorno «${wanted}». Usa :shell list.]`);
+            return;
+        }
+        if (!environment.available) {
+            writeInternal(`\r\n[${environment.label} no está disponible: ${environment.note ?? 'revisa Entornos y dependencias.'}]`);
+            return;
+        }
+        if (!app.activeTabId) return;
+        const switched = await app.switchEnvironment(app.activeTabId, environment.id);
+        if (!switched) writeInternal(`\r\n[No se pudo cambiar a ${environment.label}.]`);
+    }
+
+    async function configurePanel(argument?: string): Promise<void> {
+        const wanted = (argument ?? 'list').trim().toLowerCase();
+        const panelsByName: Record<string, PanelId> = {
+            deps: 'deps', dependencies: 'deps', dependencias: 'deps',
+            projects: 'projects', project: 'projects', proyectos: 'projects',
+            scripts: 'scripts', library: 'scripts', biblioteca: 'scripts',
+            settings: 'settings', config: 'settings', ajustes: 'settings',
+        };
+        if (['list', 'lista', 'help', 'ayuda'].includes(wanted)) {
+            writeInternal('\r\nPaneles: settings, deps, projects, scripts, explorer.');
+            writeInternal('Uso: :panel <panel> | :panel close');
+            return;
+        }
+        if (['close', 'cerrar', 'none', 'off'].includes(wanted)) {
+            panels.close();
+            app.explorerVisible = false;
+            writeInternal('\r\nPaneles cerrados.');
+            return;
+        }
+        if (wanted === 'explorer' || wanted === 'explorador') {
+            if (app.preferences?.showExplorerPanel === false) {
+                writeInternal('\r\n[El Explorador está oculto en Ajustes. Actívalo desde Ajustes > Comportamiento.]');
+                return;
+            }
+            panels.close();
+            app.explorerVisible = true;
+            return;
+        }
+        const panel = panelsByName[wanted];
+        if (!panel) {
+            writeInternal('\r\n[Panel desconocido. Usa :panel list.]');
+            return;
+        }
+        const visible = panel === 'deps'
+            ? app.preferences?.showDependenciesPanel !== false
+            : panel === 'projects'
+                ? app.preferences?.showProjectsPanel !== false
+                : panel === 'scripts'
+                    ? app.preferences?.showScriptsPanel !== false
+                    : true;
+        if (!visible) {
+            writeInternal('\r\n[Este panel está oculto en Ajustes. Actívalo desde Ajustes > Comportamiento.]');
+            return;
+        }
+        app.explorerVisible = false;
+        panels.show(panel);
+        // Los paneles se montan bajo demanda para evitar trabajo y parpadeos al
+        // arrancar. La barra lateral ya conoce sus callbacks de carga, pero un
+        // comando escrito en la shell necesita avisar al raíz para montar el
+        // componente antes de que `panels.open` intente mostrarlo.
+        window.dispatchEvent(new CustomEvent('winslim:open-panel', { detail: { panel } }));
+    }
+
+    async function configureTheme(argument?: string): Promise<void> {
+        const wanted = (argument ?? 'list').trim();
+        if (!wanted || ['list', 'lista'].includes(wanted.toLowerCase())) {
+            writeInternal('\r\nTemas disponibles:');
+            for (const theme of app.themes) writeInternal(`  ${theme.id} — ${theme.label}`);
+            writeInternal('Uso: :theme <id> | :theme list');
+            return;
+        }
+        const theme = app.themes.find((candidate) => candidate.id.toLowerCase() === wanted.toLowerCase()
+            || foldLocalized(candidate.label, app.catalog.language) === foldLocalized(wanted, app.catalog.language));
+        if (!theme) {
+            writeInternal(`\r\n[No se encontró el tema «${wanted}». Usa :theme list.]`);
+            return;
+        }
+        await app.savePreferences({ themeId: theme.id });
+        writeInternal(`\r\nTema aplicado: ${theme.label}.`);
+    }
+
+    async function configureFont(argument?: string): Promise<void> {
+        const wanted = (argument ?? 'list').trim();
+        if (!wanted || ['list', 'lista'].includes(wanted.toLowerCase())) {
+            writeInternal('\r\nFuentes disponibles:');
+            for (const font of app.fonts) writeInternal(`  ${font.id} — ${font.label}`);
+            writeInternal('Uso: :font <id> | :font list');
+            return;
+        }
+        const font = app.fonts.find((candidate) => candidate.id.toLowerCase() === wanted.toLowerCase()
+            || foldLocalized(candidate.label, app.catalog.language) === foldLocalized(wanted, app.catalog.language));
+        if (!font) {
+            writeInternal(`\r\n[No se encontró la fuente «${wanted}». Usa :font list.]`);
+            return;
+        }
+        await app.savePreferences({ terminalFontFamily: font.id });
+        writeInternal(`\r\nFuente aplicada: ${font.label}.`);
+    }
+
+    async function configureLanguage(argument?: string): Promise<void> {
+        const wanted = (argument ?? 'list').trim();
+        if (!wanted || ['list', 'lista'].includes(wanted.toLowerCase())) {
+            writeInternal('\r\nIdiomas disponibles:');
+            for (const language of app.languages) writeInternal(`  ${language.id} — ${language.label}`);
+            writeInternal('Uso: :language <id> | :language list');
+            return;
+        }
+        const language = app.languages.find((candidate) => candidate.id.toLowerCase() === wanted.toLowerCase()
+            || foldLocalized(candidate.label, app.catalog.language) === foldLocalized(wanted, app.catalog.language)
+            || foldLocalized(candidate.englishLabel, app.catalog.language) === foldLocalized(wanted, app.catalog.language));
+        if (!language) {
+            writeInternal(`\r\n[No se encontró el idioma «${wanted}». Usa :language list.]`);
+            return;
+        }
+        await app.savePreferences({ language: language.id });
+        writeInternal(`\r\nIdioma aplicado: ${language.label}.`);
+    }
+
+    function terminalStatus(): void {
+        const preferences = app.preferences;
+        if (!preferences) return;
+        const rows: Array<[string, string | number | boolean]> = [
+            ['font-size', preferences.terminalFontSize], ['line-height', preferences.terminalLineHeight],
+            ['letter-spacing', preferences.terminalLetterSpacing], ['padding', preferences.terminalPadding],
+            ['scrollback', preferences.terminalScrollback], ['scroll-sensitivity', preferences.terminalScrollSensitivity],
+            ['cursor', preferences.terminalCursorStyle], ['font-weight', preferences.terminalFontWeight],
+            ['cursor-blink', preferences.terminalCursorBlink], ['copy-on-select', preferences.copyOnSelect],
+            ['density', preferences.uiDensity], ['background', preferences.terminalBackground],
+            ['foreground', preferences.terminalForeground], ['selection', preferences.terminalSelectionColor],
+            ['cursor-color', preferences.terminalCursorColor], ['fastfetch-color', preferences.fastfetchColor],
+        ];
+        writeInternal('\r\nParámetros de terminal:');
+        for (const [name, value] of rows) writeInternal(`  ${name} = ${value}`);
+        writeInternal('Uso: :terminal <parámetro> <valor> | :terminal list');
+        writeInternal('Colores: #rrggbb · booleanos: on/off · cursor: block|underline|bar|beam|underline-thick');
+    }
+
+    async function configureTerminal(argument?: string): Promise<void> {
+        const tokens = (argument ?? 'list').trim().split(/\s+/).filter(Boolean);
+        const key = (tokens.shift() ?? 'list').toLowerCase();
+        const raw = tokens.join(' ').trim();
+        if (['list', 'lista', 'show', 'mostrar'].includes(key)) {
+            terminalStatus();
+            return;
+        }
+        if (!raw) {
+            writeInternal('\r\n[Falta el valor. Usa :terminal list para ver los parámetros.]');
+            return;
+        }
+        const aliases: Record<string, keyof Preferences> = {
+            'font-size': 'terminalFontSize', fontsize: 'terminalFontSize', size: 'terminalFontSize',
+            'line-height': 'terminalLineHeight', lineheight: 'terminalLineHeight',
+            'letter-spacing': 'terminalLetterSpacing', letterspacing: 'terminalLetterSpacing',
+            padding: 'terminalPadding', scrollback: 'terminalScrollback',
+            'scroll-sensitivity': 'terminalScrollSensitivity', sensitivity: 'terminalScrollSensitivity',
+            cursor: 'terminalCursorStyle', 'font-weight': 'terminalFontWeight', weight: 'terminalFontWeight',
+            'cursor-blink': 'terminalCursorBlink', blink: 'terminalCursorBlink',
+            'copy-on-select': 'copyOnSelect', copy: 'copyOnSelect', density: 'uiDensity',
+            background: 'terminalBackground', bg: 'terminalBackground',
+            foreground: 'terminalForeground', fg: 'terminalForeground',
+            selection: 'terminalSelectionColor', 'cursor-color': 'terminalCursorColor',
+            'fastfetch-color': 'fastfetchColor',
+        };
+        const field = aliases[key];
+        if (!field) {
+            writeInternal(`\r\n[Parámetro desconocido «${key}». Usa :terminal list.]`);
+            return;
+        }
+        let value: string | number | boolean = raw;
+        if (['terminalFontSize', 'terminalPadding', 'terminalScrollback', 'terminalScrollSensitivity'].includes(field)) {
+            value = Number(raw);
+            if (!Number.isInteger(value) || value <= 0) {
+                writeInternal('\r\n[Debe ser un número entero positivo.]');
+                return;
+            }
+        } else if (['terminalLineHeight', 'terminalLetterSpacing'].includes(field)) {
+            value = Number(raw);
+            if (!Number.isFinite(value)) {
+                writeInternal('\r\n[Debe ser un número válido.]');
+                return;
+            }
+        } else if (['terminalCursorBlink', 'copyOnSelect'].includes(field)) {
+            if (['on', 'true', 'yes', 'si', 'sí', '1'].includes(raw.toLowerCase())) value = true;
+            else if (['off', 'false', 'no', '0'].includes(raw.toLowerCase())) value = false;
+            else {
+                writeInternal('\r\n[Usa on u off para este parámetro.]');
+                return;
+            }
+        } else if (['terminalCursorStyle', 'terminalFontWeight', 'uiDensity'].includes(field)) {
+            value = raw.toLowerCase();
+            const allowed: Record<string, string[]> = {
+                terminalCursorStyle: ['block', 'underline', 'bar', 'beam', 'underline-thick'],
+                terminalFontWeight: ['light', 'normal', 'medium', 'semibold', 'bold'],
+                uiDensity: ['compact', 'comfortable'],
+            };
+            if (!allowed[field].includes(value)) {
+                writeInternal(`\r\n[Valor no válido para ${key}. Usa :terminal list.]`);
+                return;
+            }
+        } else if (['terminalBackground', 'terminalForeground', 'terminalSelectionColor', 'terminalCursorColor', 'fastfetchColor'].includes(field)
+            && !/^#[0-9a-f]{6}$/i.test(raw)) {
+            writeInternal('\r\n[El color debe tener formato #rrggbb.]');
+            return;
+        }
+        await app.savePreferences({ [field]: value } as Partial<Preferences>);
+        writeInternal(`\r\nParámetro actualizado: ${key} = ${value}.`);
+    }
+
+    async function configurePanes(argument?: string): Promise<void> {
+        const wanted = (argument ?? 'list').trim().toLowerCase();
+        const current = app.panes.length < 2 ? 1 : app.panes.length;
+        if (['list', 'lista', 'show', 'mostrar'].includes(wanted)) {
+            writeInternal(`\r\nDiseño actual: ${current} panel${current === 1 ? '' : 'es'}.`);
+            writeInternal('Uso: :panes 1|2|3|4 | :panes cycle');
+            return;
+        }
+        if (['cycle', 'ciclo', 'next', 'siguiente'].includes(wanted)) {
+            await app.cyclePanes();
+        } else {
+            const count = Number(wanted);
+            if (!Number.isInteger(count) || count < 1 || count > 4) {
+                writeInternal('\r\n[El diseño debe ser 1, 2, 3 o 4.]');
+                return;
+            }
+            await app.setPaneCount(count);
+        }
+        const next = app.panes.length < 2 ? 1 : app.panes.length;
+        writeInternal(`\r\nDiseño aplicado: ${next} panel${next === 1 ? '' : 'es'}.`);
+    }
+
+    async function runInternal(line: string): Promise<{ handled: boolean; shellPrintsPrompt: boolean }> {
         const command = await api.parseInternalCommand(line);
-        if (!command) return false;
+        if (!command) return { handled: false, shellPrintsPrompt: false };
+        let shellPrintsPrompt = false;
         // Borrar carácter a carácter funciona también en cmd.exe, donde
         // Ctrl+U no limpia la línea. El espejo solo admite ASCII simple, así
         // que el número de DEL coincide exactamente con lo escrito.
@@ -203,10 +481,24 @@
             );
             if (environment) await app.createTab(environment.id);
             else term?.writeln(`\r\n\x1b[33m[${translated('terminal.replMissing', 'REPL not detected: {name}', { name: command.argument! })}]\x1b[0m`);
+        } else if (command.action === 'shell') {
+            await configureShell(command.argument);
         } else if (command.action === 'banner') {
             await configureBanner(command.argument);
         } else if (command.action === 'quickActions') {
             await configureQuickActions(command.argument);
+        } else if (command.action === 'panel') {
+            await configurePanel(command.argument);
+        } else if (command.action === 'theme') {
+            await configureTheme(command.argument);
+        } else if (command.action === 'font') {
+            await configureFont(command.argument);
+        } else if (command.action === 'language') {
+            await configureLanguage(command.argument);
+        } else if (command.action === 'terminal') {
+            await configureTerminal(command.argument);
+        } else if (command.action === 'panes') {
+            await configurePanes(command.argument);
         } else if (command.action === 'darkeiser003' || command.action === 'christianlg97') {
             writeCredits(command.action);
         } else if (command.action === 'help' || command.action === 'alias') {
@@ -221,6 +513,7 @@
                 // La ayuda completa vive en el alias generado para ESTA shell.
                 // Ejecutarlo aquí mantiene el mismo contenido que `ayuda` y
                 // evita que :help se quede en una lista fija desactualizada.
+                shellPrintsPrompt = true;
                 await api.sendInput(tabId, topic ? 'ayuda ' + topic + '\r' : 'ayuda\r');
             } else {
                 // Un REPL o un contenedor no puede cargar el archivo temporal
@@ -228,12 +521,12 @@
                 // `ayuda` en Python, Node, Docker o ADB como si fuera código
                 // de esa shell.
                 term?.writeln(`\r\n${translated('terminal.helpFallback', 'Help{topic}: use :help from a terminal or consult the internal commands.', { topic: topic ? ` (${topic})` : '' })}`);
-                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :config  :reload  :repl <name>  :alias  :help [section]  :banner [options]  :quick-actions [options]'));
+                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :help [section]  :config/:settings  :reload  :shell [list|current|<name>]  :repl <name>  :panel <panel|close>  :theme [list|<id>]  :font [list|<id>]  :language [list|<id>]  :terminal [list|<key> <value>]  :panes [1|2|3|4|cycle]  :banner [options]  :quick-actions [options]'));
             }
         } else {
-            term?.writeln(`\r\n${app.t('terminal.commandList', ':config  :reload  :repl <name>  :alias  :help  :banner  :quick-actions')}`);
+            term?.writeln(`\r\n${app.t('terminal.commandList', ':help  :config/:settings  :reload  :shell  :repl  :panel  :theme  :font  :language  :terminal  :panes  :alias  :banner  :quick-actions')}`);
         }
-        return true;
+        return { handled: true, shellPrintsPrompt };
     }
 
     function completeRepl(line: string): boolean {
@@ -677,8 +970,18 @@
                 mirroredLine = '';
                 exposeInputMirror('internal-enter');
                 void runInternal(line)
-                    .then((handled) => {
-                        if (!handled) void api.sendInput(tabId, data);
+                    .then(({ handled, shellPrintsPrompt }) => {
+                        if (!handled) {
+                            void api.sendInput(tabId, data);
+                            return;
+                        }
+                        // Los comandos internos se ejecutan fuera de la shell,
+                        // así que el prompt que contenía la línea interceptada
+                        // queda arriba del resultado. Un Enter sobre la línea
+                        // ya vacía fuerza a la shell a dibujar un prompt nuevo
+                        // al final; :help/:alias ya lo generan por sí mismos.
+                        if (!shellPrintsPrompt) void api.sendInput(tabId, '\r');
+                        term?.scrollToBottom();
                     })
                     .catch((error) => {
                         // Si el backend no está disponible, conservar el

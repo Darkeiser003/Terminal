@@ -650,6 +650,8 @@
   "settings.savedNote": "सहेजा गया। डिफ़ॉल्ट पर्यावरण और Docker विकल्प अगली शुरुआत पर लागू होंगे।",
   "settings.sections": "प्राथमिकता श्रेणियां",
   "settings.showBannerHint": "सिस्टम सारांश को टर्मिनल आउटपुट में एक बार प्रिंट करें।",
+  "settings.clearReprintBanner": "clear चलाने पर fastfetch फिर दिखाएं",
+  "settings.clearReprintBannerHint": "स्क्रीन साफ़ करने के बाद सिस्टम सारांश फिर दिखाएं।",
   "settings.startupEnv": "प्रारंभिक पर्यावरण",
   "settings.startupPanels": "स्टार्टअप पर पैनल",
   "settings.startupPanelsHint": "ऐप शुरू होते ही खुले दिखाई देने वाले साइड पैनल।",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "ड्राइव का उपयोग।",
   "settings.banner.uptime.description": "बूट होने के बाद का समय।",
   "settings.banner.datetime.description": "वर्तमान दिनांक और समय।",
-  "deps.visibleComponents": "{count} दिखाई देने वाले घटक"
+  "deps.visibleComponents": "{count} दिखाई देने वाले घटक",
+  "terminal.dynamicOutput": "{text}"
 }

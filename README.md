@@ -455,17 +455,66 @@ Se inyectan al crear una pestaña, solo en shells reales.
 | Alias | Qué hace |
 |---|---|
 | `edit`, `ip`, `ll`, `ls`, `pwd` | Vocabulario común a todas las shells reales. El nombre y la intención son iguales; cambia únicamente el comando nativo que hay detrás. |
-| `clear`, `cls` | Limpieza real de pantalla e historial. |
+| `clear`, `cls` | Limpieza real de pantalla e historial; por defecto vuelve a mostrar el fastfetch esencial. Se puede desactivar en Ajustes (`Reimprimir fastfetch al ejecutar clear`). |
 | `sysinfo` | Reimprime el banner del sistema. |
 | `ayuda` | Ayuda explicada: qué hace cada alias, qué gestor los atiende y qué scripts se han registrado. Se lee de un archivo generado por sesión, así que ocupa varias líneas y va traducida. |
 | `nsudo` | Solo si el ejecutable existe en la máquina. |
 | `install`, `update`, `upgrade`, `uninstall`, `remove`, `search` | Se traducen al gestor de paquetes real del entorno. |
-| *(uno por script)* | Cada script de la **Biblioteca** registra su propio alias. |
+| `adb-manager`, `docker-manager`, `kubernetes-manager`, `network-manager`, `service-manager`, `ssh-manager` | Scripts integrados de la **Biblioteca**; se selecciona la variante PowerShell o Shell según el entorno. Los scripts personales detectados se muestran con sus nombres concretos en la ayuda de cada sesión. |
 
-El banner inicial usa **Solo esencial** (5–8 líneas) y se imprime una única vez
-como salida normal del terminal. Para solicitar todos los campos usa Ajustes o
-`:banner preset full`; el cambio se añade al scrollback sin mover la selección
-ni superponerse al código.
+Los scripts integrados que se pueden registrar como alias son `adb-manager`,
+`docker-manager`, `kubernetes-manager`, `network-manager`, `service-manager` y
+`ssh-manager` (se elige la variante PowerShell o Shell según el entorno). La
+ayuda de cada sesión añade también los scripts personales detectados y muestra
+sus nombres concretos.
+
+### Comandos internos de la aplicación (`:`)
+
+Una línea que empieza por `:` no se entrega a la shell: la interpreta WinSlim
+Terminal para consultar o cambiar su propia configuración. Se pueden escribir
+en cualquier terminal real; en un REPL se muestran como ayuda y no se inyectan
+como código. Los argumentos se separan por espacios y los identificadores no
+distinguen mayúsculas de minúsculas.
+
+| Comando | Función |
+|---|---|
+| `:help [sección]` / `:alias` | Ayuda completa o una sección: `paquetes`, `sesion`, `internos`, `alias`, `biblioteca`, `menus`, `plugins`, `soporte` y `creditos`. |
+| `:config` / `:settings` | Abre Ajustes. |
+| `:reload` | Vuelve a detectar shells, WSL, Docker, ADB y herramientas. |
+| `:shell list` / `:shell current` / `:shell <id o nombre>` | Enumera, muestra o cambia la shell/entorno de la pestaña actual. También se aceptan `:env` y `:environment`. El resto de pestañas no cambia. |
+| `:repl <nombre>` | Abre una pestaña nueva con un intérprete interactivo detectado, por ejemplo `:repl python`. |
+| `:panel list` / `:panel <panel>` / `:panel close` | Abre o cierra `settings`, `deps`, `projects`, `scripts` y `explorer`. `:open` es equivalente a `:panel`. |
+| `:theme list` / `:theme <id>` | Enumera o aplica un tema disponible, como `ocean` o `nordic`. |
+| `:font list` / `:font <id>` | Enumera o aplica una fuente de terminal, como `jetbrains`. `:fuente` es equivalente. |
+| `:language list` / `:language <id>` | Enumera o cambia el idioma (`es`, `en`, `auto`, etc.). También acepta `:lang` y `:idioma`. |
+| `:terminal list` | Muestra todos los parámetros editables de xterm y sus valores actuales. |
+| `:terminal <parámetro> <valor>` | Cambia tamaño/familia/peso de fuente, interlineado, espaciado, padding, scrollback, sensibilidad, cursor, parpadeo, selección, densidad y colores. Ejemplos: `:terminal font-size 14`, `:terminal cursor beam`, `:terminal cursor-blink off`, `:terminal background #080808`. `:term` es equivalente. |
+| `:panes 1\|2\|3\|4` / `:panes cycle` | Fija o rota el número de terminales visibles en la rejilla. `:layout` y `:grid` son equivalentes. |
+| `:banner list` / `:banner hide|show|toggle <campo>` / `:banner preset compact\|full` | Consulta o cambia los campos del fastfetch. Los campos son `system`, `host`, `kernel`, `environment`, `motherboard`, `cpu`, `gpu`, `memory`, `storage`, `uptime` y `datetime`. |
+| `:quick-actions list` / `on` / `off` / `toggle` | Consulta o cambia la visibilidad de las acciones rápidas de Biblioteca. |
+
+Los parámetros de `:terminal` usan valores sencillos: colores `#rrggbb`,
+booleanos `on/off`, cursor `block|underline|bar|beam|underline-thick`, peso
+`light|normal|medium|semibold|bold` y densidad `compact|comfortable`. Los
+valores numéricos se validan y acotan igual que en Ajustes; `settings.json`
+sigue siendo la fuente persistente. `:terminal list` y `:help internos` son la
+forma más rápida de consultar el estado sin abrir un panel.
+
+### Qué va a la shell y qué no
+
+Todo lo que **no** empieza por `:` sigue siendo una orden de la shell actual.
+Ahí entran los alias `clear`, `cls`, `sysinfo`, `edit`, `ll`, `install`, los
+alias de scripts y cualquier comando nativo (`git`, `python`, `docker`, etc.).
+WinSlim solo los prepara al crear la pestaña y conserva su sintaxis; la shell
+decide cómo ejecutarlos y devuelve su salida y código de salida. Por eso
+`install git` ejecuta el gestor real del entorno, mientras que `:panel deps`
+abre un panel de la aplicación sin escribir nada en cmd o PowerShell.
+
+El banner inicial usa **Solo esencial** (5–8 líneas) y se imprime como salida
+normal del terminal. `clear/cls` vuelve a mostrar ese fastfetch por defecto; la
+preferencia `clearReprintBanner` permite dejar la pantalla limpia sin banner.
+Para solicitar todos los campos usa Ajustes o `:banner preset full`; el cambio
+se añade al scrollback sin mover la selección ni superponerse al código.
 
 Los alias de gestor de paquetes se resuelven según el entorno: Windows elige
 entre winget, Chocolatey o Scoop al crear la pestaña; las shells Unix eligen
@@ -873,6 +922,39 @@ Comportamiento.
 ---
 
 ## Pruebas
+
+### Idioma de los scripts
+
+Cuando la Biblioteca escribe un script en la pestaña activa, WinSlim conserva
+su intérprete y argumentos originales, pero añade la variable de entorno
+`LTERMINAL_LANGUAGE` (`es`, `en`, etc.) al proceso. Así, los scripts propios o
+integrados pueden seleccionar sus textos según el idioma elegido en Ajustes;
+la aplicación no traduce código arbitrario ni cambia la sintaxis de PowerShell,
+CMD, Bash, Python o Node.
+
+### Auditoría de release y comportamiento observable
+
+Una build correcta no basta: hay que abrir el artefacto que se va a entregar y
+comprobar la ruta que recorrerá el usuario. La batería oficial hace lo siguiente:
+
+1. Arranca el ejecutable desempaquetado de Windows y espera la confirmación de
+   ventana, frontend, IPC, xterm y primera PTY; si falla `app.load()`, la ventana
+   se revela para mostrar el error en vez de quedarse oculta.
+2. Ejecuta el AppImage con su runtime normal y con extracción controlada, valida
+   ELF/AppDir, y comprueba que termina sin procesos residuales.
+3. Recorre comandos internos (`:help`, `:panel`, `:shell`, `:terminal`,
+   `:language`, `:banner`, `:panes`), alias de shell, cambio de entorno,
+   preferencias, paneles, acordeones, explorador, menús contextuales,
+   pestañas, división, redimensionado y fastfetch.
+4. Conserva capturas y un informe JSON fuera del repositorio. Los logs y
+   capturas temporales se ignoran mediante `.gitignore`; solo se versiona una
+   auditoría resumida y revisada en `docs/`.
+
+Al cambiar el idioma desde Ajustes o `:language`, la interfaz se actualiza y el
+backend regenera en ese mismo momento los archivos `help-<pestaña>.txt`, sus
+secciones y el runner de cada pestaña existente. No hace falta cerrar ni volver
+a crear la shell. Si el arranque falla antes de montar xterm, el error se
+presenta en la ventana mediante la ruta de recuperación `frontend_reveal`.
 
 ```bash
 npm run check

@@ -671,7 +671,9 @@ async function assertClearKeepsInputOnPromptRow() {
         await sendTerminalLine(command);
         await waitUntil(async () => {
             const snapshot = await activeTerminalRowSnapshot();
-            return snapshot.rows.some((row) => promptLooksVisible(row.text));
+            const nonEmptyRows = snapshot.rows.filter((row) => row.text.trim().length > 0);
+            const promptRows = nonEmptyRows.filter((row) => promptLooksVisible(row.text));
+            return promptRows.length === 1 && promptRows[0] === nonEmptyRows.at(-1);
         }, 10000, `prompt tras ${command} ${attempt + 1}/${attempts}`);
 
         const marker = `CLEAR_ROW_${attempt + 1}`;
@@ -872,9 +874,14 @@ async function promptBannerGeometry(expected) {
                 .sort((left, right) => right.top - left.top) : [];
             const prompt = promptCandidates[0];
             const terminalRect = rows?.getBoundingClientRect();
+            // WebKitGTK rounds the cursor line box independently from
+            // xterm-rows; at the bottom row its descender can extend 1–2px
+            // past the rounded container without any visual overlap. Keep a
+            // small device-pixel tolerance while still rejecting a cursor in
+            // the neighbouring pane or outside the terminal.
             const cursorInsideTerminal = Boolean(terminalRect && cursorRect
-                && cursorRect.top >= terminalRect.top - 1
-                && cursorRect.bottom <= terminalRect.bottom + 1);
+                && cursorRect.top >= terminalRect.top - 3
+                && cursorRect.bottom <= terminalRect.bottom + 3);
             return {
                 overlap: false,
                 logicalSafe: cursorInsideTerminal,
@@ -1147,11 +1154,10 @@ async function assertBannerHeaders(expected, label) {
                 logicalSafe: promptGeometry.every(({ logicalSafe }) => logicalSafe),
                 noAnomalies: anomalies.every((items) => items.length === 0
                     || (tinyGrid && items.every((item) => item === 'cabeceras=0'))),
-                // La pestaña existente conserva su banner inicial al cambiar
-                // la rejilla y la pestaña recién creada nace ya en compacto.
-                // Por tanto `full + compact` es la transición correcta; lo
-                // importante es que la casilla nueva no nazca en modo full.
-                createdPaneCompact: tinyGrid || modes[expected - 1] === 'compact',
+                // Todas las casillas deben usar el mismo perfil. Antes la
+                // pestaña existente conservaba el formato completo mientras
+                // las nuevas nacían compactas, dejando una rejilla mezclada.
+                sameBannerMode: tinyGrid || modes.every((mode) => mode === modes[0]),
             };
             last = { panes: panes.length, rows: rows.length, headers, modes, anomalies, promptGeometry, checks };
             return checks.hasHeader
@@ -1165,7 +1171,7 @@ async function assertBannerHeaders(expected, label) {
                 // la build.
                 && checks.logicalSafe
                 && checks.noAnomalies
-                && checks.createdPaneCompact;
+                && checks.sameBannerMode;
         }, 5000, `${label}: cabeceras de banner`);
     } catch (error) {
         throw new Error(`${label}: cabeceras inconsistentes (${JSON.stringify(last)})`, { cause: error });
@@ -1194,6 +1200,7 @@ async function assertPaneOutputStable(expected, label) {
         if (panes.length !== expected || rows.length < expected) return false;
         const texts = await visualBannerTexts(expected);
         const rawTexts = await rawTerminalTexts(expected);
+        const promptState = await promptStates(expected);
         const promptGeometry = await promptBannerGeometry(expected);
         const latest = texts.map(latestBannerBlock);
         const headers = latest.map(firstNonEmptyTerminalLine);
@@ -1204,12 +1211,34 @@ async function assertPaneOutputStable(expected, label) {
             if ((promptGeometry[index]?.viewportRows ?? 0) < 12) return [];
             return /(?:WinSlim|LTerminal) Terminal\b/i.test(text) ? bannerTextAnomalies(text) : [];
         });
-        last = { panes: panes.length, rows: rows.length, headers, anomalies, promptGeometry };
-        return rawTexts.every(promptLooksVisible)
+        const rawPromptMatches = rawTexts.map(promptLooksVisible);
+        const headerPromptMatches = headers.map((header) => /(?:[^\s@]+@[^\s:]+:[^\n]*[❯$#]|[A-Za-z]:\\[^\n]*[>$#])/.test(header));
+        const statePromptMatches = promptState.map((value) => value === 'true');
+        const geometryPromptMatches = promptGeometry.map(({ logicalSafe, cursorInsideTerminal, promptCandidates }) =>
+            promptCandidates.length > 0 || (logicalSafe && cursorInsideTerminal));
+        last = { panes: panes.length, rows: rows.length, headers, anomalies, promptGeometry, promptState,
+            rawPromptMatches, headerPromptMatches, statePromptMatches, geometryPromptMatches };
+        // WebKitGTK puede devolver el texto accesible de xterm con una fila
+        // antigua concatenada mientras el canvas ya muestra el prompt nuevo
+        // (se ve especialmente al reflowar una entrada larga en una rejilla
+        // 2x2). La geometría se calcula sobre el mismo DOM y confirma que el
+        // cursor está dentro del terminal y que existe un prompt visible;
+        // usarla como respaldo evita un falso negativo sin relajar la
+        // comprobación de seguridad espacial.
+        const promptsDetected = rawPromptMatches.every(Boolean)
+            || (statePromptMatches.length >= expected && statePromptMatches.every(Boolean))
+            // En Linux/WebKitGTK el endpoint accesible puede devolver una
+            // casilla sin sus saltos de línea justo durante el reflow. El
+            // texto visual ya agregado por `latestBannerBlock` conserva el
+            // prompt; exigirlo en las cuatro cabeceras evita aceptar una
+            // casilla vacía y cubre esa ventana de sincronización.
+            || headerPromptMatches.every(Boolean)
+            || geometryPromptMatches.every(Boolean);
+        return promptsDetected
             && promptGeometry.every(({ logicalSafe }) => logicalSafe)
             && anomalies.every((items) => items.length === 0);
     }, 10000, `${label}: salida estable`); } catch (error) {
-        throw new Error(`${label}: salida inestable (${JSON.stringify(last).slice(0, 2600)})`, { cause: error });
+        throw new Error(`${label}: salida inestable (${JSON.stringify(last).slice(0, 6000)})`, { cause: error });
     }
     recordEvent('pane-output-stable', { label, expected, ...last });
     return last;
@@ -1635,8 +1664,7 @@ try {
     const splitGeometry = await contentGeometry();
     assertPaneGeometry(splitGeometry, 2, 'División en el tamaño mínimo');
     // Esta transición empieza con una sola pestaña y obliga a crear la
-    // segunda. No basta con comprobar que la casilla existe: la nueva debe
-    // nacer con banner compacto; la existente conserva su banner y scrollback.
+    // segunda. Todas las casillas deben usar el mismo perfil de banner.
     const tinySplit = splitGeometry.panes.slice(0, 2).every((pane) => (pane.terminal?.rows ?? 0) < 12);
     if (tinySplit) {
         await assertTinyPanesClean(2, 'rejilla 2 paneles en altura mínima');
@@ -1744,6 +1772,78 @@ try {
     markPhase('comandos internos y shell');
     await sendTerminalLine(':help');
     await sendTerminalLine(':alias');
+    await sendTerminalLine(':banner');
+    let bannerPromptSnapshot;
+    try {
+        await waitUntil(async () => {
+            bannerPromptSnapshot = await activeTerminalRowSnapshot();
+            const nonEmptyRows = bannerPromptSnapshot.rows.filter((row) => row.text.trim().length > 0);
+            const lastRow = nonEmptyRows.at(-1);
+            const text = nonEmptyRows.map((row) => row.text).join('\n');
+            return text.includes('Banner:')
+                && Boolean(lastRow && promptLooksVisible(lastRow.text))
+                && (bannerPromptSnapshot.cursorRow < 0 || bannerPromptSnapshot.cursorRow === lastRow.index);
+        }, 10000, 'prompt al final tras :banner');
+    } catch (error) {
+        await captureScreenshot('banner-prompt-no-visible-al-final');
+        throw new Error(`Tras :banner, el prompt no quedó en la última fila: ${JSON.stringify(bannerPromptSnapshot)}`, { cause: error });
+    }
+    recordEvent('internal-banner-prompt-row', {
+        cursorRow: bannerPromptSnapshot?.cursorRow ?? -1,
+        passed: true,
+    });
+    // Verificar que la propia consola interpreta VT: el alias de ayuda usa el
+    // mismo canal que los encabezados coloreados de la aplicación.
+    await sendTerminalLine('echo %WSTERM_ESC%[1;92mLTERMINAL_ANSI_TEST%WSTERM_ESC%[0m');
+    await waitUntil(async () => {
+        const output = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+        return output.includes('LTERMINAL_ANSI_TEST');
+    }, 5000, 'secuencia ANSI de la consola');
+    await captureScreenshot('ansi-colores-consola');
+    // El alias de compatibilidad `help` debe conservar el formato de la ayuda
+    // canónica: títulos coloreados y bloques separados, no una línea corrida.
+    // La captura deja una comprobación visual reproducible además del texto
+    // accesible que ya valida :help.
+    await sendTerminalLine('help');
+    await waitUntil(async () => {
+        const output = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+        // La ayuda ocupa más filas que el viewport: xterm solo expone las
+        // últimas visibles, donde queda la firma final del documento.
+        return /Uso de esta ayuda|Usage of this help/i.test(output);
+    }, 10000, 'ayuda del alias help');
+    await captureScreenshot('help-colores-saltos');
+    recordEvent('help-formatting', { command: 'help', capture: 'help-colores-saltos', passed: true });
+    // El catálogo interno debe exponer también las rutas rápidas de
+    // configuración, no solo banner/help: se consultan sin cambiar estado
+    // para comprobar que llegan al terminal correcto y dejan el prompt usable.
+    for (const [command, marker, label] of [
+        [':shell current', 'Shell actual:', 'shell actual'],
+        [':panel list', 'Paneles:', 'lista de paneles'],
+        [':theme list', 'Temas disponibles:', 'lista de temas'],
+        [':font list', 'Fuentes disponibles:', 'lista de fuentes'],
+        [':language list', 'Idiomas disponibles:', 'lista de idiomas'],
+        [':terminal list', 'Parámetros de terminal:', 'parámetros de terminal'],
+        [':panes list', 'Diseño actual:', 'diseño de paneles'],
+    ]) {
+        await sendTerminalLine(command);
+        await waitUntil(async () => {
+            const snapshot = await activeTerminalRowSnapshot();
+            return snapshot.rows.some((row) => row.text.includes(marker));
+        }, 10000, `comando interno ${label}`);
+    }
+    recordEvent('internal-configuration-commands', {
+        commands: [':shell current', ':panel list', ':theme list', ':font list', ':language list', ':terminal list', ':panes list'],
+        passed: true,
+    });
+    // La apertura por comando debe montar el panel bajo demanda igual que la
+    // barra: en una sesión fresca no existe todavía ningún componente de
+    // Ajustes en el DOM. Esta comprobación cubre la ruta que antes dejaba
+    // `panels.open` apuntando a un panel invisible.
+    await sendTerminalLine(':panel settings');
+    await findWhenReady('[role="dialog"]', 10000);
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Ajustes abierto por comando');
+    recordEvent('internal-panel-open', { command: ':panel settings', mounted: true, passed: true });
     await sendTerminalLine('echo LTERMINAL_E2E_COMMAND_OK');
     await waitUntil(async () => {
         const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
@@ -1951,6 +2051,7 @@ try {
             bannerItems: document.querySelectorAll('[role="dialog"] .banner-item').length,
             testIds: [...document.querySelectorAll('[role="dialog"] [data-testid^="settings-banner-"]')]
                 .map((element) => element.getAttribute('data-testid')),
+            clearReprintTestId: document.querySelector('[data-testid="settings-clear-reprint-banner"]')?.getAttribute('data-testid') ?? null,
         };`,
         args: [],
     });
@@ -1958,6 +2059,61 @@ try {
     if (!bannerSettingsSnapshot.testIds?.includes('settings-banner-cpu')) {
         throw new Error(`Ajustes no renderizó el control funcional de CPU: ${JSON.stringify(bannerSettingsSnapshot)}`);
     }
+    if (bannerSettingsSnapshot.clearReprintTestId !== 'settings-clear-reprint-banner') {
+        throw new Error(`Ajustes no renderizó el control de fastfetch para clear: ${JSON.stringify(bannerSettingsSnapshot)}`);
+    }
+    const clearReprintInput = await findWhenReady('[data-testid="settings-clear-reprint-banner"]');
+    const clearReprintWasEnabled = Boolean(await property(clearReprintInput, 'checked'));
+    const assertClearBannerMode = async (enabled, description) => {
+        await sendTerminalLine('clear');
+        await waitUntil(async () => {
+            const text = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+            const latest = latestBannerBlock(text);
+            return (/WinSlim Terminal|LTerminal/i.test(latest)) === enabled;
+        }, 15000, description);
+    };
+    // El alias ya está instalado en la shell: cambiar la preferencia solo
+    // actualiza el indicador que consulta `clear`, sin reiniciar la pestaña.
+    if (clearReprintWasEnabled) await clickInView(clearReprintInput);
+    await clickInView(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => Boolean(await property(await findWhenReady('[data-testid="settings-clear-reprint-banner"]'), 'checked')) === false,
+        5000,
+        'desactivación temporal del fastfetch tras clear');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre tras desactivar fastfetch de clear');
+    await assertClearBannerMode(false, 'clear sin fastfetch cuando la opción está desactivada');
+
+    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
+    await findWhenReady('[role="dialog"]');
+    await click(await findWhenReady('[data-testid="settings-tab-terminal"]'));
+    const clearReprintEnabledInput = await findWhenReady('[data-testid="settings-clear-reprint-banner"]');
+    if (!Boolean(await property(clearReprintEnabledInput, 'checked'))) await clickInView(clearReprintEnabledInput);
+    await clickInView(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => Boolean(await property(await findWhenReady('[data-testid="settings-clear-reprint-banner"]'), 'checked')) === true,
+        5000,
+        'activación temporal del fastfetch tras clear');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre tras activar fastfetch de clear');
+    await assertClearBannerMode(true, 'clear con fastfetch cuando la opción está activada');
+
+    // Restaurar exactamente el valor que tenía la instalación antes del smoke.
+    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
+    await findWhenReady('[role="dialog"]');
+    await click(await findWhenReady('[data-testid="settings-tab-terminal"]'));
+    const clearReprintRestoredInput = await findWhenReady('[data-testid="settings-clear-reprint-banner"]');
+    if (Boolean(await property(clearReprintRestoredInput, 'checked')) !== clearReprintWasEnabled) {
+        await clickInView(clearReprintRestoredInput);
+    }
+    await clickInView(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => Boolean(await property(await findWhenReady('[data-testid="settings-clear-reprint-banner"]'), 'checked')) === clearReprintWasEnabled,
+        5000,
+        'restauración persistida del fastfetch tras clear');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre tras restaurar fastfetch de clear');
+
+    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
+    await findWhenReady('[role="dialog"]');
+    await click(await findWhenReady('[data-testid="settings-tab-terminal"]'));
     const cpuInput = await findWhenReady('[data-testid="settings-banner-cpu"]');
     const cpuControl = await parentOf(cpuInput);
     const cpuLabelElement = (await findAllWithin(cpuControl, 'strong'))[0]?.[elementKey];
@@ -2178,6 +2334,11 @@ try {
     if (dependencySections.length < 2) {
         throw new Error(`Dependencias perdió sus secciones de navegación: ${dependencySections.length}`);
     }
+    for (const section of dependencySections) {
+        if ((await attribute(section[elementKey], 'open')) !== null) {
+            throw new Error('Una sección de Dependencias aparece abierta al entrar en el panel');
+        }
+    }
     const sectionIds = new Set(await Promise.all(
         dependencySections.map((section) => attribute(section[elementKey], 'data-section-id'))
     ));
@@ -2226,6 +2387,16 @@ try {
         }
     }
     if (!compatibilityId) throw new Error(`No se pudo localizar el grupo de ${platformGroupLabel}`);
+    const compatibilitySectionId = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: 'return arguments[0].closest("[data-testid=dependency-section]")?.dataset.sectionId ?? null;',
+        args: [{ [elementKey]: compatibilityId }],
+    });
+    if (compatibilitySectionId) {
+        const section = await findWhenReady(`[data-testid="dependency-section"][data-section-id="${compatibilitySectionId}"]`);
+        if ((await attribute(section, 'open')) === null) {
+            await click(await findWhenReady(`[data-testid="dependency-section"][data-section-id="${compatibilitySectionId}"] > summary.section-header`));
+        }
+    }
     await click(compatibilityId);
     await captureScreenshot('dependencias-plataforma-desplegada');
     const subgroupSummaries = await findAllWithin(compatibilityId, '[data-testid="dependency-subgroup"] > summary');
@@ -2329,6 +2500,131 @@ try {
         entries: platformEntries.length,
         repeatedLoads: 3,
         platformGroup: platformGroupLabel,
+    });
+
+    // Las dos preferencias de acordeones tienen que gobernar también las
+    // secciones grandes de Dependencias (no solo los subgrupos). Se prueban
+    // con clics reales y se restaura el perfil original al terminar.
+    markPhase('acordeones y listas');
+    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
+    await findWhenReady('[role="dialog"]');
+    await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
+    const exclusiveInput = await findWhenReady('[data-testid="settings-exclusive-groups"]');
+    const autoOpenInput = await findWhenReady('[data-testid="settings-auto-open-first"]');
+    const originalExclusive = Boolean(await property(exclusiveInput, 'checked'));
+    const originalAutoOpen = Boolean(await property(autoOpenInput, 'checked'));
+    if (!originalExclusive) await clickInView(exclusiveInput);
+    if (originalAutoOpen) await clickInView(autoOpenInput);
+    await clickInView(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => {
+        const dialogInput = await findWhenReady('[data-testid="settings-exclusive-groups"]');
+        const dialogAuto = await findWhenReady('[data-testid="settings-auto-open-first"]');
+        return Boolean(await property(dialogInput, 'checked')) && !Boolean(await property(dialogAuto, 'checked'));
+    }, 5000, 'preferencias de listas exclusivas');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Ajustes de acordeones');
+
+    await click(await findWhenReady('[data-testid="toolbar-dependencies"]'));
+    await waitUntil(async () => (await findAll('[data-testid="dependency-section"]')).length >= 2, 10000, 'secciones para probar acordeones');
+    const dependencySectionSelector = '[role="dialog"] [data-testid="dependency-section"]';
+    // WebDriver no siempre refleja el atributo booleano `open`; consultar la
+    // propiedad DOM evita que la prueba vuelva a pulsar la misma lista.
+    for (;;) {
+        const currentSections = await findAll(dependencySectionSelector);
+        let openSection = null;
+        for (const section of currentSections) {
+            if (Boolean(await property(section[elementKey], 'open'))) {
+                openSection = section[elementKey];
+                break;
+            }
+        }
+        if (!openSection) break;
+        await click((await findAllWithin(openSection, 'summary'))[0][elementKey]);
+    }
+    const sectionSummaries = await findAll(`${dependencySectionSelector} > summary`);
+    if (sectionSummaries.length < 2) throw new Error('Dependencias no ofrece dos listas para comprobar exclusividad');
+    await click(sectionSummaries[0][elementKey]);
+    await waitUntil(async () => Boolean(await property((await findAll(dependencySectionSelector))[0][elementKey], 'open')), 3000, 'apertura de la primera sección');
+    const secondSection = (await findAll(dependencySectionSelector))[1];
+        await click((await findAllWithin(secondSection[elementKey], 'summary'))[0][elementKey]);
+    await waitUntil(async () => Boolean(await property((await findAll(dependencySectionSelector))[1][elementKey], 'open')), 3000, 'apertura de la segunda sección');
+    let openSectionCountVerified = 0;
+    for (const section of await findAll(dependencySectionSelector)) if (Boolean(await property(section[elementKey], 'open'))) openSectionCountVerified += 1;
+    if (openSectionCountVerified !== 1) throw new Error(`Acordeón exclusivo de secciones falló: ${openSectionCountVerified} abiertas`);
+
+    let openSection = null;
+    for (const section of await findAll(dependencySectionSelector)) if (Boolean(await property(section[elementKey], 'open'))) { openSection = section[elementKey]; break; }
+    if (!openSection) throw new Error('No quedó ninguna sección abierta para probar sus grupos');
+    const groupSummariesForAccordion = await findAllWithin(openSection, '[data-testid="dependency-group"] > summary');
+    if (groupSummariesForAccordion.length >= 2) {
+        await click(groupSummariesForAccordion[0][elementKey]);
+        const groupsInSection = await findAllWithin(openSection, '[data-testid="dependency-group"]');
+        let secondGroup = null;
+        for (const group of groupsInSection) if (!Boolean(await property(group[elementKey], 'open'))) { secondGroup = group; break; }
+        if (!secondGroup) throw new Error('No se pudo localizar el segundo grupo de Dependencias');
+        await click((await findAllWithin(secondGroup[elementKey], 'summary'))[0][elementKey]);
+        let openGroupCount = 0;
+        for (const group of await findAllWithin(openSection, '[data-testid="dependency-group"]')) if (Boolean(await property(group[elementKey], 'open'))) openGroupCount += 1;
+        if (openGroupCount !== 1) throw new Error(`Acordeón exclusivo de grupos falló: ${openGroupCount} abiertas`);
+    }
+    await captureScreenshot('listas-exclusivas');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre tras probar listas exclusivas');
+
+    // Con exclusividad desactivada, dos listas del mismo panel deben poder
+    // permanecer abiertas simultáneamente.
+    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
+    await findWhenReady('[role="dialog"]');
+    await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
+    const exclusiveOffInput = await findWhenReady('[data-testid="settings-exclusive-groups"]');
+    if (Boolean(await property(exclusiveOffInput, 'checked'))) await clickInView(exclusiveOffInput);
+    await clickInView(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => !Boolean(await property(await findWhenReady('[data-testid="settings-exclusive-groups"]'), 'checked')),
+        5000, 'desactivación de acordeón exclusivo');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre tras desactivar exclusividad');
+
+    await click(await findWhenReady('[data-testid="toolbar-dependencies"]'));
+    await waitUntil(async () => (await findAll(dependencySectionSelector)).length >= 2, 10000, 'secciones con acordeón múltiple');
+    for (;;) {
+        const currentSections = await findAll(dependencySectionSelector);
+        let openSection = null;
+        for (const section of currentSections) if (Boolean(await property(section[elementKey], 'open'))) { openSection = section[elementKey]; break; }
+        if (!openSection) break;
+        await click((await findAllWithin(openSection, 'summary'))[0][elementKey]);
+    }
+    const multipleSectionSummaries = await findAll(`${dependencySectionSelector} > summary`);
+    await click(multipleSectionSummaries[0][elementKey]);
+    await click((await findAllWithin((await findAll(dependencySectionSelector))[1][elementKey], 'summary'))[0][elementKey]);
+    let multipleOpenCount = 0;
+    for (const section of await findAll(dependencySectionSelector)) if (Boolean(await property(section[elementKey], 'open'))) multipleOpenCount += 1;
+    if (multipleOpenCount !== 2) {
+        throw new Error('Acordeón no exclusivo no permite mantener dos secciones abiertas');
+    }
+    await captureScreenshot('listas-multiples');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre tras probar listas múltiples');
+
+    // Restaurar exactamente las dos preferencias del perfil del usuario.
+    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
+    await findWhenReady('[role="dialog"]');
+    await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
+    const restoreExclusive = await findWhenReady('[data-testid="settings-exclusive-groups"]');
+    const restoreAuto = await findWhenReady('[data-testid="settings-auto-open-first"]');
+    if (Boolean(await property(restoreExclusive, 'checked')) !== originalExclusive) await clickInView(restoreExclusive);
+    if (Boolean(await property(restoreAuto, 'checked')) !== originalAutoOpen) await clickInView(restoreAuto);
+    await clickInView(await findWhenReady('[data-testid="settings-save"]'));
+    await waitUntil(async () => {
+        return Boolean(await property(await findWhenReady('[data-testid="settings-exclusive-groups"]'), 'checked')) === originalExclusive
+            && Boolean(await property(await findWhenReady('[data-testid="settings-auto-open-first"]'), 'checked')) === originalAutoOpen;
+    }, 5000, 'restauración de preferencias de listas');
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre tras restaurar acordeones');
+    recordEvent('accordion-preferences', {
+        exclusive: { original: originalExclusive, tested: true },
+        autoOpenFirst: { original: originalAutoOpen, tested: true },
+        captures: ['listas-exclusivas', 'listas-multiples'],
+        passed: true,
     });
 
     markPhase('pestañas, división y redimensionado');

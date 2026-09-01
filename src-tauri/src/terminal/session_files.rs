@@ -2,12 +2,13 @@
 //! inicialización de la shell.
 //!
 //! Port de la parte de `electron/main.js` que escribe `banner-<tab>.txt`,
-//! `bannerclear-<tab>.txt`, `help-<tab>.txt` e `init-<tab>.<ext>`.
+//! `bannerclear-<tab>.txt`, el indicador configurable de `clear`,
+//! `help-<tab>.txt` e `init-<tab>.<ext>`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::alias_profiles::{
-    self, help_runner_path, help_topic_path, HelpTopic, InitOptions, ScriptAlias,
+    self, help_runner_path, help_topic_path, HelpTopic, InitOptions, InitScript, ScriptAlias,
 };
 use crate::environments::Environment;
 use crate::i18n::Translator;
@@ -87,6 +88,8 @@ pub struct SessionRequest<'a> {
     pub banner: &'a str,
     /// Indica si el script de inicialización debe imprimir el banner una vez.
     pub initial_banner: bool,
+    /// Controla si `clear`/`cls` vuelve a imprimir el banner de esta pestaña.
+    pub clear_reprint_banner: bool,
 }
 
 /// Escribe el banner y el archivo de inicialización de una pestaña.
@@ -114,6 +117,7 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
             let ascii = to_console_ascii(&banner_text);
             let normal = dir.join(format!("banner-{}.txt", request.tab_id));
             let cleared = dir.join(format!("bannerclear-{}.txt", request.tab_id));
+            let clear_toggle = dir.join(format!("clear-banner-{}.flag", request.tab_id));
             match (
                 std::fs::write(&normal, &ascii),
                 std::fs::write(&cleared, format!("\x1b[H\x1b[2J\x1b[3J{ascii}")),
@@ -121,6 +125,11 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
                 (Ok(()), Ok(())) => {
                     banner_path = Some(normal);
                     banner_clear_path = Some(cleared);
+                    if request.clear_reprint_banner {
+                        let _ = std::fs::write(clear_toggle, "1");
+                    } else {
+                        let _ = std::fs::remove_file(clear_toggle);
+                    }
                 }
                 _ => log_warn!(
                     "No se pudo escribir el banner de la pestaña",
@@ -152,6 +161,10 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
     let banner_clear_str = banner_clear_path
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
+    let clear_banner_flag_path = dir
+        .as_ref()
+        .map(|dir| dir.join(format!("clear-banner-{}.flag", request.tab_id)))
+        .map(|p| p.to_string_lossy().to_string());
     let help_str = help_path.as_ref().map(|p| p.to_string_lossy().to_string());
 
     let script = alias_profiles::build_init_script(
@@ -162,6 +175,7 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
             script_aliases: request.script_aliases,
             banner_path: banner_str.as_deref(),
             banner_clear_path: banner_clear_str.as_deref(),
+            clear_banner_flag_path: clear_banner_flag_path.as_deref(),
             help_path: help_str.as_deref(),
             transport: request.env.transport,
             app_name: request.app_name,
@@ -180,54 +194,8 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
         };
     };
 
-    if let (Some(help_path), Some(help_text)) = (&help_path, &script.help_text) {
-        // Solo cmd y Windows PowerShell leen el archivo en la página de códigos
-        // de la consola, donde un UTF-8 se ve como galimatías. bash, zsh, fish y
-        // WSL lo imprimen bien con `cat`, así que ahí la ayuda conserva sus
-        // tildes en vez de quedar en "Sesion".
-        let needs_ascii = matches!(
-            request.env.kind,
-            crate::environments::ShellKind::Cmd | crate::environments::ShellKind::Powershell
-        );
-        let body = if needs_ascii {
-            to_console_ascii(help_text)
-        } else {
-            help_text.clone()
-        };
-        // Sin archivo de ayuda la sesión funciona igual: `ayuda` imprimirá el
-        // archivo vacío en vez del resumen. No se aborta por esto.
-        if std::fs::write(help_path, body).is_err() {
-            log_warn!(
-                "No se pudo escribir la ayuda de la pestaña",
-                serde_json::json!({ "tabId": request.tab_id })
-            );
-        }
-        if let Some(topics) = &script.help_topics {
-            for (key, text) in topics {
-                let topic = HelpTopic::from_argument(Some(key)).unwrap_or(HelpTopic::General);
-                let topic_path = help_topic_path(&help_path.to_string_lossy(), topic);
-                let body = if needs_ascii {
-                    to_console_ascii(text)
-                } else {
-                    text.clone()
-                };
-                if std::fs::write(topic_path, body).is_err() {
-                    log_warn!(
-                        "No se pudo escribir una sección de ayuda de la pestaña",
-                        serde_json::json!({ "tabId": request.tab_id, "section": key })
-                    );
-                }
-            }
-        }
-        if let Some(runner) = &script.help_runner {
-            let runner_path = help_runner_path(&help_path.to_string_lossy(), request.env.kind);
-            if std::fs::write(runner_path, runner).is_err() {
-                log_warn!(
-                    "No se pudo escribir el selector de secciones de ayuda",
-                    serde_json::json!({ "tabId": request.tab_id })
-                );
-            }
-        }
+    if let Some(help_path) = &help_path {
+        write_help_files(request.tab_id, help_path, request.env.kind, &script);
     }
 
     let Some(dir) = dir else {
@@ -258,8 +226,66 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
     }
 }
 
-/// Actualiza el archivo que usa `sysinfo` después de una nueva sesión o de una
-/// solicitud explícita. `clear` no imprime otra copia del fastfetch.
+/// Escribe la ayuda completa de una pestaña. Se mantiene separado de la
+/// creación del script porque el idioma puede cambiar mientras la shell sigue
+/// viva: el alias ya apunta al mismo archivo y basta con sustituir su contenido.
+pub fn write_help_files(
+    tab_id: &str,
+    help_path: &Path,
+    kind: crate::environments::ShellKind,
+    script: &InitScript,
+) {
+    let Some(help_text) = &script.help_text else {
+        return;
+    };
+    // cmd y Windows PowerShell leen con la página de códigos de la consola;
+    // las shells Unix imprimen UTF-8 directamente.
+    let needs_ascii = matches!(
+        kind,
+        crate::environments::ShellKind::Cmd | crate::environments::ShellKind::Powershell
+    );
+    let body = if needs_ascii {
+        to_console_ascii(help_text)
+    } else {
+        help_text.to_string()
+    };
+    if std::fs::write(help_path, body).is_err() {
+        log_warn!(
+            "No se pudo escribir la ayuda de la pestaña",
+            serde_json::json!({ "tabId": tab_id })
+        );
+    }
+    if let Some(topics) = &script.help_topics {
+        for (key, text) in topics {
+            let topic = HelpTopic::from_argument(Some(key)).unwrap_or(HelpTopic::General);
+            let topic_path = help_topic_path(&help_path.to_string_lossy(), topic);
+            let body = if needs_ascii {
+                to_console_ascii(text)
+            } else {
+                text.to_string()
+            };
+            if std::fs::write(topic_path, body).is_err() {
+                log_warn!(
+                    "No se pudo escribir una sección de ayuda de la pestaña",
+                    serde_json::json!({ "tabId": tab_id, "section": key })
+                );
+            }
+        }
+    }
+    if let Some(runner) = &script.help_runner {
+        let runner_path = help_runner_path(&help_path.to_string_lossy(), kind);
+        if std::fs::write(runner_path, runner).is_err() {
+            log_warn!(
+                "No se pudo escribir el selector de secciones de ayuda",
+                serde_json::json!({ "tabId": tab_id })
+            );
+        }
+    }
+}
+
+/// Actualiza los archivos que usan `sysinfo` y `clear` después de una nueva
+/// sesión o de una solicitud explícita. El indicador separado permite cambiar
+/// el comportamiento de `clear` sin tener que redefinir el alias de la shell.
 pub fn refresh_banner_files(tab_id: &str, note: Option<&str>, banner: &str) {
     let Some(dir) = dir() else {
         return;
@@ -271,6 +297,9 @@ pub fn refresh_banner_files(tab_id: &str, note: Option<&str>, banner: &str) {
     let ascii = to_console_ascii(&text);
     let normal = dir.join(format!("banner-{tab_id}.txt"));
     let cleared = dir.join(format!("bannerclear-{tab_id}.txt"));
+    let clear_toggle = dir.join(format!("clear-banner-{tab_id}.flag"));
+    let preferences = crate::preferences::current();
+    let clear_reprint = preferences.show_system_banner && preferences.clear_reprint_banner;
     if std::fs::write(&normal, &ascii).is_err()
         || std::fs::write(&cleared, format!("\x1b[H\x1b[2J\x1b[3J{ascii}")).is_err()
     {
@@ -278,6 +307,10 @@ pub fn refresh_banner_files(tab_id: &str, note: Option<&str>, banner: &str) {
             "No se pudo actualizar el banner de la pestaña",
             serde_json::json!({ "tabId": tab_id })
         );
+    } else if clear_reprint {
+        let _ = std::fs::write(clear_toggle, "1");
+    } else {
+        let _ = std::fs::remove_file(clear_toggle);
     }
 }
 

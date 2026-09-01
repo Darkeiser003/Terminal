@@ -624,6 +624,8 @@
   "settings.sections": "Preference sections",
   "settings.showBanner": "Show system information",
   "settings.showBannerHint": "Print the system summary once in the terminal output.",
+  "settings.clearReprintBanner": "Reprint fastfetch when running clear",
+  "settings.clearReprintBannerHint": "After clearing the screen, show the system summary again.",
   "settings.startupEnv": "Environment at startup",
   "settings.startupPanels": "Startup and panels",
   "settings.startupPanelsHint": "Only changes how the application behaves.",
@@ -878,5 +880,6 @@
   "settings.banner.storage.description": "Drive usage.",
   "settings.banner.uptime.description": "Time since boot.",
   "settings.banner.datetime.description": "Current date and time.",
-  "deps.visibleComponents": "{count} visible components"
+  "deps.visibleComponents": "{count} visible components",
+  "terminal.dynamicOutput": "{text}"
 }
