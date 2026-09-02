@@ -29,5 +29,10 @@
 # dejan en LF como el resto para que el diff no se llene de ruido.
 *.bat text eol=lf
 *.cmd text eol=lf
+# Windows PowerShell 5 interpreta correctamente los literales Unicode solo si
+# el archivo UTF-8 lleva BOM. Bash, Node, Rust y el resto usan UTF-8 sin BOM.
+# No se usa working-tree-encoding: Git no puede recodificar de forma segura
+# blobs históricos que ya incluyen ese BOM. verify-encoding.mjs lo garantiza.
 *.ps1 text eol=lf
+*.ps1.in text eol=lf
 *.sh text eol=lf

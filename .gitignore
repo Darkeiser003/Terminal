@@ -1,5 +1,7 @@
 # Dependencias y salidas de compilación
 node_modules/
+# Staging temporal que usa linux/build.sh al apartar dependencias Windows.
+/.node_modules.windows.*
 dist/
 release/
 
@@ -42,8 +44,8 @@ winslim-terminal-e2e-*.json
 /*-smoke-*.json
 /*-e2e-*.json
 
-# Evidencia local de auditorías y builds. La documentación mantenida vive en
-# docs/; los registros y capturas temporales no deben volver al repositorio.
+# Evidencia local de auditorías y builds; los registros y capturas temporales
+# no deben volver al repositorio. La documentación mantenida vive en README.md.
 /AUDIT-*.md
 audit-*.log
 build-*.log

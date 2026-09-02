@@ -3,7 +3,7 @@
 # Build de LTerminal (Tauri 2 + Rust) para Linux.
 #
 # Produce UNA sola cosa: el AppImage. Sin .deb, sin .rpm, sin carpeta
-# desempaquetada y sin accesos directos; el porqué está en src-tauri/BUNDLE.md.
+# desempaquetada y sin accesos directos; la descripción mantenida está en README.md.
 #
 # Requisitos: Node.js >= 22.12, el toolchain de Rust y las bibliotecas de
 # desarrollo de WebKitGTK. Los nombres de los paquetes cambian según la
@@ -62,6 +62,7 @@ ALLOW_OFFLINE_CHECKS=0
 AUTO_INSTALL=1
 VERSION_OVERRIDE=""
 EXTENDED_TESTS=1
+EXTENDED_MODE=""
 # La ruta predeterminada es una release verificable: si falta el driver, se
 # intenta instalar automáticamente para no publicar un AppImage sin E2E.
 INSTALL_E2E_DRIVER=1
@@ -70,6 +71,14 @@ CROSS_WINDOWS=0
 NON_INTERACTIVE=0
 FAST_BUILD=0
 EXPLICIT_OPTIONS=0
+POST_BUILD_FAILURE=0
+POST_BUILD_ISSUES=()
+post_build_issue() {
+    local message="$1"
+    POST_BUILD_FAILURE=1
+    POST_BUILD_ISSUES+=("$message")
+    err "$message"
+}
 while [ "$#" -gt 0 ]; do
     EXPLICIT_OPTIONS=1
     case "$1" in
@@ -78,9 +87,22 @@ while [ "$#" -gt 0 ]; do
         --skip-checks) SKIP_CHECKS=1 ;;
         --allow-offline-checks) ALLOW_OFFLINE_CHECKS=1 ;;
         --no-install)  AUTO_INSTALL=0 ;;
-        --extended-tests) EXTENDED_TESTS=1 ;;
-        --full-tests)     EXTENDED_TESTS=1 ;;
-        --no-extended-tests) EXTENDED_TESTS=0 ;;
+        --extended-tests|--full-tests)
+            if [ "$EXTENDED_MODE" = "off" ]; then
+                echo "--full-tests/--extended-tests no se puede combinar con --no-extended-tests." >&2
+                exit 2
+            fi
+            EXTENDED_MODE="on"
+            EXTENDED_TESTS=1
+            ;;
+        --no-extended-tests)
+            if [ "$EXTENDED_MODE" = "on" ]; then
+                echo "--no-extended-tests no se puede combinar con --full-tests/--extended-tests." >&2
+                exit 2
+            fi
+            EXTENDED_MODE="off"
+            EXTENDED_TESTS=0
+            ;;
         --cross-windows|--windows-tests)
             CROSS_WINDOWS=1
             ;;
@@ -89,24 +111,33 @@ while [ "$#" -gt 0 ]; do
         --install-e2e-driver) INSTALL_E2E_DRIVER=1 ;;
         --e2e-driver)
             shift
-            if [ "$#" -eq 0 ] || [ -z "$1" ]; then
+            if [ "$#" -eq 0 ] || [ -z "$1" ] || [[ "$1" == -* ]]; then
                 echo "--e2e-driver necesita la ruta a WebKitWebDriver." >&2
                 exit 2
             fi
             E2E_DRIVER_PATH="$1"
             ;;
-        --e2e-driver=*) E2E_DRIVER_PATH="${1#*=}" ;;
+        --e2e-driver=*)
+            E2E_DRIVER_PATH="${1#*=}"
+            [ -n "$E2E_DRIVER_PATH" ] || { echo "--e2e-driver necesita la ruta a WebKitWebDriver." >&2; exit 2; }
+            ;;
         --version)
             shift
-            if [ "$#" -eq 0 ] || [ -z "$1" ]; then
+            if [ "$#" -eq 0 ] || [ -z "$1" ] || [[ "$1" == -* ]]; then
                 echo "--version necesita un valor SemVer, por ejemplo 1.4.4" >&2
                 exit 2
             fi
             VERSION_OVERRIDE="$1"
             ;;
+        --version=*)
+            VERSION_OVERRIDE="${1#*=}"
+            [ -n "$VERSION_OVERRIDE" ] || { echo "--version necesita un valor SemVer, por ejemplo 1.4.4" >&2; exit 2; }
+            ;;
         -h|--help)
             echo "Uso: $0 [--fast] [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
-    echo "Sin opciones: release completa AppImage + checks estrictos + smoke + bateria ampliada + E2E."
+            echo "Sin opciones: release completa AppImage + checks estrictos + smoke + bateria ampliada + E2E."
+            echo "En modo interactivo, la versión se pide al principio junto al resto de opciones."
+            echo "Los fallos de E2E se informan al final sin impedir publicar el AppImage."
             exit 0
             ;;
         *)
@@ -143,16 +174,41 @@ ask_build_choice() {
 }
 
 configure_interactive_options() {
-    # Una ejecución sin argumentos permite escoger el perfil sin romper las
-    # builds automatizadas: cualquier argumento explícito, --non-interactive o
-    # una entrada/salida redirigida conserva exactamente el comportamiento
-    # anterior y no intenta leer del usuario.
-    if [ "$NON_INTERACTIVE" -eq 1 ] || [ "$EXPLICIT_OPTIONS" -eq 1 ] || \
-        [ "${CI:-}" = '1' ] || [ "${CI:-}" = 'true' ] || [ "${CI:-}" = 'yes' ] || \
+    # Una ejecución interactiva permite escoger el perfil sin romper las
+    # builds automatizadas: --non-interactive, CI o una entrada/salida
+    # redirigida no intentan leer del usuario. Con flags explícitos solo se
+    # solicita la versión si falta; el resto ya está determinado.
+    local can_prompt=1
+    local printed_config=0
+    if [ "$NON_INTERACTIVE" -eq 1 ] || [ "${CI:-}" = '1' ] || [ "${CI:-}" = 'true' ] || [ "${CI:-}" = 'yes' ] || \
         [ ! -t 0 ] || [ ! -t 1 ]; then
+        can_prompt=0
+    fi
+
+    if [ "$can_prompt" -eq 1 ] && [ "$EXPLICIT_OPTIONS" -eq 0 ]; then
+        printf '\n\033[36mConfiguración de build (Enter conserva el valor actual):\033[0m\n'
+        printed_config=1
+    fi
+
+    # La versión forma parte de la configuración inicial y se solicita antes
+    # de las demás opciones. Incluso con flags explícitos se pide aquí si la
+    # terminal es interactiva; así nunca aparece después de los checks.
+    if [ "$can_prompt" -eq 1 ] && [ -z "$VERSION_OVERRIDE" ]; then
+        read -r -p "Versión de release [$CURRENT_VERSION]: " VERSION_OVERRIDE
+        VERSION_OVERRIDE="${VERSION_OVERRIDE:-$CURRENT_VERSION}"
+    elif [ -z "$VERSION_OVERRIDE" ]; then
+        VERSION_OVERRIDE="$CURRENT_VERSION"
+    fi
+
+    # Con opciones explícitas solo se pregunta la versión; el resto de valores
+    # ya vienen determinados por los flags.
+    if [ "$can_prompt" -eq 0 ] || [ "$EXPLICIT_OPTIONS" -eq 1 ]; then
         return 0
     fi
-    printf '\n\033[36mConfiguración de build (Enter conserva el valor actual):\033[0m\n'
+    if [ "$printed_config" -eq 0 ]; then
+        printf '\n\033[36mConfiguración de build (Enter conserva el valor actual):\033[0m\n'
+    fi
+    printf '  Versión seleccionada: %s\n' "$VERSION_OVERRIDE"
     if ask_build_choice 'Limpiar dependencias y target antes de compilar' "$CLEAN"; then CLEAN=1; else CLEAN=0; fi
     if ask_build_choice 'Usar perfil rápido de desarrollo' "$FAST_BUILD"; then FAST_BUILD=1; else FAST_BUILD=0; fi
     if ask_build_choice 'Instalar automáticamente dependencias faltantes' "$AUTO_INSTALL"; then AUTO_INSTALL=1; else AUTO_INSTALL=0; fi
@@ -216,7 +272,21 @@ ok()   { printf '    \033[32mOK:\033[0m %s\n' "$1"; }
 warn() { printf '    \033[33mAVISO:\033[0m %s\n' "$1"; }
 err()  { printf '    \033[31mERROR:\033[0m %s\n' "$1" >&2; }
 
+# Resolver la ruta y la versión antes de cualquier comprobación o instalación
+# permite que toda la configuración inicial quede agrupada al principio.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+TAURI_DIR="$PROJECT_ROOT/src-tauri"
+BUNDLE_DIR="$TAURI_DIR/target/release/bundle/appimage"
+CURRENT_VERSION="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROJECT_ROOT/package.json" | head -n 1)"
+CURRENT_VERSION="${CURRENT_VERSION:-1.0.0}"
+
 configure_interactive_options
+
+if ! [[ "$VERSION_OVERRIDE" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+    echo "La versión indicada no es SemVer válida: $VERSION_OVERRIDE" >&2
+    exit 2
+fi
 
 if [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ]; then
     export LTERMINAL_LINK_CHECK=warn
@@ -755,11 +825,6 @@ ensure_rust_components() {
     cargo fmt --version >/dev/null 2>&1 && cargo clippy --version >/dev/null 2>&1
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-TAURI_DIR="$PROJECT_ROOT/src-tauri"
-BUNDLE_DIR="$TAURI_DIR/target/release/bundle/appimage"
-
 cd "$PROJECT_ROOT"
 configure_cargo_profile
 
@@ -901,15 +966,13 @@ if ! has_ibus_runtime; then
 fi
 ok "IBus disponible para linuxdeploy"
 
-CURRENT_VERSION="$(node -p "require('./package.json').version")"
 if [ -n "$VERSION_OVERRIDE" ]; then
     VERSION="$VERSION_OVERRIDE"
-elif [ "$NON_INTERACTIVE" -eq 0 ] && [ -t 0 ]; then
-    read -r -p "Versión a compilar [$CURRENT_VERSION]: " VERSION
-    VERSION="${VERSION:-$CURRENT_VERSION}"
 else
     VERSION="$CURRENT_VERSION"
-    warn "Modo no interactivo: se conserva la versión $VERSION."
+    if [ "$NON_INTERACTIVE" -eq 1 ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+        warn "Modo no interactivo: se conserva la versión $VERSION."
+    fi
 fi
 
 node scripts/set-package-version.mjs "$VERSION" || {
@@ -1668,50 +1731,55 @@ ok "Estructura ELF/AppImage y AppDir Linux verificadas"
 if [ "$EXTENDED_TESTS" -eq 1 ]; then
     step "Pruebas ampliadas secuenciales (shells, herramientas y E2E)"
     if command -v ionice >/dev/null 2>&1; then
-        nice -n 10 ionice -c 3 bash "$PROJECT_ROOT/linux/exercise-host.sh"
+        if ! nice -n 10 ionice -c 3 bash "$PROJECT_ROOT/linux/exercise-host.sh"; then
+            post_build_issue "Las sondas de shells/herramientas fallaron; revisa la salida de exercise-host.sh."
+        fi
     else
-        nice -n 10 bash "$PROJECT_ROOT/linux/exercise-host.sh"
-    fi
-    ok "Shells y REPL instalados respondieron correctamente"
-
-    if ! graphical_session_available; then
-        err "El test completo requiere una sesión gráfica accesible para ejecutar E2E."
-        err "DISPLAY/WAYLAND_DISPLAY está ausente o no se puede abrir desde esta shell."
-        exit 1
-    fi
-    if ! command -v tauri-driver >/dev/null 2>&1; then
-        if [ "$INSTALL_E2E_DRIVER" -eq 1 ] && command -v cargo >/dev/null 2>&1; then
-            warn "Falta tauri-driver; se instalará con cargo para completar E2E."
-            cargo install tauri-driver --locked
-            recover_tool tauri-driver "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" || true
+        if ! nice -n 10 bash "$PROJECT_ROOT/linux/exercise-host.sh"; then
+            post_build_issue "Las sondas de shells/herramientas fallaron; revisa la salida de exercise-host.sh."
         fi
     fi
-    if ! command -v tauri-driver >/dev/null 2>&1; then
-        err "Falta tauri-driver. Reintenta con --install-e2e-driver o instálalo con cargo."
-        exit 1
+    [ "$POST_BUILD_FAILURE" -eq 0 ] && ok "Shells y REPL instalados respondieron correctamente"
+
+    if ! graphical_session_available; then
+        post_build_issue "E2E omitido: no hay una sesión gráfica accesible (DISPLAY/WAYLAND_DISPLAY)."
+    else
+        if ! command -v tauri-driver >/dev/null 2>&1; then
+            if [ "$INSTALL_E2E_DRIVER" -eq 1 ] && command -v cargo >/dev/null 2>&1; then
+                warn "Falta tauri-driver; se instalará con cargo para completar E2E."
+                if cargo install tauri-driver --locked; then
+                    recover_tool tauri-driver "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" || true
+                else
+                    post_build_issue "No se pudo instalar tauri-driver; el AppImage ya está publicado."
+                fi
+            fi
+        fi
+        if ! command -v tauri-driver >/dev/null 2>&1; then
+            post_build_issue "E2E omitido: falta tauri-driver. Reintenta con --install-e2e-driver."
+        else
+            E2E_DRIVER_PATH="$(find_native_e2e_driver || true)"
+            if [ -z "$E2E_DRIVER_PATH" ] && [ "$INSTALL_E2E_DRIVER" -eq 1 ]; then
+                if ! install_e2e_driver; then
+                    post_build_issue "E2E omitido: no se pudo preparar WebKitWebDriver."
+                fi
+            fi
+            if [ -z "$E2E_DRIVER_PATH" ]; then
+                post_build_issue "E2E omitido: falta WebKitWebDriver (--e2e-driver /ruta/WebKitWebDriver)."
+            else
+                E2E_REPORT="$(mktemp "${TMPDIR:-/tmp}/lterminal-e2e-report.XXXXXX.json")"
+                if ! TAURI_NATIVE_DRIVER="$E2E_DRIVER_PATH" \
+                    E2E_BINARY="$RELEASE_DIR/$RELEASE_NAME" \
+                    LTERMINAL_SMOKE_REPORT="$E2E_REPORT" npm run e2e; then
+                    post_build_issue "E2E falló. Se conserva el informe para diagnóstico: $E2E_REPORT"
+                elif ! node "$PROJECT_ROOT/scripts/verify-e2e-report.mjs" "$E2E_REPORT"; then
+                    post_build_issue "El informe E2E está incompleto: $E2E_REPORT"
+                else
+                    rm -f "$E2E_REPORT"
+                    ok "E2E confirmó todas las fases: ventana, terminal, paneles, comandos, preferencias y redimensionado"
+                fi
+            fi
+        fi
     fi
-    E2E_DRIVER_PATH="$(find_native_e2e_driver || true)"
-    if [ -z "$E2E_DRIVER_PATH" ] && [ "$INSTALL_E2E_DRIVER" -eq 1 ]; then
-        install_e2e_driver
-    fi
-    if [ -z "$E2E_DRIVER_PATH" ]; then
-        err "Falta WebKitWebDriver para E2E en Linux."
-        err "Reintenta con --install-e2e-driver o indica --e2e-driver /ruta/WebKitWebDriver."
-        exit 1
-    fi
-    E2E_REPORT="$(mktemp "${TMPDIR:-/tmp}/lterminal-e2e-report.XXXXXX.json")"
-    if ! TAURI_NATIVE_DRIVER="$E2E_DRIVER_PATH" \
-        E2E_BINARY="$RELEASE_DIR/$RELEASE_NAME" \
-        LTERMINAL_SMOKE_REPORT="$E2E_REPORT" npm run e2e; then
-        err "E2E falló. Se conserva el informe para diagnóstico: $E2E_REPORT"
-        exit 1
-    fi
-    if ! node "$PROJECT_ROOT/scripts/verify-e2e-report.mjs" "$E2E_REPORT"; then
-        err "El E2E terminó, pero su informe está incompleto: $E2E_REPORT"
-        exit 1
-    fi
-    rm -f "$E2E_REPORT"
-    ok "E2E confirmó todas las fases: ventana, terminal, paneles, comandos, preferencias y redimensionado"
 fi
 
 if [ "$CROSS_WINDOWS" -eq 1 ]; then
@@ -1721,8 +1789,11 @@ if [ "$CROSS_WINDOWS" -eq 1 ]; then
     [ "$SKIP_CHECKS" -eq 1 ] && cross_args+=(--skip-checks)
     [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ] && cross_args+=(--allow-offline-checks)
     [ "$AUTO_INSTALL" -eq 0 ] && cross_args+=(--no-install)
-    bash "$PROJECT_ROOT/linux/build-windows.sh" "${cross_args[@]}"
-    ok "Release Windows x64 compilada y ejecutada repetidamente bajo Wine"
+    if bash "$PROJECT_ROOT/linux/build-windows.sh" "${cross_args[@]}"; then
+        ok "Release Windows x64 compilada y ejecutada repetidamente bajo Wine"
+    else
+        post_build_issue "Build/pruebas cruzadas Windows bajo Wine fallaron; la release Linux ya está publicada."
+    fi
 fi
 
 if [ "$NO_RUN" -eq 0 ] && graphical_session_available; then
@@ -1737,3 +1808,12 @@ echo
 printf '\033[32mListo. LTerminal %s compilado y verificado.\033[0m\n' "$VERSION"
 echo "  AppImage: $RELEASE_DIR/$RELEASE_NAME"
 printf '  Tiempo total: %ss\n' "$((SECONDS - BUILD_STARTED_SECONDS))"
+if [ "$POST_BUILD_FAILURE" -ne 0 ]; then
+    echo
+    printf '\033[33mLa build terminó y publicó el AppImage, pero quedaron validaciones pendientes:\033[0m\n'
+    for issue in "${POST_BUILD_ISSUES[@]}"; do
+        printf '  - %s\n' "$issue"
+    done
+    printf '\033[33mEl código de salida es 1 para que CI no ignore estos diagnósticos.\033[0m\n'
+    exit 1
+fi

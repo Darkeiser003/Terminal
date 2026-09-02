@@ -60,7 +60,7 @@ const handledActions = [...terminal.matchAll(/command\.action\s*===\s*'([^']+)'/
 sameSet(typedActions, parsedActions, 'El tipo InternalCommand no coincide con el parser Rust');
 for (const action of parsedActions) assert(handledActions.includes(action), `TerminalPane no maneja el comando interno ${action}`);
 const aliases = read('src-tauri/src/terminal/aliases.rs');
-for (const command of [':config', ':settings', ':reload', ':shell', ':repl', ':alias', ':help', ':banner', ':quick-actions', ':panel', ':theme', ':font', ':language', ':terminal', ':panes']) {
+for (const command of [':config', ':settings', ':reload', ':shell', ':repl', ':alias', ':help', ':banner', ':quick-actions', ':panel', ':explorer-here', ':theme', ':font', ':language', ':terminal', ':panes']) {
     assert(aliases.includes(command), `La ayuda no documenta ${command}`);
 }
 

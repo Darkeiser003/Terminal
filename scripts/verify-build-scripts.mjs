@@ -18,6 +18,8 @@ const files = {
     profileSh: await readFile(resolve(root, 'src-tauri/resources/profile-bootstrap.sh.in'), 'utf8'),
     profilePs1: await readFile(resolve(root, 'src-tauri/resources/profile-bootstrap.ps1.in'), 'utf8'),
     releaseHash: await readFile(resolve(root, 'scripts/update-release-hash.mjs'), 'utf8'),
+    cleanerPs1: await readFile(resolve(root, 'scripts/clean-repository.ps1'), 'utf8'),
+    cleanerSh: await readFile(resolve(root, 'scripts/clean-repository.sh'), 'utf8'),
 };
 
 const installerBlock = files.windows.indexOf('if ($Installer) {');
@@ -32,10 +34,22 @@ const invokeNativeBlock = invokeNativeStart >= 0 && invokeNativeEnd > invokeNati
     ? files.windows.slice(invokeNativeStart, invokeNativeEnd)
     : '';
 const crossLinuxStart = files.windows.indexOf('function Invoke-CrossLinuxTests {');
-const crossLinuxEnd = files.windows.indexOf('\n$WindowsDir', crossLinuxStart);
+const crossLinuxEnd = files.windows.indexOf('if ($CrossLinux)', crossLinuxStart);
 const crossLinuxBlock = crossLinuxStart >= 0 && crossLinuxEnd > crossLinuxStart
     ? files.windows.slice(crossLinuxStart, crossLinuxEnd)
     : '';
+const windowsVersionPrompt = files.windows.indexOf('Versión de release')
+const windowsRequirementsStep = files.windows.indexOf("Write-Step 'Comprobando requisitos'")
+const linuxVersionPrompt = files.linux.indexOf('Versión de release')
+const linuxRequirementsStep = files.linux.indexOf('step "Comprobando requisitos"')
+const cleanerPsDirectories = files.cleanerPs1.slice(
+    files.cleanerPs1.indexOf('$generatedDirectories = @('),
+    files.cleanerPs1.indexOf(')\n\n$directoryTargets', files.cleanerPs1.indexOf('$generatedDirectories = @(')),
+)
+const cleanerShDirectories = files.cleanerSh.slice(
+    files.cleanerSh.indexOf('generated_directories=('),
+    files.cleanerSh.indexOf(')\n\nassert_project_target', files.cleanerSh.indexOf('generated_directories=(')),
+)
 
 const checks = [
     ['Linux ejecuta la batería estática', files.linux.includes('npm run check')],
@@ -47,6 +61,10 @@ const checks = [
     ['Windows fija UTF-8 para la salida de procesos nativos', files.windows.includes('[Console]::OutputEncoding = $utf8NoBom') && files.windows.includes('$OutputEncoding = $utf8NoBom')],
     ['Windows muestra tiempos por paso y tiempo total de build', files.windows.includes('$script:BuildStartedAt') && files.windows.includes('Tiempo del paso anterior') && files.windows.includes('Tiempo total')],
     ['Windows ofrece selector interactivo con valores predeterminados y conserva CI', files.windows.includes('Read-BuildChoice') && files.windows.includes('$interactiveBuild') && files.windows.includes('$hasExplicitBuildOptions') && files.windows.includes('$isCiEnvironment') && files.windows.includes('Enter conserva el valor actual')],
+    ['Windows solicita la versión al inicio junto a la configuración', windowsVersionPrompt >= 0 && windowsRequirementsStep > windowsVersionPrompt && files.windows.includes('$canPromptVersion') && files.windows.includes('$printedBuildConfigHeader')],
+    ['Windows rechaza argumentos desconocidos y conflictos antes de tocar dependencias', files.windows.includes('Argumento(s) no reconocido(s)') && files.windows.includes("$NoExtendedTests.IsPresent -and ($FullTests.IsPresent -or $StrictTests.IsPresent)") && files.windows.indexOf('Argumento(s) no reconocido(s)') < files.windows.indexOf('$WindowsDir')],
+    ['Windows valida SemVer antes de comprobar el toolchain', files.windows.includes('$semverPattern') && files.windows.includes('La versión indicada no es SemVer válida') && files.windows.indexOf('$semverPattern') < files.windows.indexOf("Write-Step 'Comprobando requisitos")],
+    ['Windows rechaza una versión vacía indicada explícitamente', files.windows.includes('$versionWasExplicit') && files.windows.includes('La versión no puede estar vacía.')],
     ['Windows captura stderr de Java sin convertirlo en NativeCommandError', files.windows.includes('$isJavaProbe = [IO.Path]::GetFileNameWithoutExtension($Command) -ieq \'java\'') && files.windows.includes('New-Object System.Diagnostics.ProcessStartInfo') && files.windows.includes('$processInfo.RedirectStandardError = $true') && files.windows.includes('$process.WaitForExit()') && files.windows.includes('$exitCode = [int]$process.ExitCode')],
     ['Windows une stderr informativo de comandos nativos sin falsos NativeCommandError', files.windows.includes('$nativeOutput = @(& $Command @Arguments 2> $stderrPath)') && files.windows.includes('el código de salida sigue siendo la única señal de fallo')],
     ['Windows no oculta el código nativo con una variable LASTEXITCODE local', invokeNativeBlock.includes('$exitCode = [int]$LASTEXITCODE') && !/\$LASTEXITCODE\s*=/.test(invokeNativeBlock)],
@@ -54,12 +72,16 @@ const checks = [
     ['Windows no convierte avisos stderr de rustc en fallos al buscar rust-lld', files.windows.includes('$sysrootOutput = @(& rustc --print sysroot 2>&1)') && files.windows.includes("$ErrorActionPreference = 'Continue'") && files.windows.includes("Where-Object { $_ -match '^[A-Za-z]:\\\\|^/' }")],
     ['WinGet evita falsos fallos por consultas concurrentes y reintenta tras actualizar la fuente', files.winget.includes('LTERMINAL_WINGET_CONCURRENCY') && files.winget.includes('?? 1') && files.winget.includes("source', 'update")],
     ['Windows ofrece comprobaciones externas offline sin saltar tests locales', files.windows.includes('$AllowOfflineChecks') && files.windows.includes("$env:LTERMINAL_LINK_CHECK = 'warn'") && files.windows.includes("$env:LTERMINAL_INSTALL_SOURCE_CHECK = 'warn'") && files.windows.includes("$env:LTERMINAL_WINGET_CHECK = 'warn'")],
-    ['Windows documenta una ayuda no destructiva para la build', files.windows.includes('[Alias(\'h\')][switch]$Help') && files.windows.includes('if ($Help)') && files.windowsBat.includes('build.bat -Help') && files.windowsBat.includes('Ayuda mostrada; no se ejecuto')],
+    ['Windows documenta una ayuda no destructiva para la build', files.windows.includes('[Alias(\'h\')][switch]$Help') && files.windows.includes('if ($Help)') && files.windowsBat.includes('build.bat -Help') && files.windowsBat.includes('Ayuda mostrada; no se ejecuto') && files.windowsBat.includes('for %%A in (%*)')],
     ['Linux ofrece test ampliado', files.linux.includes('--extended-tests') && files.linux.includes('--full-tests')],
     ['Linux tiene modo no interactivo', files.linux.includes('--non-interactive') && files.linux.includes('NON_INTERACTIVE')],
     ['Linux ofrece selector interactivo con valores predeterminados y conserva CI', files.linux.includes('ask_build_choice') && files.linux.includes('configure_interactive_options') && files.linux.includes('EXPLICIT_OPTIONS') && files.linux.includes('${CI:-}') && files.linux.includes('Enter conserva el valor actual')],
+    ['Linux solicita la versión al inicio junto a la configuración', linuxVersionPrompt >= 0 && linuxRequirementsStep > linuxVersionPrompt && files.linux.includes('can_prompt') && files.linux.includes('CURRENT_VERSION')],
     ['Linux ofrece modo explícito sin red', files.linux.includes('--allow-offline-checks') && files.linux.includes('LTERMINAL_LINK_CHECK=warn')],
     ['Linux activa tests ampliados por defecto', files.linux.includes('EXTENDED_TESTS=1') && files.linux.includes('--no-extended-tests')],
+    ['Linux rechaza combinaciones contradictorias de tests ampliados', files.linux.includes('EXTENDED_MODE=""') && files.linux.includes('--full-tests/--extended-tests no se puede combinar') && files.linux.includes('--no-extended-tests no se puede combinar')],
+    ['Linux acepta --version con valor separado o con igual y valida SemVer pronto', files.linux.includes('--version=*)') && files.linux.includes('La versión indicada no es SemVer válida') && files.linux.indexOf('La versión indicada no es SemVer válida') < files.linux.indexOf('Comprobando requisitos')],
+    ['Linux valida rutas de driver ausentes y no consume el siguiente flag', files.linux.includes('E2E_DRIVER_PATH') && files.linux.includes('[[ "$1" == -* ]]') && files.linux.includes('--e2e-driver=*)')],
     ['Linux ofrece perfil release comprimido y desarrollo rápido', files.linux.includes('--fast') && files.linux.includes('CARGO_PROFILE_RELEASE_LTO=false') && files.linux.includes('CARGO_PROFILE_RELEASE_LTO=true') && files.linux.includes('CARGO_PROFILE_RELEASE_INCREMENTAL=true') && files.linux.includes('RELEASE_DIR/dev') && files.linux.includes('-dev.AppImage')],
     ['Linux prepara herramientas opcionales del host', files.linux.includes('install_extended_test_tools') && files.linux.includes('gcc-fortran') && files.linux.includes('com.usebottles.bottles')],
     ['Linux evita actualizar todo el sistema al instalar herramientas', files.linux.includes('pacman_install()') && files.linux.includes('LTERMINAL_ALLOW_SYSTEM_UPGRADE') && files.linux.includes('pacman -S --needed --noconfirm')],
@@ -86,7 +108,7 @@ const checks = [
     ['Windows instala automáticamente tauri-driver cuando E2E lo necesita', files.windows.includes('se instalará automáticamente con cargo') && !files.windows.includes("-and $InstallE2eDriver -and") && files.windows.includes('tauri-driver no apareció en PATH')],
     ['Windows prepara Edge WebDriver compatible sin exigir Microsoft Edge', files.windows.includes('Get-WebView2RuntimeVersion') && files.windows.includes('LATEST_RELEASE_') && files.windows.includes('msedgedriver.microsoft.com') && files.windows.includes('sin instalar Microsoft Edge') && files.windows.includes('$env:TAURI_NATIVE_DRIVER = $nativeE2eDriver')],
     ['Linux puede lanzar E2E', files.linux.includes('npm run e2e')],
-    ['Linux aborta la build cuando falla E2E', /if ![\s\S]*npm run e2e; then[\s\S]*E2E falló[\s\S]*exit 1[\s\S]*fi/.test(files.linux)],
+    ['Linux publica el AppImage aunque falle el E2E y deja diagnóstico final', files.linux.includes('if ! TAURI_NATIVE_DRIVER=') && files.linux.includes('post_build_issue "E2E falló') && files.linux.includes('POST_BUILD_FAILURE')],
     ['E2E Linux pasa el driver nativo', files.linux.includes('TAURI_NATIVE_DRIVER=')],
     ['Windows puede lanzar E2E', files.windows.includes("@('run', 'e2e')")],
     ['Windows automatiza la propia release sin recompilar un segundo perfil', files.windows.includes('$env:E2E_BINARY = Join-Path $distDir') && !files.windows.includes("@('run', 'e2e:build')")],
@@ -123,11 +145,12 @@ const checks = [
     ['Build Windows deja terminar el E2E antes de cerrar por sondas estrictas', e2eBlock >= 0 && strictProbeThrow > e2eBlock],
     ['Windows prepara WebView2 antes de generar NSIS', installerBlock >= 0 && installerBinaryBuild > installerBlock && installerLoaderPreparation > installerBinaryBuild && installerBundleBuild > installerLoaderPreparation],
     ['Windows rechaza un instalador NSIS truncado', files.windows.includes('Length -lt 1MB') && files.windows.includes('instalador NSIS parece incompleto')],
+    ['Windows publica el instalador NSIS junto al ZIP y verifica la copia', files.windows.includes('WinSlimTerminal-$version$zipSuffix-x64-setup.exe') && files.windows.includes('Copy-Item -LiteralPath $installerPath.FullName -Destination $installerReleasePath') && files.windows.includes('La copia del instalador NSIS no coincide') && files.windows.includes('SHA256 instalador')],
     ['Windows conserva hashes de todas las variantes de release', files.windows.includes('scripts/update-release-hash.mjs') && files.windows.includes('$checksumManifest') && !files.windows.includes("Set-Content (Join-Path $releaseOut 'SHA256SUMS.txt')")],
     ['Linux conserva artefactos y hashes de todas las variantes de release', files.linux.includes('scripts/update-release-hash.mjs') && files.linux.includes('No borres AppImage ni SHA256SUMS anteriores') && !files.linux.includes('rm -f "$RELEASE_DIR"/LTerminal-*.AppImage')],
     ['El actualizador de hashes hace upsert por artefacto y escribe atómicamente', files.releaseHash.includes('fields[1].replace(/^\\*/, \'\') !== artifact') && files.releaseHash.includes('await rename(temporary, target)') && files.releaseHash.includes('kept.push(`${hash}  ${artifact}`)')],
     ['Windows puede iniciar pruebas Linux cruzadas', files.windows.includes('$CrossLinux') && files.windows.includes('Invoke-CrossLinuxTests')],
-    ['Windows aborta si la build WSL devuelve un código distinto de cero', crossLinuxBlock.includes("$code = Invoke-Native 'wsl.exe'") && crossLinuxBlock.includes('if ($code -ne 0)') && crossLinuxBlock.includes('throw "Las pruebas Linux en WSL fallaron')],
+    ['Windows conserva el artefacto si la build WSL devuelve un código distinto de cero', crossLinuxBlock.includes("$code = Invoke-Native 'wsl.exe'") && crossLinuxBlock.includes('if ($code -ne 0)') && crossLinuxBlock.includes('Add-PostBuildIssue')],
     ['Windows propaga el perfil y exclusiones de tests a WSL', files.windows.includes('$linuxFlags') && files.windows.includes('if ($Fast)') && files.windows.includes('--no-extended-tests')],
     ['Windows instala WSL si falta', files.windows.includes('Microsoft.WSL') && files.windows.includes('--install') && files.windows.includes('Ubuntu')],
     ['Windows convierte la ruta del proyecto para WSL', files.windows.includes('wslpath') && files.windows.includes('wslRoot')],
@@ -139,9 +162,14 @@ const checks = [
     ['Smoke Linux fuerza una ejecución reproducible del AppImage', files.linux.includes('APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}"')],
     ['Linux fija el ajuste WebKit en el AppImage', files.linux.includes('GTK_HOOK') && files.linux.includes('WEBKIT_DISABLE_DMABUF_RENDERER')],
     ['Linux muestra tiempos por paso y tiempo total de build', files.linux.includes('BUILD_STARTED_SECONDS') && files.linux.includes('STEP_STARTED_SECONDS') && files.linux.includes('Tiempo del paso anterior') && files.linux.includes('Tiempo total')],
+    ['Los limpiadores protegen release/ y no la borran como una salida generada', files.cleanerPs1.includes('$ReleaseRoot') && files.cleanerPs1.includes('pertenece a release/:') && !cleanerPsDirectories.includes("'release'") && files.cleanerSh.includes('release_root') && files.cleanerSh.includes('Ruta protegida (release/)') && !cleanerShDirectories.includes(' release')],
+    ['El limpiador Windows cubre temporales E2E, logs AppData y cachés privadas', files.cleanerPs1.includes('winslim-terminal-e2e-captures-*') && files.cleanerPs1.includes('winslim-terminal-webview2-e2e-*') && files.cleanerPs1.includes("Join-Path $dataRoot 'logs'") && files.cleanerPs1.includes("'appimage'" ) && files.cleanerPs1.includes('activePids')],
+    ['El limpiador Linux cubre temporales E2E, logs y cachés sin tocar Tauri global', files.cleanerSh.includes('lterminal-e2e-report.*') && files.cleanerSh.includes('config_root/lterminal') && files.cleanerSh.includes('cache_root/lterminal') && files.cleanerSh.includes('caché global de') && files.cleanerSh.includes('kill -0')],
     ['Linux invalida node_modules de otra plataforma antes de svelte-check', files.linux.includes('linux_native_dependencies_ready') && files.linux.includes('@rollup/rollup-linux-x64-gnu') && files.linux.includes('@esbuild/linux-x64')],
     ['Linux aísla node_modules Windows y lo restaura al terminar', files.linux.includes('NODE_MODULES_RESTORE') && files.linux.includes('restore_node_modules') && files.linux.includes('@tauri-apps/cli-win32-x64-msvc') && files.linux.includes("trap 'cleanup_smoke_process; restore_node_modules' EXIT")],
     ['La cross-build Windows acepta modo no interactivo', files.linuxWindows.includes('--non-interactive') && files.linuxWindows.includes('NON_INTERACTIVE')],
+    ['La cross-build Windows permite fijar la versión antes de compilar', files.linuxWindows.includes('--version') && files.linuxWindows.includes('CURRENT_VERSION') && files.linuxWindows.includes('set-package-version.mjs') && files.linuxWindows.includes('Versión seleccionada')],
+    ['La cross-build Windows valida SemVer antes de comprobar dependencias', files.linuxWindows.includes('La versión indicada no es SemVer válida') && files.linuxWindows.indexOf('La versión indicada no es SemVer válida') < files.linuxWindows.indexOf('ensure_node_and_rust')],
     ['Linux elige una compresión AppImage compatible con su runtime de smoke', files.linux.includes('APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-zstd}"') && files.linux.includes('APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-gzip}"') && files.linux.includes('XZ no es compatible')],
     ['Linux evita la copia conflictiva de GIO TLS', files.linux.includes('libgiognutls.so') && files.linux.includes('rm -f "$APPDIR/usr/lib/gio/modules/libgiognutls.so"')],
     ['Smoke Windows valida el token de arranque', files.windows.includes('$smokeToken')],

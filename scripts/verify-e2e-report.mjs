@@ -74,9 +74,39 @@ if (!responsiveMinimum || responsiveMinimum.passed !== true
     throw new Error('El E2E no registró el mínimo responsive calculado y aplicado.');
 }
 
+const nativeResizes = events.filter((event) => event?.type === 'native-window-resize');
+const nativePlatform = report.host?.platform;
+if (nativeResizes.length < 2
+    || nativeResizes.some((event) => event.passed !== true
+        || event.nativeChanged !== true
+        || event.viewportChanged !== true
+        || event.ptyChanged !== true
+        || (nativePlatform && event.platform !== nativePlatform))) {
+    throw new Error('El E2E no demostró dos redimensionados nativos con viewport y PTY sincronizados.');
+}
+const resizeCaptures = (report.captures ?? [])
+    .filter((capture) => String(capture?.label ?? '').startsWith('window-resize-'));
+if (resizeCaptures.length < 2) {
+    throw new Error('El E2E no conservó las capturas visuales de las transiciones de ventana.');
+}
+
 const tabIsolation = events.find((event) => event?.type === 'tab-isolation');
 if (!tabIsolation || tabIsolation.passed !== true || tabIsolation.tabs < 3) {
     throw new Error('El E2E no demostró sesiones PTY independientes entre pestañas.');
+}
+
+const keyboardShortcuts = events.find((event) => event?.type === 'keyboard-shortcuts');
+if (!keyboardShortcuts || keyboardShortcuts.passed !== true
+    || keyboardShortcuts.newTab !== true
+    || (keyboardShortcuts.nextTab !== true && keyboardShortcuts.nextTabReserved !== true)
+    || keyboardShortcuts.cyclePanes !== true) {
+    throw new Error('El E2E no demostró los atajos de nueva pestaña, navegación y división.');
+}
+const keyboardCaptures = new Set((report.captures ?? [])
+    .filter((capture) => String(capture?.label ?? '').startsWith('atajo-'))
+    .map((capture) => capture.label));
+for (const label of ['atajo-nueva-pestana', 'atajo-pestana-siguiente', 'atajo-division-dos-paneles', 'atajo-division-tres-paneles']) {
+    if (!keyboardCaptures.has(label)) throw new Error(`Falta la captura del atajo ${label}.`);
 }
 
 const shellStartup = events.find((event) => event?.type === 'shell-startup-performance');

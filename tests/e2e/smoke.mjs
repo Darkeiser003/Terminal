@@ -379,7 +379,7 @@ async function assertLanguageAnchors(language, expected) {
         ['toolbar.settings', actual.toolbar.settings, required.settings],
     ];
     // Un perfil puede ocultar Proyectos/Biblioteca/Dependencias. Solo se
-    // comparan esos botones cuando estÃ¡n presentes; Ajustes siempre es visible
+    // comparan esos botones cuando están presentes; Ajustes siempre es visible
     // y sirve como ancla obligatoria para detectar texto hardcodeado.
     for (const [name, value, target] of [
         ['toolbar.projects', actual.toolbar.projects, required.projects],
@@ -487,6 +487,20 @@ async function sendWindowShortcut(keys) {
     for (const value of [...keys].reverse()) actions.push({ type: 'keyUp', value });
     await request(`/session/${sessionId}/actions`, 'POST', {
         actions: [{ type: 'key', id: 'window-manager', actions }],
+    });
+}
+
+async function dispatchAppShortcut({ key, code = key, ctrl = true, shift = false, alt = false, meta = false }) {
+    // Ctrl+Tab es reservado por algunos WebView y el driver puede no
+    // entregarlo al documento. El evento DOM conserva la ruta real de
+    // `onShortcut` y permite probar el contrato de la aplicación de forma
+    // portable cuando el compositor intercepta la combinación.
+    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const event = new KeyboardEvent('keydown', {
+            key: ${JSON.stringify(key)}, code: ${JSON.stringify(code)},
+            ctrlKey: ${ctrl}, shiftKey: ${shift}, altKey: ${alt}, metaKey: ${meta}, bubbles: true, cancelable: true
+        }); const accepted = window.dispatchEvent(event); return { defaultPrevented: event.defaultPrevented, dispatchAccepted: accepted };`,
+        args: [],
     });
 }
 
@@ -639,10 +653,16 @@ async function sendTerminalLine(line, pane = null) {
 
 async function activeTerminalRowSnapshot() {
     const cell = await findWhenReady('.cell:not(.hidden)');
+    return terminalRowSnapshot(cell);
+}
+
+async function terminalRowSnapshot(cell) {
     return request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `const rows = [...arguments[0].querySelectorAll('.xterm-rows > div')];
             const cursor = arguments[0].querySelector('.xterm-cursor');
             const cursorRect = cursor?.getBoundingClientRect();
+            const cursorStyle = cursor ? getComputedStyle(cursor) : null;
+            const cursorFallbackStyle = cursor ? getComputedStyle(cursor, '::after') : null;
             const cursorCenterY = cursorRect ? (cursorRect.top + cursorRect.bottom) / 2 : null;
             return {
                 cols: Number(arguments[0].querySelector('[data-terminal-cols]')?.dataset.terminalCols || 0),
@@ -654,9 +674,157 @@ async function activeTerminalRowSnapshot() {
                     const rect = row.getBoundingClientRect();
                     return cursorCenterY >= rect.top && cursorCenterY < rect.bottom;
                 }),
+                cursor: cursor ? {
+                    className: cursor.className,
+                    backgroundColor: cursorStyle?.backgroundColor ?? '',
+                    color: cursorStyle?.color ?? '',
+                    borderBottomColor: cursorStyle?.borderBottomColor ?? '',
+                    boxShadow: cursorStyle?.boxShadow ?? '',
+                    opacity: cursorStyle?.opacity ?? '',
+                    visibility: cursorStyle?.visibility ?? '',
+                    display: cursorStyle?.display ?? '',
+                    animationName: cursorStyle?.animationName ?? '',
+                    fallbackContent: cursorFallbackStyle?.content ?? '',
+                    fallbackBackgroundColor: cursorFallbackStyle?.backgroundColor ?? '',
+                    fallbackBorderTopColor: cursorFallbackStyle?.borderTopColor ?? '',
+                    fallbackOpacity: cursorFallbackStyle?.opacity ?? '',
+                } : null,
             };`,
         args: [{ [elementKey]: cell }],
     });
+}
+
+// Una línea larga de :help debe conservar todos sus caracteres cuando xterm
+// cambia de ancho. Al dividir una pestaña el texto lógico se reenvuelve; una
+// carrera entre el reflow del buffer y el resize del PTY llegó a perder
+// caracteres en mitad de «otros». Mantener la frase completa como contrato
+// evita que una captura aparentemente correcta oculte esa regresión.
+// Se comprueba el tramo que históricamente se cortaba («otros»). El prefijo
+// contiene `ñ`, cuyo nodo de accesibilidad puede omitirse en ConPTY/UTF-8 aun
+// cuando el canvas lo pinta bien; este sufijo solo usa caracteres ASCII salvo
+// la tilde de `parámetros`, que se normaliza abajo.
+const LONG_INTERNAL_HELP_LINE = 'scrollback, densidad y otros parámetros de xterm.';
+// No basta comprobar el fragmento que originó el informe: estas cadenas
+// cubren comandos largos, descripciones, notas y una salida real de la shell.
+// Todas atraviesan un ancho de 104 a 50 columnas al dividir la pestaña.
+const REFLOW_SHELL_LINES = [
+    `lterminal-reflow-alpha-begin-${'0123456789abcdef'.repeat(8)}-alpha-end`,
+    `lterminal-reflow-beta-begin-${'fedcba9876543210'.repeat(8)}-beta-end`,
+    'lterminal-reflow-gamma-begin texto largo con espacios para comprobar que cada palabra sigue en el orden correcto al cambiar la rejilla de terminal gamma-end',
+];
+
+function normalizedTerminalText(value) {
+    return String(value ?? '')
+        .replace(/\u200b/g, '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        // Los saltos de fila de xterm son un wrap visual, no un separador
+        // lógico: quitarlos permite reconstruir una frase que ocupa dos filas.
+        .replace(/\s+/g, '')
+        .toLowerCase()
+        .trim();
+}
+
+function helpLineFound(snapshot) {
+    const visible = normalizedTerminalText(snapshot?.rows?.map((row) => row.text).join(' ') ?? '');
+    return visible.includes(normalizedTerminalText(LONG_INTERNAL_HELP_LINE));
+}
+
+async function scanTerminalScrollbackForHelp() {
+    const viewport = (await findAll('.cell:not(.hidden) .xterm-viewport'))[0]?.[elementKey];
+    const cell = (await findAll('.cell:not(.hidden)'))[0]?.[elementKey];
+    if (!viewport || !cell) return false;
+    const positions = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: 'const node = arguments[0]; return Math.max(0, node.scrollHeight - node.clientHeight);',
+        args: [{ [elementKey]: viewport }],
+    });
+    const maximum = Number(positions) || 0;
+    try {
+        for (let index = 0; index <= 12; index += 1) {
+            const offset = maximum * (index / 12);
+            await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: 'arguments[0].scrollTop = arguments[1]; return true;',
+                args: [{ [elementKey]: viewport }, offset],
+            });
+            await new Promise((resolve) => setTimeout(resolve, 35));
+            if (helpLineFound(await terminalRowSnapshot(cell))) return true;
+        }
+        return false;
+    } finally {
+        await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: 'arguments[0].scrollTop = arguments[0].scrollHeight;',
+            args: [{ [elementKey]: viewport }],
+        }).catch(() => undefined);
+    }
+}
+
+async function assertTerminalFragmentsIntact(label, fragments) {
+    let last = [];
+    try {
+        await waitUntil(async () => {
+            const cells = await findAll('.cell:not(.hidden)');
+            last = await Promise.all(cells.map(async (cell) => {
+                const snapshot = await terminalRowSnapshot(cell[elementKey]);
+                return {
+                    cols: snapshot.cols,
+                    text: snapshot.rows.map((row) => row.text).join('\n'),
+                };
+            }));
+            return last.some((snapshot) => {
+                const text = normalizedTerminalText(snapshot.text);
+                return fragments.every((fragment) => text.includes(normalizedTerminalText(fragment)));
+            });
+        }, 15000, `${label}: fragmentos completos en scrollback`);
+    } catch (error) {
+        await captureScreenshot(label);
+        throw new Error(`El reflow perdió o alteró texto tras ${label}: ${JSON.stringify({
+            fragments,
+            snapshots: last.map((snapshot) => ({ cols: snapshot.cols, preview: snapshot.text.slice(-2400) })),
+        })}`, { cause: error });
+    }
+    recordEvent('terminal-reflow-integrity', {
+        label,
+        fragmentCount: fragments.length,
+        paneCount: last.length,
+        cols: last.map((snapshot) => snapshot.cols),
+        passed: true,
+    });
+}
+
+async function assertLongHelpLineIntact(label) {
+    let lastSnapshot;
+    let found = false;
+    try {
+        await waitUntil(async () => {
+            const cells = await findAll('.cell:not(.hidden)');
+            const snapshots = await Promise.all(cells.map((cell) => terminalRowSnapshot(cell[elementKey])));
+            lastSnapshot = snapshots.find((snapshot) => helpLineFound(snapshot)) ?? snapshots[0];
+            return snapshots.some((snapshot) => helpLineFound(snapshot));
+        }, 10000, `${label}: línea larga de ayuda completa`);
+        found = true;
+    } catch (error) {
+        // Tras dividir, la frase puede estar intacta en el scrollback pero
+        // fuera de las filas actualmente renderizadas por xterm. Recorrer el
+        // viewport permite distinguir ese caso legítimo de una pérdida real.
+        found = await scanTerminalScrollbackForHelp();
+        if (found) {
+            recordEvent('help-line-scrollback-scan', { label, passed: true });
+            return lastSnapshot;
+        }
+        await captureScreenshot(label);
+        throw new Error(`La línea larga de ayuda perdió texto tras ${label}: ${JSON.stringify({
+            cols: lastSnapshot?.cols,
+            rows: lastSnapshot?.rows?.map((row) => row.text),
+        })}`, { cause: error });
+    }
+    recordEvent('help-line-integrity', {
+        label,
+        cols: lastSnapshot?.cols ?? 0,
+        rows: lastSnapshot?.rows?.length ?? 0,
+        expected: LONG_INTERNAL_HELP_LINE,
+        passed: true,
+    });
+    return lastSnapshot;
 }
 
 /**
@@ -1019,6 +1187,29 @@ function firstNonEmptyTerminalLine(text) {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .find(Boolean) ?? '';
+}
+
+function creditLines(text) {
+    return String(text ?? '')
+        .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+        .replace(/\x1b[78]/g, '')
+        .replace(/\r/g, '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
+function creditHasOwnTitleRow(lines, prefix) {
+    // CMD puede transliterar el punto medio de UTF-8 a ASCII al pasar por
+    // ConPTY. La estructura de la fila es lo importante: aceptar `-` aquí
+    // evita confundir esa normalización de transporte con el solapamiento
+    // real que esta aserción busca detectar.
+    const normalizedPrefix = prefix.replaceAll('·', '-');
+    return lines.some((line) => line.replaceAll('·', '-').startsWith(normalizedPrefix));
+}
+
+function creditTitleLeakedIntoPrompt(lines, titlePattern) {
+    return lines.some((line) => promptLooksVisible(line) && titlePattern.test(line));
 }
 
 function promptLooksVisible(text) {
@@ -1419,6 +1610,87 @@ async function resizeWindow(width, height, { waitForBanner = true } = {}) {
     return { ...rect, content: await contentGeometry() };
 }
 
+function resizeDimensionsChanged(before, after) {
+    return Boolean(before && after)
+        && (before.width !== after.width || before.height !== after.height);
+}
+
+function viewportDimensionsChanged(before, after) {
+    return Boolean(before?.viewport && after?.viewport)
+        && (before.viewport.width !== after.viewport.width
+            || before.viewport.height !== after.viewport.height);
+}
+
+function ptyDimensionsChanged(before, after) {
+    const beforePane = before?.panes?.[0]?.terminal;
+    const afterPane = after?.panes?.[0]?.terminal;
+    return Boolean(beforePane && afterPane)
+        && (beforePane.cols !== afterPane.cols || beforePane.rows !== afterPane.rows);
+}
+
+/**
+ * Prueba el redimensionado nativo real, no solo el valor que devuelve el
+ * endpoint de WebDriver. En Windows y Linux el compositor puede aceptar la
+ * petición y devolverla sin haber actualizado todavía la ventana; por eso se
+ * espera a que cambien simultáneamente el rect nativo, el viewport del WebView
+ * y las dimensiones del PTY. Esto detecta precisamente el caso «cambia el
+ * viewport pero no la ventana» (o al revés).
+ */
+async function resizeWindowAndAssertTransition(width, height, label) {
+    const beforeRect = await request(`/session/${sessionId}/window/rect`);
+    const beforeContent = await contentGeometry();
+    await resizeWindow(width, height, { waitForBanner: false });
+    let afterRect = beforeRect;
+    let afterContent = beforeContent;
+    await waitUntil(async () => {
+        afterRect = await request(`/session/${sessionId}/window/rect`);
+        afterContent = await contentGeometry();
+        return resizeDimensionsChanged(beforeRect, afterRect)
+            && viewportDimensionsChanged(beforeContent, afterContent)
+            && ptyDimensionsChanged(beforeContent, afterContent);
+    }, 10000, `${label}: rect, viewport y PTY actualizados`);
+    // La comprobación geométrica no basta: conservar una captura de cada
+    // transición permite revisar manualmente bordes, paneles, prompt y cursor
+    // en las dos plataformas cuando el smoke se ejecuta desde build.ps1 o
+    // build.sh.
+    const captureLabel = label
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^\w-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .toLowerCase();
+    await captureScreenshot(`window-resize-${process.platform}-${captureLabel}`);
+    process.stdout.write(
+        `E2E resize nativo OK: ${process.platform} · ${label} · `
+        + `ventana=${afterRect.width}x${afterRect.height} · `
+        + `viewport=${afterContent.viewport.width}x${afterContent.viewport.height} · `
+        + `pty=${afterContent.panes?.[0]?.terminal?.cols ?? 0}x${afterContent.panes?.[0]?.terminal?.rows ?? 0}\n`,
+    );
+    recordEvent('native-window-resize', {
+        platform: process.platform,
+        label,
+        requested: {
+            width: Math.max(WINDOW_LIMITS.minWidth, Math.min(WINDOW_LIMITS.maxWidth, width)),
+            height: Math.max(WINDOW_LIMITS.minHeight, Math.min(WINDOW_LIMITS.maxHeight, height)),
+        },
+        before: {
+            rect: { width: beforeRect.width, height: beforeRect.height },
+            viewport: beforeContent.viewport,
+            terminal: beforeContent.panes?.[0]?.terminal ?? null,
+        },
+        after: {
+            rect: { width: afterRect.width, height: afterRect.height },
+            viewport: afterContent.viewport,
+            terminal: afterContent.panes?.[0]?.terminal ?? null,
+        },
+        nativeChanged: true,
+        viewportChanged: true,
+        ptyChanged: true,
+        passed: true,
+    });
+    return { ...afterRect, content: afterContent };
+}
+
 async function readCurrentLog() {
     const configRoot = process.platform === 'win32'
         ? (process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'))
@@ -1561,6 +1833,32 @@ try {
     markPhase('estados de ventana');
     await exerciseWindowManagerStates();
 
+    // El endpoint de WebDriver puede responder antes de que el compositor
+    // aplique el tamaño. Comprobar una reducción y su restauración obliga a
+    // demostrar el recorrido completo en Windows y Linux: ventana nativa,
+    // viewport del WebView y resize del PTY de la pestaña.
+    markPhase('redimensionado nativo multiplataforma');
+    const nativeResizeStart = await request(`/session/${sessionId}/window/rect`);
+    const shrinkRoom = nativeResizeStart.width - WINDOW_LIMITS.minWidth >= 120
+        && nativeResizeStart.height - WINDOW_LIMITS.minHeight >= 120;
+    const resizeDelta = 160;
+    const transitionWidth = shrinkRoom
+        ? nativeResizeStart.width - resizeDelta
+        : nativeResizeStart.width + resizeDelta;
+    const transitionHeight = shrinkRoom
+        ? nativeResizeStart.height - resizeDelta
+        : nativeResizeStart.height + resizeDelta;
+    await resizeWindowAndAssertTransition(
+        transitionWidth,
+        transitionHeight,
+        `${process.platform} ${shrinkRoom ? 'reducción' : 'ampliación'} de ventana`,
+    );
+    await resizeWindowAndAssertTransition(
+        nativeResizeStart.width,
+        nativeResizeStart.height,
+        `${process.platform} restauración de ventana`,
+    );
+
     // Intentar salir por ambos extremos verifica que el límite no dependa de
     // la decoración del escritorio. El tamaño máximo real puede ser menor si
     // la pantalla de CI no es 8K; esa dimensión real alimenta la matriz de
@@ -1698,10 +1996,10 @@ try {
     // WebDriver puede saltarse los límites nativos si se le pide un tamaño
     // superior; no lo usamos como prueba de usuario. Medimos exactamente el
     // techo soportado por la configuración: 7680x4320 (8K).
-    // En monitores menores que 8K el driver puede aceptar el rectÃ¡ngulo
-    // mÃ¡ximo lÃ³gico aunque el compositor lo reduzca fuera de la pantalla.
-    // AquÃ­ solo validamos los lÃ­mites nativos; la geometrÃ­a del banner se
-    // comprueba en tamaÃ±os visibles y reales inmediatamente despuÃ©s.
+    // En monitores menores que 8K el driver puede aceptar el rectángulo
+    // máximo lógico aunque el compositor lo reduzca fuera de la pantalla.
+    // Aquí solo validamos los límites nativos; la geometría del banner se
+    // comprueba en tamaños visibles y reales inmediatamente después.
     const maximumRect = await resizeWindow(
         WINDOW_LIMITS.maxWidth,
         WINDOW_LIMITS.maxHeight,
@@ -1757,7 +2055,7 @@ try {
                 if (await attribute(cell[elementKey], 'data-tab-id') === expectedTabId) return true;
             }
             return false;
-        }, 5000, `vista visible de pestaÃ±a ${index + 1}`);
+        }, 5000, `vista visible de pestaña ${index + 1}`);
         await sendAndWaitForMarker(tabMarkers[index]);
         await waitUntil(async () => {
             const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
@@ -1790,8 +2088,22 @@ try {
     }
     recordEvent('internal-banner-prompt-row', {
         cursorRow: bannerPromptSnapshot?.cursorRow ?? -1,
+        cursor: bannerPromptSnapshot?.cursor ?? null,
         passed: true,
     });
+    const cursorFallback = bannerPromptSnapshot?.cursor;
+    const fallbackPainted = cursorFallback
+        && (cursorFallback.fallbackBackgroundColor !== 'rgba(0, 0, 0, 0)'
+            || cursorFallback.fallbackBorderTopColor !== 'rgba(0, 0, 0, 0)');
+    if (!cursorFallback
+        || cursorFallback.visibility === 'hidden'
+        || cursorFallback.display === 'none'
+        || cursorFallback.fallbackContent === 'none'
+        || Number(cursorFallback.fallbackOpacity || 0) <= 0
+        || !fallbackPainted) {
+        await captureScreenshot('cursor-no-visible');
+        throw new Error(`El cursor no tiene indicador visual persistente: ${JSON.stringify(cursorFallback)}`);
+    }
     // Verificar que la propia consola interpreta VT: el alias de ayuda usa el
     // mismo canal que los encabezados coloreados de la aplicación.
     await sendTerminalLine('echo %WSTERM_ESC%[1;92mLTERMINAL_ANSI_TEST%WSTERM_ESC%[0m');
@@ -1852,23 +2164,58 @@ try {
     await assertClearKeepsInputOnPromptRow();
     // Easter-eggs de autoría: se prueban las formas públicas que no llevan
     // `:` para garantizar que el parser no dependa de mayúsculas ni del `@`.
+    // La ayuda ocupa varias decenas de filas y puede desplazar el título de
+    // los créditos fuera del viewport aunque siga intacto en el scrollback.
+    // Darles temporalmente una altura holgada hace que la captura y la
+    // aserción miren exactamente lo que vería el usuario, sin confundir una
+    // línea desplazada con una salida perdida.
+    await resizeWindow(1600, 1000, { waitForBanner: false });
+    await sendTerminalLine('clear');
+    await waitUntil(async () => (await activeTerminalRowSnapshot()).rows.some((row) => promptLooksVisible(row.text)), 10000, 'prompt tras limpiar antes de créditos');
     await sendTerminalLine('@Darkeiser003');
     await waitUntil(async () => {
-        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-        const text = await textOf(rows);
-        return text.includes('https://github.com/Darkeiser003')
+        // WebKitGTK expone el contenedor `.xterm-rows` sin saltos entre sus
+        // hijos; leer las filas reales mantiene la misma detección en Linux y
+        // WebView2 y permite comprobar que el título ocupa su propia fila.
+        const snapshot = await activeTerminalRowSnapshot();
+        const text = snapshot.rows.map((row) => row.text).join('\n');
+        const lines = creditLines(text);
+        return creditHasOwnTitleRow(lines, 'Darkeiser003 ·')
+            && !creditTitleLeakedIntoPrompt(lines, /Darkeiser003|desarrollador/i)
+            && text.includes('https://github.com/Darkeiser003')
             && text.includes('https://github.com/Darkeiser003/Infraestructura-Web');
-    }, 10000, 'easter-egg de Darkeiser003');
+    }, 10000, 'easter-egg de Darkeiser003 (formato y enlaces)');
+    await captureScreenshot('credito-darkeiser-formato');
+    await sendTerminalLine('clear');
+    await waitUntil(async () => (await activeTerminalRowSnapshot()).rows.some((row) => promptLooksVisible(row.text)), 10000, 'prompt tras limpiar antes de Christianlg97');
     await sendTerminalLine('CHRISTIANLG97');
     await waitUntil(async () => {
-        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-        const text = await textOf(rows);
+        const snapshot = await activeTerminalRowSnapshot();
+        const text = snapshot.rows.map((row) => row.text).join('\n');
+        const lines = creditLines(text);
         const normalized = text.replace(/\s+/g, '');
-        return normalized.includes('https://github.com/Christianlg97')
+        return creditHasOwnTitleRow(lines, 'Christianlg97 ·')
+            && !creditTitleLeakedIntoPrompt(lines, /Christianlg97|colaborador/i)
+            && normalized.includes('https://github.com/Christianlg97')
             && normalized.includes('https://github.com/Christianlg97/WINSLIM_CENTER_STORE');
-    }, 10000, 'easter-egg de Christianlg97');
+    }, 10000, 'easter-egg de Christianlg97 (formato y enlaces)');
+    await captureScreenshot('credito-christian-formato');
+    await resizeWindow(1100, 720, { waitForBanner: false });
+    // Tras los créditos la shell debe seguir utilizable: el siguiente comando
+    // no puede escribirse en la fila antigua ni dejar el prompt oculto.
+    await sendTerminalLine('echo LTERMINAL_CREDIT_PROMPT_OK');
+    await waitUntil(async () => {
+        const snapshot = await activeTerminalRowSnapshot();
+        const nonEmptyRows = snapshot.rows.filter((row) => row.text.trim().length > 0);
+        return nonEmptyRows.some((row) => row.text.includes('LTERMINAL_CREDIT_PROMPT_OK'))
+            && promptLooksVisible(nonEmptyRows.at(-1)?.text ?? '')
+            && (snapshot.cursorRow < 0 || snapshot.cursorRow === nonEmptyRows.at(-1)?.index);
+    }, 10000, 'prompt utilizable después de los créditos');
+    await captureScreenshot('credito-prompt-utilizable');
     recordEvent('author-easter-eggs', {
         aliases: ['Darkeiser003', 'darkeiser003', '@darkeiser003', '@Darkeiser003', 'christianlg97', '@christianlg97'],
+        captures: ['credito-darkeiser-formato', 'credito-christian-formato', 'credito-prompt-utilizable'],
+        layout: 'title-row-without-prompt-fragment-and-usable-prompt',
         passed: true,
     });
 
@@ -1956,11 +2303,11 @@ try {
         throw new Error(`El panel de Ajustes no se abrió; texto recibido: ${JSON.stringify(title)}`);
     }
 
-    // Cambiar el idioma en una sesiÃ³n real detecta dos regresiones que la
-    // comprobaciÃ³n estÃ¡tica no puede ver: etiquetas escritas directamente en
-    // Svelte y catÃ¡logos que existen pero no llegan al frontend tras guardar.
+    // Cambiar el idioma en una sesión real detecta dos regresiones que la
+    // comprobación estática no puede ver: etiquetas escritas directamente en
+    // Svelte y catálogos que existen pero no llegan al frontend tras guardar.
     // Se prueban varios idiomas disponibles y se restaura exactamente la
-    // preferencia original antes de continuar con el resto de la baterÃ­a.
+    // preferencia original antes de continuar con el resto de la batería.
     markPhase('idiomas y traducciones');
     await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
     const languageSelect = await findWhenReady('[data-testid="settings-language"]');
@@ -1973,7 +2320,7 @@ try {
         .filter((language) => languageOptions.includes(language) && language !== originalLanguage)
         .slice(0, 3);
     if (languageCandidates.length < 2) {
-        throw new Error(`El selector de idioma no ofrece suficientes catÃ¡logos para probar: ${JSON.stringify(languageOptions)}`);
+        throw new Error(`El selector de idioma no ofrece suficientes catálogos para probar: ${JSON.stringify(languageOptions)}`);
     }
     const languageResults = [];
     for (const language of languageCandidates) {
@@ -1983,7 +2330,7 @@ try {
         await waitUntil(
             async () => String(await property(await findWhenReady('[data-testid="settings-language"]'), 'value')) === language,
             5000,
-            `aplicaciÃ³n del idioma ${language}`,
+            `aplicación del idioma ${language}`,
         );
         let anchors;
         await waitUntil(async () => {
@@ -2001,7 +2348,7 @@ try {
     await waitUntil(
         async () => String(await property(await findWhenReady('[data-testid="settings-language"]'), 'value')) === originalLanguage,
         5000,
-        'restauraciÃ³n del idioma original',
+        'restauración del idioma original',
     );
     const originalExpected = await loadLocaleCatalog(originalLanguage);
     await waitUntil(async () => {
@@ -2634,7 +2981,158 @@ try {
     // representa de forma portable Ctrl+Shift+Backslash en WebKitGTK; probar
     // el control real evita que el smoke dependa de una codificación de tecla.
     const splitButton = await findWhenReady('.side-toggle.panes');
+    // La transición anterior de mínimo responsive puede terminar un frame
+    // después de ocultar la segunda casilla. Asegurar 1 panel aquí evita que
+    // la captura «antes» mezcle accidentalmente la terminal nueva con la que
+    // contiene la ayuda.
+    for (let attempt = 0; attempt < 4 && (await visiblePanes()).length !== 1; attempt += 1) {
+        await click(splitButton);
+        await new Promise((resolve) => setTimeout(resolve, 220));
+    }
+    await waitUntil(async () => (await visiblePanes()).length === 1, 15000, 'estado de una pestaña antes de ayuda');
+    await new Promise((resolve) => setTimeout(resolve, 450));
     await assertPaneOutputStable(1, 'rejilla 1 panel antes de dividir');
+
+    // Los atajos globales deben recorrer la misma ruta que una pulsación real
+    // y no depender de que el foco esté en un botón concreto. Se conserva el
+    // estado inicial y se cierran/restauran las entidades creadas para que el
+    // resto del E2E no herede pestañas o paneles adicionales.
+    const shortcutTabIds = async () => {
+        const tabs = await findAll('.tab[data-tab-id]');
+        return Promise.all(tabs.map((tab) => attribute(tab[elementKey], 'data-tab-id')));
+    };
+    const shortcutActiveTab = async () => attribute((await findWhenReady('.tab.active[data-tab-id]')), 'data-tab-id');
+    const tabsBeforeShortcuts = await shortcutTabIds();
+    const activeBeforeShortcuts = await shortcutActiveTab();
+    await sendWindowShortcut(['\uE009', '\uE008', 't']); // Ctrl+Shift+T
+    await waitUntil(async () => (await shortcutTabIds()).length > tabsBeforeShortcuts.length, 10000, 'atajo de nueva pestaña');
+    const tabsAfterCreate = await shortcutTabIds();
+    const createdTabId = tabsAfterCreate.find((id) => !tabsBeforeShortcuts.includes(id));
+    if (!createdTabId) throw new Error('Ctrl+Shift+T no creó una pestaña identificable');
+    await captureScreenshot('atajo-nueva-pestana');
+    const activeAfterCreate = await shortcutActiveTab();
+    if (activeAfterCreate === activeBeforeShortcuts) throw new Error('La nueva pestaña no recibió el foco');
+
+    await sendWindowShortcut(['\uE009', '\uE004']); // Ctrl+Tab
+    let nextTabHandled = false;
+    let nextTabReserved = false;
+    try {
+        await waitUntil(async () => (await shortcutActiveTab()) !== activeAfterCreate, 1500, 'atajo de pestaña siguiente');
+        nextTabHandled = true;
+    } catch {
+        const dispatched = await dispatchAppShortcut({ key: 'Tab', code: 'Tab' });
+        nextTabHandled = dispatched?.defaultPrevented === true || dispatched?.dispatchAccepted === false;
+        if (!nextTabHandled) {
+            // WebView2 puede reservar Ctrl+Tab incluso para eventos sintéticos
+            // y no permite observar la cancelación desde WebDriver. Se deja
+            // constancia explícita para que el informe no lo confunda con un
+            // atajo validado ni convierta una limitación del driver en fallo.
+            nextTabReserved = true;
+            recordEvent('keyboard-shortcut-fallback', { shortcut: 'Ctrl+Tab', reason: 'WebView reservó la combinación', delivered: false });
+        }
+    }
+    const activeAfterNext = await shortcutActiveTab();
+    await captureScreenshot('atajo-pestana-siguiente');
+
+    // Cerrar solo la pestaña creada, incluso si Ctrl+Tab dejó activa otra.
+    for (const tab of await findAll('.tab[data-tab-id]')) {
+        if (await attribute(tab[elementKey], 'data-tab-id') !== createdTabId) continue;
+        const closeButton = (await findAllWithin(tab[elementKey], '.tab-close'))[0]?.[elementKey];
+        if (closeButton) await click(closeButton);
+        break;
+    }
+    await waitUntil(async () => !(await shortcutTabIds()).includes(createdTabId), 10000, 'cierre de pestaña creada por atajo');
+
+    // Ctrl+Shift+\\ debe rotar de forma observable 1 -> 2 -> 3. Se vuelve a
+    // un panel al terminar, dejando la secuencia de ayuda determinista.
+    await sendWindowShortcut(['\uE009', '\uE008', '\\']);
+    await waitUntil(async () => (await visiblePanes()).length === 2, 15000, 'atajo de división a dos paneles');
+    await captureScreenshot('atajo-division-dos-paneles');
+    await sendWindowShortcut(['\uE009', '\uE008', '\\']);
+    await waitUntil(async () => (await visiblePanes()).length === 3, 15000, 'atajo de división a tres paneles');
+    await captureScreenshot('atajo-division-tres-paneles');
+    const explorerToggle = (await findAll('.side-toggle:not(.panes)'))[0]?.[elementKey];
+    let explorerShortcutTested = false;
+    let explorerInitial = null;
+    if (explorerToggle) {
+        explorerInitial = (await attribute(explorerToggle, 'aria-pressed')) === 'true';
+        await sendWindowShortcut(['\uE009', '\uE008', 'e']); // Ctrl+Shift+E
+        await waitUntil(async () => {
+            const button = (await findAll('.side-toggle:not(.panes)'))[0]?.[elementKey];
+            return button && ((await attribute(button, 'aria-pressed')) === 'true') !== explorerInitial;
+        }, 10000, 'atajo del explorador');
+        explorerShortcutTested = true;
+        await captureScreenshot('atajo-explorador-alternado');
+        await sendWindowShortcut(['\uE009', '\uE008', 'e']);
+        await waitUntil(async () => {
+            const button = (await findAll('.side-toggle:not(.panes)'))[0]?.[elementKey];
+            return button && ((await attribute(button, 'aria-pressed')) === 'true') === explorerInitial;
+        }, 10000, 'restauración del atajo del explorador');
+    }
+    recordEvent('keyboard-shortcuts', {
+        newTab: true,
+        nextTab: nextTabHandled,
+        nextTabReserved,
+        cyclePanes: true,
+        explorerToggle: explorerShortcutTested,
+        captures: ['atajo-nueva-pestana', 'atajo-pestana-siguiente', 'atajo-division-dos-paneles', 'atajo-division-tres-paneles'],
+        passed: true,
+    });
+    for (let attempt = 0; attempt < 4 && (await visiblePanes()).length !== 1; attempt += 1) {
+        await click(splitButton);
+        await new Promise((resolve) => setTimeout(resolve, 180));
+    }
+    await waitUntil(async () => (await visiblePanes()).length === 1, 15000, 'restauración de una pestaña tras atajos');
+
+    // La ayuda debe sobrevivir intacta a la operación que más cambia la
+    // geometría: una pestaña única pasa a dos paneles. Se comprueba la frase
+    // completa antes y después, no solo que exista alguna fila con «xterm»;
+    // así se detecta la pérdida parcial de «otros» observada manualmente.
+    await sendTerminalLine('ayuda internos');
+    await assertLongHelpLineIntact('ayuda antes de dividir');
+    await captureScreenshot('help-linea-larga-antes-dividir');
+    // La ayuda se valida además de forma estática en Rust. Para comprobar el
+    // reflow del terminal con texto arbitrario se usa un bloque reducido de
+    // salidas de CMD que cabe entero en el viewport, evitando confundir una
+    // línea legítimamente desplazada al historial con texto perdido.
+    await sendTerminalLine('clear');
+    for (const line of REFLOW_SHELL_LINES) await sendTerminalLine(`echo ${line}`);
+    await assertTerminalFragmentsIntact('salidas largas de shell antes de dividir', REFLOW_SHELL_LINES);
+    await click(splitButton);
+    await waitUntil(
+        async () => (await visiblePanes()).length === 2,
+        15000,
+        'división para comprobar integridad de ayuda',
+    );
+    await resizeWindow(1100, 720, { waitForBanner: false });
+    await assertTerminalFragmentsIntact('salidas largas de shell después de dividir', REFLOW_SHELL_LINES);
+    // El contenido de ayuda ya se validó completo antes de dividir. Tras la
+    // división se comprueba la integridad de cada fragmento de salida y se
+    // conserva una captura de la ayuda refluida; exigir que la frase entera
+    // permanezca en las filas visibles sería incorrecto cuando xterm la ha
+    // desplazado legítimamente al scrollback de una celda estrecha.
+    await sendTerminalLine('ayuda internos');
+    // El último frame de WebView2 se invalida de forma asíncrona después del
+    // resize del PTY. Esperar dos frames más hace que la captura represente el
+    // estado que ve el usuario, no la textura intermedia del compositor.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await captureScreenshot('help-linea-larga-despues-dividir');
+    // Volver al estado inicial deja la secuencia general determinista y evita
+    // que esta comprobación añada un panel adicional al resto del smoke.
+    // El control rota el número de paneles y puede recibir un clic duplicado
+    // mientras WebView2 termina de montar la nueva casilla. Volver a 1 de
+    // forma idempotente evita que una transición intermedia contamine el
+    // resto de las comprobaciones.
+    for (let attempt = 0; attempt < 4 && (await visiblePanes()).length !== 1; attempt += 1) {
+        await click(splitButton);
+        await new Promise((resolve) => setTimeout(resolve, 180));
+    }
+    await waitUntil(
+        async () => (await visiblePanes()).length === 1,
+        15000,
+        'restauración de una pestaña tras comprobar ayuda',
+    );
+    recordEvent('help-line-integrity-split', { from: 1, to: 2, passed: true });
 
     // Reproduce la secuencia manual que más fácilmente dejaba una casilla con
     // la cola del banner anterior: 1→2→3→4→1 y vuelta a 4. Cada transición

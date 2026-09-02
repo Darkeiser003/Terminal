@@ -10,7 +10,8 @@ fn main() {
 /// ahí con `bundle.resources`; en desarrollo hay que ponerla a mano, porque el
 /// binario vive en `target/<perfil>/`.
 ///
-/// El porqué de no usar el ConPTY del sistema está en `vendor/conpty/README.md`.
+/// La razón de no usar el ConPTY del sistema y la política de vendorización se
+/// documentan en la sección «conpty.dll» del README raíz.
 fn copy_conpty_next_to_executable() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;

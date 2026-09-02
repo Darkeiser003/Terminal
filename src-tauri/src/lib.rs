@@ -116,7 +116,8 @@ pub fn run() {
     if platform::host().is_windows() && conpty.is_none() {
         // Sin ella la app arranca igual, pero en un Windows recortado las
         // pestañas se quedarán en blanco varios minutos antes de fallar. Ver
-        // vendor/conpty/README.md.
+        // La explicación completa se mantiene en la sección «conpty.dll» del
+        // README raíz, junto con los pasos de la build.
         log_error!(
             "Falta conpty.dll junto al ejecutable: se usará el ConPTY del sistema, \
              que en algunos Windows no consigue arrancar la shell"
@@ -162,8 +163,8 @@ pub fn run() {
                 {
                     // Algunos WebView2 recortados arrancan el proceso GPU aun
                     // con `--disable-gpu` y terminan antes de que EdgeDriver
-                    // pueda crear la sesiÃ³n. Mantener el GPU en proceso y
-                    // desactivar la composiciÃ³n evita ese crash solo en E2E.
+                    // pueda crear la sesión. Mantener el GPU en proceso y
+                    // desactivar la composición evita ese crash solo en E2E.
                     browser_args
                         .push_str(" --disable-gpu --disable-gpu-compositing --in-process-gpu");
                 }

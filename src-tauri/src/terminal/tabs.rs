@@ -273,7 +273,8 @@ fn script_aliases_for(env: &Environment) -> Vec<crate::alias_profiles::ScriptAli
 /// limpieza. Los REPL, contenedores y dispositivos no lo reciben: su prompt
 /// inicial no debe quedar retenido esperando un marcador que nunca llegará.
 fn waits_for_initial_clear(env: &Environment) -> bool {
-    crate::alias_profiles::transport_loads_host_files(env.transport) && !env.repl
+    let is_repl = env.repl || env.kind == crate::environments::ShellKind::Repl;
+    crate::alias_profiles::transport_loads_host_files(env.transport) && !is_repl
 }
 
 fn manual_aliases_from_text(text: &str) -> Vec<crate::alias_profiles::ScriptAlias> {
@@ -438,7 +439,8 @@ struct Tab {
     /// rejilla anterior y después intentaba refluirlo encima del prompt.
     pending_init_command: Option<String>,
     /// Para transportes sin script de inicialización (Docker/ADB/Wine), el
-    /// banner se entrega como salida PTY en el primer resize real.
+    /// banner se entrega como salida PTY en el primer resize real. Los REPL
+    /// dejan este indicador vacío para no intercalar texto con su prompt.
     initial_banner_pending: bool,
     /// Carpeta que el panel «Aquí» está escaneando para esta pestaña.
     here_scripts_dir: Option<String>,
@@ -618,7 +620,7 @@ impl TabManager {
                 return;
             };
             tab.ready = true;
-            // Docker/ADB/Wine no tienen un script de inicialización donde
+            // Los transportes sin script de inicialización no tienen dónde
             // anteponer el banner. Emitirlo antes de vaciar la cola garantiza
             // que un prompt temprano nunca quede por encima del fastfetch.
             let banner = if tab.initial_banner_pending {
@@ -908,24 +910,42 @@ impl TabManager {
                 // imprime una sola vez dentro de esa inicialización; para los
                 // transportes sin archivos lo entrega el backend por PTY.
                 let t = crate::i18n::Translator::new(&active_language());
+                let is_repl = env.repl || env.kind == crate::environments::ShellKind::Repl;
                 let aliases_started = Instant::now();
-                let aliases = script_aliases_for(env);
+                // Un REPL no carga aliases ni archivos de sesión. Evitar el
+                // escaneo de la Biblioteca aquí hace que Python/Ruby/Node
+                // puedan mostrar su prompt sin esperar a la detección de
+                // scripts del resto de la aplicación.
+                let aliases = if is_repl {
+                    Vec::new()
+                } else {
+                    script_aliases_for(env)
+                };
                 let aliases_ms = aliases_started.elapsed().as_millis();
                 // La fachada devuelve siempre None fuera de Windows. Así el
                 // alias NSudo no puede filtrarse a builds Linux ni siquiera si
                 // existe un ejecutable con ese nombre en PATH.
                 let nsudo_path = crate::platform::nsudo_path();
                 let banner_started = Instant::now();
-                let banner = crate::system_info::build_banner(
-                    &env.label,
-                    crate::identity::current().name,
-                    viewport.cols,
-                    viewport.rows,
-                    pane_count,
-                    &t,
-                );
+                let banner = if is_repl {
+                    String::new()
+                } else {
+                    crate::system_info::build_banner(
+                        &env.label,
+                        crate::identity::current().name,
+                        viewport.cols,
+                        viewport.rows,
+                        pane_count,
+                        &t,
+                    )
+                };
                 let build_banner_ms = banner_started.elapsed().as_millis();
-                let show_banner = crate::preferences::current().show_system_banner;
+                // Los REPL tienen una línea de entrada propia; su prompt no
+                // puede compartir scrollback con una inyección de fastfetch.
+                // La capa de archivos también lo filtra, pero mantenerlo aquí
+                // evita marcar la pestaña como pendiente de banner durante la
+                // carrera entre el primer prompt y el resize del xterm.
+                let show_banner = crate::preferences::current().show_system_banner && !is_repl;
                 let session_files_started = Instant::now();
                 let session_files = crate::session_files::write_session_files(
                     &crate::session_files::SessionRequest {
@@ -1004,7 +1024,8 @@ impl TabManager {
                         // Docker/ADB/Wine no pueden cargar el archivo temporal
                         // del host. Su banner se entrega como salida PTY en el
                         // primer resize real, cuando xterm ya tiene sus
-                        // dimensiones definitivas.
+                        // dimensiones definitivas. Los REPL no reciben banner:
+                        // su prompt es una línea de entrada viva.
                     }
                 }
                 true
@@ -1043,7 +1064,7 @@ impl TabManager {
     /// sistema: dónde está la shell (se reconoce su prompt) y si acaba de
     /// quejarse de un comando que no existe.
     fn inspect_output(&self, app: &AppHandle, tab_id: &str, data: &str) {
-        let suggestion = {
+        let (suggestion, cwd_changed) = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
                 return;
@@ -1061,16 +1082,23 @@ impl TabManager {
                 .cwd
                 .as_ref()
                 .map(|cwd| cwd.to_string_lossy().to_string());
-            if let Some(next) = crate::current_dir::detect_current_directory(
+            let cwd_changed = if let Some(next) = crate::current_dir::detect_current_directory(
                 &tab.cwd_buffer,
                 &env,
                 previous.as_deref(),
             ) {
-                tab.cwd = Some(PathBuf::from(next));
-            }
+                if previous.as_deref() != Some(next.as_str()) {
+                    tab.cwd = Some(PathBuf::from(&next));
+                    Some(next)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let missing = crate::command_not_found::detect_missing_command(&tab.output_buffer);
-            match missing {
+            let suggestion = match missing {
                 Some(missing) if tab.last_missing_command.as_deref() != Some(&missing) => {
                     tab.last_missing_command = Some(missing.clone());
                     crate::command_not_found::resolve_tool_suggestion(
@@ -1083,8 +1111,16 @@ impl TabManager {
                     )
                 }
                 _ => None,
-            }
+            };
+            (suggestion, cwd_changed)
         };
+
+        if let Some(cwd) = cwd_changed {
+            let _ = app.emit(
+                "terminal-cwd-changed",
+                serde_json::json!({ "tabId": tab_id, "cwd": cwd }),
+            );
+        }
 
         if let Some(suggestion) = suggestion {
             log_info!(
@@ -1567,6 +1603,19 @@ impl TabManager {
             .find(tab_id)
             .and_then(|tab| tab.env.clone());
         let Some(env) = env else { return };
+        let is_repl = env.repl || env.kind == crate::environments::ShellKind::Repl;
+        if is_repl {
+            // Dividir la rejilla dispara un resize. No vuelvas a ejecutar las
+            // sondas del sistema para un REPL que nunca muestra banner: antes
+            // esto daba la impresión de que el intérprete "despertaba" al
+            // pulsar un botón y podía dejar salida a medio pintar.
+            if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                tab.viewport = Viewport { cols, rows };
+                tab.banner_rows = 0;
+                tab.banner_text.clear();
+            }
+            return;
+        }
         let t = crate::i18n::Translator::new(&active_language());
         let banner = crate::system_info::build_banner(
             &env.label,
@@ -1686,6 +1735,12 @@ impl TabManager {
             .lock()
             .find(tab_id)
             .and_then(|tab| tab.env.clone())?;
+        // No se debe intercalar un fastfetch con la línea de entrada de un
+        // intérprete interactivo: al volver de `:banner` el prompt del REPL
+        // seguiría en mitad del texto. Las shells sí conservan el banner.
+        if env.repl || env.kind == crate::environments::ShellKind::Repl {
+            return None;
+        }
         let t = crate::i18n::Translator::new(&active_language());
         let banner = crate::system_info::build_banner(
             &env.label,

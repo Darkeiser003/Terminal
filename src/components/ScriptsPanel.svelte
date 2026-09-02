@@ -1013,7 +1013,7 @@
     }
 
     .modes button {
-        overflow: hidden;
+        min-width: 0;
         padding: 6px 5px;
         border: 1px solid transparent;
         border-radius: 4px;
@@ -1021,9 +1021,29 @@
         color: var(--muted);
         font: inherit;
         font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+        white-space: normal;
         cursor: pointer;
+    }
+
+    /* Estas medidas se refieren al panel, no a la ventana completa: un panel
+       redimensionado sigue reordenando sus controles aunque el viewport no
+       cambie. */
+    @container (max-width: 360px) {
+        .modes button {
+            padding-inline: 3px;
+        }
+
+        .toolbar,
+        .filter {
+            align-items: stretch;
+            flex-wrap: wrap;
+        }
+
+        .depth {
+            flex: 1 1 100%;
+        }
     }
 
     .modes button:hover {
@@ -1356,7 +1376,7 @@
         cursor: pointer;
     }
 
-    @media (max-width: 420px) {
+    @container (max-width: 420px) {
         .operation-tool {
             grid-template-columns: 1fr;
         }
@@ -1396,7 +1416,7 @@
     }
 
     .group.pinned .group-title {
-        color: #e5c07b;
+        color: var(--warning);
     }
 
     .count {
@@ -1494,8 +1514,8 @@
     /* El anclado marcado se distingue por color, no por otro icono: la estrella
        llena y la vacía se confunden a este tamaño. */
     .icon.on {
-        border-color: #e5c07b;
-        color: #e5c07b;
+        border-color: var(--warning);
+        color: var(--warning);
     }
 
     .run {

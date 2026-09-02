@@ -3,7 +3,7 @@
     Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
 
     Produce por defecto la carpeta desempaquetada con el .exe y un instalador
-    NSIS con WebView2 offline incluido; el porqué está en src-tauri/BUNDLE.md.
+    NSIS con WebView2 offline incluido; la descripción mantenida está en README.md.
 
     Requisitos: Node.js >= 22.12 y el toolchain de Rust (rustup/cargo). La
     carpeta desempaquetada necesita WebView2 ya instalado; el instalador
@@ -30,6 +30,35 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# PowerShell permite que los argumentos no vinculados terminen silenciosamente
+# en `$args` cuando un script no declara parámetros posicionales. Rechazarlos
+# aquí evita que una errata (por ejemplo, `-NotARealOption`) parezca aceptada y
+# arranque una build con valores distintos de los que pidió el usuario.
+# PowerShell vincula los parámetros con la forma `-Version 1.2.3`. Cualquier
+# token restante se rechaza para que una errata no arranque una build distinta.
+if ($args.Count -gt 0) {
+    throw "Argumento(s) no reconocido(s): $($args -join ', ')"
+}
+$versionWasExplicit = $PSBoundParameters.ContainsKey('Version')
+if ($versionWasExplicit -and [string]::IsNullOrWhiteSpace($Version)) {
+    throw 'La versión no puede estar vacía.'
+}
+
+if ($NoExtendedTests.IsPresent -and ($FullTests.IsPresent -or $StrictTests.IsPresent)) {
+    throw '-NoExtendedTests no se puede combinar con -FullTests ni -StrictTests.'
+}
+
+# Resolver las rutas del proyecto al principio permite recoger todos los
+# parámetros interactivos (incluida la versión) antes de tocar dependencias o
+# comenzar una compilación.
+$WindowsDir  = $PSScriptRoot
+$ProjectRoot = Split-Path -Parent $WindowsDir
+$TauriDir    = Join-Path $ProjectRoot 'src-tauri'
+$ReleaseDir  = Join-Path $TauriDir 'target\release'
+$VendorDir   = Join-Path $TauriDir 'vendor\conpty'
+
+Set-Location $ProjectRoot
+
 if ($Installer.IsPresent -and $NoInstaller.IsPresent) {
     throw '-Installer y -NoInstaller no se pueden combinar.'
 }
@@ -52,19 +81,31 @@ if ($Help) {
     Write-Host '  -CrossLinux            Ejecuta tambien la build Linux dentro de WSL.'
     Write-Host '  -Installer             Activa el instalador NSIS offline (ya es predeterminado).'
     Write-Host '  -NoInstaller           Desactiva el instalador NSIS predeterminado.'
-    Write-Host '  -InstallE2eDriver     Instala tauri-driver si falta.'
+    Write-Host '  -InstallE2eDriver     Compatibilidad: el E2E ya prepara tauri-driver automáticamente.'
     Write-Host '  -Version X.Y.Z        Sobrescribe la version del paquete.'
     Write-Host '  -NonInteractive        No espera entrada del usuario.'
     Write-Host '  Sin opciones           Release completa: EXE + NSIS, checks estrictos, smoke, bateria ampliada y E2E.'
+    Write-Host '                        En modo interactivo, la versión se pide al principio junto al resto de opciones.'
+    Write-Host '                        Un fallo de E2E se informa al final sin impedir publicar la release.'
     exit 0
 }
 
 $script:BuildStartedAt = [DateTime]::UtcNow
 $script:StepStartedAt = $script:BuildStartedAt
+# Las validaciones posteriores (sondas opcionales, E2E y WSL cruzado) no deben
+# impedir que se publique el artefacto que ya compiló correctamente. Se
+# acumulan para mostrarlas juntas al final y se conserva un código de salida
+# distinto de cero para CI/diagnóstico.
+$script:PostBuildIssues = @()
+function Add-PostBuildIssue {
+    param([Parameter(Mandatory = $true)][string]$Message)
+    $script:PostBuildIssues += $Message
+    Write-Warn $Message
+}
 
 # Windows PowerShell 5.1 necesita el BOM del propio archivo para leer bien sus
 # literales UTF-8 y, además, una codificación de consola explícita para no
-# convertir en «Ã³/Ã¡» la salida UTF-8 de Node, Cargo y las herramientas.
+# convertir en «ó/á» la salida UTF-8 de Node, Cargo y las herramientas.
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 try {
     [Console]::InputEncoding = $utf8NoBom
@@ -126,10 +167,10 @@ function Read-BuildChoice {
     }
 }
 
-# Una ejecución sin argumentos ofrece una configuración cómoda antes de tocar
-# dependencias o empezar a compilar. Los scripts siguen siendo totalmente
-# automatizables: si se pasa cualquier opción, se conserva exactamente la
-# semántica anterior; -NonInteractive también desactiva el diálogo.
+# Una ejecución interactiva ofrece una configuración cómoda antes de tocar
+# dependencias o empezar a compilar. La versión se solicita siempre en este
+# punto cuando falta, incluso si se han pasado otros flags; -NonInteractive,
+# CI o una entrada redirigida desactivan cualquier diálogo.
 $hasExplicitBuildOptions = @($PSBoundParameters.Keys | Where-Object { $_ -ne 'Help' }).Count -gt 0
 $isCiEnvironment = $env:CI -match '^(1|true|yes)$'
 $interactiveBuild = -not $NonInteractive.IsPresent -and
@@ -137,9 +178,32 @@ $interactiveBuild = -not $NonInteractive.IsPresent -and
     -not $isCiEnvironment -and
     [Environment]::UserInteractive -and
     -not [Console]::IsInputRedirected
+$canPromptVersion = -not $NonInteractive.IsPresent -and
+    -not $isCiEnvironment -and
+    [Environment]::UserInteractive -and
+    -not [Console]::IsInputRedirected
+$packageJsonForPrompt = Get-Content (Join-Path $ProjectRoot 'package.json') -Raw | ConvertFrom-Json
+$currentVersionForPrompt = [string]$packageJsonForPrompt.version
+$printedBuildConfigHeader = $false
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    if ($canPromptVersion) {
+        if ($interactiveBuild) {
+            Write-Host ''
+            Write-Host 'Configuración de build (Enter conserva el valor actual):' -ForegroundColor Cyan
+            $printedBuildConfigHeader = $true
+        }
+        $enteredVersion = Read-Host "Versión de release [$currentVersionForPrompt]"
+        $Version = if ([string]::IsNullOrWhiteSpace($enteredVersion)) { $currentVersionForPrompt } else { $enteredVersion.Trim() }
+    } else {
+        $Version = $currentVersionForPrompt
+    }
+}
 if ($interactiveBuild) {
-    Write-Host ''
-    Write-Host 'Configuración de build (Enter conserva el valor actual):' -ForegroundColor Cyan
+    if (-not $printedBuildConfigHeader) {
+        Write-Host ''
+        Write-Host 'Configuración de build (Enter conserva el valor actual):' -ForegroundColor Cyan
+    }
+    Write-Host "  Versión seleccionada: $Version" -ForegroundColor DarkGray
     $Clean = Read-BuildChoice 'Limpiar dependencias y target antes de compilar' $Clean
     $Fast = Read-BuildChoice 'Usar perfil rápido de desarrollo' $Fast
     $Installer = [switch]::new((Read-BuildChoice 'Generar también instalador NSIS offline' $Installer.IsPresent))
@@ -151,6 +215,11 @@ if ($interactiveBuild) {
     $CrossLinux = Read-BuildChoice 'Ejecutar también la build Linux mediante WSL' $CrossLinux
     $NoRun = [switch](-not (Read-BuildChoice 'Lanzar la aplicación al terminar' (-not $NoRun)))
     Write-Host '  Opciones seleccionadas. La build comenzará ahora.' -ForegroundColor DarkGray
+}
+
+$semverPattern = '^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+if ($Version -notmatch $semverPattern) {
+    throw "La versión indicada no es SemVer válida: $Version"
 }
 
 # Ejecuta un comando nativo y devuelve SOLO su codigo de salida.
@@ -622,18 +691,11 @@ function Invoke-CrossLinuxTests {
     Write-Step "Compilando y probando Linux dentro de WSL ($distro)"
     $code = Invoke-Native 'wsl.exe' @('--distribution', $distro, '--', 'bash', '-lc', $linuxCommand)
     if ($code -ne 0) {
-        throw "Las pruebas Linux en WSL fallaron (código $code). Comprueba WSLg y la distribución Ubuntu."
+        Add-PostBuildIssue "Las pruebas Linux en WSL fallaron (código $code). Comprueba WSLg y la distribución Ubuntu."
+        return
     }
     Write-Ok 'AppImage Linux compilado y probado desde Windows mediante WSL'
 }
-
-$WindowsDir  = $PSScriptRoot
-$ProjectRoot = Split-Path -Parent $WindowsDir
-$TauriDir    = Join-Path $ProjectRoot 'src-tauri'
-$ReleaseDir  = Join-Path $TauriDir 'target\release'
-$VendorDir   = Join-Path $TauriDir 'vendor\conpty'
-
-Set-Location $ProjectRoot
 
 # Tauri debe seguir usando --release para conservar sus rutas de salida y el
 # empaquetado existente. Cargo permite cambiar los ajustes del perfil release
@@ -955,14 +1017,7 @@ if (-not (Test-WindowsLinker)) {
 # parámetro permite builds automatizadas sin diálogo.
 $packageJson = Get-Content (Join-Path $ProjectRoot 'package.json') -Raw | ConvertFrom-Json
 $currentVersion = $packageJson.version
-if (-not $Version) {
-    if ($NonInteractive) {
-        $Version = $currentVersion
-    } else {
-        $enteredVersion = Read-Host "Versión a compilar [$currentVersion]"
-        $Version = if ([string]::IsNullOrWhiteSpace($enteredVersion)) { $currentVersion } else { $enteredVersion.Trim() }
-    }
-}
+if ([string]::IsNullOrWhiteSpace($Version)) { $Version = $currentVersion }
 
 if ((Invoke-Native 'node' @('scripts/set-package-version.mjs', $Version)) -ne 0) {
     throw 'La versión indicada no es válida o no se pudo guardar en todos los manifiestos.'
@@ -979,7 +1034,8 @@ Write-Ok "Version a compilar: $version"
 # Sin ella, en un Windows recortado las pestanas se quedan en blanco varios
 # minutos y luego fallan con STATUS_DLL_INIT_FAILED. build.rs la copia junto al
 # binario en cada compilacion, pero si no esta en vendor/ no hay nada que copiar
-# y el fallo no se ve hasta ejecutar la app. Ver vendor/conpty/README.md.
+# y el fallo no se ve hasta ejecutar la app. La explicación se mantiene en la
+# sección «conpty.dll» del README raíz para no duplicar documentación.
 Write-Step 'Comprobando conpty.dll'
 $conptyFiles = @('conpty.dll', 'OpenConsole.exe')
 $missing = $conptyFiles | Where-Object { -not (Test-Path (Join-Path $VendorDir $_)) }
@@ -1143,16 +1199,18 @@ if ($Installer) {
 }
 if ($code -ne 0) { throw "La compilacion fallo (codigo $code)." }
 
+$installerPath = $null
 if ($Installer) {
     $nsisDir = Join-Path $TauriDir 'target\release\bundle\nsis'
-    $installers = @(Get-ChildItem $nsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+    $installers = @(Get-ChildItem $nsisDir -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
     if ($installers.Count -eq 0) {
         throw "La compilacion termino sin generar instalador NSIS en $nsisDir."
     }
-    if ($installers[0].Length -lt 1MB) {
-        throw "El instalador NSIS parece incompleto ($($installers[0].Length) bytes): $($installers[0].FullName)."
+    $installerPath = $installers[0]
+    if ($installerPath.Length -lt 1MB) {
+        throw "El instalador NSIS parece incompleto ($($installerPath.Length) bytes): $($installerPath.FullName)."
     }
-    Write-Ok "Instalador NSIS con WebView2 offline: $($installers[0].FullName)"
+    Write-Ok "Instalador NSIS con WebView2 offline: $($installerPath.FullName)"
 }
 
 # Evita publicar por accidente un frontend anterior (por ejemplo, una copia
@@ -1335,9 +1393,6 @@ try {
 $runExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent
 $strictExtendedTests = $FullTests.IsPresent -or $StrictTests.IsPresent -or (-not $NoExtendedTests.IsPresent)
 $strictProbeFailure = $false
-if ($NoExtendedTests -and ($FullTests.IsPresent -or $StrictTests.IsPresent)) {
-    throw '-NoExtendedTests no se puede combinar con -FullTests ni -StrictTests.'
-}
 if ($NoExtendedTests) {
     $runExtendedTests = $false
     Write-Warn 'Batería ampliada omitida por -NoExtendedTests: esta build solo valida el arranque mínimo.'
@@ -1348,7 +1403,8 @@ if ($NoExtendedTests) {
     Write-Host '    Batería ampliada activada por defecto: se ejecutarán shells, herramientas y E2E.' -ForegroundColor DarkGray
 }
 if ($runExtendedTests) {
-    Write-Step 'Pruebas ampliadas de Windows (shells, herramientas y E2E)'
+    try {
+        Write-Step 'Pruebas ampliadas de Windows (shells, herramientas y E2E)'
     $systemCmd = if (-not [string]::IsNullOrWhiteSpace($env:ComSpec)) { $env:ComSpec } else { 'cmd.exe' }
     $probes = @(
         @{ Name = 'cmd'; Exe = $systemCmd; Args = @('/d', '/c', 'exit 0') },
@@ -1531,13 +1587,23 @@ if ($runExtendedTests) {
         throw 'E2E no se ejecutó: tauri-driver sigue sin estar disponible después de prepararlo.'
     }
 
-    if ($strictProbeFailure) {
-        throw 'La batería ampliada detectó herramientas instaladas que fallaron, o ausencias bajo -StrictTests. Revisa el diagnóstico anterior.'
+        if ($strictProbeFailure) {
+            throw 'La batería ampliada detectó herramientas instaladas que fallaron, o ausencias bajo -StrictTests. Revisa el diagnóstico anterior.'
+        }
+    } catch {
+        # El binario/instalador ya compilado debe publicarse aunque una sonda
+        # opcional o el WebDriver fallen. El detalle queda visible al final y
+        # mantiene el código de salida no cero para no ocultarlo a CI.
+        Add-PostBuildIssue "Batería ampliada/E2E: $($_.Exception.Message)"
     }
 }
 
 if ($CrossLinux) {
-    Invoke-CrossLinuxTests
+    try {
+        Invoke-CrossLinuxTests
+    } catch {
+        Add-PostBuildIssue "Build/pruebas Linux en WSL: $($_.Exception.Message)"
+    }
 }
 
 if ($runExtendedTests) {
@@ -1577,6 +1643,38 @@ if ($hashCode -ne 0) { throw "No se pudo actualizar el manifiesto SHA256: $check
 Write-Ok "Release: $zipPath"
 Write-Ok "SHA256: $hash"
 
+# El bundle NSIS de Tauri pertenece a target/ porque es salida intermedia de
+# Cargo, pero el instalador también es un artefacto publicable. Se copia con
+# un nombre estable junto al ZIP para que no haya que buscarlo en target/ ni
+# se confunda con una build anterior. La fuente se conserva: Tauri puede
+# reutilizarla durante builds posteriores y release/ es el único directorio de
+# distribución que debe compartir o probar una persona.
+if ($Installer) {
+    if ($null -eq $installerPath -or -not (Test-Path -LiteralPath $installerPath.FullName -PathType Leaf)) {
+        throw 'La build indicó que generó NSIS, pero no queda ningún instalador para publicar.'
+    }
+    $installerReleasePath = Join-Path $releaseOut "WinSlimTerminal-$version$zipSuffix-x64-setup.exe"
+    Copy-Item -LiteralPath $installerPath.FullName -Destination $installerReleasePath -Force
+    $publishedInstaller = Get-Item -LiteralPath $installerReleasePath
+    if ($publishedInstaller.Length -ne $installerPath.Length -or $publishedInstaller.Length -lt 1MB) {
+        throw "La copia del instalador NSIS en release es incompleta: $installerReleasePath"
+    }
+    $installerHash = Get-Sha256Hash $installerReleasePath
+    $sourceInstallerHash = Get-Sha256Hash $installerPath.FullName
+    if ($installerHash -ne $sourceInstallerHash) {
+        throw "La copia del instalador NSIS no coincide con el bundle generado: $installerReleasePath"
+    }
+    $installerHashCode = Invoke-Native 'node' @(
+        'scripts/update-release-hash.mjs',
+        '--manifest', $checksumManifest,
+        '--artifact', (Split-Path $installerReleasePath -Leaf),
+        '--hash', $installerHash
+    )
+    if ($installerHashCode -ne 0) { throw "No se pudo actualizar el manifiesto SHA256 del instalador: $checksumManifest" }
+    Write-Ok "Instalador publicado: $installerReleasePath"
+    Write-Ok "SHA256 instalador: $installerHash"
+}
+
 if (-not $NoRun) {
     Write-Step 'Lanzando la version compilada'
     Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -WorkingDirectory $distDir
@@ -1586,5 +1684,13 @@ Write-Host ''
 Write-Host "Listo. WinSlim Terminal $version compilado y verificado." -ForegroundColor Green
 Write-Host "  Carpeta: $distDir"
 Write-Host "  Release: $zipPath"
+if ($Installer) { Write-Host "  Instalador: $installerReleasePath" }
 $totalSeconds = ([DateTime]::UtcNow - $script:BuildStartedAt).TotalSeconds
 Write-Host ("  Tiempo total: {0:N1} s" -f $totalSeconds) -ForegroundColor DarkGray
+if ($script:PostBuildIssues.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'La build terminó y publicó sus artefactos, pero quedaron validaciones pendientes:' -ForegroundColor Yellow
+    foreach ($issue in $script:PostBuildIssues) { Write-Host "  - $issue" -ForegroundColor Yellow }
+    Write-Host 'El código de salida es 1 para que CI no ignore estos diagnósticos.' -ForegroundColor Yellow
+    exit 1
+}

@@ -16,6 +16,7 @@ import type {
     ActionResult,
     AppInfo,
     CommandNotFoundEvent,
+    CwdChangedEvent,
     DataEvent,
     DownloadResult,
     EnvChangedEvent,
@@ -250,8 +251,12 @@ export const cdToExplorerDir = (tabId: string) => invokeLogged<ActionResult>('ex
 
 /** Abre una carpeta en el gestor de archivos del sistema. Si no hay ninguno,
  *  devuelve con qué se puede abrir o instalar. */
-export const openDirectory = (tabId: string, itemPath?: string) =>
-    invokeLogged<OpenDirectoryResult>('explorer_open_directory', { tabId, itemPath: itemPath ?? null });
+export const openDirectory = (tabId: string, itemPath?: string, currentDir = false) =>
+    invokeLogged<OpenDirectoryResult>('explorer_open_directory', {
+        tabId,
+        itemPath: itemPath ?? null,
+        currentDir
+    });
 
 /** La elección vuelve con el identificador de la tabla de gestores, nunca con
  *  una ruta a un ejecutable. */
@@ -447,3 +452,10 @@ export const onCommandNotFound = (
     callback: (event: CommandNotFoundEvent) => void
 ): Promise<UnlistenFn> =>
     listen<CommandNotFoundEvent>('command-not-found', (event) => callback(event.payload));
+
+/** La shell ha cambiado de carpeta; el explorador puede volver a seguir la
+ *  pestaña activa sin tener que esperar a que el usuario pulse «Seguir». */
+export const onCurrentDirectoryChanged = (
+    callback: (event: CwdChangedEvent) => void
+): Promise<UnlistenFn> =>
+    listen<CwdChangedEvent>('terminal-cwd-changed', (event) => callback(event.payload));

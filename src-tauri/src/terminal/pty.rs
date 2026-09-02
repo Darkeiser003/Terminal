@@ -21,8 +21,8 @@ use crate::stream::{ClearSplitter, PtyEvent, Utf8Decoder};
 /// En Windows la app no usa el ConPTY del sistema, sino una `conpty.dll`
 /// propia que va junto al ejecutable: con el backend del sistema la shell
 /// muere al nacer con `STATUS_DLL_INIT_FAILED` en los Windows recortados para
-/// los que está pensada esta terminal. El porqué completo, en
-/// `vendor/conpty/README.md`.
+/// los que está pensada esta terminal. El porqué completo está en la sección
+/// «conpty.dll» del README raíz.
 ///
 /// Devuelve la ruta si está donde `portable-pty` la va a buscar. Que falte no
 /// impide arrancar —el sistema puede tener un ConPTY que funcione— pero deja

@@ -46,12 +46,13 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:e2e-report', 'test:release-hash', 'check:docs', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:e2e-report', 'test:release-hash', 'check:docs', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
 check('npm check incluye la auditoría de superficie lógica', scripts.check.includes('check:logic') && scripts['check:logic'].includes('verify-logic-surface.mjs'));
 check('npm check incluye la verificación de documentación', scripts.check.includes('check:docs'));
+check('npm check incluye la política de codificación UTF-8', scripts.check.includes('check:encoding') && scripts['check:encoding'].includes('verify-encoding.mjs'));
 check('npm check incluye la verificación de traducciones dinámicas', scripts.check.includes('check:i18n') && read('scripts/verify-i18n.mjs').includes('dynamicActionIds'));
 check('npm check prueba contratos cruzados y lógica frontend ejecutable', scripts.check.includes('check:contracts') && scripts.check.includes('test:frontend-logic'));
 check('npm check prueba el validador del informe E2E', scripts.check.includes('test:e2e-report'));
@@ -204,6 +205,17 @@ check('Paneles estrechos usan el ancho real para reordenar controles', [
     read('src/components/DependenciesPanel.svelte').includes('overflow-wrap: anywhere'),
     read('src/components/Toolbar.svelte').includes('width: min(480px, calc(100vw - 20px))')
 ].every(Boolean));
+check('Todos los paneles redimensionables responden al ancho del panel', [
+    read('src/components/SettingsPanel.svelte').includes('@container (max-width: 480px)'),
+    read('src/components/ScriptsPanel.svelte').includes('@container (max-width: 420px)'),
+    read('src/components/ProjectsPanel.svelte').includes('@container (max-width: 360px)'),
+    !read('src/components/ScriptsPanel.svelte').includes('@media (max-width: 420px)')
+].every(Boolean));
+check('Estados visuales usan tokens compartidos y el explorador no crea scroll horizontal', [
+    appCss.includes('--danger:') && appCss.includes('--warning:') && appCss.includes('--success:'),
+    read('src/components/Panel.svelte').includes('color: var(--danger)'),
+    read('src/components/ExplorerSidebar.svelte').includes('overflow: hidden')
+].every(Boolean));
 check('Linux y Windows comparten la geometría base de ventana', (() => {
     const base = JSON.parse(read('src-tauri/tauri.conf.json'));
     const linux = JSON.parse(read('src-tauri/tauri.linux.conf.json'));
@@ -279,6 +291,10 @@ check('Banner y código comparten un único xterm sin superposición',
     terminalPane.includes('data-testid="terminal-host"')
         && terminalPane.includes('term.open(terminalHost)')
         && !terminalPane.includes('banner-header'));
+check('El cursor mantiene una capa visible en paneles sin foco',
+    terminalPane.includes('cursorInactiveStyle')
+        && terminalPane.includes('xterm-cursor-layer')
+        && terminalPane.includes('term.refresh(0, Math.max(0, term.rows - 1))'));
 check('El banner se imprime como salida PTY normal',
     terminalTabs.includes('initial_banner: true')
         && terminalTabs.includes('Outbound::Data')
@@ -286,6 +302,9 @@ check('El banner se imprime como salida PTY normal',
 check('El resize solo ajusta xterm y no repinta automáticamente',
     terminalPane.includes('api.resize(tabId, cols, rows)')
         && !terminalPane.includes('api.refreshBanner'));
+check('El resize conserva el anclaje al prompt al envolver líneas largas',
+    terminalPane.includes('const wasAtBottom = bufferBeforeResize.viewportY')
+        && terminalPane.includes('if (wasAtBottom) term.scrollToBottom()'));
 check('Clear borra el historial sin reiniciar el cursor y el E2E lo repite',
     app.includes("term.write('\\x1b[2J\\x1b[3J', resolve)")
         && !app.includes('term.clear()')
@@ -319,6 +338,18 @@ for (const marker of [
     'sessionId'
 ]) check(`Smoke E2E cubre ${marker}`, smoke.includes(marker));
 check('Smoke E2E prueba los comandos internos', smoke.includes(':help') && smoke.includes(':alias'));
+check('Smoke E2E exige redimensionado nativo en Windows y Linux',
+    smoke.includes('resizeWindowAndAssertTransition')
+        && smoke.includes("markPhase('redimensionado nativo multiplataforma')")
+        && smoke.includes("recordEvent('native-window-resize'")
+        && smoke.includes('ptyDimensionsChanged')
+        && smoke.includes('window-resize-${process.platform}-${captureLabel}'));
+check('El verificador E2E rechaza informes sin resize nativo sincronizado',
+    e2eReportVerifier.includes("type === 'native-window-resize'")
+        && e2eReportVerifier.includes('nativeChanged')
+        && e2eReportVerifier.includes('viewportChanged')
+        && e2eReportVerifier.includes('ptyChanged')
+        && e2eReportVerifier.includes('window-resize-'));
 check('Smoke E2E conserva capturas de la organización de Dependencias',
     smoke.includes("captureScreenshot('dependencias-secciones-plegadas')")
         && smoke.includes("captureScreenshot('dependencias-plataforma-desplegada')"));

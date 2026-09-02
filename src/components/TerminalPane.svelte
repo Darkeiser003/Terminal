@@ -14,7 +14,7 @@
     import { compareLocalized, foldLocalized } from '../lib/localization';
     import { panels, type PanelId } from '../lib/panels.svelte';
     import * as perf from '../lib/performance';
-    import { cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
+    import { cursorInactiveStyle, cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
     import type { Environment, Preferences } from '../lib/types';
 
@@ -75,24 +75,41 @@
         return key ? app.t(key, fallback) : fallback;
     }
 
-    // Créditos de autoría mostrados por los easter-eggs. Las URL son datos
-    // públicos estables; el texto que las acompaña vive en el catálogo para
-    // que el comando respete el idioma activo de la interfaz.
-    const CREDIT_URLS = {
-        darkeiserProfile: 'https://github.com/Darkeiser003',
-        terminalProject: 'https://github.com/Darkeiser003/Terminal',
-        cloudProject: 'https://github.com/Darkeiser003/Infraestructura-Web',
-        christianProfile: 'https://github.com/Christianlg97',
-        winslimStore: 'https://github.com/Christianlg97/WINSLIM_CENTER_STORE',
-        winslimUpdate: 'https://github.com/Christianlg97/WinSlim-Update',
-    } as const;
-
-    function writeCredits(action: 'darkeiser003' | 'christianlg97'): void {
-        if (action === 'darkeiser003') {
-            term?.writeln(`\r\n${translated('terminal.creditDarkeiser', 'Darkeiser003 · desarrollador de WinSlim Terminal\nGracias por visitar este proyecto. Puedes seguir el desarrollo, abrir incidencias y conocer las novedades en:\nPerfil: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfraestructura-Web: {cloudProject}', CREDIT_URLS)}`);
-            return;
-        }
-        term?.writeln(`\r\n${translated('terminal.creditChristian', 'Christianlg97 · colaborador de WinSlim Terminal\nGracias por tu cooperación en este y otros proyectos, y por compartir tus conocimientos, tiempo y recursos, especialmente sobre Windows.\nWinSlim es una versión de Windows optimizada, con herramientas propias, personalización, automatización y utilidades de sistema:\nPerfil: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}', CREDIT_URLS)}`);
+    async function clearPromptInput(line: string): Promise<void> {
+        // `sendInput` solo confirma que el backend aceptó los DEL. En cmd y
+        // PowerShell el eco de esos caracteres llega después, como salida de
+        // ConPTY. Si pintamos el crédito antes de que termine esa cola, el
+        // eco mueve el cursor y parte del título acaba pegada al prompt. Se
+        // espera a la señal de salida inactiva de App.svelte, con un límite
+        // corto para shells que no hacen eco de la edición.
+        let sawBusy = terminalOutputBusy;
+        let finished = false;
+        let timer: number | undefined;
+        let resolveIdle!: () => void;
+        const idle = new Promise<void>((resolve) => { resolveIdle = resolve; });
+        const cleanup = () => {
+            if (finished) return;
+            finished = true;
+            if (timer !== undefined) window.clearTimeout(timer);
+            window.removeEventListener('winslim:terminal-output-busy', onBusy);
+            window.removeEventListener('winslim:terminal-output-idle', onIdle);
+            resolveIdle();
+        };
+        const onBusy = (event: Event) => {
+            if (eventBelongsToPane(event)) sawBusy = true;
+        };
+        const onIdle = (event: Event) => {
+            if (eventBelongsToPane(event) && sawBusy) cleanup();
+        };
+        window.addEventListener('winslim:terminal-output-busy', onBusy);
+        window.addEventListener('winslim:terminal-output-idle', onIdle);
+        timer = window.setTimeout(cleanup, 650);
+        await api.sendInput(tabId, '\u007f'.repeat(line.length));
+        // Dejar que el evento busy de una respuesta inmediata entre en la
+        // cola antes de decidir que no hubo salida que esperar.
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 24));
+        if (!sawBusy && !terminalOutputBusy) cleanup();
+        await idle;
     }
 
     function isDirectCreditAlias(line: string): boolean {
@@ -461,14 +478,36 @@
         writeInternal(`\r\nDiseño aplicado: ${next} panel${next === 1 ? '' : 'es'}.`);
     }
 
+    const canOpenCurrentDirectory = $derived(app.appInfo?.platform === 'windows');
+
+    async function openCurrentDirectory(): Promise<void> {
+        if (!canOpenCurrentDirectory) {
+            writeInternal(`\r\n[${app.t('explorer.openInSystem', 'Abrir en el explorador del sistema')}: esta acción está desactivada por defecto en Linux.]`);
+            return;
+        }
+        try {
+            // El explorador lateral puede estar navegando manualmente en otra
+            // carpeta; esta acción significa siempre «la ruta de la shell».
+            const result = await api.openDirectory(tabId, undefined, true);
+            if (!result.ok) {
+                writeInternal(`\r\n[${result.error ?? app.t('explorer.failed', 'No se pudo abrir el explorador de archivos.')}]`);
+            }
+        } catch (error) {
+            writeInternal(`\r\n[${String(error)}]`);
+        } finally {
+            term?.focus();
+        }
+    }
+
     async function runInternal(line: string): Promise<{ handled: boolean; shellPrintsPrompt: boolean }> {
         const command = await api.parseInternalCommand(line);
         if (!command) return { handled: false, shellPrintsPrompt: false };
         let shellPrintsPrompt = false;
         // Borrar carácter a carácter funciona también en cmd.exe, donde
         // Ctrl+U no limpia la línea. El espejo solo admite ASCII simple, así
-        // que el número de DEL coincide exactamente con lo escrito.
-        await api.sendInput(tabId, '\u007f'.repeat(line.length));
+        // que el número de DEL coincide exactamente con lo escrito. La
+        // función espera a que ConPTY termine de reflejarlos antes de pintar.
+        await clearPromptInput(line);
         if (command.action === 'config') {
             window.dispatchEvent(new CustomEvent('winslim:open-settings'));
         } else if (command.action === 'reload') {
@@ -499,8 +538,16 @@
             await configureTerminal(command.argument);
         } else if (command.action === 'panes') {
             await configurePanes(command.argument);
+        } else if (command.action === 'openDirectory') {
+            await openCurrentDirectory();
         } else if (command.action === 'darkeiser003' || command.action === 'christianlg97') {
-            writeCredits(command.action);
+            // Los créditos se generan en el mismo archivo de ayuda que usa la
+            // shell. Ejecutarlos por el PTY, en vez de escribir directamente
+            // en xterm, mantiene sincronizados el cursor real, el historial y
+            // el prompt; además recoge el idioma actualizado al regenerarse
+            // los archivos de sesión.
+            await api.sendInput(tabId, 'ayuda creditos\r');
+            shellPrintsPrompt = true;
         } else if (command.action === 'help' || command.action === 'alias') {
             const topic = command.action === 'alias' ? 'alias' : command.argument;
             const currentEnvironment = app.environments.find(
@@ -521,10 +568,10 @@
                 // `ayuda` en Python, Node, Docker o ADB como si fuera código
                 // de esa shell.
                 term?.writeln(`\r\n${translated('terminal.helpFallback', 'Help{topic}: use :help from a terminal or consult the internal commands.', { topic: topic ? ` (${topic})` : '' })}`);
-                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :help [section]  :config/:settings  :reload  :shell [list|current|<name>]  :repl <name>  :panel <panel|close>  :theme [list|<id>]  :font [list|<id>]  :language [list|<id>]  :terminal [list|<key> <value>]  :panes [1|2|3|4|cycle]  :banner [options]  :quick-actions [options]'));
+                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :help [section]  :config/:settings  :reload  :shell [list|current|<name>]  :repl <name>  :panel <panel|close>  :explorer-here  :theme [list|<id>]  :font [list|<id>]  :language [list|<id>]  :terminal [list|<key> <value>]  :panes [1|2|3|4|cycle]  :banner [options]  :quick-actions [options]'));
             }
         } else {
-            term?.writeln(`\r\n${app.t('terminal.commandList', ':help  :config/:settings  :reload  :shell  :repl  :panel  :theme  :font  :language  :terminal  :panes  :alias  :banner  :quick-actions')}`);
+            term?.writeln(`\r\n${app.t('terminal.commandList', ':help  :config/:settings  :reload  :shell  :repl  :panel  :explorer-here  :theme  :font  :language  :terminal  :panes  :alias  :banner  :quick-actions')}`);
         }
         return { handled: true, shellPrintsPrompt };
     }
@@ -568,6 +615,7 @@
     // de escritura confirma que el terminal quedó inactivo.
     let fitAfterOutput = false;
     let fitQuietTimer: number | undefined;
+    let repaintTimer: number | undefined;
     let lastOutputFinishedAt = 0;
     let bannerActivationTimer: number | undefined;
     let inputReadyTimer: number | undefined;
@@ -575,6 +623,41 @@
     // Mientras una solicitud sigue en vuelo no se encadena otra
     // desde el evento idle; así se evita trabajo duplicado durante un resize.
     let bannerRefreshInFlight = false;
+
+    // WebView2 puede conservar una textura parcial de xterm justo después de
+    // cambiar el número de columnas. El árbol accesible ya contiene toda la
+    // línea, pero el canvas aún muestra huecos (se pierden fragmentos de
+    // «Muestra... scrollback» hasta el siguiente repintado). Invalidar la
+    // atlas y refrescar en varios frames hace atómica la transición visual.
+    function refreshTerminalViewport(): void {
+        if (destroyed || !term) return;
+        try {
+            // Al dividir un panel, xterm puede conservar la columna horizontal
+            // que estaba visible en la geometría anterior. La textura se
+            // repinta correctamente, pero comienza a mitad de cada línea (el
+            // síntoma era «r|close>» en vez de «:panel ... <close>»). Siempre
+            // volver al margen izquierdo antes de invalidar el atlas.
+            const horizontalScroller = term as typeof term & { scrollToColumn?: (column: number) => void };
+            horizontalScroller.scrollToColumn?.(0);
+            term.clearTextureAtlas();
+            term.refresh(0, Math.max(0, term.rows - 1));
+        } catch (error) {
+            console.debug('[TerminalPane] refresh tras resize omitido', error);
+        }
+    }
+
+    function scheduleTerminalRepaint(): void {
+        if (repaintTimer) window.clearTimeout(repaintTimer);
+        refreshTerminalViewport();
+        requestAnimationFrame(() => {
+            refreshTerminalViewport();
+            requestAnimationFrame(() => refreshTerminalViewport());
+        });
+        repaintTimer = window.setTimeout(() => {
+            repaintTimer = undefined;
+            refreshTerminalViewport();
+        }, 120);
+    }
 
     function eventBelongsToPane(event: Event): boolean {
         return (event as CustomEvent<{ tabId?: string }>).detail?.tabId === tabId;
@@ -650,6 +733,14 @@
 
     function requestBannerPrint(event?: Event): void {
         if (event && (event as CustomEvent<{ bannerChanged?: boolean }>).detail?.bannerChanged !== true) return;
+        // Un REPL no tiene banner: inyectar uno aquí volvería a mezclarlo con
+        // su prompt vivo. El backend también lo rechaza, pero cortar la ruta
+        // en el renderer evita dejar una solicitud pendiente durante cada
+        // cambio de rejilla o de preferencias.
+        if (paneIsRepl()) {
+            pendingBannerPrint = false;
+            return;
+        }
         // Las casillas ocultas conservan su scrollback y no deben acumular una
         // impresión pendiente para el momento en que vuelvan a la rejilla:
         // ese momento puede coincidir con un comando todavía en curso y
@@ -710,8 +801,31 @@
         return false;
     }
 
+    function paneIsRepl(): boolean {
+        const tab = app.tabs.find((candidate) => candidate.id === tabId);
+        const environment = app.environments.find((candidate) => candidate.id === tab?.envId);
+        // Durante los primeros frames `listEnvironments` puede seguir en
+        // segundo plano y todavía no haber rellenado `app.environments`. La
+        // etiqueta de la pestaña ya viene en `listTabs`/`env-changed`, así que
+        // sirve como respaldo inequívoco para no volver a esperar un fastfetch
+        // que ese REPL nunca va a recibir.
+        return environment?.repl === true
+            || environment?.kind === 'repl'
+            || /(?:·|\u2022)\s*REPL\s*$/iu.test(tab?.label ?? '');
+    }
+
     function terminalStartupReady(): boolean {
         if (!term) return false;
+        // Las shells normales esperan a que termine el fastfetch para no
+        // liberar el primer comando encima del banner. Un REPL no lo recibe:
+        // su criterio de disponibilidad es únicamente que su prompt (`>>>`,
+        // `irb(main):001>`, etc.) ya esté visible.
+        if (paneIsRepl()) return terminalPromptVisible();
+        // Si el usuario ha desactivado el banner, no existe ningún bloque que
+        // esperar: exigir todavía el título de fastfetch retenía la entrada
+        // hasta el temporizador de seguridad y hacía parecer que un resize o
+        // el botón de dividir "despertaba" una shell que ya estaba lista.
+        if (app.preferences?.showSystemBanner === false) return terminalPromptVisible();
         // En una casilla demasiado baja el banner se omite por diseño: basta
         // con que xterm tenga una línea utilizable para liberar la entrada.
         if (term.rows < 12) return terminalPromptVisible();
@@ -778,6 +892,12 @@
                 // casilla baja y mantiene sincronizados el cursor visual y
                 // el cursor real de la shell.
                 const bufferBeforeResize = term.buffer.active;
+                // Si el usuario estaba en el prompt, xterm debe seguir anclado al
+                // final después de recalcular columnas. Al envolver una línea
+                // larga el scrollback gana filas; conservar el mismo `viewportY`
+                // dejaba visible una continuación arriba y daba la impresión de
+                // que se había perdido texto al dividir la pestaña.
+                const wasAtBottom = bufferBeforeResize.viewportY >= bufferBeforeResize.baseY - 1;
                 const cursorRowBeforeResize = bufferBeforeResize.baseY + bufferBeforeResize.cursorY;
                 let promptBeforeResize = '';
                 for (let row = Math.max(0, cursorRowBeforeResize - 2); row <= cursorRowBeforeResize; row += 1) {
@@ -800,6 +920,7 @@
                     }
                 }
                 term.resize(dims.cols, dims.rows);
+                if (wasAtBottom) term.scrollToBottom();
                 // Cuando una ventana ya mostraba un banner largo y se reduce
                 // por debajo del mínimo útil, sus últimas líneas seguirían
                 // visibles en la pantalla aunque el backend deje de generar
@@ -850,6 +971,7 @@
             };
             refreshRows();
             requestAnimationFrame(refreshRows);
+            scheduleTerminalRepaint();
             // El inspector del WebView y algunos gestores de ventanas cambian
             // el viewport sin emitir un resize convencional. Exponer las
             // dimensiones efectivas ayuda a que el smoke compare el espacio
@@ -871,6 +993,11 @@
             if (destroyed) return;
             void api.resize(tabId, cols, rows).then(() => {
                 if (destroyed) return;
+                // El resize del PTY puede provocar un repintado propio de
+                // ConPTY después del resize local de xterm. Volver a invalidar
+                // el canvas cuando termina esa llamada evita que ese segundo
+                // frame deje filas históricas parcialmente dibujadas.
+                scheduleTerminalRepaint();
                 const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
                 perf.record('terminal.resize', 'duration', {
                     durationMs: Math.round(Math.max(0, now - resizeStartedAt) * 100) / 100,
@@ -897,9 +1024,15 @@
         const mountFinished = perf.start('terminal.xterm-mount', { tabId });
         const handshakeFinished = perf.start('terminal.ready-handshake', { tabId });
         const preferences = app.preferences;
+        const initialCursor = preferences
+            ? cursorOptions(preferences)
+            : { cursorStyle: 'block' as const, cursorWidth: 1 };
         term = new Terminal({
             cursorBlink: preferences?.terminalCursorBlink ?? true,
-            ...(preferences ? cursorOptions(preferences) : { cursorStyle: 'block' as const }),
+            ...initialCursor,
+            // El estilo inactivo es explícito: cada panel conserva un cursor
+            // visible aunque otro panel tenga el foco del teclado.
+            cursorInactiveStyle: preferences ? cursorInactiveStyle(preferences) : 'block',
             scrollOnUserInput: true,
             scrollback: preferences?.terminalScrollback ?? 5000,
             fontFamily: preferences ? terminalFont(preferences, app.fonts) : 'monospace',
@@ -908,7 +1041,18 @@
             letterSpacing: preferences?.terminalLetterSpacing ?? 0,
             fontWeight: preferences ? terminalFontWeight(preferences) : 400,
             scrollSensitivity: preferences?.terminalScrollSensitivity ?? 3,
-            theme: preferences ? terminalTheme(preferences, app.themes) : undefined
+            theme: preferences ? terminalTheme(preferences, app.themes) : undefined,
+            // El PTY de Windows es ConPTY. Declararlo permite a xterm aplicar
+            // sus heurísticas de wrapping al cambiar de 1 a varios paneles;
+            // sin esta marca el reflow trata las filas como Unix y puede
+            // perder fragmentos de líneas largas (por ejemplo «otros» en
+            // :terminal) durante el resize. 21376 es el primer build de
+            // ConPTY cuyo scrollback soporta reflow fiable; al declarar el
+            // backend xterm usa sus heurísticas de wrapping en vez de tratar
+            // las filas como Unix. En Linux la opción no se añade.
+            ...(app.appInfo?.platform === 'windows'
+                ? { windowsPty: { backend: 'conpty' as const, buildNumber: 21376 } }
+                : {})
         });
         fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
@@ -1107,6 +1251,7 @@
         window.removeEventListener('resize', fitAndReport);
         if (resizeTimer) clearTimeout(resizeTimer);
         if (fitQuietTimer) window.clearTimeout(fitQuietTimer);
+        if (repaintTimer) window.clearTimeout(repaintTimer);
         if (bannerActivationTimer) window.clearTimeout(bannerActivationTimer);
         if (inputReadyTimer) window.clearTimeout(inputReadyTimer);
         if (inputReleaseTimer) window.clearTimeout(inputReleaseTimer);
@@ -1203,21 +1348,28 @@
     function onContextMenu(event: MouseEvent): void {
         event.preventDefault();
         event.stopPropagation();
-        // El menú mide ~150x104: se aparta de los bordes para no salirse.
+        // El menú incluye la acción de carpeta y mide ~210x170: se aparta de
+        // los bordes para que tampoco quede cortado en ventanas pequeñas.
+        // El límite horizontal debe usar la anchura nueva (190px mínimo), no
+        // la de la versión anterior del menú (150px).
         menu = {
-            x: Math.min(event.clientX, window.innerWidth - 156),
-            y: Math.min(event.clientY, window.innerHeight - 110)
+            x: Math.max(8, Math.min(event.clientX, window.innerWidth - 206)),
+            y: Math.max(8, Math.min(event.clientY, window.innerHeight - 180))
         };
         perf.mark('ui.context-menu.open', { tabId, x: event.clientX, y: event.clientY });
     }
 
-    function runMenu(action: 'copy' | 'cut' | 'delete' | 'paste'): void {
+    function runMenu(action: 'copy' | 'cut' | 'delete' | 'paste' | 'openDirectory'): void {
         perf.mark('ui.context-menu.action', { tabId, action });
         menu = null;
         if (action === 'copy' && term?.hasSelection()) void api.writeClipboard(term.getSelection());
         else if (action === 'cut') deleteEditableSelection(true);
         else if (action === 'delete') deleteEditableSelection(false);
         else if (action === 'paste') void pasteFromClipboard();
+        else if (action === 'openDirectory') {
+            void openCurrentDirectory();
+            return;
+        }
         term?.focus();
     }
 
@@ -1240,6 +1392,9 @@
     function tomarElFoco(): void {
         console.debug('[TerminalPane] tomarElFoco', { tabId, appActive: app.activeTabId });
         if (app.activeTabId !== tabId) void app.activateTab(tabId);
+        // El explorador sigue la pestaña cuando el usuario vuelve a trabajar
+        // en ella, incluso si antes había navegado manualmente a otra carpeta.
+        window.dispatchEvent(new CustomEvent('winslim:terminal-focused', { detail: { tabId } }));
     }
 
     // Cuando esta casilla pasa a ser la activa, le damos el foco a su xterm.
@@ -1284,6 +1439,7 @@
         term.options.cursorBlink = preferences.terminalCursorBlink;
         term.options.cursorStyle = cursor.cursorStyle;
         term.options.cursorWidth = cursor.cursorWidth;
+        term.options.cursorInactiveStyle = cursorInactiveStyle(preferences);
         term.options.scrollback = preferences.terminalScrollback;
         term.options.fontFamily = terminalFont(preferences, app.fonts);
         term.options.fontSize = preferences.terminalFontSize;
@@ -1292,6 +1448,10 @@
         term.options.fontWeight = terminalFontWeight(preferences);
         term.options.scrollSensitivity = preferences.terminalScrollSensitivity;
         term.options.theme = terminalTheme(preferences, app.themes);
+        // Cambiar color/forma durante un parpadeo puede dejar la capa del
+        // cursor en estado oculto hasta el siguiente tick. Refrescar solo la
+        // fila visible evita recrear el terminal y mantiene el scrollback.
+        term.refresh(0, Math.max(0, term.rows - 1));
         fitAndReport();
     });
     // Interceptamos eventos en fase de captura directamente en el nodo host:
@@ -1356,6 +1516,16 @@
         <button type="button" role="menuitem" onclick={() => runMenu('paste')}>
             {app.t('menu.paste', 'Pegar')}
         </button>
+        <div class="menu-separator" role="separator"></div>
+        <button
+            type="button"
+            role="menuitem"
+            disabled={!canOpenCurrentDirectory}
+            title={app.t('explorer.openInSystem', 'Abrir en el explorador del sistema')}
+            onclick={() => runMenu('openDirectory')}
+        >
+            {app.t('explorer.openInSystem', 'Abrir en el explorador del sistema')}
+        </button>
     </div>
 {/if}
 
@@ -1380,6 +1550,54 @@
         overflow: hidden;
     }
 
+    /* El cursor es una capa propia de xterm, por encima de la textura de
+       caracteres. No debe quedar tapado por el canvas al repintar WebView2 ni
+       recibir eventos del ratón. */
+    .terminal-host :global(.xterm-cursor-layer) {
+        z-index: 4;
+        pointer-events: none;
+    }
+
+    /* xterm oculta durante medio ciclo el relleno de un cursor parpadeante.
+       En WebView2 ese frame puede coincidir con una captura, un cambio de
+       foco o un repintado y el usuario percibe que el cursor ha desaparecido.
+       Este trazo fino es una guía persistente de la celda actual; el cursor
+       nativo sigue llevando la forma, el color y el parpadeo configurados. */
+    .terminal-host :global(.xterm-cursor) {
+        position: relative;
+        z-index: 6;
+    }
+
+    .terminal-host :global(.xterm-cursor)::after {
+        content: '';
+        position: absolute;
+        z-index: 1;
+        pointer-events: none;
+        box-sizing: border-box;
+        opacity: 0.78;
+    }
+
+    .terminal-host :global(.xterm-cursor-block)::after {
+        inset: 0;
+        border: 1px solid var(--terminal-cursor);
+    }
+
+    .terminal-host :global(.xterm-cursor-bar)::after {
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: max(1px, var(--terminal-cursor-width, 1px));
+        background: var(--terminal-cursor);
+    }
+
+    .terminal-host :global(.xterm-cursor-underline)::after {
+        right: 0;
+        bottom: 0;
+        left: 0;
+        height: max(1px, var(--terminal-cursor-width, 1px));
+        background: var(--terminal-cursor);
+    }
+
     .tab-pane.multiventana .terminal-host {
         padding: 0;
     }
@@ -1394,7 +1612,8 @@
         position: fixed;
         z-index: 61;
         display: flex;
-        min-width: 150px;
+        min-width: 190px;
+        max-width: min(320px, calc(100vw - 16px));
         flex-direction: column;
         padding: 4px;
         border: 1px solid var(--border);
@@ -1422,6 +1641,12 @@
     .menu button:disabled {
         color: var(--muted);
         cursor: default;
+    }
+
+    .menu-separator {
+        height: 1px;
+        margin: 3px 4px;
+        background: var(--border);
     }
 
     .tab-pane.hidden {

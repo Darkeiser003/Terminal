@@ -12,7 +12,7 @@ import type { FontFamily, Preferences, ThemePreset } from './types';
  *  que se traducen aquí en vez de llegar a xterm como un valor que rechaza. */
 export function cursorOptions(
     preferences: Preferences
-): Pick<ITerminalOptions, 'cursorStyle' | 'cursorWidth'> {
+): { cursorStyle: NonNullable<ITerminalOptions['cursorStyle']>; cursorWidth: number } {
     switch (preferences.terminalCursorStyle) {
         case 'beam':
             return { cursorStyle: 'bar', cursorWidth: 3 };
@@ -21,6 +21,18 @@ export function cursorOptions(
         default:
             return { cursorStyle: preferences.terminalCursorStyle, cursorWidth: 1 };
     }
+}
+
+/**
+ * El cursor no debe desaparecer al cambiar el foco entre paneles. xterm usa
+ * un estilo distinto para terminales inactivas y su valor por defecto puede
+ * ser demasiado tenue sobre algunas paletas/WebView. Reutilizamos la forma
+ * elegida por el usuario para que activo e inactivo sean coherentes.
+ */
+export function cursorInactiveStyle(
+    preferences: Preferences
+): NonNullable<ITerminalOptions['cursorInactiveStyle']> {
+    return cursorOptions(preferences).cursorStyle;
 }
 
 /** xterm acepta pesos numéricos, mientras que la preferencia usa nombres
@@ -78,6 +90,11 @@ export function applyTheme(
     root.setProperty('--accent-soft', palette.accentSoft);
     root.setProperty('--terminal-bg', preferences.terminalBackground);
     root.setProperty('--terminal-fg', preferences.terminalForeground);
+    // El indicador persistente del cursor usa la misma preferencia que xterm.
+    // Así el estado de parpadeo no puede dejar la posición de escritura
+    // completamente invisible entre dos frames.
+    root.setProperty('--terminal-cursor', preferences.terminalCursorColor);
+    root.setProperty('--terminal-cursor-width', `${cursorOptions(preferences).cursorWidth}px`);
     root.setProperty('--terminal-padding', `${preferences.terminalPadding}px`);
     root.setProperty('--terminal-font', font?.css ?? 'monospace');
     root.setProperty('--ui-scale', preferences.uiDensity === 'compact' ? '0.9' : '1');

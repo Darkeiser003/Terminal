@@ -35,12 +35,20 @@ fn script_format(kind: ShellKind) -> Option<ScriptFormat> {
         ShellKind::Cmd => Some(ScriptFormat {
             ext: "cmd",
             eol: "\r\n",
-            header: &["@echo off"],
+            // cmd.exe interpreta los archivos de inicio sin BOM con su página
+            // OEM inicial. Cambiar la sesión a UTF-8 antes de leer banner y
+            // ayuda permite mostrar «ñ», tildes y todos los idiomas Unicode.
+            header: &["@echo off", "@chcp 65001>nul"],
         }),
         ShellKind::Powershell => Some(ScriptFormat {
             ext: "ps1",
             eol: "\r\n",
-            header: &[],
+            header: &[
+                "$utf8NoBom = New-Object System.Text.UTF8Encoding($false)",
+                "[Console]::InputEncoding = $utf8NoBom",
+                "[Console]::OutputEncoding = $utf8NoBom",
+                "$OutputEncoding = $utf8NoBom",
+            ],
         }),
         ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => Some(ScriptFormat {
             ext: "sh",
@@ -177,7 +185,7 @@ pub fn clear_command(
         ];
         if let Some(banner) = banner_path {
             parts.push(format!(
-                "Write-Host (Get-Content -Raw '{banner}') -NoNewline"
+                "Write-Host (Get-Content -Raw -Encoding UTF8 '{banner}') -NoNewline"
             ));
         }
         return parts.join("; ");
@@ -279,7 +287,7 @@ fn clear_command_with_toggle(
     let print_banner = match kind {
         ShellKind::Cmd => format!("if exist \"{flag}\" @type \"{banner}\""),
         ShellKind::Powershell => format!(
-            "if (Test-Path -LiteralPath '{flag}') {{ Write-Host (Get-Content -Raw '{banner}') -NoNewline }}"
+            "if (Test-Path -LiteralPath '{flag}') {{ Write-Host (Get-Content -Raw -Encoding UTF8 '{banner}') -NoNewline }}"
         ),
         ShellKind::Fish => format!(
             "if test -f '{}'; cat '{}'; end",
@@ -358,7 +366,7 @@ fn sysinfo_alias_line(kind: ShellKind, banner_path: Option<&str>, transport: Tra
     if kind == ShellKind::Powershell {
         return match banner_path {
             Some(banner) => format!(
-                "function sysinfo {{ Write-Host (Get-Content -Raw '{banner}') -NoNewline }}"
+                "function sysinfo {{ Write-Host (Get-Content -Raw -Encoding UTF8 '{banner}') -NoNewline }}"
             ),
             None => "function sysinfo { Get-ComputerInfo | Select-Object OsName, OsVersion, \
                      CsProcessors, CsTotalPhysicalMemory, OsUptime }"
@@ -395,14 +403,105 @@ const HELP_SECTION_COLOR: &str = "\x1b[1;93m";
 const HELP_CMD_COLOR: &str = "\x1b[1;92m";
 const HELP_RESET: &str = "\x1b[0m";
 
+// El texto se guarda ya envuelto para que una división de pestaña no dependa
+// del reflow de xterm/ConPTY. 48 columnas era demasiado conservador: en una
+// terminal normal partía frases cortas y hacía que `help` pareciera una lista
+// entrecortada. 72 mantiene margen para el panel mínimo (y para los prefijos)
+// sin sacrificar la integridad al cambiar de rejilla.
+const HELP_WRAP_WIDTH: usize = 72;
+
 fn help_row(command: &str, description: &str) -> String {
+    // Las variantes de `:panel` y `:terminal` superan por sí solas la anchura
+    // segura de una casilla dividida. Si se dejan como una única fila, xterm
+    // tiene que refluarlas y ConPTY puede reconstruir fragmentos de distinto
+    // ancho al cambiar la rejilla. También el nombre del comando se parte de
+    // forma explícita: ningún renglón de ayuda interna depende del reflow.
+    const SAFE_HELP_WIDTH: usize = HELP_WRAP_WIDTH;
+    const CONTENT_WIDTH: usize = SAFE_HELP_WIDTH - 4;
+    if command.chars().count() + 4 > SAFE_HELP_WIDTH {
+        let characters = command.chars().collect::<Vec<_>>();
+        let mut result = String::new();
+        for chunk in characters.chunks(CONTENT_WIDTH) {
+            if !result.is_empty() {
+                result.push_str("\r\n");
+            }
+            result.push_str(&format!(
+                "    {HELP_CMD_COLOR}{}{HELP_RESET}",
+                chunk.iter().collect::<String>()
+            ));
+        }
+        let mut remaining = description.trim().to_string();
+        while !remaining.is_empty() {
+            let (chunk, rest) = take_help_words(&remaining, CONTENT_WIDTH);
+            result.push_str("\r\n    ");
+            result.push_str(&chunk);
+            remaining = rest;
+        }
+        return result;
+    }
+
     let width = command.chars().count();
     let padded = if width >= 22 {
         format!("{command} ")
     } else {
         format!("{command}{}", " ".repeat(22 - width))
     };
-    format!("    {HELP_CMD_COLOR}{padded}{HELP_RESET}{description}")
+    let prefix_width = 4 + padded.chars().count();
+    // Las casillas divididas pueden bajar a unas 50 columnas. Dejar que una
+    // descripción de ayuda de 100+ caracteres dependa del wrap implícito de
+    // ConPTY/xterm hace que un reflow pierda el tramo central de la línea. Se
+    // corta explícitamente en palabras y cada continuación cabe en una
+    // casilla estrecha, por lo que el texto lógico nunca se reconstruye a
+    // medias al pasar de una pestaña a dos paneles.
+    let first_capacity = SAFE_HELP_WIDTH.saturating_sub(prefix_width);
+    let mut result = format!("    {HELP_CMD_COLOR}{padded}{HELP_RESET}");
+    let mut remaining = description.trim().to_string();
+    if first_capacity > 0 {
+        let (first, rest) = take_help_words(&remaining, first_capacity);
+        result.push_str(&first);
+        remaining = rest;
+    }
+    while !remaining.is_empty() {
+        let (chunk, rest) = take_help_words(&remaining, CONTENT_WIDTH);
+        result.push_str("\r\n    ");
+        result.push_str(&chunk);
+        remaining = rest;
+    }
+    result
+}
+
+fn take_help_words(text: &str, max_chars: usize) -> (String, String) {
+    let trimmed = text.trim();
+    let chars = trimmed.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return (trimmed.to_string(), String::new());
+    }
+    let mut split = max_chars;
+    while split > 0 && !chars[split - 1].is_whitespace() {
+        split -= 1;
+    }
+    if split == 0 {
+        // Nunca cortes una palabra indivisible (en particular una URL). Si el
+        // primer espacio queda después del límite, conserva el token completo:
+        // es preferible una línea algo más ancha que perder caracteres y
+        // romper enlaces al reflujo de xterm/ConPTY.
+        split = chars[max_chars..]
+            .iter()
+            .position(|character| character.is_whitespace())
+            .map(|offset| max_chars + offset)
+            .unwrap_or(chars.len());
+    }
+    let first = chars[..split]
+        .iter()
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    let rest = chars[split..]
+        .iter()
+        .collect::<String>()
+        .trim_start()
+        .to_string();
+    (first, rest)
 }
 
 pub struct HelpOptions<'a> {
@@ -542,6 +641,28 @@ pub fn build_cmd_help_dispatcher(help_path: &str, t: &Translator) -> String {
     lines.join("\r\n") + "\r\n"
 }
 
+fn wrap_plain_help_line(line: &str, max_chars: usize) -> Vec<String> {
+    if line.chars().count() <= max_chars || line.trim().is_empty() {
+        return vec![line.to_string()];
+    }
+    let indent = line.len() - line.trim_start().len();
+    let prefix = &line[..indent];
+    let mut remaining = line[indent..].trim().to_string();
+    let continuation = prefix.to_string();
+    let capacity = max_chars.saturating_sub(prefix.chars().count()).max(1);
+    let mut result = Vec::new();
+    while !remaining.is_empty() {
+        let (chunk, rest) = take_help_words(&remaining, capacity);
+        result.push(format!("{prefix}{chunk}"));
+        remaining = rest;
+    }
+    if result.is_empty() {
+        vec![continuation]
+    } else {
+        result
+    }
+}
+
 pub fn help_runner_path(help_path: &str, kind: ShellKind) -> String {
     let extension = match kind {
         ShellKind::Cmd => "cmd",
@@ -596,7 +717,7 @@ pub fn build_help_runner(
                 ),
                 "    exit 2".to_string(),
                 "}".to_string(),
-                "Write-Host (Get-Content -Raw -LiteralPath $path) -NoNewline".to_string(),
+                "Write-Host (Get-Content -Raw -Encoding UTF8 -LiteralPath $path) -NoNewline".to_string(),
             ]);
             lines.join("\r\n") + "\r\n"
         }
@@ -722,25 +843,47 @@ pub fn build_help_topic_text(
         render_support(&mut lines, options);
     }
     if topic == HelpTopic::General || topic == HelpTopic::Credits {
-        render_credits(&mut lines);
+        render_credits(&mut lines, t);
     }
 
     lines.push(format!("{HELP_SECTION_COLOR}Uso de esta ayuda{HELP_RESET}"));
+    lines.push(String::new());
     lines.push("    ayuda                         ayuda completa".to_string());
     lines.push("    ayuda <seccion>              solo esa sección".to_string());
     lines.push("    secciones: paquetes, sesion, internos, alias, biblioteca, menus, plugins, soporte, creditos".to_string());
 
-    lines.join("\r\n") + "\r\n"
+    // Las líneas descriptivas que no pasan por `help_row` también deben ser
+    // seguras en una casilla dividida (alias equivalentes, ejemplos y notas).
+    // Las filas coloreadas ya llevan su propio wrap y se dejan intactas.
+    let mut rendered = Vec::with_capacity(lines.len());
+    let mut in_credits = false;
+    for line in lines {
+        if line.contains("\x1b[") {
+            let marker = line.to_ascii_lowercase();
+            in_credits = marker.contains("crédit") || marker.contains("credit");
+            rendered.push(line);
+        } else if in_credits {
+            // `render_credits` ya aplica su propio ancho (80 columnas) y los
+            // easter-eggs deben conservar sus URLs/título como filas lógicas.
+            // Volver a envolver aquí multiplicaría líneas y podría desplazar
+            // el título fuera de la vista justo después de ejecutar el alias.
+            rendered.push(line);
+        } else {
+            rendered.extend(wrap_plain_help_line(&line, HELP_WRAP_WIDTH));
+        }
+    }
+    rendered.join("\r\n") + "\r\n"
 }
 
 fn section(lines: &mut Vec<String>, title: &str) {
-    // Cada bloque empieza separado del anterior. Así la ayuda sigue siendo
-    // legible incluso cuando la consola tiene muchas columnas o una fuente
-    // pequeña, sin depender del ajuste visual del terminal.
+    // Cada bloque empieza y termina separado del anterior. Así la ayuda sigue
+    // siendo legible incluso cuando la consola tiene muchas columnas o una
+    // fuente pequeña, sin depender del ajuste visual del terminal.
     if !matches!(lines.last(), Some(last) if last.is_empty()) {
         lines.push(String::new());
     }
     lines.push(format!("{HELP_SECTION_COLOR}> {title}{HELP_RESET}"));
+    lines.push(String::new());
 }
 
 fn render_packages(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions<'_>) {
@@ -759,6 +902,7 @@ fn render_packages(lines: &mut Vec<String>, t: &Translator, options: &HelpOption
         "{HELP_SECTION_COLOR}> {}{HELP_RESET} — {packages_note}",
         t.t("help.packages", "Paquetes")
     ));
+    lines.push(String::new());
     lines.push(help_row(
         "install <paquete>",
         &t.t("help.install", "Instala uno o varios paquetes."),
@@ -812,10 +956,6 @@ fn render_session(lines: &mut Vec<String>, t: &Translator, options: &HelpOptions
             "help.sysinfo",
             "Vuelve a imprimir la información del sistema.",
         ),
-    ));
-    lines.push(help_row(
-        ":banner ...",
-        "Configura qué datos muestra el banner y conserva cinco filas para escribir.",
     ));
     lines.push(help_row(
         "ayuda [sección]",
@@ -901,7 +1041,11 @@ fn render_internal(lines: &mut Vec<String>, app_name: &str) {
         ":panes [1|2|3|4|cycle]",
         "Muestra o cambia directamente el número de terminales visibles en la rejilla.",
     ));
-    lines.push("    Alias equivalentes: :open para :panel; :env para :shell; :term para :terminal; :layout/:grid para :panes.".to_string());
+    lines.push(help_row(
+        ":explorer-here",
+        "Abre el gestor de archivos del sistema en la ruta actual de esta terminal (Windows; en Linux está desactivado por defecto).",
+    ));
+    lines.push("    Alias equivalentes: :open para :panel; :env para :shell; :term para :terminal; :layout/:grid para :panes; :open-here/:explorerhere para :explorer-here.".to_string());
     lines.push("    Ejemplos: :shell powershell · :panel settings · :theme ocean · :terminal font-size 14 · :panes 2".to_string());
     lines.push(
         "    Si una línea no empieza por : (y no es un crédito reconocido), se deja intacta para que la interprete la shell."
@@ -1007,17 +1151,89 @@ fn render_support(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
     lines.push(String::new());
 }
 
-fn render_credits(lines: &mut Vec<String>) {
+fn render_credits(lines: &mut Vec<String>, t: &Translator) {
     section(lines, "Créditos");
-    lines.push("    Desarrollador principal: Darkeiser003".to_string());
-    lines.push(
-        "    Colaborador: Christianlg97 (colaborador y desarrollador de WinSlim)".to_string(),
+    const DARK: &[(&str, &str)] = &[
+        ("darkeiserProfile", "https://github.com/Darkeiser003"),
+        (
+            "terminalProject",
+            "https://github.com/Darkeiser003/Terminal",
+        ),
+        (
+            "cloudProject",
+            "https://github.com/Darkeiser003/Infraestructura-Web",
+        ),
+    ];
+    const CHRISTIAN: &[(&str, &str)] = &[
+        ("christianProfile", "https://github.com/Christianlg97"),
+        (
+            "winslimStore",
+            "https://github.com/Christianlg97/WINSLIM_CENTER_STORE",
+        ),
+        (
+            "winslimUpdate",
+            "https://github.com/Christianlg97/WinSlim-Update",
+        ),
+    ];
+    let dark_params: Vec<(&str, String)> = DARK
+        .iter()
+        .map(|(name, value)| (*name, (*value).to_string()))
+        .collect();
+    let christian_params: Vec<(&str, String)> = CHRISTIAN
+        .iter()
+        .map(|(name, value)| (*name, (*value).to_string()))
+        .collect();
+    let dark = t.tp(
+        "terminal.creditDarkeiser",
+        &dark_params,
+        "Darkeiser003 · desarrollador de WinSlim Terminal\nGracias por visitar este proyecto. Puedes seguir el desarrollo, abrir incidencias y conocer las novedades en:\nPerfil: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfraestructura-Web: {cloudProject}",
     );
+    let christian = t.tp(
+        "terminal.creditChristian",
+        &christian_params,
+        "Christianlg97 · colaborador de WinSlim Terminal\nGracias por tu cooperación en este y otros proyectos, y por compartir tus conocimientos, tiempo y recursos, especialmente sobre Windows.\nWinSlim es una versión de Windows optimizada, con herramientas propias, personalización, automatización y utilidades de sistema:\nPerfil: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
+    );
+    for line in dark.lines().chain(christian.lines()) {
+        for wrapped in wrap_help_text_line(line, 80) {
+            lines.push(format!("    {wrapped}"));
+        }
+    }
     lines.push(
         "    Linux se presenta como LTerminal; Windows se presenta como WinSlim Terminal."
             .to_string(),
     );
     lines.push(String::new());
+}
+
+/// ConPTY puede calcular mal la fila de retorno cuando `type` imprime una
+/// línea más ancha que la consola: el prompt siguiente tapa el principio de
+/// la continuación. Los créditos se generan para todas las shells y todos los
+/// idiomas, así que se envuelven en un ancho conservador antes de guardarlos.
+fn wrap_help_text_line(line: &str, width: usize) -> Vec<String> {
+    if line.chars().count() <= width {
+        return vec![line.to_string()];
+    }
+    let mut result = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let separator = usize::from(!current.is_empty());
+        if current.chars().count() + separator + word.chars().count() > width && !current.is_empty()
+        {
+            result.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    if result.is_empty() {
+        vec![line.to_string()]
+    } else {
+        result
+    }
 }
 
 /// Alias "ayuda": imprime el archivo anterior. Sin archivo (temporal no
@@ -1871,8 +2087,19 @@ mod tests {
         assert!(internos.contains("Comandos internos de App"));
         assert!(internos.contains(":quick-actions on|off|toggle|list"));
         assert!(internos.contains(":shell [list|current|<nombre>]"));
-        assert!(internos.contains(":terminal [list|<parámetro> <valor>]"));
-        assert!(internos.contains(":panel <settings|deps|projects|scripts|explorer|close>"));
+        let internos_sin_saltos = internos
+            .replace(HELP_CMD_COLOR, "")
+            .replace(HELP_RESET, "")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(internos_sin_saltos.contains(":terminal[list|<parámetro><valor>]"));
+        assert!(
+            internos_sin_saltos.contains(":panel<settings|deps|projects|scripts|explorer|close>")
+        );
+        let sesion = build_help_topic_text(&Translator::default(), &opciones, HelpTopic::Session);
+        assert!(!sesion.contains(":banner"));
+        assert!(internos.contains(":banner hide|show|toggle <elemento>"));
         assert_eq!(
             HelpTopic::from_argument(Some("help")),
             Some(HelpTopic::General)
@@ -1969,7 +2196,8 @@ mod tests {
         let etiqueta_antigua = ["(uno por ", "script)"].concat();
         assert!(!texto.contains(&etiqueta_antigua));
         assert!(texto.contains("uno, dos"));
-        assert!(texto.contains("Scripts de la Biblioteca registrados en esta sesión."));
+        let texto_sin_saltos = texto.replace("\r", "").replace("\n", "").replace(" ", "");
+        assert!(texto_sin_saltos.contains("ScriptsdelaBibliotecaregistradosenestasesión."));
     }
 
     #[test]
@@ -1985,6 +2213,34 @@ mod tests {
             },
         );
         assert!(texto.contains("Biblioteca"));
+    }
+
+    #[test]
+    fn los_creditos_se_envuelven_sin_superar_el_ancho_seguro() {
+        let original = "Gracias por compartir tus conocimientos, tiempo y recursos, especialmente sobre Windows.";
+        let wrapped = wrap_help_text_line(original, 32);
+        assert!(wrapped.iter().all(|line| line.chars().count() <= 32));
+        assert_eq!(wrapped.join(" "), original);
+    }
+
+    #[test]
+    fn la_ayuda_no_corta_las_frases_a_cuarenta_y_ocho_columnas() {
+        let original = "    Una descripción suficientemente larga conserva más de 48 columnas antes de saltar.";
+        let wrapped = wrap_plain_help_line(original, HELP_WRAP_WIDTH);
+        assert!(wrapped.len() >= 2);
+        assert!(wrapped[0].chars().count() > 48);
+        assert!(wrapped
+            .iter()
+            .all(|line| line.chars().count() <= HELP_WRAP_WIDTH));
+        let normalized = wrapped
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            normalized,
+            original.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
     }
 
     #[test]
@@ -2051,6 +2307,33 @@ mod tests {
             corta.find("Esta ayuda.").unwrap(),
             larga.find("Desinstala.").unwrap()
         );
+    }
+
+    #[test]
+    fn la_ayuda_interna_no_deja_filas_largas_para_el_reflow_del_terminal() {
+        let texto = build_help_topic_text(
+            &Translator::default(),
+            &HelpOptions {
+                app_name: "App",
+                env_label: "cmd.exe",
+                manager_label: Some("winget"),
+                has_nsudo: false,
+                script_names: &[],
+            },
+            HelpTopic::Internal,
+        );
+        let sin_ansi = texto
+            .replace("\x1b[1;96m", "")
+            .replace("\x1b[1;93m", "")
+            .replace("\x1b[1;92m", "")
+            .replace(HELP_RESET, "");
+        for fila in sin_ansi.lines().filter(|fila| !fila.trim().is_empty()) {
+            assert!(
+                fila.chars().count() <= HELP_WRAP_WIDTH,
+                "la ayuda interna dejó una fila de {} columnas para xterm: {fila:?}",
+                fila.chars().count()
+            );
+        }
     }
 
     #[test]

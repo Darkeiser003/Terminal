@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 
 if ($env:OS -ne 'Windows_NT') { throw 'Este perfil .ps1 instala la edición Windows y necesita Windows.' }

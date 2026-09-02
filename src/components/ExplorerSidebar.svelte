@@ -39,11 +39,34 @@
      *  «Pegar» que solo puede fallar. */
     let clipped = $state(false);
 
-    /** Se recarga al cambiar de pestaña: cada una tiene su propia carpeta. */
+    /** Se recarga al cambiar de pestaña y vuelve a la carpeta real de la shell.
+     *  Una navegación manual sigue siendo posible; el botón «Seguir» y el foco
+     *  de la terminal recuperan este modo sin obligar a cambiar de panel. */
     $effect(() => {
         const tabId = app.activeTabId;
         if (!app.explorerVisible || !tabId) return;
-        void load(tabId);
+        void follow(tabId);
+    });
+
+    /** El prompt puede revelar un `cd` sin que cambie la pestaña. Escuchar este
+     *  evento evita que el explorador se quede mostrando la carpeta anterior. */
+    $effect(() => {
+        if (!app.explorerVisible) return;
+        let disposed = false;
+        const unlisten = api.onCurrentDirectoryChanged((event) => {
+            if (disposed || event.tabId !== app.activeTabId) return;
+            void follow(event.tabId);
+        });
+        const onTerminalFocused = (event: Event) => {
+            const tabId = (event as CustomEvent<{ tabId?: string }>).detail?.tabId;
+            if (tabId && tabId === app.activeTabId) void follow(tabId);
+        };
+        window.addEventListener('winslim:terminal-focused', onTerminalFocused);
+        return () => {
+            disposed = true;
+            window.removeEventListener('winslim:terminal-focused', onTerminalFocused);
+            void unlisten.then((stop) => stop());
+        };
     });
 
     async function load(tabId: string, dir?: string): Promise<void> {
@@ -62,6 +85,30 @@
             status = String(cause);
         } finally {
             loading = false;
+        }
+    }
+
+    async function follow(tabId: string): Promise<void> {
+        loading = true;
+        statusError = false;
+        try {
+            const next = await api.followTab(tabId);
+            // Una respuesta vieja no debe devolver el explorador a la ruta de
+            // otra pestaña si el usuario cambia de foco mientras se lista.
+            if (app.activeTabId !== tabId) return;
+            listing = next;
+            if (next.error) {
+                statusError = true;
+                status = next.error;
+            } else {
+                status = '';
+            }
+        } catch (cause) {
+            if (app.activeTabId !== tabId) return;
+            statusError = true;
+            status = String(cause);
+        } finally {
+            if (app.activeTabId === tabId) loading = false;
         }
     }
 
@@ -202,12 +249,7 @@
                 title={app.t('explorer.follow', 'Volver al directorio de la terminal')}
                 onclick={async () => {
                     if (!app.activeTabId) return;
-                    loading = true;
-                    try {
-                        listing = await api.followTab(app.activeTabId);
-                    } finally {
-                        loading = false;
-                    }
+                    await follow(app.activeTabId);
                 }}
             >⌖</button>
             <button
@@ -480,7 +522,9 @@
         /* Se puede ensanchar arrastrando su borde. Aquí sí vale `resize` de
            CSS: la barra está anclada por la IZQUIERDA, así que su asa nativa
            (abajo a la derecha) crece hacia dentro de la ventana. */
-        overflow: auto;
+        /* El scroll pertenece a `.list`; mantenerlo aquí crea una segunda
+           barra horizontal al estrechar el explorador y roba altura a la lista. */
+        overflow: hidden;
         resize: horizontal;
     }
 
@@ -504,7 +548,8 @@
     }
 
     .path {
-        flex: 0 0 auto;
+        flex: 1 1 100px;
+        min-width: 0;
         overflow: hidden;
         padding: 4px 6px;
         color: var(--muted);
@@ -564,7 +609,7 @@
     }
 
     .status.error {
-        color: #e06c75;
+        color: var(--danger);
     }
 
     .list {
@@ -649,8 +694,8 @@
     }
 
     .danger {
-        border-color: #e06c75;
-        color: #e06c75;
+        border-color: var(--danger);
+        color: var(--danger);
     }
 
     .menu-backdrop {

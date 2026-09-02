@@ -196,7 +196,7 @@ export interface WindowsIntegrationStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'darkeiser003' | 'christianlg97';
+    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003' | 'christianlg97';
     argument?: string;
 }
 
@@ -623,4 +623,10 @@ export interface EnvChangedEvent {
     tabId: string;
     id: string;
     label: string;
+}
+
+/** La shell ha revelado un directorio de trabajo nuevo en su prompt. */
+export interface CwdChangedEvent {
+    tabId: string;
+    cwd: string;
 }

@@ -434,9 +434,9 @@
         color: var(--text);
     }
 
-    /* `min-width: 0` es lo que permite que el texto se recorte en vez de
-       empujar al contador fuera de la caja: un hijo de flex no baja de su
-       contenido mínimo salvo que se le diga. */
+    /* El encabezado es un hijo flex: `min-width: 0` permite que el título se
+       recorte sin empujar el contador ni el botón fuera de la caja. El
+       subtítulo, en cambio, puede ocupar varias líneas para no perder texto. */
     .panel-heading {
         flex: 1 1 auto;
         min-width: 0;
@@ -451,16 +451,15 @@
 
     .panel-subtitle {
         min-width: 0;
-        overflow: hidden;
         color: var(--muted);
         font-size: 10px;
         line-height: 1.25;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        overflow-wrap: anywhere;
+        white-space: normal;
     }
 
     .panel-subtitle.error {
-        color: #e06c75;
+        color: var(--danger);
     }
 
     .panel-count {

@@ -38,18 +38,24 @@ assert.equal(localization.platformBrandText('LTerminal', 'unknown', 'Otro'), 'LT
 
 const defaults = await readFile('src-tauri/default_settings.toml', 'utf8');
 const terminalPane = await readFile('src/components/TerminalPane.svelte', 'utf8');
+const aliases = await readFile('src-tauri/src/terminal/aliases.rs', 'utf8');
 assert(terminalPane.includes('function isDirectCreditAlias(line: string): boolean'),
     'TerminalPane debe preseleccionar los easter-eggs sin `:`');
 assert(terminalPane.includes("candidate.trimStart().startsWith(':') || isDirectCreditAlias(candidate)"),
     'Las líneas de crédito deben interceptarse antes de enviarse a la shell');
-assert(terminalPane.includes("terminal.creditDarkeiser") && terminalPane.includes("terminal.creditChristian"),
-    'Los easter-eggs deben usar claves localizadas');
+assert(terminalPane.includes("ayuda creditos")
+    && aliases.includes('terminal.creditDarkeiser')
+    && aliases.includes('terminal.creditChristian'),
+    'Los easter-eggs deben ejecutarse por la ayuda localizada del PTY');
 const fitAndReportStart = terminalPane.indexOf('function fitAndReport()');
 const paneResizeBlock = terminalPane.slice(fitAndReportStart);
 assert(terminalPane.includes('term.open(terminalHost)')
     && terminalPane.includes('data-testid="terminal-host"')
     && terminalPane.includes('function requestBannerPrint'),
     'El banner y el código deben compartir el mismo xterm');
+assert(terminalPane.includes('cursorInactiveStyle')
+    && terminalPane.includes('xterm-cursor-layer'),
+    'Cada panel debe conservar una capa de cursor visible aunque no tenga el foco');
 const configuredShortcuts = [...defaults.matchAll(/^shortcut\w+\s*=\s*"([^"]+)"/gm)].map((match) => match[1]);
 assert.equal(configuredShortcuts.length, shortcuts.SHORTCUT_PREFERENCE_KEYS.length);
 const normalizedDefaults = configuredShortcuts.map(shortcuts.normalizeShortcut);

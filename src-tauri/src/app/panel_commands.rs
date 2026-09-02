@@ -1073,20 +1073,31 @@ pub struct OpenDirectoryResult {
 }
 
 /// `explorer:openDirectory`: abre una CARPETA en el gestor de archivos del
-/// sistema. Si no hay ninguno, se devuelve con qué se puede abrir o instalar, y
-/// la elección vuelve por `explorer_open_directory_with` con el identificador
-/// de la tabla, nunca con una ruta a un ejecutable.
+/// sistema. `current_dir=true` fuerza la carpeta cwd de la shell e ignora una
+/// navegación manual del panel lateral. Si no hay ningún gestor, se devuelve
+/// con qué se puede abrir o instalar, y la elección vuelve por
+/// `explorer_open_directory_with` con el identificador de la tabla, nunca con
+/// una ruta a un ejecutable.
 #[tauri::command(async)]
 pub fn explorer_open_directory(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     tab_id: String,
     item_path: Option<String>,
+    current_dir: Option<bool>,
 ) -> OpenDirectoryResult {
-    let target = item_path
-        .filter(|value| !value.is_empty())
-        .or_else(|| state.tabs.explorer_dir(&tab_id))
-        .unwrap_or_default();
+    let target = if current_dir.unwrap_or(false) {
+        state
+            .tabs
+            .cwd_of(&tab_id)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        item_path
+            .filter(|value| !value.is_empty())
+            .or_else(|| state.tabs.explorer_dir(&tab_id))
+            .unwrap_or_default()
+    };
     if target.is_empty() || !Path::new(&target).is_dir() {
         return OpenDirectoryResult {
             ok: false,

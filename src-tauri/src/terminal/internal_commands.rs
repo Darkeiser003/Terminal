@@ -45,10 +45,18 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "language" | "lang" | "idioma" => "language",
         "terminal" | "term" => "terminal",
         "panes" | "layout" | "grid" => "panes",
+        "explorer-here" => "openDirectory",
+        "explorerhere" => "openDirectory",
+        "open-here" => "openDirectory",
+        "openhere" => "openDirectory",
+        "reveal-here" => "openDirectory",
         "darkeiser003" if argument.is_none() => "darkeiser003",
         "christianlg97" if argument.is_none() => "christianlg97",
         _ => return None,
     };
+    if action == "openDirectory" && argument.is_some() {
+        return None;
+    }
     Some(InternalCommand {
         action: action.into(),
         argument,
@@ -94,6 +102,8 @@ mod tests {
             parse(":banner preset compact").unwrap().argument.as_deref(),
             Some("preset compact")
         );
+        assert_eq!(parse(":explorer-here").unwrap().action, "openDirectory");
+        assert_eq!(parse(":open-here").unwrap().action, "openDirectory");
     }
 
     #[test]

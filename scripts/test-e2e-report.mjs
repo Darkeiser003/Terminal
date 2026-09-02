@@ -22,6 +22,14 @@ const valid = {
     logValidated: true,
     durationMs: 1200,
     phases: phases.map((name) => ({ name, durationMs: 10 })),
+    captures: [
+        { label: 'window-resize-win32-reduccion-de-ventana', path: 'resize-1.png' },
+        { label: 'window-resize-win32-restauracion-de-ventana', path: 'resize-2.png' },
+        { label: 'atajo-nueva-pestana', path: 'shortcut-new-tab.png' },
+        { label: 'atajo-pestana-siguiente', path: 'shortcut-next-tab.png' },
+        { label: 'atajo-division-dos-paneles', path: 'shortcut-split-2.png' },
+        { label: 'atajo-division-tres-paneles', path: 'shortcut-split-3.png' },
+    ],
     events: [
         ...phases.map((name) => ({ type: 'phase', name })),
         { type: 'preference', name: 'showQuickActions', value: false },
@@ -30,7 +38,10 @@ const valid = {
         { type: 'dependencies', groups: 8, subgroups: 6, repeatedLoads: 3, platformGroup: 'Virtualización' },
         { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
         { type: 'responsive-minimum', passed: true, configured: { width: 481, height: 271 }, requested: { width: 512, height: 281 }, applied: { width: 513, height: 282 } },
+        { type: 'native-window-resize', platform: 'win32', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
+        { type: 'native-window-resize', platform: 'win32', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
         { type: 'tab-isolation', passed: true, tabs: 3 },
+        { type: 'keyboard-shortcuts', passed: true, newTab: true, nextTab: true, cyclePanes: true, explorerToggle: true },
         { type: 'shell-startup-performance', passed: true, samples: 4, maxMs: 740, limitMs: 2500 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
         { type: 'banner-ready', promptsVisible: true, preview: ['WinSlim Terminal 1.4.4\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
@@ -77,6 +88,14 @@ try {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'responsive-minimum'),
     })).status, 0, 'falta la evidencia del mínimo responsive calculado');
+    assert.notEqual((await run('missing-native-window-resize', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'native-window-resize'),
+    })).status, 0, 'falta la evidencia de redimensionado nativo');
+    assert.notEqual((await run('missing-native-window-captures', {
+        ...valid,
+        captures: [],
+    })).status, 0, 'faltan las capturas del redimensionado nativo');
     assert.notEqual((await run('missing-tab-isolation', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'tab-isolation'),
@@ -112,4 +131,4 @@ try {
     await rm(directory, { recursive: true, force: true });
 }
 
-console.log('Validador E2E probado: informe completo y trece rechazos correctos.');
+console.log('Validador E2E probado: informe completo y rechazos de regresiones correctos.');

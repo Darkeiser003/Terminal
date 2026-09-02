@@ -526,7 +526,7 @@
     }
 
     .modes button {
-        overflow: hidden;
+        min-width: 0;
         padding: 6px 5px;
         border: 1px solid transparent;
         border-radius: 4px;
@@ -534,9 +534,28 @@
         color: var(--muted);
         font: inherit;
         font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+        white-space: normal;
         cursor: pointer;
+    }
+
+    @container (max-width: 360px) {
+        .modes {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .toolbar,
+        .search,
+        .filter {
+            align-items: stretch;
+            flex-wrap: wrap;
+        }
+
+        .search input,
+        .filter input {
+            flex-basis: 100%;
+        }
     }
 
     .modes button:hover {
@@ -625,7 +644,7 @@
     }
 
     .name small.warn {
-        color: #e5c07b;
+        color: var(--warning);
     }
 
     /* Un perfil no es un repositorio: la marca de la izquierda distingue las dos

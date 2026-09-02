@@ -25,11 +25,10 @@ identificador y rutas de datos propias por plataforma (`src-tauri/src/config/ide
 - [Requisitos](#requisitos)
 - [Instalación para usar la aplicación](#instalación-para-usar-la-aplicación)
 - [Entorno de desarrollo](#entorno-de-desarrollo)
+- [Limpieza del repositorio](#limpieza-del-repositorio)
 - [Scripts npm](#scripts-npm)
 - [Compilación y distribución](#compilación-y-distribución)
 - [Arquitectura](#arquitectura)
-- [Flujo completo del proyecto](docs/PROJECT-FLOW.md)
-- [Auditoría técnica y controles](docs/AUDIT-2026-08-30.md)
 - [Contrato IPC](#contrato-ipc)
 - [Seguridad](#seguridad)
 - [Entornos y shells](#entornos-y-shells)
@@ -112,7 +111,7 @@ recortados con `STATUS_DLL_INIT_FAILED`, y el error tarda más de dos minutos en
 aparecer: las pestañas se quedan en blanco sin decir por qué. `build.rs` copia
 ConPTY en cada compilación y `windows/build.ps1` aborta si falta cualquiera de
 los cuatro archivos. El detalle completo, en
-`src-tauri/vendor/conpty/README.md`.
+Esta misma sección documenta la razón y los archivos que se comprueban.
 
 ## Instalación para usar la aplicación
 
@@ -123,9 +122,11 @@ toca el registro y no crea accesos directos. Los binarios y la carpeta
 `conpty.dll`, `OpenConsole.exe` y `WebView2Loader.dll`, esa carpeta contiene
 los gestores integrados que muestra la Biblioteca.
 
-**Windows instalable.** `npm run dist:win:installer` genera un NSIS con el
-instalador offline de WebView2 incluido. Es la opción recomendada para equipos
-recortados, instalaciones limpias o despliegues sin Internet.
+**Windows instalable.** La release completa (`npm run dist:win`) y su alias
+explícito `npm run dist:win:installer` generan un NSIS con el instalador
+offline de WebView2 incluido y lo publican como
+`release/WinSlimTerminal-<versión>-x64-setup.exe`. Es la opción recomendada
+para equipos recortados, instalaciones limpias o despliegues sin Internet.
 
 **Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
 
@@ -151,6 +152,43 @@ El puerto de Vite es fijo (1420) y `strictPort` está activo a propósito:
 `tauri.conf.json` apunta a esa URL, y que Vite se moviera solo a otro puerto
 dejaría la ventana en blanco sin decir por qué. Si queda ocupado de una
 ejecución anterior, hay que liberarlo antes.
+
+## Limpieza del repositorio
+
+Los limpiadores eliminan únicamente salidas reproducibles, cachés e informes
+conocidos, y todos los Markdown salvo este README. También retiran los rastros
+de smoke/E2E en `%TEMP%` (o `/tmp`), los logs de build en AppData y las cachés
+privadas de LTerminal. `release/` y todo su contenido están protegidos y nunca
+se borran. Por seguridad, la vista previa es el comportamiento predeterminado;
+el borrado requiere una opción explícita.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/clean-repository.ps1
+powershell -ExecutionPolicy Bypass -File scripts/clean-repository.ps1 -Apply
+```
+
+```bash
+scripts/clean-repository.sh
+scripts/clean-repository.sh --apply
+```
+
+No usa `git clean`: no borra `.git`, código fuente ni configuraciones locales.
+Los datos de usuario (`settings.json`, scripts, plugins y proyectos) se
+conservan; solo se elimina la carpeta `logs` y las sesiones temporales antiguas.
+Si Windows mantiene un artefacto abierto, elimina lo que esté libre y termina
+con error indicando la ruta exacta que queda por cerrar. Las sesiones temporales
+de procesos activos se conservan para no interrumpir una terminal en uso.
+
+### Codificación
+
+El repositorio no usa ANSI. Rust, Svelte, JSON, Bash, Node (`.mjs` incluidos),
+tests y archivos de configuración son **UTF-8 sin BOM**. Los `.ps1` y
+`.ps1.in` usan **UTF-8 con BOM** para que Windows PowerShell 5 lea correctamente
+`ñ`, tildes y el resto de Unicode. Los `.cmd`/`.bat` se mantienen ASCII por
+compatibilidad con `cmd.exe`; al abrir una sesión CMD, `init.cmd` activa
+`chcp 65001` antes de leer banner y ayuda UTF-8. `npm run check:encoding`
+verifica esta política y rechaza ANSI, BOM indebidos o una regresión que vuelva
+a degradar Unicode a ASCII.
 
 ## Scripts npm
 
@@ -224,7 +262,7 @@ se solicite una excepción (`-NoInstaller`, `-NoExtendedTests`, `-SkipChecks`,
 Para validar la compatibilidad Windows desde Linux:
 
 ```bash
-linux/build-windows.sh --wine-smoke
+linux/build-windows.sh --version 1.4.4 --wine-smoke
 ```
 
 Esta ruta genera `src-tauri/target/windows-cross/x86_64-pc-windows-gnu/release/`
@@ -234,7 +272,12 @@ Wine; la release oficial sigue siendo la carpeta producida por
 `windows/build.ps1` en Windows con MSVC. `--skip-checks` y `--no-install`
 tienen el mismo sentido que en la build Linux; `--clean` elimina únicamente la
 salida Windows cruzada. `LTERMINAL_WINDOWS_TARGET_DIR` permite cambiar esa
-carpeta sin compartir locks con otra compilación.
+carpeta sin compartir locks con otra compilación. `--version X.Y.Z` fija la
+versión antes de validar dependencias; si se omite en una consola interactiva,
+se pregunta al principio y Enter conserva la versión actual. `--fast` usa el
+perfil incremental. `--wine-smoke` ejecuta el smoke gráfico, `--full-tests`
+añade la batería Rust y `--wine-repeats N` repite el smoke (1–10). Las opciones
+desconocidas y los valores ausentes se rechazan antes de empezar.
 
 Para hacer la validación cruzada completa desde Linux, incluyendo la batería
 Rust compilada como PE Windows y tres arranques aislados bajo Wine:
@@ -272,13 +315,20 @@ instalaciones automáticas. En Arch/CachyOS instala solo esos paquetes y no
 actualiza todo el sistema; `LTERMINAL_ALLOW_SYSTEM_UPGRADE=1` habilita la
 actualización completa de `pacman` de forma explícita.
 
+Los tres lanzadores rechazan opciones desconocidas y valores ausentes antes de
+instalar dependencias. En Windows tampoco se permiten combinaciones
+contradictorias como `-Installer` con `-NoInstaller` o
+`-FullTests`/`-StrictTests` con `-NoExtendedTests`; en Linux,
+`--full-tests`/`--extended-tests` y `--no-extended-tests` siguen la misma regla.
+
 En Windows, la batería ampliada se ejecuta automáticamente tanto en modo
 interactivo como no interactivo; solo `-NoExtendedTests` la omite. Las sondas de shells y herramientas se
 acumulan aunque alguna falle, de modo que el E2E no se pierde por un único
-runtime averiado; la ruta completa hace fallar las herramientas instaladas que
-no respondan y deja como aviso las opcionales ausentes. `-StrictTests` incluye
-también esas ausencias. El informe
-E2E se guarda en `%TEMP%\winslim-terminal-e2e-<id>.json`.
+runtime averiado. Un fallo de sonda, WebDriver, E2E o WSL cruzado ya no impide
+comprimir ni publicar la release: se muestra junto al resumen final y el
+proceso termina con código 1 para que CI lo detecte. `-StrictTests` sigue
+convirtiendo también las ausencias opcionales en ese diagnóstico final. El
+informe E2E se conserva en `%TEMP%\winslim-terminal-e2e-<id>.json` cuando falla.
 
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
@@ -319,12 +369,13 @@ build, incluidas las comprobaciones que lanza `prebuild`.
 
 | Plataforma | Artefacto |
 |---|---|
-| Windows | Carpeta desempaquetada + `WinSlimTerminal-Unpacked-<versión>.zip`; opcionalmente instalador NSIS offline |
+| Windows | Carpeta desempaquetada + `WinSlimTerminal-Unpacked-<versión>.zip` + `WinSlimTerminal-<versión>-x64-setup.exe` (NSIS offline) |
 | Linux | `LTerminal-<versión>-<arch>.AppImage` |
 
-La build portable no genera instalador ni accesos directos. La build explícita
-`dist:win:installer` sí genera NSIS porque es la que garantiza la instalación
-del WebView2 Runtime.
+La build con instalador publica el NSIS en `release/`, junto al ZIP, y registra
+su SHA-256 en `release/SHA256SUMS.txt`; `target/` sigue siendo solo la salida
+interna de Tauri/Cargo. `-NoInstaller` omite explícitamente ese artefacto. La
+build portable no genera instalador ni accesos directos.
 
 Si se configura actualización automática más adelante, el nombre del artefacto
 debe coincidir con `self_update::asset_for_platform`; de otro modo una release
@@ -345,19 +396,10 @@ no tendrá un adjunto compatible.
 Dos lados con una separación estricta: un backend en Rust que es el único que
 toca el sistema, y un frontend en Svelte que solo pinta.
 
-La descripción exhaustiva, con el orden de build/arranque, el flujo PTY/IPC,
-el inventario de los 190 archivos y los diagramas Mermaid está en
-[docs/PROJECT-FLOW.md](docs/PROJECT-FLOW.md). El banner se imprime una sola vez
-como salida normal del PTY dentro de `terminal-host`, por lo que comparte
-scrollback, cursor y selección con la shell sin superponerse a ellos.
-
-Para el recorrido corto del proyecto, usa [docs/SIMPLE-FLOW.md](docs/SIMPLE-FLOW.md):
-agrupa desarrollo, validación local y release, y marca qué rutas deben seguir
-separadas por depender del PTY, la red o permisos del sistema.
-
-La auditoría reproducible de esta reorganización, con riesgos residuales y la
-batería exacta de comandos ejecutados, está en
-[docs/AUDIT-2026-08-30.md](docs/AUDIT-2026-08-30.md).
+El banner se imprime una sola vez como salida normal del PTY dentro de
+`terminal-host`, por lo que comparte scrollback, cursor y selección con la
+shell sin superponerse a ellos. Este README concentra la documentación
+mantenida del repositorio.
 
 ```
 src-tauri/src/
@@ -490,6 +532,7 @@ distinguen mayúsculas de minúsculas.
 | `:terminal list` | Muestra todos los parámetros editables de xterm y sus valores actuales. |
 | `:terminal <parámetro> <valor>` | Cambia tamaño/familia/peso de fuente, interlineado, espaciado, padding, scrollback, sensibilidad, cursor, parpadeo, selección, densidad y colores. Ejemplos: `:terminal font-size 14`, `:terminal cursor beam`, `:terminal cursor-blink off`, `:terminal background #080808`. `:term` es equivalente. |
 | `:panes 1\|2\|3\|4` / `:panes cycle` | Fija o rota el número de terminales visibles en la rejilla. `:layout` y `:grid` son equivalentes. |
+| `:explorer-here` | Abre el gestor de archivos del sistema en la ruta actual de la terminal. En Windows está habilitado; en Linux aparece desactivado por defecto. `:open-here` y `:reveal-here` son equivalentes. |
 | `:banner list` / `:banner hide|show|toggle <campo>` / `:banner preset compact\|full` | Consulta o cambia los campos del fastfetch. Los campos son `system`, `host`, `kernel`, `environment`, `motherboard`, `cpu`, `gpu`, `memory`, `storage`, `uptime` y `datetime`. |
 | `:quick-actions list` / `on` / `off` / `toggle` | Consulta o cambia la visibilidad de las acciones rápidas de Biblioteca. |
 
@@ -708,7 +751,8 @@ Crear algo solo se admite dentro de la carpeta mostrada: el nombre no puede
 contener separadores, `..`, caracteres de control ni los nombres reservados de
 Windows, y nunca se sobrescribe nada existente.
 
-**Abrir carpeta** (menú contextual) lanza el explorador del sistema, que es
+**Abrir en el explorador del sistema** (menú contextual de la terminal o
+`:explorer-here`) lanza el explorador del sistema en la ruta actual, que es
 distinto de entrar en ella dentro del panel. En Linux se lanza el gestor del
 escritorio en uso, deducido de `XDG_CURRENT_DESKTOP`: Dolphin en KDE, Archivos
 en GNOME, Thunar en Xfce, Nemo, Caja o PCManFM según el caso. **No se delega en
@@ -716,6 +760,11 @@ en GNOME, Thunar en Xfce, Nemo, Caja o PCManFM según el caso. **No se delega en
 escritorios a un emulador de terminal, y pedir «abrir carpeta» acababa abriendo
 una terminal. Si no se puede deducir el escritorio y hay varios gestores, se
 pregunta; si no hay ninguno, se ofrece instalar uno.
+
+El panel sigue automáticamente a la pestaña activa y a los cambios de carpeta
+detectados en su prompt (`cd`, `Set-Location`, etc.). Si se navega manualmente
+por otra carpeta, esa vista se conserva hasta volver a enfocar la terminal o
+pulsar «Seguir»; al cambiar de pestaña siempre se carga su directorio real.
 
 ### Visores de archivos
 
@@ -947,8 +996,8 @@ comprobar la ruta que recorrerá el usuario. La batería oficial hace lo siguien
    preferencias, paneles, acordeones, explorador, menús contextuales,
    pestañas, división, redimensionado y fastfetch.
 4. Conserva capturas y un informe JSON fuera del repositorio. Los logs y
-   capturas temporales se ignoran mediante `.gitignore`; solo se versiona una
-   auditoría resumida y revisada en `docs/`.
+   capturas temporales se ignoran mediante `.gitignore`; la documentación
+   mantenida se concentra en este README.
 
 Al cambiar el idioma desde Ajustes o `:language`, la interfaz se actualiza y el
 backend regenera en ese mismo momento los archivos `help-<pestaña>.txt`, sus
@@ -968,14 +1017,16 @@ Rust. Es lo que tiene que estar en verde antes de compilar.
 
 La build Linux ejecuta por defecto la batería ampliada. Además del smoke test
 de ventana/frontend/PTY, comprueba shells y herramientas instaladas y ejecuta
-E2E con `tauri-driver`; si falta una precondición, el build falla indicando
-cuál es. Se puede omitir con `linux/build.sh --no-extended-tests` o
+E2E con `tauri-driver`; si falta una precondición, el AppImage se publica y el
+build informa el diagnóstico al final con código 1. Se puede omitir con `linux/build.sh --no-extended-tests` o
 `windows/build.ps1 -NoExtendedTests`; en Windows `-FullTests` la selecciona
-explícitamente. La falta del driver E2E sí detiene
-la batería gráfica. El smoke recorre
+explícitamente. La falta del driver E2E se registra como diagnóstico y no
+oculta el artefacto ya generado. El smoke recorre
 Ajustes, Biblioteca, Proyectos, Entorno y dependencias, acordeones, explorador
 y menú contextual, comandos internos, respuesta de la shell, división y
-varios tamaños de ventana. También repite refrescos de entornos, clics de
+varios tamaños de ventana. También ejecuta los atajos globales de nueva pestaña,
+navegación entre pestañas, división y explorador, conservando capturas antes y
+después. Repite refrescos de entornos, clics de
 división y aperturas de paneles para detectar carreras y estados residuales.
 El informe JSON se vuelve a validar al terminar y debe contener las once fases,
 los dos estados de `:quick-actions` y evidencias de menú contextual,
@@ -1087,4 +1138,7 @@ ejecutable recién creado.
 
 ## Créditos
 
-Desarrollado por [Darkeiser003](https://github.com/Darkeiser003).
+Desarrollado por [Darkeiser003](https://github.com/Darkeiser003), con la
+colaboración de [Christianlg97](https://github.com/Christianlg97). Sus proyectos
+relacionados son [WinSlim Center Store](https://github.com/Christianlg97/WINSLIM_CENTER_STORE)
+y [WinSlim Update](https://github.com/Christianlg97/WinSlim-Update).

@@ -137,7 +137,9 @@
      *  ruta en Ajustes no quiere abrir pestañas — salvo Ctrl+Tab, que es
      *  navegación y tiene sentido desde cualquier sitio. */
     function onShortcut(event: KeyboardEvent): void {
-        const target = event.target as HTMLElement | null;
+        // Los eventos de WebView/IME y los sintéticos del E2E pueden llegar
+        // con `window` como target; solo los elementos DOM ofrecen `closest`.
+        const target = event.target instanceof HTMLElement ? event.target : null;
         // Un campo de formulario solo bloquea los atajos si está FUERA de la
         // terminal. xterm mantiene un textarea invisible para recibir la
         // entrada, así que sin esta condición el foco normal de la terminal
@@ -629,7 +631,7 @@
         min-width: 0;
         min-height: 0;
         background: var(--terminal-bg);
-        border: 1px solid #282c34;
+        border: 1px solid var(--border);
         border-radius: 4px;
         overflow: hidden;
         transition:
@@ -685,10 +687,10 @@
         z-index: 10000;
         overflow: auto;
         padding: 24px;
-        border: 2px solid #e06c75;
+        border: 2px solid var(--danger);
         border-radius: 8px;
-        background: #1f1f1f;
-        color: #f3f3f3;
+        background: var(--surface);
+        color: var(--text);
         font: 14px/1.5 system-ui, sans-serif;
     }
 
@@ -729,7 +731,7 @@
 
     .update-error {
         display: block;
-        color: #e06c75;
+        color: var(--danger);
         font-size: 11px;
         font-weight: 400;
     }

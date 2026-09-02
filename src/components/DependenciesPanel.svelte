@@ -937,7 +937,7 @@
 
     /* Marca lo que ya está en el sistema */
     .subgroup.installed > .subgroup-title::before {
-        color: #4ec9b0;
+        color: var(--success);
     }
 
     .subgroup-title .count {
@@ -989,7 +989,7 @@
         height: 6px;
         margin-right: 6px;
         border-radius: 50%;
-        background: #4ec9b0;
+        background: var(--success);
         vertical-align: middle;
     }
 
@@ -1001,12 +1001,12 @@
         height: 6px;
         margin-right: 6px;
         border-radius: 50%;
-        background: #e5c07b;
+        background: var(--warning);
         vertical-align: middle;
     }
 
     .hint .warn {
-        color: #e5c07b;
+        color: var(--warning);
         font-weight: 400;
     }
 

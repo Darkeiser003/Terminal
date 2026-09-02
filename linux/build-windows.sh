@@ -40,6 +40,9 @@ ALLOW_OFFLINE_CHECKS=0
 CLEAN=0
 FAST_BUILD=0
 NON_INTERACTIVE=0
+VERSION_OVERRIDE=""
+CURRENT_VERSION="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROJECT_ROOT/package.json" | head -n 1)"
+CURRENT_VERSION="${CURRENT_VERSION:-1.0.0}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -72,8 +75,20 @@ while [ "$#" -gt 0 ]; do
         --clean) CLEAN=1 ;;
         --fast) FAST_BUILD=1 ;;
         --non-interactive) NON_INTERACTIVE=1 ;;
+        --version)
+            shift
+            if [ "$#" -eq 0 ] || [ -z "$1" ] || [[ "$1" == -* ]]; then
+                echo "--version necesita un valor SemVer, por ejemplo 1.4.4." >&2
+                exit 2
+            fi
+            VERSION_OVERRIDE="$1"
+            ;;
+        --version=*)
+            VERSION_OVERRIDE="${1#*=}"
+            [ -n "$VERSION_OVERRIDE" ] || { echo "--version necesita un valor SemVer, por ejemplo 1.4.4." >&2; exit 2; }
+            ;;
         -h|--help)
-            echo "Uso: $0 [--fast] [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean] [--non-interactive]"
+            echo "Uso: $0 [--version X.Y.Z] [--fast] [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean] [--non-interactive]"
             exit 0
             ;;
         *)
@@ -83,6 +98,24 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+# La versión se decide antes de comprobar o instalar dependencias. El cambio
+# del package.json se aplica más abajo, cuando Node ya ha sido validado; así un
+# --version erróneo no deja una edición parcial si el host carece del toolchain.
+if [ -z "$VERSION_OVERRIDE" ]; then
+    if [ "$NON_INTERACTIVE" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+        printf 'Versión de release [%s]: ' "$CURRENT_VERSION"
+        IFS= read -r VERSION_OVERRIDE
+        VERSION_OVERRIDE="${VERSION_OVERRIDE:-$CURRENT_VERSION}"
+    else
+        VERSION_OVERRIDE="$CURRENT_VERSION"
+    fi
+fi
+printf 'Versión seleccionada: %s\n' "$VERSION_OVERRIDE"
+if ! [[ "$VERSION_OVERRIDE" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+    echo "La versión indicada no es SemVer válida: $VERSION_OVERRIDE" >&2
+    exit 2
+fi
 
 # Se mantiene --release para que la salida cruzada conserve su estructura y
 # los verificadores de PE/runtime sigan encontrando el ejecutable. El perfil
@@ -329,6 +362,10 @@ cd "$PROJECT_ROOT"
 step "Comprobando requisitos Windows desde Linux"
 configure_cargo_profile
 ensure_node_and_rust
+step "Aplicando versión de release"
+node "$PROJECT_ROOT/scripts/set-package-version.mjs" "$VERSION_OVERRIDE" || fail "No se pudo aplicar la versión $VERSION_OVERRIDE."
+VERSION_OVERRIDE="$(node -p "require('./package.json').version")"
+ok "Versión $VERSION_OVERRIDE aplicada"
 ensure_mingw
 ensure_target
 

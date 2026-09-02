@@ -570,14 +570,14 @@
         background: transparent;
     }
 
-    .env-favorite.selected { color: #f2c94c; }
+    .env-favorite.selected { color: var(--favorite); }
 
     .repl-favorite {
         max-width: 130px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        color: #f2c94c;
+        color: var(--favorite);
     }
 
     .env-status {
@@ -589,7 +589,7 @@
     }
 
     .env-status.available {
-        background: #54d6b0;
+        background: var(--online);
         box-shadow: 0 0 0 2px rgba(84, 214, 176, 0.1);
     }
 
@@ -661,7 +661,7 @@
     }
 
     .notice {
-        color: #e06c75;
+        color: var(--danger);
         font-size: 11px;
     }
 

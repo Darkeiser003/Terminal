@@ -1261,9 +1261,9 @@
 <style>
     /* Las pestañas se quedan a la vista al desplazar: en Terminal la lista es
        más alta que el panel y volver arriba para cambiar de sección estorba. */
-    /* Las cuatro secciones caben siempre: son etiquetas cortas y partirlas en
-       dos filas costaria mas altura de la que ahorra. Lo que si hace falta es
-       que el texto se recorte en vez de desbordar. */
+    /* Las pestañas se compactan por el ancho real del panel. En una ventana
+       estrecha se muestran en dos o una columna y el texto puede partirse sin
+       invadir la pestaña vecina ni provocar scroll horizontal. */
     .tabs {
         position: sticky;
         top: 38px;
@@ -1277,10 +1277,11 @@
     }
 
     .tabs button {
-        overflow: hidden;
+        min-width: 0;
         padding: 7px 5px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        line-height: 1.15;
+        overflow-wrap: anywhere;
+        white-space: normal;
         border: 1px solid transparent;
         border-radius: 4px;
         background: transparent;
@@ -1288,6 +1289,18 @@
         font: inherit;
         font-size: 10px;
         cursor: pointer;
+    }
+
+    @container (max-width: 480px) {
+        .tabs {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+
+    @container (max-width: 300px) {
+        .tabs {
+            grid-template-columns: 1fr;
+        }
     }
 
     .tabs button:hover {
