@@ -468,6 +468,31 @@ async function click(element) {
     await request(`/session/${sessionId}/element/${element}/click`, 'POST', {});
 }
 
+/** Reproduce dos intenciones humanas consecutivas sin dejar que WebDriver
+ * conserve una referencia a un nodo que Svelte puede actualizar entre ambas.
+ * Los dos `click()` atraviesan los manejadores reales de la interfaz; solo se
+ * agrupan en una misma tarea del navegador para garantizar que "inmediatamente"
+ * describe a la aplicación y no el tiempo de ida y vuelta del driver. */
+async function createTabAndCloseImmediately(tabId) {
+    const result = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const tabId = arguments[0];
+            const oldTab = [...document.querySelectorAll('.tab[data-tab-id]')]
+                .find((tab) => tab.dataset.tabId === tabId);
+            const create = document.querySelector('.tab-new');
+            const close = oldTab?.querySelector('.tab-close');
+            if (!create || !close) {
+                return { ok: false, hasCreate: Boolean(create), hasOldTab: Boolean(oldTab), hasClose: Boolean(close) };
+            }
+            create.click();
+            close.click();
+            return { ok: true };`,
+        args: [tabId],
+    });
+    if (!result?.ok) {
+        throw new Error(`No se pudo reproducir el cierre inmediato: ${JSON.stringify(result)}`);
+    }
+}
+
 async function closeEnvironmentMenu() {
     const backdrops = await findAll('.env-backdrop');
     if (!backdrops.length) return;
@@ -2091,15 +2116,7 @@ try {
     const rapidOldId = await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id');
     const rapidOldMarker = `LTERMINAL_E2E_CLOSED_TAB_${Date.now()}`;
     await sendAndWaitForMarker(rapidOldMarker);
-    let rapidOldClose;
-    for (const tab of await findAll('.tab[data-tab-id]')) {
-        if (await attribute(tab[elementKey], 'data-tab-id') !== rapidOldId) continue;
-        rapidOldClose = (await findAllWithin(tab[elementKey], '.tab-close'))[0]?.[elementKey];
-        break;
-    }
-    if (!rapidOldClose) throw new Error('No se encontró el cierre de la pestaña para reproducir la carrera');
-    await click(await findWhenReady('.tab-new'));
-    await click(rapidOldClose);
+    await createTabAndCloseImmediately(rapidOldId);
     let rapidNewId;
     await waitUntil(async () => {
         const ids = await Promise.all(

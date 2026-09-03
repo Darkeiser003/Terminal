@@ -146,9 +146,16 @@ check('El E2E valida un formato de banner único en toda la rejilla',
 check('El E2E reproduce cierre rápido de pestaña y sincronización real del explorador', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
     return smoke.includes("recordEvent('rapid-tab-replace'")
+        && smoke.includes('createTabAndCloseImmediately(rapidOldId)')
         && smoke.includes("recordEvent('explorer-cwd-layout'")
         && smoke.includes("await sendTerminalLine('cd /tmp')")
         && smoke.includes('pathHeight > 32');
+})());
+check('La barra de pestañas no anida el cierre dentro de otro botón', (() => {
+    const tabBar = read('src/components/TabBar.svelte');
+    return tabBar.includes('role="tab"')
+        && tabBar.includes('<button\n                type="button"\n                class="tab-close"')
+        && !tabBar.includes('<span\n                class="tab-close"');
 })());
 check('El E2E cierra el selector de entornos si solo hay una shell disponible', (() => {
     const smoke = read('tests/e2e/smoke.mjs');

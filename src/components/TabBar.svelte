@@ -47,6 +47,15 @@
         await app.closeTab(tabId);
     }
 
+    function activateFromKeyboard(event: KeyboardEvent, tabId: string): void {
+        // El botón de cierre vive dentro del contenedor de la pestaña. No
+        // convertir sus pulsaciones en una activación de la pestaña padre.
+        if (event.target !== event.currentTarget) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        void app.activateTab(tabId);
+    }
+
     function onAuxClick(event: MouseEvent, tabId: string): void {
         // Botón central de la rueda del ratón (button === 1)
         if (event.button === 1) {
@@ -159,8 +168,7 @@
     </button>
 
     {#each app.tabs as tab (tab.id)}
-        <button
-            type="button"
+        <div
             class="tab"
             data-tab-id={tab.id}
             class:active={tab.id === app.activeTabId}
@@ -168,9 +176,13 @@
             class:drop-before={tab.id === dropTargetId && !dropAfter}
             class:drop-after={tab.id === dropTargetId && dropAfter}
             draggable="true"
+            role="tab"
+            aria-selected={tab.id === app.activeTabId}
+            tabindex={tab.id === app.activeTabId ? 0 : -1}
             aria-label={`${tab.label}. ${app.t('tabs.dragHint', 'Arrastra para reordenar')}`}
             title={tab.label}
-            onclick={() => app.activateTab(tab.id)}
+            onclick={() => void app.activateTab(tab.id)}
+            onkeydown={(event) => activateFromKeyboard(event, tab.id)}
             onauxclick={(event) => onAuxClick(event, tab.id)}
             ondragstart={(event) => dragStart(event, tab.id)}
             ondragover={(event) => dragOver(event, tab.id)}
@@ -178,15 +190,14 @@
             ondragend={endDrag}
         >
             <span class="tab-label">{tab.label}</span>
-            <span
+            <button
+                type="button"
                 class="tab-close"
-                role="button"
-                tabindex="-1"
                 aria-label={app.t('tabs.close', 'Cerrar pestaña')}
+                title={app.t('tabs.close', 'Cerrar pestaña')}
                 onclick={(event) => close(event, tab.id)}
-                onkeydown={(event) => event.key === 'Enter' && close(event as unknown as MouseEvent, tab.id)}
-            >✕</span>
-        </button>
+            >✕</button>
+        </div>
     {/each}
 
     <button
@@ -271,13 +282,20 @@
     }
 
     .tab-close {
+        display: flex;
+        align-items: center;
+        justify-content: center;
         flex: 0 0 auto;
         margin-left: auto;
         padding: 0 3px;
+        border: 0;
         border-radius: 3px;
+        background: transparent;
         color: var(--muted);
+        font: inherit;
         font-size: 11px;
         line-height: 1;
+        cursor: pointer;
     }
 
     .tab-close:hover {
