@@ -12,6 +12,9 @@ La aplicación se llama **WinSlim Terminal** en Windows y **LTerminal** en
 Linux. No es una marca distinta: es la misma base con identidad,
 identificador y rutas de datos propias por plataforma (`src-tauri/src/config/identity.rs`).
 
+Este README concentra la documentación técnica, el flujo de ejecución, los
+contratos de seguridad y la matriz de pruebas mantenida del repositorio.
+
 | | |
 |---|---|
 | Versión | 1.4.4 |
@@ -29,6 +32,7 @@ identificador y rutas de datos propias por plataforma (`src-tauri/src/config/ide
 - [Scripts npm](#scripts-npm)
 - [Compilación y distribución](#compilación-y-distribución)
 - [Arquitectura](#arquitectura)
+- [Flujos de ejecución y diagnóstico](#flujos-de-ejecución-y-diagnóstico)
 - [Contrato IPC](#contrato-ipc)
 - [Seguridad](#seguridad)
 - [Entornos y shells](#entornos-y-shells)
@@ -85,6 +89,36 @@ instala los controladores cuando sea posible y `--e2e-driver
 /ruta/WebKitWebDriver` permite indicar el ejecutable nativo si la distribución
 no lo incluye. Si una precondición no puede prepararse, el script lo indica y
 no marca la release como verificada.
+
+### Wine para la validación cruzada
+
+Para compilar el ejecutable Windows desde Arch/CachyOS e inspeccionarlo bajo
+Wine, instala las herramientas de la cadena cruzada y del entorno gráfico:
+
+```bash
+sudo pacman -S --needed mingw-w64-gcc wine winetricks cabextract unzip xdotool xorg-server-xvfb openbox
+rustup target add x86_64-pc-windows-gnu
+```
+
+La batería Rust no necesita WebView2. El smoke gráfico sí: crea un prefijo
+aislado (`WINE_SMOKE_PREFIX`) e instala dentro el WebView2 Fixed Runtime x64
+desde la [página oficial de WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2).
+Extrae el CAB con `cabextract`, conserva la carpeta de versión y apunta
+`WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` a esa carpeta usando una ruta Wine, por
+ejemplo `Z:\tmp\webview2-fixed`. Después ejecuta:
+
+```bash
+WINE_SMOKE_PREFIX=/ruta/al/prefijo \
+WEBVIEW2_BROWSER_EXECUTABLE_FOLDER='Z:\tmp\webview2-fixed' \
+LTERMINAL_REQUIRE_SIGNING=0 \
+bash linux/build-windows.sh --fast --no-install --skip-checks --wine-smoke
+```
+
+El prefijo no debe compartirse con una instalación normal de Wine ni incluirse
+en Git. El resultado Rust bajo Wine es válido para la lógica Windows; la
+creación gráfica completa de PTY/ConPTY debe confirmarse además en Windows
+nativo, porque Wine puede ejecutar WebView2 y la interfaz pero no implementar
+ConPTY con fidelidad suficiente.
 
 Cada E2E de Windows crea además un perfil WebView2 temporal y exclusivo, que
 EdgeDriver recibe mediante `webviewOptions`. Algunas combinaciones de WebView2
@@ -223,6 +257,12 @@ directamente en la terminal.
 
 Para una build completa y verificada, con sus comprobaciones previas y su
 release comprimida, usar los scripts de `windows/` y `linux/` en vez de estos.
+Tauri incrusta `dist/index.html` en el binario; por eso `src-tauri/build.rs`
+declara ese archivo como entrada de Cargo. Sin ese enlace, una modificación
+exclusivamente Svelte/CSS podía regenerar `dist/` y aun así reutilizar un
+ejecutable incremental con el frontend anterior. La comprobación de scripts de
+build exige esta dependencia y evita que una prueba aparentemente correcta se
+ejecute contra una interfaz desactualizada.
 
 Las builds normales (`dist:win`, `dist:win:installer` y `dist:linux`) usan el
 perfil release comprimido: LTO completo, una unidad de generación y símbolos
@@ -381,6 +421,40 @@ Si se configura actualización automática más adelante, el nombre del artefact
 debe coincidir con `self_update::asset_for_platform`; de otro modo una release
 no tendrá un adjunto compatible.
 
+### Seguridad de las releases
+
+Las actualizaciones exigen `SHA256SUMS.txt` y su firma detached
+`SHA256SUMS.txt.sig`. El binario se compila con
+`LTERMINAL_UPDATE_PUBLIC_KEY` (clave pública Ed25519 en hexadecimal) y verifica
+la firma antes de descargar, extraer o instalar el payload; después exige una
+coincidencia exacta de SHA-256. Una release oficial falla si no recibe
+`LTERMINAL_SIGNING_PRIVATE_KEY` en el entorno de CI. La clave privada nunca se
+guarda en el repositorio.
+
+En una máquina de desarrollo, `linux/build.sh` carga automáticamente esas dos
+claves desde `~/.config/lterminal/release-signing-private.pem` y
+`~/.config/lterminal/release-signing-public.hex`, siempre que no se hayan
+proporcionado ya mediante variables de entorno. Se puede cambiar la ubicación
+con `LTERMINAL_SIGNING_PRIVATE_KEY_FILE` y
+`LTERMINAL_UPDATE_PUBLIC_KEY_FILE`. En CI no se usa este fallback local: el
+workflow debe entregar los secretos mediante Actions. La build no afirma que
+una firma es válida hasta verificarla con la clave pública, y elimina una firma
+antigua si se intenta generar una build sin material de firma.
+
+Los payloads comprimidos se inspeccionan antes de extraerse: se rechazan rutas
+absolutas, `..`, separadores Windows, enlaces simbólicos, archivos especiales,
+archivos excesivos y expansiones superiores a 512 MiB. El bootstrap de perfil
+también exige el checksum del ZIP y limita sus hosts de descarga a GitHub.
+
+El workflow `Wine` ejecuta la batería Rust Windows con Wine sin requerir
+WebView2. El smoke gráfico se puede lanzar con `--wine-smoke`/`--full-tests`
+cuando `WINE_SMOKE_PREFIX` apunta a un prefijo con WebView2 Runtime; también
+admite `LTERMINAL_WINE_RUNNER=proton` y `LTERMINAL_PROTON=/ruta/al/proton`.
+En Linux, Wine 11 y Proton 11 han quedado instrumentados y aislados, pero el
+GUI smoke actual termina en timeout después de arrancar WebView2; no se declara
+aprobado hasta repetirlo en Windows nativo, donde ConPTY y WebView2 sí tienen
+la implementación objetivo.
+
 ### Comprobaciones que hacen los scripts, y por qué
 
 | Comprobación | Por qué está |
@@ -400,6 +474,11 @@ El banner se imprime una sola vez como salida normal del PTY dentro de
 `terminal-host`, por lo que comparte scrollback, cursor y selección con la
 shell sin superponerse a ellos. Este README concentra la documentación
 mantenida del repositorio.
+
+El recorrido completo, con el orden de arranque, el ciclo de vida de una
+pestaña, la frontera IPC, los procesos, el actualizador y los límites de
+confianza está desarrollado en este README junto con la estrategia de pruebas,
+la matriz Linux/Wine/Windows y la evidencia visual E2E.
 
 ```
 src-tauri/src/
@@ -426,9 +505,12 @@ src/
 
 ### Reglas que atraviesan todo el backend
 
-- **El frontend nunca manda una ruta que el backend no le haya dado antes.** Lo
-  que se ejecuta, se abre o se borra tiene que estar en la lista blanca del
-  último escaneo. Una ruta suelta se rechaza.
+- **Las operaciones sensibles validan las rutas en el backend.** Scripts,
+  repositorios y entradas de archivos pasan por listas blancas o por una
+  comprobación contra la vista actual. La interfaz no debe considerarse una
+  frontera de seguridad contra el propio usuario: una terminal permite
+  comandos explícitos arbitrarios y las rutas recibidas deben seguir
+  revalidándose antes de cada operación.
 - **Nada se ejecuta a escondidas.** Lo que un panel «hace» es escribir un
   comando en la terminal visible, con su cabecera y su resultado. El usuario lo
   lee entero antes de que pase nada y puede cancelarlo con Ctrl+C.
@@ -437,6 +519,395 @@ src/
   red o lanzan procesos llevan `#[tauri::command(async)]`. Se quedan en el hilo
   principal los rápidos y **`pty_input`**, que además tiene que conservar el
   orden de las pulsaciones.
+
+## Flujos de ejecución y diagnóstico
+
+La terminal no es una única llamada ni una única pantalla: es una cadena de
+flujos concurrentes que comparten estado. Una regresión visible (un cursor
+extraño, un espacio que parece desaparecer, parte del `fastfetch` de otra
+pestaña o un explorador atrasado) puede nacer en cualquiera de estas fronteras.
+La regla para depurarla es seguir el dato desde su origen hasta el píxel, y
+correlacionarlo siempre por `tabId`, generación de PTY y época de entrada o
+salida.
+
+### 1. Flujo global: de la ventana al prompt
+
+```text
+proceso Tauri
+  ├─ configuración, rutas y estado compartido del backend
+  ├─ App.svelte:onMount
+  │   ├─ registra una sola vez los listeners Tauri
+  │   └─ app.load()
+  │       ├─ tabs_list + settings_get + app_info en paralelo
+  │       ├─ aplica preferencias, tema y modo de ventana
+  │       └─ inicia la detección de entornos sin bloquear la primera terminal
+  ├─ un TerminalPane por pestaña
+  │   ├─ crea xterm.js + FitAddon y lo monta
+  │   ├─ registra el terminal en terminalRegistry
+  │   ├─ mide columnas/filas reales
+  │   ├─ tabs_ready: libera la salida retenida por el backend
+  │   └─ frontend_ready: permite completar la preparación global
+  ├─ TabManager crea la PTY y su sesión temporal
+  │   ├─ lector: bytes de la shell → salida incremental
+  │   └─ waiter: final de proceso → pty-exit
+  └─ inicializador, banner y prompt visible
+```
+
+Hay paralelismo intencional entre cargar ajustes, información de aplicación y
+la detección de entornos. No lo hay entre “xterm existe” y “vaciar la salida
+pendiente”: `tabs_ready` es la barrera que evita enviar bytes a un terminal que
+aún no tiene consumidor. La detección completa se retrasa hasta que la primera
+sesión puede responder para que un escaneo de PATH o de WSL no congele la
+interfaz ni retrase innecesariamente el prompt.
+
+Cada etapa tiene una condición observable. Si falla antes de `app.load()`, hay
+que mirar configuración y backend; si falla entre `tabs_ready` y el primer
+`pty-data`, hay que separar creación de PTY, inicializador y shell; si el evento
+llega pero no se ve, el problema está en la cola del frontend, xterm, el tamaño
+del viewport o el repintado.
+
+### 2. Flujo de salida PTY
+
+La salida de una pestaña sigue este recorrido, en este orden:
+
+```text
+shell / proceso hijo
+  → portable-pty (lector por bloques de hasta 64 KiB)
+  → Utf8Decoder + ClearSplitter
+  → Outbound::{Data, Clear, Exit}
+  → outbound_lock de TabManager
+  → evento Tauri: pty-data / pty-clear / pty-exit
+  → listener único de App.svelte
+  → outputQueues[tabId]
+  → xterm.write(data, callback)
+  → scroll, idle, fit y repintado
+```
+
+`Utf8Decoder` es incremental: una secuencia UTF-8 partida entre dos lecturas
+no se convierte en caracteres corruptos. `ClearSplitter` reconoce el marcador
+de limpieza sin destruir el orden de los datos que lo rodean. El backend
+serializa la emisión con `outbound_lock`; el frontend serializa las escrituras
+con una cola por pestaña; xterm mantiene su propio parser y renderizador. Estas
+tres fronteras son necesarias porque `AppHandle::emit` no proporciona un orden
+total entre hilos y una impresión del banner puede competir con el lector de la
+PTY.
+
+Un `pty-clear` no es “borrar un poco de texto”: es una transición de sesión. El
+frontend invalida la cola pendiente, limpia la pantalla y el scrollback de
+xterm con las secuencias apropiadas, y solo después deja pasar la salida nueva.
+`outputEpochs[tabId]` descarta una escritura que se hubiera quedado esperando en
+una promesa de una época anterior. Por eso no basta con emitir `\x1b[2J` desde
+un sitio cualquiera: limpiar sin invalidar la cola permite que el bloque viejo
+aparezca después del nuevo.
+
+Los campos mínimos para seguir una salida son `tabId`, `generation`, entorno,
+columnas/filas y marca temporal. La generación vive en el backend; la época es
+la barrera local del frontend. La primera descarta callbacks de una PTY
+reemplazada y la segunda descarta promesas de renderizado ya obsoletas.
+
+### 3. Flujo de entrada, cursor y teclado
+
+```text
+tecla física
+  ├─ captura global de App.svelte, fase capture
+  │   ├─ si coincide con un atajo: preventDefault + stopPropagation + acción
+  │   └─ si no coincide: continúa hacia el textarea oculto de xterm
+  └─ xterm.onData
+      → TerminalPane (mirror, comandos internos y preparación)
+      → api.sendInput(tabId, data)
+      → inputQueues[tabId]
+      → pty_input
+      → note_user_input + escritura en portable-pty
+      → eco de la shell / salida normal
+```
+
+El textarea oculto de xterm es el dueño de la edición de línea. La aplicación
+no debe reconstruir el cursor a partir de cada tecla ni capturar flechas,
+espacios, Backspace o Enter como si fueran atajos normales. `shortcutFromEvent`
+exige al menos un modificador, compara también `KeyboardEvent.code` y permite
+que la distribución del teclado no cambie el significado de Backslash. Así
+`ArrowLeft`, `ArrowRight`, `ArrowUp`, `ArrowDown` y el espacio siguen llegando
+a la shell salvo que el usuario les asigne explícitamente una combinación con
+modificadores.
+
+La cola de entrada es por pestaña y conserva el orden de las pulsaciones. Cada
+envío captura una época; al cerrar o reemplazar una sesión,
+`api.invalidateInput(tabId)` incrementa esa época y elimina la cola pendiente.
+Una promesa de la sesión anterior no puede escribir en la nueva PTY. El estado
+visual de la línea (`mirroredLine`) solo sirve para selección contextual y
+acciones de cortar/borrar; no es una segunda terminal ni una fuente de verdad
+para el cursor. Los espacios son ASCII ordinario (`0x20`) y se preservan en
+`sendInput`.
+
+Durante el arranque o un cambio de shell, `queuedInput` retiene temporalmente
+las pulsaciones hasta que el banner y el prompt están completos. Toda salida de
+ese estado pasa por una única función: marca la terminal disponible y vacía la
+cola en el mismo orden. El camino normal espera solo un frame breve después de
+`term.write`; el límite de seguridad cubre prompts no reconocibles y también
+vacía la cola, por lo que nunca puede dejar espacios o texto retenidos.
+
+Los comandos internos se interceptan únicamente cuando hay una línea completa
+con el prefijo `:`. Todo lo demás se entrega a la shell, incluido un comando
+que tenga espacios. El comportamiento correcto se comprueba en tres niveles:
+que el evento no sea consumido por un atajo, que `pty_input` reciba la misma
+secuencia y que la shell la refleje con el cursor en la posición esperada.
+
+### 4. Flujo de una pestaña y las carreras de cierre
+
+```text
+crear
+  → TabManager asigna tab-<contador>, entorno y cwd heredado
+  → generación nueva + spawn de PTY
+  → TerminalPane keyed por tab.id
+  → xterm abre, hace fit y llama tabs_ready
+  → inicializador/banner/prompt
+  → pestaña lista
+
+cerrar
+  → tabLifecycleQueue serializa la intención
+  → backend toma outbound_lock, mata/libera la sesión
+  → emite tab-closed con el siguiente tab activo
+  → frontend invalida entrada y salida
+  → actualiza estado; la última pestaña cierra la ventana
+```
+
+El `id` de la pestaña no se reutiliza durante la vida del proceso. El `{#each}`
+del frontend está keyed por ese id y cada `TerminalPane` permanece montado,
+aunque se oculte al cambiar de panel o de distribución. Esto conserva scrollback,
+selección, foco y callbacks de xterm; reciclar el nodo DOM para otra pestaña
+mezclaría estado visual aunque el backend estuviera correcto.
+
+El cierre, la creación y el ciclo de paneles pasan por colas/guardas porque el
+usuario puede abrir, dividir y cerrar casi en el mismo instante. Un evento
+tardío de `pty-exit`, `pty-data` o `tab-closed` se ignora si su pestaña ya no
+existe. Una sesión sustituida se identifica además por `generation`, por lo
+que un callback de la shell antigua no puede cerrar ni contaminar la nueva.
+
+### 5. Flujo de cambio de entorno
+
+```text
+selector / acción de entorno
+  → winslim:environment-switch-started(tabId)
+  → frontend invalida input/output y reinicia mirror/readiness
+  → env_switch IPC valida entorno y pestaña
+  → conserva cwd cuando es compatible
+  → incrementa generation y detiene la PTY anterior
+  → pty-clear ordenado
+  → crea la nueva PTY y sus archivos temporales
+  → responde consultas VT de arranque si ConPTY las hace
+  → inicializador + marcador de limpieza + banner/prompt
+  → environment-changed + terminal-cwd-changed
+  → interfaz, explorador y sugerencias reciben el nuevo entorno
+```
+
+La limpieza se ejecuta dentro de `spawn_pty`, después de invalidar la generación
+anterior y antes de que la shell nueva pueda imprimir. No se debe añadir otra
+limpieza en la capa de UI: dos clears en sitios distintos producen parpadeo,
+pueden borrar el prompt nuevo o reabrir una carrera de orden. La cola de
+`pending_commands` retiene acciones de panel que llegaron durante la
+inicialización y las libera tras el marcador de limpieza.
+
+El redimensionado solo cambia filas/columnas, mantiene el anclaje inferior y
+refresca la textura de xterm. Nunca ejecuta `term.clear()` ni reescribe un prompt
+local con secuencias CSI: lo primero destruiría el scrollback y lo segundo
+separaría el cursor visual del cursor que realmente posee la shell.
+
+Síntomas de una ruptura en este flujo: `fastfetch` antiguo después del cambio,
+prompt doble, cursor que reaparece en una posición vieja, el comando del panel
+que se pierde o la etiqueta que cambia antes de que exista una shell utilizable.
+La evidencia decisiva es comparar `tabId` y `generation` en el log con el orden
+`switch-started → clear → primer output nuevo → environment-changed`.
+
+### 6. Flujo de directorio de trabajo y explorador
+
+```text
+prompt / salida de la shell
+  → inspector prioriza OSC 7 y usa el prompt como respaldo
+  → TabManager actualiza cwd de la pestaña
+  → terminal-cwd-changed(tabId, cwd, envId)
+  → ExplorerSidebar decide si sigue a la terminal
+  → agrupa ráfagas de foco y conserva la última solicitud pendiente
+  → explorer_follow / lectura del backend
+  → solo la respuesta cuyo request y tabId siguen vigentes se pinta
+```
+
+El explorador sigue al tab activo cuando está en modo automático. Una carpeta
+que el usuario haya elegido manualmente no se pisa hasta que se solicite seguir
+la terminal, se cambie el foco o se use el botón correspondiente. Cada lectura
+tiene un número de solicitud: si el usuario navega de `A` a `B` y la respuesta
+de `A` llega tarde, se descarta en vez de sobrescribir `B`.
+
+Fish y otras shells modernas publican el directorio mediante OSC 7
+(`file://host/ruta`); se decodifican también rutas con espacios escapados. Esa
+señal no depende del aspecto del prompt y es la fuente preferida. Los patrones
+de cmd, PowerShell, MSYS, Bash, zsh, fish/Pure y Starship siguen siendo el
+respaldo para sesiones que no emiten OSC 7. Las llamadas repetidas por mostrar
+el panel, cambiar de pestaña y enfocar xterm se coalescen: se hace una lectura
+y, si durante ella llega otra solicitud, una sola lectura final. Así se evita
+que una ráfaga invalide todas las respuestas antes de pintar siquiera la ruta
+inicial.
+
+Llevar el explorador a una ruta (`cd` desde el explorador) debe pasar por la
+ruta validada y el comando de cambio de directorio del backend; la UI no debe
+componer una orden con texto sin validar. El flujo inverso, seguir la terminal,
+usa el `cwd` detectado, no una segunda copia del estado mantenida por el panel.
+
+### 7. Flujo de paneles, ajustes y acciones configurables
+
+`appState.svelte.ts` es el estado compartido. Los paneles no deben mantener una
+versión paralela de pestañas, entorno o cwd: reciben el estado, solicitan una
+operación y esperan la confirmación del backend. La carga de preferencias se
+serializa con `preferencesReloadRequest`; los guardados se encadenan en
+`preferencesSaveQueue`. De este modo cambiar idioma, tema, densidad o varios
+interruptores rápidamente no restaura un JSON antiguo por una respuesta tardía.
+
+La UI se construye a partir de capacidades configurables: selector de entorno,
+refresco, idioma, barra de pestañas, explorador, paneles de Dependencias,
+Proyectos y Biblioteca, acciones rápidas, modo de terminal limpia y controles
+de ventana. El botón **Logs** no forma parte de esa superficie: fue retirado.
+Los logs siguen existiendo como dato de diagnóstico, pero no como botón fijo
+que el usuario tenga que conservar.
+
+Hay veinte acciones mapeables en `src/lib/shortcuts.ts`: pestaña nueva,
+siguiente/anterior, división, explorador, terminal limpia, cuatro direcciones,
+Ajustes, Proyectos, Biblioteca, Dependencias, cerrar panel, refrescar entornos,
+seguir ruta, llevar la terminal a la carpeta, limpiar terminal y abrir el
+explorador del sistema. Las diez últimas de utilidad no tienen asignación de
+fábrica; una cadena vacía significa “disponible para grabar”, no “fallo”. Los
+valores se normalizan y comparan por código físico cuando procede.
+
+Los defaults direccionales son `Ctrl+Alt+H/J/K/L` (izquierda/abajo/arriba/
+derecha), no flechas. Es una decisión de frontera: la terminal conserva las
+flechas para la shell y el usuario puede elegir otra combinación explícita. Si
+un atajo no funciona, revisar primero el valor normalizado en Ajustes y luego
+si el evento fue consumido por un input con `data-shortcut-input`; no añadir un
+segundo listener local al componente de terminal.
+
+Los perfiles que aún contengan exactamente el conjunto heredado
+`Alt+ArrowLeft/Right/Up/Down` se migran al leerlos. La migración solo actúa si
+coinciden las cuatro asignaciones antiguas; una configuración parcial o
+personalizada se conserva.
+
+### 8. Flujo de instaladores, inventario y dependencias
+
+```text
+abrir Dependencias
+  → install_list devuelve el catálogo conocido/caché rápidamente
+  → install_refresh ejecuta detección completa por entorno
+      (PATH, WSL, Docker, ADB y gestores aplicables)
+  → envs-updated actualiza el inventario
+  → se construye el catálogo de acciones por plataforma y gestor
+  → install_run escribe el comando visible en la terminal
+  → pausa / resultado / salida de la herramienta
+  → nueva detección verifica el estado real
+```
+
+Una acción de instalación no es solo una etiqueta: tiene id estable, plataforma,
+gestor, comando visible, sonda posterior y estado (`instalado`, `actualizable`,
+`faltante`, `no aplicable` o `no verificable`). El backend no debe reutilizar el
+nombre del paquete de una distribución en otra solo para que los contadores
+coincidan.
+
+Para GitHub CLI (`gh`), el id estable es `pkg-gh`: WinGet usa `GitHub.cli`;
+Linux usa `gh` en apt/dnf/zypper y `github-cli` en pacman/apk. Un HTTP 404 de un
+mirror de CachyOS/Arch después de que el índice anuncie el paquete apunta a
+sincronización o contenido del mirror, no necesariamente a un id incorrecto.
+La secuencia de diagnóstico es comparar `pacman -Si github-cli`, el repositorio
+que lo anuncia y la URL del mirror con la salida de `pacman`; la acción solo debe
+marcar éxito cuando la sonda `gh --version` confirma el binario.
+
+Los instaladores comparten la misma frontera de visibilidad que los paneles:
+el usuario ve el comando, puede cancelarlo con Ctrl+C y la terminal conserva el
+resultado. Las fuentes externas, DNS, índices, mirrors, permisos y reinicios
+son dependencias del sistema y se deben distinguir de un error de catálogo o
+de IPC en los diagnósticos.
+
+### 9. Errores, rendimiento y correlación
+
+Los errores de JavaScript y las promesas rechazadas se envían mediante
+`log_frontend_error` al mismo `main.log` que el backend. Cada registro útil debe
+permitir responder: qué pestaña, qué entorno, qué generación, qué viewport y
+qué operación estaban activos. Nunca basta con “falló el terminal” sin esos
+campos.
+
+Las métricas de rendimiento no significan lo mismo:
+
+| Métrica | Qué mide | Frontera que ayuda a localizar |
+|---|---|---|
+| `app.initial-load` | carga completa de estado inicial | app/configuración/IPC |
+| `app.ui-shell-visible` | primera UI visible | ventana/WebView/UI |
+| `app.ready-for-input` | terminal apta para escribir | xterm/PTY/handshake |
+| `terminal.xterm-mount` | montaje del componente | DOM/xterm |
+| `terminal.ready-handshake` | tabs_ready/frontend_ready | barrera frontend/backend |
+| `terminal.initial-fit` | primer tamaño real | viewport/FitAddon/resize |
+| `terminal.environment-switch-first-output` | cambio hasta primer output nuevo | generación/spawn/shell |
+| `fastfetch.banner-visible` | banner realmente pintado | PTY/cola/xterm |
+| `terminal.resize` | ajuste de una terminal | layout/PTY resize |
+| `ipc.*` | llamada individual | contrato y backend |
+| `ui.panel.visible` | panel abierto y visible | estado/render |
+
+`sinceStartMs` responde “cuánto desde que empezó la interfaz” y `durationMs`
+responde “cuánto duró esta operación”; mezclarlos hace parecer lento un panel
+que solo se abrió después de un arranque largo. Para comparar pestañas hay que
+agrupar por `tabId` y no por el orden de líneas del log.
+
+### 10. Máquina de estados y reglas de validez
+
+| Estado | Entrada | Permitido | Invalida |
+|---|---|---|---|
+| `created` | tab summary | montar xterm, preparar PTY | nada aún |
+| `spawning` | spawn solicitado | esperar sesión y resize | callbacks de otra generación |
+| `initializing` | PTY viva | acumular salida/comandos, responder VT | entrada prematura no encolada |
+| `ready` | `tabs_ready` + prompt | entrada, resize, paneles | salida sin `tabId` |
+| `switching` | cambio de entorno | clear, invalidar épocas, nueva PTY | output/click de la sesión vieja |
+| `closing` | cierre o exit | liberar PTY y notificar | nuevas escrituras |
+| `closed` | `tab-closed` | retirar estado y DOM | cualquier evento tardío |
+
+Las invariantes que deben mantenerse al modificar el código son:
+
+- Una pestaña tiene un único dueño de estado y una única PTY activa.
+- Un flujo reemplazable tiene una generación backend y una época frontend.
+- La salida se ordena antes de emitirse y antes de escribirse en xterm.
+- La entrada se ordena por pestaña y se invalida al reemplazar o cerrar.
+- El shell posee el cursor; el mirror nunca lo sustituye.
+- Una respuesta asíncrona solo puede aplicar si conserva su tab, solicitud y
+  contexto.
+- La UI no valida por sí sola rutas, gestores, fuentes ni permisos.
+
+### 11. Matriz de síntomas y primera evidencia
+
+| Síntoma | Primera evidencia | Frontera probable | Siguiente comprobación |
+|---|---|---|---|
+| Cursor, espacios o flechas raros | secuencia en `onData` y `pty_input` | atajo/textarea/cola de entrada | revisar capture, `inputEpochs` y eco de shell |
+| Fastfetch antiguo tras abrir/cerrar/cambiar | `tabId`, generación, orden de `pty-clear`/`pty-data` | PTY sustituida o cola de salida | buscar generación vieja y época incrementada |
+| Banner encima del prompt | `tabs_ready`, `initializing`, primer resize | handshake/inicializador | comprobar `pending` y marcador de limpieza |
+| Explorador muestra carpeta anterior | cwd event y `listingRequest` | evento tardío o navegación manual | comparar request, tab activo y cwd |
+| Atajo con flecha no actúa | valor normalizado + fase del keydown | captura o terminal que lo consume | probar el default H/J/K/L o asignar modificador |
+| `gh` falla con 404 | gestor, repo, mirror y URL | fuente externa/índice | `pacman -Si`, estado del mirror y `gh --version` |
+| Pestaña Windows en blanco | presencia de ConPTY/WebView2 + log de spawn | runtime del sistema | validar DLL, arquitectura y respuesta de ConPTY |
+| Panel repone datos antiguos | request/cola de preferencias | async sin serializar | revisar `preferencesSaveQueue`/`preferencesReloadRequest` |
+| Primera escritura se pierde | `ready-for-input`, `queuedInput` | xterm aún no listo | comprobar liberación por output idle/timeout |
+
+### 12. Cómo mejorar sin reintroducir carreras
+
+Antes de cambiar un flujo, documentar su productor, consumidor, estado, barrera
+y evento de finalización. Después:
+
+1. Dibujar la cadena concreta (por ejemplo `tecla → xterm → IPC → PTY → eco`)
+   y decidir cuál es la única fuente de verdad.
+2. Añadir una guardia de generación, época o número de solicitud si el flujo
+   puede ser reemplazado mientras hay trabajo pendiente.
+3. Mantener la operación observable: comando visible, evento con campos de
+   correlación y métrica de inicio/fin.
+4. Probar la transición y la carrera, no solo el caso feliz: abrir/cerrar
+   rápidamente, cambiar de entorno mientras sale el banner, escribir antes del
+   prompt, navegar A→B, guardar dos preferencias seguidas y fallar un mirror.
+5. Ejecutar las comprobaciones de contratos, lógica, flujos, compilación y
+   smoke; si la limitación es externa (DNS, WebDriver, mirror), registrarla
+   separada del resultado de la aplicación.
+
+Toda la documentación técnica mantenida del proyecto vive en este README. Los
+flujos pueden crecer aquí sin crear READMEs paralelos que se contradigan.
 
 ## Contrato IPC
 
@@ -532,7 +1003,7 @@ distinguen mayúsculas de minúsculas.
 | `:terminal list` | Muestra todos los parámetros editables de xterm y sus valores actuales. |
 | `:terminal <parámetro> <valor>` | Cambia tamaño/familia/peso de fuente, interlineado, espaciado, padding, scrollback, sensibilidad, cursor, parpadeo, selección, densidad y colores. Ejemplos: `:terminal font-size 14`, `:terminal cursor beam`, `:terminal cursor-blink off`, `:terminal background #080808`. `:term` es equivalente. |
 | `:panes 1\|2\|3\|4` / `:panes cycle` | Fija o rota el número de terminales visibles en la rejilla. `:layout` y `:grid` son equivalentes. |
-| `:explorer-here` | Abre el gestor de archivos del sistema en la ruta actual de la terminal. En Windows está habilitado; en Linux aparece desactivado por defecto. `:open-here` y `:reveal-here` son equivalentes. |
+| `:explorer-here` | Abre el gestor de archivos del sistema en la ruta actual de la terminal en Windows o Linux. `:open-here` y `:reveal-here` son equivalentes. |
 | `:banner list` / `:banner hide|show|toggle <campo>` / `:banner preset compact\|full` | Consulta o cambia los campos del fastfetch. Los campos son `system`, `host`, `kernel`, `environment`, `motherboard`, `cpu`, `gpu`, `memory`, `storage`, `uptime` y `datetime`. |
 | `:quick-actions list` / `on` / `off` / `toggle` | Consulta o cambia la visibilidad de las acciones rápidas de Biblioteca. |
 
@@ -804,14 +1275,29 @@ histórica no se puede reescribir, solo copiar.
 
 ## Atajos de teclado
 
+Los atajos se resuelven en una única captura global, antes de que el textarea
+oculto de xterm reciba la tecla. Hay veinte acciones configurables en Ajustes;
+las acciones sin valor se muestran como disponibles pero no secuestran ninguna
+tecla. Los valores se guardan normalizados y se comparan por `KeyboardEvent.code`
+cuando la tecla tiene una representación física ambigua.
+
 | Atajo | Acción |
 |---|---|
 | `Ctrl+Shift+T` | Nueva pestaña del entorno actual |
 | `Ctrl+Shift+E` | Mostrar u ocultar el explorador de archivos |
-| `Ctrl+Shift+\` | Añadir una sesión a la vista dividida (o volver a una) |
+| `Ctrl+Shift+Backslash` | Añadir una sesión a la vista dividida (o volver a una) |
 | `Ctrl+Shift+C` | Copiar la selección |
 | `Ctrl+Shift+V` | Pegar |
 | `Ctrl+Shift+X` | Cortar la entrada seleccionada |
+
+Los defaults de navegación de panel son `Ctrl+Alt+H` (izquierda), `Ctrl+Alt+J`
+(abajo), `Ctrl+Alt+K` (arriba) y `Ctrl+Alt+L` (derecha), precisamente para no
+capturar las flechas que necesita la shell. También se pueden asignar acciones
+sin default: abrir un panel concreto, cerrar panel, refrescar entornos, seguir
+la ruta de la terminal, llevar la terminal a la carpeta del explorador, limpiar
+terminal y abrir el explorador del sistema. Un cambio de atajos debe probarse
+con foco en terminal, input de ajustes y panel lateral: cada contexto tiene que
+conservar su propia edición.
 
 ---
 
@@ -921,9 +1407,11 @@ visible; el mecanismo y el validador ya las contemplan.
 | Logs | `logs\main.log` (rota a `main.log.1` al superar 2 MB) | ídem |
 | Variable de depuración | `WINSLIM_LOG_LEVEL=debug` | `LTERMINAL_LOG_LEVEL=debug` |
 
-El botón **Logs** abre la ruta real. Los archivos de inicialización y banner de
-cada sesión van a una carpeta temporal por PID, de modo que dos instancias
-abiertas a la vez no se pisan ni se borran los archivos al salir.
+La interfaz no muestra un botón **Logs**: fue retirado para que la barra no
+acumule superficies fijas. Los logs siguen disponibles en la ruta real indicada
+arriba. Los archivos de inicialización y banner de cada sesión van a una carpeta
+temporal por PID, de modo que dos instancias abiertas a la vez no se pisan ni se
+borran los archivos al salir.
 
 Los registros llevan hora UTC con milisegundos, identificador de sesión y
 metadatos JSON. Se anotan la migración, el arranque, cada PTY, duración de

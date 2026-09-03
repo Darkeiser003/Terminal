@@ -130,7 +130,12 @@ pub fn payload_root(staged: &Path) -> PathBuf {
         };
         let hijos: Vec<_> = entradas.filter_map(Result::ok).collect();
         match hijos.as_slice() {
-            [unico] if unico.path().is_dir() => actual = unico.path(),
+            [unico]
+                if std::fs::symlink_metadata(unico.path())
+                    .is_ok_and(|metadata| metadata.is_dir()) =>
+            {
+                actual = unico.path();
+            }
             _ => return actual,
         }
     }
@@ -147,12 +152,94 @@ pub fn verify_payload(root: &Path, binary_name: &str) -> Result<(), String> {
             "Lo descargado no parece esta aplicación: no trae {binary_name}."
         ));
     }
+    if !crate::platform::host().is_windows()
+        && binary_name.to_ascii_lowercase().ends_with(".appimage")
+    {
+        let mut magic = [0u8; 4];
+        let mut file = std::fs::File::open(&binario)
+            .map_err(|error| format!("No se pudo leer el AppImage: {error}"))?;
+        std::io::Read::read_exact(&mut file, &mut magic)
+            .map_err(|error| format!("El AppImage está incompleto: {error}"))?;
+        if magic != *b"\x7fELF" {
+            return Err("La actualización Linux no es un AppImage ELF válido.".into());
+        }
+    }
     if crate::platform::host().is_windows() {
         for recurso in windows_runtime_files() {
             if !root.join(recurso).is_file() {
                 return Err(format!(
                     "La actualización Windows está incompleta: falta {recurso}."
                 ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rechaza enlaces y tipos especiales después de extraer. La validación previa
+/// de nombres evita traversal; esta segunda barrera evita que un archivo del
+/// paquete pueda redirigir la copia hacia fuera del staging.
+pub fn validate_payload_tree(root: &Path) -> Result<(), String> {
+    const MAX_FILES: usize = 10_000;
+    const MAX_BYTES: u64 = 512 * 1024 * 1024;
+    let root_metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("No se pudo inspeccionar la raíz del payload: {error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("La raíz del payload debe ser una carpeta real, no un enlace.".into());
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("No se pudo fijar la raíz del payload: {error}"))?;
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .map_err(|error| format!("No se pudo leer el payload: {error}"))?
+        {
+            let entry = entry
+                .map_err(|error| format!("No se pudo leer una entrada del payload: {error}"))?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("No se pudo inspeccionar el payload: {error}"))?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| "El payload contiene una ruta fuera de su raíz.".to_string())?;
+            if relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) {
+                return Err("El payload contiene una ruta fuera de su raíz.".into());
+            }
+            if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+                return Err(format!(
+                    "El payload contiene un tipo de archivo no permitido: {}",
+                    relative.display()
+                ));
+            }
+            let canonical = path
+                .canonicalize()
+                .map_err(|error| format!("No se pudo resolver el payload: {error}"))?;
+            if !canonical.starts_with(&canonical_root) {
+                return Err(format!(
+                    "El payload sale de su raíz: {}",
+                    relative.display()
+                ));
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            } else {
+                files += 1;
+                bytes = bytes.saturating_add(metadata.len());
+                if files > MAX_FILES || bytes > MAX_BYTES {
+                    return Err(
+                        "El payload extraído supera los límites de archivos o tamaño.".into(),
+                    );
+                }
             }
         }
     }
@@ -422,6 +509,23 @@ mod tests {
         escribir(&dir.path().join("WinSlimTerminal-1.4.3/conpty.dll"), "y");
         let raiz = payload_root(dir.path());
         assert!(raiz.join("app.exe").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_se_sigue_un_enlace_simbolico_como_raiz_del_payload() {
+        use std::os::unix::fs::symlink;
+
+        let staged = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        escribir(&outside.path().join("app.exe"), "fuera del staging");
+        symlink(outside.path(), staged.path().join("payload")).unwrap();
+
+        // La raíz se queda en staging para que la segunda barrera vea el
+        // enlace y rechace el árbol completo; nunca debe devolver la carpeta
+        // externa como si fuera parte de la release.
+        assert_eq!(payload_root(staged.path()), staged.path());
+        assert!(validate_payload_tree(staged.path()).is_err());
     }
 
     #[test]

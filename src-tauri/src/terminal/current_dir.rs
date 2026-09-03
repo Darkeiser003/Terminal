@@ -9,6 +9,7 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::path::Path;
 
 use crate::environments::{Environment, Transport};
 
@@ -41,6 +42,11 @@ pub fn join_host_path(root: &str, child: &str) -> String {
 
 static OSC_SEQUENCE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap());
+// OSC 7 es la notificación estándar de cwd que emiten fish y otras shells
+// modernas. Es más fiable que reconstruir una ruta desde un prompt abreviado
+// o redibujado, por lo que se consulta antes de eliminar las secuencias ANSI.
+static OSC_CWD_SEQUENCE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\x1b\]7;file://([^\x07\x1b]*)(?:\x07|\x1b\\)").unwrap());
 static CSI_SEQUENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
 
 pub fn strip_ansi(value: &str) -> String {
@@ -176,12 +182,88 @@ static POSIX_PROMPT: Lazy<Regex> =
 static BRACKET_POSIX_PROMPT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)(?:^|\n)\[[^\n\]]+\s((?:~|/)[^\n\]]*)\]\s*[$#]?\s*$").unwrap());
 
+// Starship suele poner la ruta y los metadatos (por ejemplo, la rama de git)
+// en una línea y el prompt editable en la siguiente:
+// `~/proyecto main\n❯ `. Se captura toda la línea: una ruta válida puede llevar
+// espacios y se separa de los metadatos comprobando los prefijos existentes.
+static STARSHIP_POSIX_PROMPT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)(?:^|\n)((?:~|/)[^\n]+)\n[ \t]*(?:❯|➜|>)\s*$").unwrap());
+
 fn last_capture(text: &str, regex: &Regex) -> Option<String> {
     regex
         .captures_iter(text)
         .last()
         .and_then(|captures| captures.get(1))
         .map(|group| group.as_str().to_string())
+}
+
+fn decode_percent_path(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn osc_current_directory(output: &str, env: &Environment) -> Option<String> {
+    let payload = last_capture(output, &OSC_CWD_SEQUENCE)?;
+    // file://host/ruta y file:///ruta comparten esta separación: lo anterior
+    // a la primera barra es el host, no parte del directorio.
+    let path_start = payload.find('/')?;
+    let mut path = decode_percent_path(&payload[path_start..])?;
+    if path.len() >= 4
+        && path.starts_with('/')
+        && path.as_bytes()[1].is_ascii_alphabetic()
+        && path.as_bytes()[2] == b':'
+        && path.as_bytes()[3] == b'/'
+    {
+        path.remove(0);
+    }
+    map_remote_path(&path, env)
+}
+
+/// Distingue una ruta con espacios de los metadatos que Starship añade al
+/// final de la misma línea. Se prueba primero la línea completa y después se
+/// eliminan sufijos palabra a palabra hasta encontrar el prefijo más largo que
+/// sea un directorio real del anfitrión. Si la ruta no es comprobable (por
+/// ejemplo, una ruta remota todavía no montada), se conserva la compatibilidad
+/// con el formato tradicional y se toma el primer segmento.
+fn resolve_starship_path(raw: &str, env: &Environment) -> Option<String> {
+    let value = raw.trim();
+    let mut end = value.len();
+
+    loop {
+        let candidate = value[..end].trim_end();
+        if let Some(mapped) = map_remote_path(candidate, env) {
+            if Path::new(&mapped).is_dir() {
+                return Some(mapped);
+            }
+        }
+
+        let Some(index) = candidate
+            .char_indices()
+            .rev()
+            .find_map(|(index, character)| character.is_whitespace().then_some(index))
+        else {
+            break;
+        };
+        end = index;
+    }
+
+    value
+        .split_whitespace()
+        .next()
+        .and_then(|candidate| map_remote_path(candidate, env))
 }
 
 /// Normaliza una ruta de Windows: colapsa separadores repetidos y resuelve los
@@ -217,6 +299,9 @@ pub fn detect_current_directory(
     env: &Environment,
     fallback: Option<&str>,
 ) -> Option<String> {
+    if let Some(found) = osc_current_directory(output, env) {
+        return Some(found);
+    }
     let stripped = strip_ansi(output);
     let start = stripped.len().saturating_sub(SCAN_WINDOW);
     // El recorte va a un límite de carácter: partir un UTF-8 por la mitad
@@ -232,6 +317,10 @@ pub fn detect_current_directory(
 
     if let Some(found) = last_capture(text, &MSYS_PROMPT) {
         return map_remote_path(&found, env);
+    }
+
+    if let Some(found) = last_capture(text, &STARSHIP_POSIX_PROMPT) {
+        return resolve_starship_path(&found, env);
     }
 
     if let Some(found) = last_capture(text, &BRACKET_POSIX_PROMPT) {
@@ -327,6 +416,61 @@ mod tests {
         assert_eq!(
             detect_current_directory("[ana@pc ~/proyectos/app]$ ", &native, None),
             Some("/home/ana/proyectos/app".to_string())
+        );
+    }
+
+    #[test]
+    fn osc_7_detecta_el_cwd_aunque_el_prompt_no_contenga_la_ruta() {
+        let out = "salida\x1b]7;file://equipo/tmp/proyecto%20local\x07❯ ";
+        assert_eq!(
+            detect_current_directory(out, &env(Transport::Native), Some("/antes")),
+            Some("/tmp/proyecto local".to_string())
+        );
+    }
+
+    #[test]
+    fn osc_7_usa_la_notificacion_mas_reciente_y_acepta_el_terminador_st() {
+        let out = "\x1b]7;file://equipo/home/ana\x07❯ cd /tmp\r\n\x1b]7;file://equipo/tmp\x1b\\❯ ";
+        assert_eq!(
+            detect_current_directory(out, &env(Transport::Native), None),
+            Some("/tmp".to_string())
+        );
+    }
+
+    #[test]
+    fn reconoce_el_prompt_de_starship_en_dos_lineas_y_omite_la_rama() {
+        let native = env(Transport::Native);
+        let home = crate::paths::home_cwd();
+        let home = home.to_string_lossy();
+        let out = "~/Documentos/Scripts/cachyos-tools/dist main\n❯ ";
+        assert_eq!(
+            detect_current_directory(out, &native, None),
+            Some(join_host_path(
+                &home,
+                "Documentos/Scripts/cachyos-tools/dist"
+            ))
+        );
+    }
+
+    #[test]
+    fn reconoce_starship_sin_metadatos_de_git() {
+        let out = "/home/ana/proyectos\n❯ ";
+        assert_eq!(
+            detect_current_directory(out, &env(Transport::Native), None),
+            Some("/home/ana/proyectos".to_string())
+        );
+    }
+
+    #[test]
+    fn starship_conserva_los_espacios_de_la_ruta_y_descarta_la_rama() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("proyecto con espacios");
+        std::fs::create_dir(&directory).unwrap();
+        let out = format!("{} main\n❯ ", directory.display());
+
+        assert_eq!(
+            detect_current_directory(&out, &env(Transport::Native), None),
+            Some(directory.to_string_lossy().to_string())
         );
     }
 

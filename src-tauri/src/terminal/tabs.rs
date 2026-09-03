@@ -189,6 +189,12 @@ static SCRIPT_ALIAS_CACHE: once_cell::sync::Lazy<Mutex<Option<ScriptAliasCache>>
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 
 const SCRIPT_ALIAS_CACHE_TTL: Duration = Duration::from_secs(2);
+// Crear un PTY suele tardar milisegundos, pero puede quedar momentáneamente
+// desplanificado mientras WebKit/antivirus comprime o captura la interfaz. Tres
+// segundos producían pestañas muertas en equipos bajo carga aunque el PTY
+// terminase llegando. El límite sigue siendo finito y la inicialización visible
+// conserva sus métricas independientes para detectar una regresión real.
+const PTY_SPAWN_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn script_alias_cache_key(env: &Environment, folder: &Path, manual_aliases: &str) -> String {
     let language = crate::i18n::active_language();
@@ -789,6 +795,16 @@ impl TabManager {
             tab.generation
         };
 
+        // Invalidar la generación antes de limpiar la vista es esencial. Si se
+        // emitía el clear desde `env_switch` y solo después se incrementaba la
+        // generación, el lector de la shell anterior todavía podía entregar un
+        // último bloque entre ambos pasos y dejarlo delante del fastfetch nuevo.
+        // La primera creación no necesita limpiar nada: el xterm aún está vacío
+        // y su salida inicial se retiene hasta el handshake.
+        if generation > 1 {
+            self.clear_view(app, tab_id);
+        }
+
         let spawn_dir = spawn_cwd::resolve_spawn_cwd(initial_cwd, env, &paths::home_cwd());
         let (viewport, pane_count) = self
             .registry
@@ -847,7 +863,7 @@ impl TabManager {
 
         let session = match spawn_thread {
             Err(error) => Err(anyhow::anyhow!("no se pudo crear el hilo PTY: {error}")),
-            Ok(_) => match spawn_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(_) => match spawn_rx.recv_timeout(PTY_SPAWN_TIMEOUT) {
                 Ok(result) => result,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Si el sistema devuelve finalmente un PTY, se destruye:
@@ -860,7 +876,8 @@ impl TabManager {
                             }
                         });
                     Err(anyhow::anyhow!(
-                        "la creación del PTY superó el límite de 3 segundos"
+                        "la creación del PTY superó el límite de {} segundos",
+                        PTY_SPAWN_TIMEOUT.as_secs()
                     ))
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
@@ -945,6 +962,11 @@ impl TabManager {
                 // La capa de archivos también lo filtra, pero mantenerlo aquí
                 // evita marcar la pestaña como pendiente de banner durante la
                 // carrera entre el primer prompt y el resize del xterm.
+                // Incluso si el primer viewport es demasiado bajo y el banner
+                // sale vacío, hay que crear su archivo y dejar que el script
+                // lo lea después del primer resize real. En ese momento
+                // `refresh_initial_banner_files` ya habrá escrito el texto
+                // completo y la inicialización no perderá el fastfetch.
                 let show_banner = crate::preferences::current().show_system_banner && !is_repl;
                 let session_files_started = Instant::now();
                 let session_files = crate::session_files::write_session_files(
@@ -1116,6 +1138,10 @@ impl TabManager {
         };
 
         if let Some(cwd) = cwd_changed {
+            log_info!(
+                "Directorio de terminal actualizado",
+                serde_json::json!({ "tabId": tab_id, "cwd": cwd })
+            );
             let _ = app.emit(
                 "terminal-cwd-changed",
                 serde_json::json!({ "tabId": tab_id, "cwd": cwd }),
@@ -1200,6 +1226,15 @@ impl TabManager {
                         }
                     };
                     if initializing {
+                        // Una shell interactiva puede consultar el terminal
+                        // (modo de teclado, color, capacidades, etc.) antes
+                        // de ejecutar nuestro inicializador. Esas sondas
+                        // tienen que llegar a xterm para que responda; si se
+                        // descarta todo mientras esperamos el marcador, Fish
+                        // o fastfetch pueden quedar bloqueados varios
+                        // segundos. El marcador posterior limpia esta salida
+                        // provisional antes de mostrar el banner definitivo.
+                        self.send(app, tab_id, Outbound::Data(data));
                         return;
                     }
                     if let Some(elapsed) = first_output {
@@ -1375,6 +1410,11 @@ impl TabManager {
     /// cosas dejan lo mismo: una pestaña sin sesión detrás, que no sirve para
     /// nada.
     pub fn close_tab(self: &Arc<Self>, app: &AppHandle, tab_id: &str, reason: &str) {
+        // No emitir más salida de esta pestaña después de anunciar su cierre.
+        // El lector del PTY puede estar terminando al mismo tiempo que el
+        // usuario pulsa la ✕; esta compuerta ordena ambos eventos y evita que
+        // un bloque tardío quede pintado durante la transición a otra pestaña.
+        let _outbound = self.outbound_lock.lock();
         let (removed, remaining, active_tab_id) = {
             let mut registry = self.registry.lock();
             let Some(index) = registry.tabs.iter().position(|tab| tab.id == tab_id) else {

@@ -515,8 +515,8 @@ pub struct HelpOptions<'a> {
     pub script_names: &'a [String],
 }
 
-/// Secciones de la ayuda que se pueden pedir desde ayuda <seccion>,
-/// help <seccion> o :help <seccion>. Los nombres cortos son deliberados:
+/// Secciones de la ayuda que se pueden pedir desde `ayuda <seccion>`,
+/// `help <seccion>` o `:help <seccion>`. Los nombres cortos son deliberados:
 /// deben poder escribirse igual desde cualquier shell y no dependen del
 /// idioma visible de la interfaz.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1043,7 +1043,7 @@ fn render_internal(lines: &mut Vec<String>, app_name: &str) {
     ));
     lines.push(help_row(
         ":explorer-here",
-        "Abre el gestor de archivos del sistema en la ruta actual de esta terminal (Windows; en Linux está desactivado por defecto).",
+        "Abre el gestor de archivos del sistema en la ruta actual de esta terminal (Windows y Linux).",
     ));
     lines.push("    Alias equivalentes: :open para :panel; :env para :shell; :term para :terminal; :layout/:grid para :panes; :open-here/:explorerhere para :explorer-here.".to_string());
     lines.push("    Ejemplos: :shell powershell · :panel settings · :theme ocean · :terminal font-size 14 · :panes 2".to_string());

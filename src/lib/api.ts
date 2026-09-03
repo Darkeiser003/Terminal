@@ -8,6 +8,7 @@
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { openPath } from '@tauri-apps/plugin-opener';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -58,6 +59,16 @@ const HIGH_FREQUENCY_COMMANDS = new Set([
     'pty_resize',
     'internal_command_parse',
 ]);
+
+// `invoke` es asíncrono y varias pulsaciones pueden llegar al runtime nativo
+// al mismo tiempo cuando se escribe rápido. El PTY, en cambio, necesita
+// recibirlas en el orden exacto en que xterm las produjo; especialmente un
+// espacio no debe adelantarse o quedarse detrás de la siguiente letra.
+const inputQueues = new Map<string, Promise<void>>();
+// Una pestaña conserva su id cuando cambia de entorno. Las pulsaciones que ya
+// estaban en vuelo no deben acabar en la shell nueva; el contador invalida esas
+// promesas sin intentar cancelar una llamada IPC que ya esté dentro de Tauri.
+const inputEpochs = new Map<string, number>();
 
 /** Registra una métrica sin volver a instrumentar la propia llamada de log. */
 export const recordPerformance = (payload: Record<string, unknown>) =>
@@ -120,9 +131,41 @@ export const markFrontendReady = (tabId: string) => invokeLogged<void>('frontend
 /** Hace visible la ventana si la carga inicial falla antes de montar un xterm. */
 export const revealWindow = () => invokeLogged<void>('frontend_reveal');
 
+/** Aplica el tamaño inicial elegido en Ajustes sin cambiar la decoración nativa. */
+export async function setWindowMaximized(maximized: boolean): Promise<void> {
+    const window = getCurrentWindow();
+    if (maximized) await window.maximize();
+    else await window.unmaximize();
+}
+
 // ---- pty ----
 
-export const sendInput = (tabId: string, data: string) => invokeLogged<void>('pty_input', { tabId, data });
+export function sendInput(tabId: string, data: string): Promise<void> {
+    const previous = inputQueues.get(tabId) ?? Promise.resolve();
+    const epoch = inputEpochs.get(tabId) ?? 0;
+    const next = previous
+        .catch(() => undefined)
+        .then(() => {
+            if ((inputEpochs.get(tabId) ?? 0) !== epoch) return undefined;
+            return invokeLogged<void>('pty_input', { tabId, data });
+        });
+    inputQueues.set(tabId, next);
+    void next.then(
+        () => {
+            if (inputQueues.get(tabId) === next) inputQueues.delete(tabId);
+        },
+        () => {
+            if (inputQueues.get(tabId) === next) inputQueues.delete(tabId);
+        },
+    );
+    return next;
+}
+
+/** Invalida entrada pendiente al reemplazar o cerrar una sesión PTY. */
+export function invalidateInput(tabId: string): void {
+    inputEpochs.set(tabId, (inputEpochs.get(tabId) ?? 0) + 1);
+    inputQueues.delete(tabId);
+}
 
 export const parseInternalCommand = (line: string) =>
     invokeLogged<InternalCommand | null>('internal_command_parse', { line });
@@ -364,8 +407,6 @@ export const resetPreferences = () => invokeLogged<PreferencesPayload>('settings
 // ---- Identidad y registro ----
 
 export const getAppInfo = () => invokeLogged<AppInfo>('app_info');
-
-export const openLogFolder = () => invokeLogged<string | null>('log_open_folder');
 
 export const reportFrontendError = (payload: unknown) =>
     invokeLogged<void>('log_frontend_error', { payload }).catch(() => {

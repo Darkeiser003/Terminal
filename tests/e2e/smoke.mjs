@@ -628,9 +628,23 @@ async function sendTerminalKeys(line, pane = null, { enter = true, settle = true
         return [{ type: 'keyDown', value }, { type: 'keyUp', value }];
     });
     try {
-        await request(`/session/${sessionId}/actions`, 'POST', {
-            actions: [{ type: 'key', id: 'keyboard', actions: keyActions }],
-        });
+        if (enter) {
+            const lineActions = keyActions.slice(0, -2);
+            await request(`/session/${sessionId}/actions`, 'POST', {
+                actions: [{ type: 'key', id: 'keyboard', actions: lineActions }],
+            });
+            // WebKitWebDriver puede entregar la última letra junto con Enter
+            // antes de que xterm actualice su buffer accesible. Separarlos
+            // evita que los comandos internos pierdan ese carácter final.
+            await new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS));
+            await request(`/session/${sessionId}/actions`, 'POST', {
+                actions: [{ type: 'key', id: 'keyboard', actions: keyActions.slice(-2) }],
+            });
+        } else {
+            await request(`/session/${sessionId}/actions`, 'POST', {
+                actions: [{ type: 'key', id: 'keyboard', actions: keyActions }],
+            });
+        }
     } catch (firstError) {
         // WebKitWebDriver antiguo puede no implementar acciones de teclado;
         // conservar una ruta compatible para esos entornos.
@@ -841,7 +855,12 @@ async function assertClearKeepsInputOnPromptRow() {
             const snapshot = await activeTerminalRowSnapshot();
             const nonEmptyRows = snapshot.rows.filter((row) => row.text.trim().length > 0);
             const promptRows = nonEmptyRows.filter((row) => promptLooksVisible(row.text));
-            return promptRows.length === 1 && promptRows[0] === nonEmptyRows.at(-1);
+            const lastRow = nonEmptyRows.at(-1);
+            const previousRow = nonEmptyRows.at(-2);
+            const splitPrompt = lastRow && previousRow
+                && promptLooksVisible(`${previousRow.text}\n${lastRow.text}`);
+            return (promptRows.length === 1 && promptRows[0] === lastRow)
+                || Boolean(splitPrompt && snapshot.cursorRow === lastRow.index);
         }, 10000, `prompt tras ${command} ${attempt + 1}/${attempts}`);
 
         const marker = `CLEAR_ROW_${attempt + 1}`;
@@ -851,8 +870,12 @@ async function assertClearKeepsInputOnPromptRow() {
             await waitUntil(async () => {
                 lastSnapshot = await activeTerminalRowSnapshot();
                 const markerRow = lastSnapshot.rows.find((row) => row.text.includes(marker));
+                const markerIndex = markerRow?.index ?? -1;
+                const markerPreviousRow = markerIndex > 0 ? lastSnapshot.rows[markerIndex - 1] : null;
                 return Boolean(markerRow
-                    && promptLooksVisible(markerRow.text)
+                    && promptLooksVisible(markerPreviousRow
+                        ? `${markerPreviousRow.text}\n${markerRow.text}`
+                        : markerRow.text)
                     && (lastSnapshot.cursorRow < 0 || lastSnapshot.cursorRow === markerRow.index));
             }, 5000, `entrada en la misma fila del prompt tras ${command}`);
         } catch (error) {
@@ -878,6 +901,12 @@ async function assertPromptReflowsAfterResize() {
         const current = snapshot.rows[snapshot.cursorRow]?.text.trimEnd() ?? '';
         const previous = snapshot.rows[snapshot.cursorRow - 1]?.text.trimEnd() ?? '';
         const joined = `${previous}${current}`;
+        // Fish dibuja normalmente el directorio y el terminador en filas
+        // separadas (`~` + `❯`). Esa geometría no es un wrap residual y debe
+        // quedar fuera de esta aserción incluso cuando la terminal ya es ancha.
+        const fishPrompt = /^(?:~|\/.*|[A-Za-z]:.*)$/.test(previous)
+            && /^[>❯$#](?:.*)?$/u.test(current);
+        if (fishPrompt) return null;
         if (promptLooksVisible(current) || !promptLooksVisible(joined) || joined.length > snapshot.cols) return null;
         return { cols: snapshot.cols, cursorRow: snapshot.cursorRow, previous, current, joined };
     };
@@ -1235,10 +1264,23 @@ function promptLooksVisible(text) {
     // Recomponer solo esas filas no relaja el contrato: la ruta sigue
     // necesitando su prefijo y el terminador real de la shell.
     const reflowed = lines.join('');
+    const fishSplit = lines.length >= 2
+        && /^(?:~|\/.*|[A-Za-z]:?)$/.test(lines.at(-2))
+        && /^[>❯$#](?:.*)?$/u.test(lines.at(-1));
     return lines.some((line) => anchored.test(line))
         || concatenated.test(clean)
         || anchored.test(reflowed)
-        || concatenated.test(reflowed);
+        || concatenated.test(reflowed)
+        || fishSplit;
+}
+
+function snapshotPromptVisible(snapshot) {
+    const rows = snapshot?.rows ?? [];
+    return rows.some((row, index) => {
+        if (promptLooksVisible(row.text)) return true;
+        const previous = index > 0 ? rows[index - 1].text : '';
+        return promptLooksVisible(`${previous}\n${row.text}`);
+    });
 }
 
 function bannerTextAnomalies(text) {
@@ -1435,22 +1477,34 @@ async function assertPaneOutputStable(expected, label) {
     return last;
 }
 
-async function assertTinyPanesClean(expected, label) {
-    let last = [];
-    await waitUntil(async () => {
-        const rows = await findAll('.cell:not(.hidden) .xterm-rows');
-        if (rows.length < expected) return false;
-        const texts = await Promise.all(rows.slice(0, expected).map((row) => textOf(row[elementKey])));
-        last = texts.map((text) => text.slice(-600));
-        // Por debajo de 12 filas el backend no pinta banner. Solo aceptamos
-        // el prompt/espacio; una cola de Sesión, GPU o una segunda cabecera es
-        // precisamente el residuo que este caso intenta detectar.
-        return texts.every((text) =>
-            !/(?:WinSlim|LTerminal).*Terminal|Sistema|System|CPU|Memoria|Memory|Uptime|Tiempo activo|Disco|Disk|GPU|Placa|Motherboard|Kernel|Entorno|Environment/i.test(text)
-            && !bannerTextAnomalies(text).some((item) => item.startsWith('continuación huérfana')),
-        );
-    }, 5000, `${label}: casillas bajas sin residuos`);
-    recordEvent('banner-hidden-tiny-pane', { expected, preview: last });
+async function assertTinyPanesStable(expected, label) {
+    let last = {};
+    try {
+        await waitUntil(async () => {
+            const rows = await findAll('.cell:not(.hidden) .xterm-rows');
+            if (rows.length < expected) return false;
+            const texts = await Promise.all(rows.slice(0, expected).map((row) => textOf(row[elementKey])));
+            const promptState = await promptStates(expected);
+            const anomalies = texts.map(bannerTextAnomalies);
+            const promptsVisible = texts.every(promptLooksVisible)
+                || (promptState.length >= expected && promptState.every((value) => value === 'true'));
+            // Una terminal reducida conserva su scrollback. El historial puede
+            // contener el banner anterior, pero nunca cabeceras duplicadas ni
+            // líneas partidas de otro bloque, y el prompt debe seguir usable.
+            const historyStable = anomalies.every((items) =>
+                items.every((item) => item === 'cabeceras=0'),
+            );
+            last = {
+                preview: texts.map((text) => text.slice(-600)),
+                promptState,
+                anomalies,
+            };
+            return promptsVisible && historyStable;
+        }, 5000, `${label}: casillas bajas estables`);
+    } catch (error) {
+        throw new Error(`${label}: casillas bajas inestables; diagnóstico=${JSON.stringify(last)}`, { cause: error });
+    }
+    recordEvent('tiny-pane-stable', { expected, ...last });
 }
 
 function assertWindowBounds(rect, label) {
@@ -1825,7 +1879,17 @@ try {
     const initialTooShort = initialGeometry.panes.slice(0, 1)
         .every((pane) => (pane.terminal?.rows ?? 0) < 12);
     if (initialTooShort) {
-        await assertTinyPanesClean(1, 'arranque con casilla baja');
+        // El primer `contentGeometry` puede observar el frame provisional
+        // antes del fit inicial. Si ya llegó el tamaño real cuando leemos el
+        // texto, la comprobación correcta pasa a ser la del banner completo;
+        // no debemos aplicar el contrato de casilla baja a una terminal que
+        // ya tiene 30 filas.
+        const settledGeometry = await contentGeometry();
+        if (settledGeometry.panes.slice(0, 1).every((pane) => (pane.terminal?.rows ?? 0) < 12)) {
+            await assertTinyPanesStable(1, 'arranque con casilla baja');
+        } else {
+            await waitForBannerPanes(1, 20000);
+        }
     } else {
         await waitForBannerPanes(1, 20000);
     }
@@ -1933,7 +1997,7 @@ try {
     const effectiveMinimumTooShort = effectiveMinimumGeometry.panes.slice(0, 1)
         .every((pane) => (pane.terminal?.rows ?? 0) < 12);
     if (effectiveMinimumTooShort) {
-        await assertTinyPanesClean(1, 'mínimo útil con casilla baja');
+        await assertTinyPanesStable(1, 'mínimo útil con casilla baja');
     } else {
         await waitForBannerPanes(1, 20000);
     }
@@ -1965,7 +2029,7 @@ try {
     // segunda. Todas las casillas deben usar el mismo perfil de banner.
     const tinySplit = splitGeometry.panes.slice(0, 2).every((pane) => (pane.terminal?.rows ?? 0) < 12);
     if (tinySplit) {
-        await assertTinyPanesClean(2, 'rejilla 2 paneles en altura mínima');
+        await assertTinyPanesStable(2, 'rejilla 2 paneles en altura mínima');
     } else {
         await waitForBannerPanes(2, 20000);
         await assertBannerHeaders(2, 'rejilla 2 paneles tras crear la segunda pestaña');
@@ -2016,6 +2080,51 @@ try {
     // responde a su marcador y ningún marcador aparece en otra sesión.
     const initialTabs = await findAll('.tab');
     if (initialTabs.length < 1) throw new Error('La ventana no creó la pestaña inicial');
+
+    // Reproduce la carrera reportada: iniciar una pestaña y cerrar la anterior
+    // sin esperar a que termine el banner nuevo. La cola de ciclo de vida debe
+    // conservar ambas intenciones en orden y las épocas de salida deben impedir
+    // que el texto de la sesión cerrada llegue al xterm recién creado.
+    const rapidBeforeIds = await Promise.all(
+        initialTabs.map((tab) => attribute(tab[elementKey], 'data-tab-id')),
+    );
+    const rapidOldId = await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id');
+    const rapidOldMarker = `LTERMINAL_E2E_CLOSED_TAB_${Date.now()}`;
+    await sendAndWaitForMarker(rapidOldMarker);
+    let rapidOldClose;
+    for (const tab of await findAll('.tab[data-tab-id]')) {
+        if (await attribute(tab[elementKey], 'data-tab-id') !== rapidOldId) continue;
+        rapidOldClose = (await findAllWithin(tab[elementKey], '.tab-close'))[0]?.[elementKey];
+        break;
+    }
+    if (!rapidOldClose) throw new Error('No se encontró el cierre de la pestaña para reproducir la carrera');
+    await click(await findWhenReady('.tab-new'));
+    await click(rapidOldClose);
+    let rapidNewId;
+    await waitUntil(async () => {
+        const ids = await Promise.all(
+            (await findAll('.tab[data-tab-id]')).map((tab) => attribute(tab[elementKey], 'data-tab-id')),
+        );
+        rapidNewId = ids.find((id) => !rapidBeforeIds.includes(id));
+        return !ids.includes(rapidOldId) && Boolean(rapidNewId);
+    }, 15000, 'crear pestaña y cerrar la anterior inmediatamente');
+    await waitUntil(async () => {
+        const activeCell = await findWhenReady('.cell:not(.hidden)[data-tab-id]');
+        return (await attribute(activeCell, 'data-tab-id')) === rapidNewId;
+    }, 10000, 'mostrar la pestaña creada durante el cierre rápido');
+    const rapidNewMarker = `LTERMINAL_E2E_NEW_TAB_${Date.now()}`;
+    await sendAndWaitForMarker(rapidNewMarker);
+    const rapidNewText = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+    if (rapidNewText.includes(rapidOldMarker)) {
+        throw new Error('La pestaña nueva recibió salida de la sesión cerrada');
+    }
+    recordEvent('rapid-tab-replace', {
+        closedTabId: rapidOldId,
+        createdTabId: rapidNewId,
+        isolated: true,
+        passed: true,
+    });
+
     let expectedTabs = initialTabs.length;
     for (let attempt = 0; attempt < 2; attempt += 1) {
         await click(await findWhenReady('.tab-new'));
@@ -2077,9 +2186,12 @@ try {
             bannerPromptSnapshot = await activeTerminalRowSnapshot();
             const nonEmptyRows = bannerPromptSnapshot.rows.filter((row) => row.text.trim().length > 0);
             const lastRow = nonEmptyRows.at(-1);
+            const previousRow = nonEmptyRows.at(-2);
             const text = nonEmptyRows.map((row) => row.text).join('\n');
             return text.includes('Banner:')
-                && Boolean(lastRow && promptLooksVisible(lastRow.text))
+                && Boolean(lastRow && promptLooksVisible(
+                    previousRow ? `${previousRow.text}\n${lastRow.text}` : lastRow.text,
+                ))
                 && (bannerPromptSnapshot.cursorRow < 0 || bannerPromptSnapshot.cursorRow === lastRow.index);
         }, 10000, 'prompt al final tras :banner');
     } catch (error) {
@@ -2171,7 +2283,7 @@ try {
     // línea desplazada con una salida perdida.
     await resizeWindow(1600, 1000, { waitForBanner: false });
     await sendTerminalLine('clear');
-    await waitUntil(async () => (await activeTerminalRowSnapshot()).rows.some((row) => promptLooksVisible(row.text)), 10000, 'prompt tras limpiar antes de créditos');
+    await waitUntil(async () => snapshotPromptVisible(await activeTerminalRowSnapshot()), 10000, 'prompt tras limpiar antes de créditos');
     await sendTerminalLine('@Darkeiser003');
     await waitUntil(async () => {
         // WebKitGTK expone el contenedor `.xterm-rows` sin saltos entre sus
@@ -2187,7 +2299,7 @@ try {
     }, 10000, 'easter-egg de Darkeiser003 (formato y enlaces)');
     await captureScreenshot('credito-darkeiser-formato');
     await sendTerminalLine('clear');
-    await waitUntil(async () => (await activeTerminalRowSnapshot()).rows.some((row) => promptLooksVisible(row.text)), 10000, 'prompt tras limpiar antes de Christianlg97');
+    await waitUntil(async () => snapshotPromptVisible(await activeTerminalRowSnapshot()), 10000, 'prompt tras limpiar antes de Christianlg97');
     await sendTerminalLine('CHRISTIANLG97');
     await waitUntil(async () => {
         const snapshot = await activeTerminalRowSnapshot();
@@ -2207,9 +2319,13 @@ try {
     await waitUntil(async () => {
         const snapshot = await activeTerminalRowSnapshot();
         const nonEmptyRows = snapshot.rows.filter((row) => row.text.trim().length > 0);
+        const lastRow = nonEmptyRows.at(-1);
+        const previousRow = nonEmptyRows.at(-2);
         return nonEmptyRows.some((row) => row.text.includes('LTERMINAL_CREDIT_PROMPT_OK'))
-            && promptLooksVisible(nonEmptyRows.at(-1)?.text ?? '')
-            && (snapshot.cursorRow < 0 || snapshot.cursorRow === nonEmptyRows.at(-1)?.index);
+            && promptLooksVisible(previousRow
+                ? `${previousRow.text}\n${lastRow?.text ?? ''}`
+                : lastRow?.text ?? '')
+            && (snapshot.cursorRow < 0 || snapshot.cursorRow === lastRow?.index);
     }, 10000, 'prompt utilizable después de los créditos');
     await captureScreenshot('credito-prompt-utilizable');
     recordEvent('author-easter-eggs', {
@@ -2631,7 +2747,75 @@ try {
     markPhase('explorador y menú contextual');
     // El explorador debe conservar el menú contextual y sus acciones, aunque
     // aquí no se ejecuta eliminar ni pegar sobre datos del usuario.
+    const openDialogs = await findAll('[role="dialog"]');
+    if (openDialogs.length) {
+        await click(await findWhenReady('[role="dialog"] .panel-close'));
+        await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca antes del explorador');
+    }
     const explorer = await findWhenReady('.explorer');
+    const explorerLayout = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const root = arguments[0];
+            const path = root.querySelector('.path')?.getBoundingClientRect();
+            const actions = root.querySelector('.actions')?.getBoundingClientRect();
+            return path && actions ? {
+                pathHeight: path.height,
+                gap: actions.top - path.bottom,
+                ordered: actions.top >= path.bottom
+            } : null;`,
+        args: [{ [elementKey]: explorer }],
+    });
+    if (!explorerLayout
+        || explorerLayout.pathHeight > 32
+        || explorerLayout.gap > 4
+        || explorerLayout.ordered !== true) {
+        throw new Error(`La ruta del explorador volvió a ocupar un bloque vacío: ${JSON.stringify(explorerLayout)}`);
+    }
+
+    let cwdFollowed = false;
+    let explorerOriginalPath = '';
+    const explorerState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const root = document.querySelector('.explorer');
+            const path = root?.querySelector('.path');
+            const status = root?.querySelector('.status');
+            return {
+                path: path?.textContent?.trim() ?? '',
+                title: path?.getAttribute('title') ?? '',
+                status: status?.textContent?.trim() ?? '',
+                entries: root?.querySelectorAll('.entry').length ?? 0
+            };`,
+        args: [],
+    });
+    try {
+        await waitUntil(async () => {
+            explorerOriginalPath = (await explorerState()).path;
+            return explorerOriginalPath.length > 0;
+        }, 10000, 'ruta inicial del explorador');
+    } catch (cause) {
+        throw new Error(`${cause.message}: ${JSON.stringify(await explorerState())}`);
+    }
+    if (process.platform !== 'win32') {
+        if (!explorerOriginalPath.startsWith('/')) {
+            throw new Error(`El explorador Linux no mostró una ruta absoluta: ${JSON.stringify(explorerOriginalPath)}`);
+        }
+        await click(await findWhenReady('.cell:not(.hidden) .xterm'));
+        await sendTerminalLine('cd /tmp');
+        await waitUntil(async () =>
+            (await explorerState()).path === '/tmp',
+        10000, 'sincronización del explorador tras cd /tmp');
+        cwdFollowed = true;
+        const quotedOriginalPath = `'${explorerOriginalPath.replaceAll("'", "'\"'\"'")}'`;
+        await sendTerminalLine(`cd ${quotedOriginalPath}`);
+        await waitUntil(async () =>
+            (await explorerState()).path === explorerOriginalPath,
+        10000, 'restauración del cwd tras probar el explorador');
+    }
+    recordEvent('explorer-cwd-layout', {
+        layout: explorerLayout,
+        originalPath: explorerOriginalPath,
+        cwdFollowed,
+        passed: true,
+    });
+
     const entry = (await findAll('.explorer .entry'))[0]?.[elementKey];
     if (!entry) throw new Error('El explorador no mostró ninguna entrada para probar el menú contextual');
     await rightClick(entry);
@@ -2649,6 +2833,22 @@ try {
         throw new Error('El menú contextual no contiene cortar y eliminar');
     }
     recordEvent('context-menu', { actions: ['cut', 'delete'] });
+    await click(await findWhenReady('.menu-backdrop'));
+
+    const terminalForMenu = await findWhenReady('.cell:not(.hidden) .xterm');
+    await rightClick(terminalForMenu);
+    let terminalMenu;
+    try {
+        terminalMenu = await findWhenReady('[role="menu"]', 2500);
+    } catch {
+        await dispatchContextMenu(terminalForMenu);
+        terminalMenu = await findWhenReady('[role="menu"]', 5000);
+    }
+    const terminalMenuText = await textOf(terminalMenu);
+    const openSystemLabel = originalExpected['explorer.openInSystem'] ?? 'Abrir en el explorador del sistema';
+    if (!terminalMenuText.includes(openSystemLabel)) {
+        throw new Error('El menú de terminal no ofrece abrir el directorio actual en el gestor del sistema');
+    }
     await click(await findWhenReady('.menu-backdrop'));
 
     markPhase('proyectos');

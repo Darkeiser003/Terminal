@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag SemVer que se va a publicar, por ejemplo v1.4.4
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: AppImage firmado
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dependencias de AppImage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf fuse3 file
+      - run: npm ci
+      - name: Build y firma
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          LTERMINAL_REQUIRE_SIGNING: '1'
+          LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
+          LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
+        run: npm run dist:linux -- --version "${RELEASE_TAG#v}" --no-run --no-extended-tests --no-install
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            release/**/*.AppImage
+            release/**/SHA256SUMS.txt
+            release/**/SHA256SUMS.txt.sig
+
+  windows:
+    name: ZIP/NSIS Windows firmado
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - name: Build y firma
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          LTERMINAL_REQUIRE_SIGNING: '1'
+          LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
+          LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
+        run: ./windows/build.ps1 -Version ($env:RELEASE_TAG -replace '^v', '') -NoRun -NonInteractive -FullTests
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            release/**/*.zip
+            release/**/*.exe
+            release/**/SHA256SUMS.txt
+            release/**/SHA256SUMS.txt.sig

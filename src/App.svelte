@@ -47,34 +47,30 @@
     // eventos desde hilos distintos y xterm mantiene su propio buffer de
     // escritura; serializarlos conserva el orden exacto de la shell.
     const outputQueues = new Map<string, Promise<void>>();
-    // KeyboardEvent.ctrlKey no distingue izquierda/derecha. Se conserva el
-    // estado físico de ControlRight para ofrecer un chord que no robe los
-    // Ctrl+A/C/S/W habituales de la shell.
-    let rightControlDown = false;
-
-    function onGamingNavigationKeyDown(event: KeyboardEvent): void {
-        if (event.code === "ControlRight" || (event.key === "Control" && event.location === 2)) {
-            rightControlDown = true;
-            return;
-        }
-        if (!rightControlDown || !event.ctrlKey || event.altKey || event.metaKey) return;
-        const directions: Record<string, "left" | "right" | "up" | "down"> = {
-            KeyA: "left",
-            KeyD: "right",
-            KeyW: "up",
-            KeyS: "down",
-        };
-        const direction = directions[event.code];
-        if (!direction) return;
+    // El id de una pestaña sobrevive a un cambio de entorno. Invalidar la época
+    // hace que los bloques que aún esperan turno en la cola no se pinten sobre
+    // la sesión siguiente.
+    const outputEpochs = new Map<string, number>();
+    function consumeShortcut(event: KeyboardEvent): void {
+        // Capturarlo en la fase de captura es importante: el textarea oculto de
+        // xterm recibe las flechas antes que un listener normal de la ventana.
         event.preventDefault();
-        event.stopImmediatePropagation();
-        if (!event.repeat) app.navigatePaneDirection(direction);
+        event.stopPropagation();
     }
 
-    function onGamingNavigationKeyUp(event: KeyboardEvent): void {
-        if (event.code === "ControlRight" || (event.key === "Control" && event.location === 2)) {
-            rightControlDown = false;
-        }
+    function invalidateTerminalOutput(tabId: string, preserveOrdering = false): Promise<void> {
+        // Para un clear hay que conservar la promesa actual: aunque sus datos
+        // pertenezcan a una época obsoleta, una escritura que ya esté dentro
+        // de xterm debe terminar antes del borrado. Si se elimina la cola
+        // primero, el clear puede adelantarse y el prompt antiguo reaparece
+        // después del fastfetch nuevo.
+        const previous = outputQueues.get(tabId) ?? Promise.resolve();
+        outputEpochs.set(tabId, (outputEpochs.get(tabId) ?? 0) + 1);
+        // Las promesas antiguas siguen resolviendo, pero ya no son la cola
+        // vigente. La siguiente salida empieza desde una cola limpia.
+        if (!preserveOrdering) outputQueues.delete(tabId);
+        api.invalidateInput(tabId);
+        return previous;
     }
 
     async function loadDeps(): Promise<void> {
@@ -140,6 +136,10 @@
         // Los eventos de WebView/IME y los sintéticos del E2E pueden llegar
         // con `window` como target; solo los elementos DOM ofrecen `closest`.
         const target = event.target instanceof HTMLElement ? event.target : null;
+        // Un campo de grabación usa precisamente las mismas combinaciones que
+        // la aplicación: no debe abrir un panel mientras el usuario lo está
+        // configurando.
+        if (target?.closest('[data-shortcut-input]')) return;
         // Un campo de formulario solo bloquea los atajos si está FUERA de la
         // terminal. xterm mantiene un textarea invisible para recibir la
         // entrada, así que sin esta condición el foco normal de la terminal
@@ -158,15 +158,23 @@
         const esNavegacion = esSiguiente || esAnterior;
         if (enFormulario && !esNavegacion) return;
 
+        if (matchesShortcut(event, preferences.shortcutToggleTerminalOnly)) {
+            consumeShortcut(event);
+            panels.close();
+            app.explorerVisible = false;
+            void app.savePreferences({ terminalOnlyMode: !preferences.terminalOnlyMode });
+            return;
+        }
+
         if (
             matchesShortcut(event, preferences.shortcutNewTab)
         ) {
-            event.preventDefault();
+            consumeShortcut(event);
             void app.createTab(app.activeTab?.envId ?? undefined);
             return;
         }
         if (esNavegacion) {
-            event.preventDefault();
+            consumeShortcut(event);
             if (app.tabs.length < 2) return;
             const actual = app.tabs.findIndex(
                 (tab) => tab.id === app.activeTabId,
@@ -181,11 +189,11 @@
         }
         // Ctrl+Shift+\ rota entre 1, 2, 3 y 4 terminales a la vista.
         if (matchesShortcut(event, preferences.shortcutCyclePanes)) {
-            event.preventDefault();
+            consumeShortcut(event);
             app.cyclePanes();
             return;
         }
-        // Ctrl + Flechas o Alt + Flechas: mover el foco de la terminal en la vista dividida
+        // Atajos direccionales configurables: mover el foco en la vista dividida.
         {
             const directions = [
                 [preferences.shortcutPaneLeft, "left"],
@@ -195,8 +203,7 @@
             ] as const;
             const direction = directions.find(([shortcut]) => matchesShortcut(event, shortcut));
             if (direction) {
-                event.preventDefault();
-                event.stopPropagation();
+                consumeShortcut(event);
                 app.navigatePaneDirection(direction[1]);
                 return;
             }
@@ -205,9 +212,86 @@
         if (
             matchesShortcut(event, preferences.shortcutToggleExplorer)
         ) {
-            event.preventDefault();
+            consumeShortcut(event);
             if (preferences.showExplorerPanel === false) return;
             app.explorerVisible = !app.explorerVisible;
+            return;
+        }
+
+        const extraActions = [
+            [preferences.shortcutOpenSettings, 'openSettings'],
+            [preferences.shortcutOpenProjects, 'openProjects'],
+            [preferences.shortcutOpenScripts, 'openScripts'],
+            [preferences.shortcutOpenDependencies, 'openDependencies'],
+            [preferences.shortcutClosePanel, 'closePanel'],
+            [preferences.shortcutRefreshEnvironments, 'refreshEnvironments'],
+            [preferences.shortcutExplorerFollow, 'explorerFollow'],
+            [preferences.shortcutExplorerCd, 'explorerCd'],
+            [preferences.shortcutClearTerminal, 'clearTerminal'],
+            [preferences.shortcutOpenSystemExplorer, 'openSystemExplorer'],
+        ] as const;
+        const extra = extraActions.find(([shortcut]) => shortcut && matchesShortcut(event, shortcut));
+        if (extra) {
+            consumeShortcut(event);
+            runExtraShortcut(extra[1]);
+        }
+    }
+
+    function runExtraShortcut(action: string): void {
+        switch (action) {
+            case 'openSettings':
+                panels.show('settings');
+                void loadSettings();
+                break;
+            case 'openProjects':
+                if (app.preferences?.showProjectsPanel === false) return;
+                panels.show('projects');
+                void loadProjects();
+                break;
+            case 'openScripts':
+                if (app.preferences?.showScriptsPanel === false) return;
+                panels.show('scripts');
+                void loadScripts();
+                break;
+            case 'openDependencies':
+                if (app.preferences?.showDependenciesPanel === false) return;
+                panels.show('deps');
+                void loadDeps();
+                break;
+            case 'closePanel':
+                panels.close();
+                app.explorerVisible = false;
+                break;
+            case 'refreshEnvironments':
+                void app.refreshEnvironments();
+                break;
+            case 'explorerFollow':
+                if (app.preferences?.showExplorerPanel === false) return;
+                app.explorerVisible = true;
+                window.dispatchEvent(new CustomEvent('winslim:explorer-follow', {
+                    detail: { tabId: app.activeTabId },
+                }));
+                break;
+            case 'explorerCd':
+                if (app.preferences?.showExplorerPanel === false) return;
+                app.explorerVisible = true;
+                window.dispatchEvent(new CustomEvent('winslim:explorer-cd', {
+                    detail: { tabId: app.activeTabId },
+                }));
+                break;
+            case 'clearTerminal': {
+                const terminal = app.activeTabId ? getTerminal(app.activeTabId) : undefined;
+                terminal?.clear();
+                terminal?.focus();
+                break;
+            }
+            case 'openSystemExplorer':
+                if (app.activeTabId) {
+                    window.dispatchEvent(new CustomEvent('winslim:open-current-directory', {
+                        detail: { tabId: app.activeTabId },
+                    }));
+                }
+                break;
         }
     }
 
@@ -215,6 +299,10 @@
         const onEnvironmentSwitchStarted = (event: Event) => {
             const detail = (event as CustomEvent<{ tabId?: string }>).detail;
             if (detail?.tabId) {
+                // El backend emitirá pty-clear después de invalidar la PTY.
+                // Mantener el orden hasta ese evento evita que una escritura
+                // vieja termine después del clear de la nueva sesión.
+                invalidateTerminalOutput(detail.tabId, true);
                 environmentSwitchStarted.set(
                     detail.tabId,
                     typeof performance !== 'undefined' ? performance.now() : Date.now(),
@@ -248,7 +336,12 @@
             api.onData((tabId, data) => {
                 window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
                 const previous = outputQueues.get(tabId) ?? Promise.resolve();
+                const epoch = outputEpochs.get(tabId) ?? 0;
                 const queued = previous.catch(() => undefined).then(() => new Promise<void>((resolve) => {
+                    if ((outputEpochs.get(tabId) ?? 0) !== epoch) {
+                        resolve();
+                        return;
+                    }
                     const term = getTerminal(tabId);
                     // La cola de escritura de xterm puede completar después de
                     // que el usuario cierre la pestaña. No conservar una
@@ -312,9 +405,14 @@
             // un momento distinto al de la shell y vuelve a desincronizar la
             // fila donde se escribe la siguiente entrada.
             api.onClear((tabId) => {
+                const previous = invalidateTerminalOutput(tabId, true);
                 window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
-                const previous = outputQueues.get(tabId) ?? Promise.resolve();
+                const epoch = outputEpochs.get(tabId) ?? 0;
                 const queued = previous.catch(() => undefined).then(() => new Promise<void>((resolve) => {
+                    if ((outputEpochs.get(tabId) ?? 0) !== epoch) {
+                        resolve();
+                        return;
+                    }
                     const term = getTerminal(tabId);
                     if (!term?.element?.isConnected) {
                         resolve();
@@ -346,9 +444,10 @@
                 );
             }),
 
-            api.onTabClosed((tabId, activeTabId) =>
-                app.handleTabClosed(tabId, activeTabId),
-            ),
+            api.onTabClosed((tabId, activeTabId) => {
+                invalidateTerminalOutput(tabId);
+                app.handleTabClosed(tabId, activeTabId);
+            }),
 
             api.onEnvironmentChanged((event) => {
                 app.applyEnvironmentChange(event);
@@ -409,12 +508,7 @@
 
         window.addEventListener("error", onError);
         window.addEventListener("unhandledrejection", onRejection);
-        // Captura antes que xterm/readline: la letra no llega al PTY cuando el
-        // chord es Control derecho + WASD.
-        window.addEventListener("keydown", onGamingNavigationKeyDown, true);
-        window.addEventListener("keyup", onGamingNavigationKeyUp, true);
-        const resetGamingChord = () => { rightControlDown = false; };
-        window.addEventListener("blur", resetGamingChord);
+        window.addEventListener("keydown", onShortcut, true);
 
         return () => {
             window.removeEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
@@ -423,33 +517,31 @@
             window.removeEventListener('winslim:open-panel', openPanelFromTerminal);
             window.removeEventListener("error", onError);
             window.removeEventListener("unhandledrejection", onRejection);
-            window.removeEventListener("keydown", onGamingNavigationKeyDown, true);
-            window.removeEventListener("keyup", onGamingNavigationKeyUp, true);
-            window.removeEventListener("blur", resetGamingChord);
+            window.removeEventListener("keydown", onShortcut, true);
             for (const pending of unlisteners)
                 void pending.then((stop) => stop());
             outputQueues.clear();
+            outputEpochs.clear();
         };
     });
 </script>
-
-<svelte:window onkeydown={onShortcut} />
 
 <main class:platform-linux={app.appInfo?.platform === "linux"}>
     {#if startupError}
         <section class="startup-error" role="alert">
             <h1>{app.t("startup.errorTitle", "La terminal no pudo iniciar la interfaz")}</h1>
             <p>{startupError}</p>
-            <p>{app.t("startup.logHint", "Consulta la carpeta de logs desde Ajustes.")}</p>
         </section>
     {/if}
-    <Toolbar
-        onOpenDeps={() => void loadDeps()}
-        onOpenSettings={() => void loadSettings()}
-        onOpenScripts={() => void loadScripts()}
-        onOpenProjects={() => void loadProjects()}
-    />
-    <TabBar />
+    {#if app.preferences?.terminalOnlyMode !== true}
+        <Toolbar
+            onOpenDeps={() => void loadDeps()}
+            onOpenSettings={() => void loadSettings()}
+            onOpenScripts={() => void loadScripts()}
+            onOpenProjects={() => void loadProjects()}
+        />
+        {#if app.preferences?.showTabBar !== false}<TabBar />{/if}
+    {/if}
 
     <div class="workspace">
         {#if app.preferences?.showExplorerPanel !== false}

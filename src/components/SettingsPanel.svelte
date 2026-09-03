@@ -14,7 +14,13 @@
     import * as api from "../lib/api";
     import { app } from "../lib/appState.svelte";
     import { includesLocalized } from "../lib/localization";
-    import { normalizeShortcut, SHORTCUT_PREFERENCE_KEYS } from "../lib/shortcuts";
+    import {
+        normalizeShortcut,
+        shortcutFromEvent,
+        SHORTCUT_DEFINITIONS,
+        SHORTCUT_PREFERENCE_KEYS,
+        type ShortcutPreferenceKey,
+    } from "../lib/shortcuts";
     import type { PluginInfo, Preferences, ThemePreset, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
     import Panel from "./Panel.svelte";
 
@@ -90,8 +96,8 @@
         if (theme.id === "violet") return app.t("theme.violet", theme.label);
         if (theme.id === "nordic") return app.t("theme.nordic", theme.label);
         if (theme.id === "crimson") return app.t("theme.crimson", theme.label);
-        if (theme.id === "green-phosphor") return app.t("theme.greenPhosphor", theme.label);
-        if (theme.id === "high-contrast") return app.t("theme.highContrast", theme.label);
+        if (theme.id === "matrix") return app.t("theme.greenPhosphor", theme.label);
+        if (theme.id === "contrast") return app.t("theme.highContrast", theme.label);
         if (theme.id === "slate") return app.t("theme.slate", theme.label);
         if (theme.id === "plum") return app.t("theme.plum", theme.label);
         if (theme.id === "teal") return app.t("theme.turquoise", theme.label);
@@ -117,6 +123,21 @@
 
     function setVisibleEnvironmentsEnabled(enabled: boolean): void {
         for (const environment of visibleEnvironments) setEnvironmentEnabled(environment.id, enabled);
+    }
+
+    function captureShortcut(event: KeyboardEvent, key: ShortcutPreferenceKey): void {
+        if (!draft) return;
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+            event.preventDefault();
+            event.stopPropagation();
+            draft[key] = '';
+            return;
+        }
+        const shortcut = shortcutFromEvent(event);
+        if (!shortcut) return;
+        event.preventDefault();
+        event.stopPropagation();
+        draft[key] = shortcut;
     }
 
     const bannerItems = [
@@ -162,7 +183,7 @@
         const currentDraft = draft;
         const shortcuts = SHORTCUT_PREFERENCE_KEYS.map((key) =>
             normalizeShortcut(currentDraft[key]) || currentDraft[key].trim().toLowerCase()
-        );
+        ).filter(Boolean);
         if (new Set(shortcuts).size !== shortcuts.length) {
             statusError = true;
             status = app.t("settings.shortcutConflict", "Dos acciones no pueden usar el mismo atajo.");
@@ -980,6 +1001,16 @@
                     <label class="check"><input data-testid="settings-show-quick-actions" type="checkbox" bind:checked={draft.showQuickActions} /><span><strong>{app.t("settings.showQuickActions", "Acciones rápidas")}</strong><small>{app.t("settings.showQuickActionsHint", "Muestra el submenú de acciones rápidas en la Biblioteca.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-explorer" type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong></span></label>
                     <div class="heading">
+                        <strong>{app.t("settings.interfaceModules", "Interfaz modular")}</strong>
+                        <span>{app.t("settings.interfaceModulesHint", "Elige qué controles quieres ver. Las funciones ocultas siguen disponibles mediante sus atajos o comandos.")}</span>
+                    </div>
+                    <label class="check"><input data-testid="settings-show-tab-bar" type="checkbox" bind:checked={draft.showTabBar} /><span><strong>{app.t("settings.showTabBar", "Barra de pestañas")}</strong><small>{app.t("settings.showTabBarHint", "Muestra las pestañas, el botón + y el control de terminales divididas.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-show-environment-selector" type="checkbox" bind:checked={draft.showEnvironmentSelector} /><span><strong>{app.t("settings.showEnvironmentSelector", "Selector de entorno")}</strong><small>{app.t("settings.showEnvironmentSelectorHint", "Muestra la shell activa, los REPL favoritos y el botón de refresco.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-show-refresh" type="checkbox" bind:checked={draft.showRefreshButton} /><span><strong>{app.t("settings.showRefreshButton", "Refrescar entornos")}</strong></span></label>
+                    <label class="check"><input data-testid="settings-show-language" type="checkbox" bind:checked={draft.showLanguageButton} /><span><strong>{app.t("settings.showLanguageButton", "Selector de idioma")}</strong></span></label>
+                    <label class="check"><input data-testid="settings-terminal-only" type="checkbox" bind:checked={draft.terminalOnlyMode} /><span><strong>{app.t("settings.terminalOnlyMode", "Modo terminal limpia")}</strong><small>{app.t("settings.terminalOnlyModeHint", "Oculta la barra superior y las pestañas para dejar la ventana dedicada a la terminal. Se recupera con el atajo configurado.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-start-maximized" type="checkbox" bind:checked={draft.startMaximized} /><span><strong>{app.t("settings.startMaximized", "Iniciar maximizada")}</strong><small>{app.t("settings.startMaximizedHint", "Abre la ventana ocupando todo el espacio disponible al iniciar.")}</small></span></label>
+                    <div class="heading">
                         <strong>{app.t("settings.enabledEnvironments", "Entornos habilitados")}</strong>
                         <span>{app.t("settings.enabledEnvironmentsHint", "Oculta shells, contenedores, dispositivos o REPL concretos sin desinstalarlos.")}</span>
                     </div>
@@ -1016,24 +1047,33 @@
                     </label>
                     <div class="heading">
                         <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
-                        <span>{app.t("settings.shortcutsHint", "Usa combinaciones como Ctrl+Shift+T. Navegación directa: Control derecho + W/A/S/D, sin interferir con el Control izquierdo de la shell.")}</span>
-                    </div>
-                    <div class="shortcut-preset" aria-label={app.t("settings.shortcutsNavigation", "Navegación fija entre paneles")}>
-                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>W</kbd> {app.t("settings.shortcutUp", "arriba")}</span>
-                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>A</kbd> {app.t("settings.shortcutLeft", "izquierda")}</span>
-                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>S</kbd> {app.t("settings.shortcutDown", "abajo")}</span>
-                        <span><kbd>{app.t("settings.rightControl", "Ctrl derecho")}</kbd> + <kbd>D</kbd> {app.t("settings.shortcutRight", "derecha")}</span>
+                        <span>{app.t("settings.shortcutsHint", "Pulsa una combinación para grabarla. Se capturan antes que la terminal; deja un campo vacío para no asignar ese atajo.")}</span>
                     </div>
                     <div class="field-grid">
-                        <label class="field"><span>{app.t("settings.shortcutNewTab", "Nueva pestaña")}</span><input spellcheck="false" bind:value={draft.shortcutNewTab} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutNextTab", "Pestaña siguiente")}</span><input spellcheck="false" bind:value={draft.shortcutNextTab} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutPreviousTab", "Pestaña anterior")}</span><input spellcheck="false" bind:value={draft.shortcutPreviousTab} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutCyclePanes", "Dividir terminales")}</span><input spellcheck="false" bind:value={draft.shortcutCyclePanes} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutToggleExplorer", "Mostrar explorador")}</span><input spellcheck="false" bind:value={draft.shortcutToggleExplorer} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutPaneLeft", "Foco a la izquierda")}</span><input spellcheck="false" bind:value={draft.shortcutPaneLeft} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutPaneRight", "Foco a la derecha")}</span><input spellcheck="false" bind:value={draft.shortcutPaneRight} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutPaneUp", "Foco arriba")}</span><input spellcheck="false" bind:value={draft.shortcutPaneUp} /></label>
-                        <label class="field"><span>{app.t("settings.shortcutPaneDown", "Foco abajo")}</span><input spellcheck="false" bind:value={draft.shortcutPaneDown} /></label>
+                        {#each SHORTCUT_DEFINITIONS as shortcut (shortcut.key)}
+                            <label class="field shortcut-field">
+                                <span>{app.t(shortcut.labelKey, shortcut.fallback)}</span>
+                                <div class="shortcut-control">
+                                    <input
+                                        data-shortcut-input
+                                        data-testid={`shortcut-${shortcut.key}`}
+                                        readonly
+                                        spellcheck="false"
+                                        value={draft[shortcut.key]}
+                                        placeholder={app.t("settings.shortcutUnset", "Sin asignar")}
+                                        aria-label={app.t(shortcut.labelKey, shortcut.fallback)}
+                                        onkeydown={(event) => captureShortcut(event, shortcut.key)}
+                                    />
+                                    <button
+                                        type="button"
+                                        class="secondary shortcut-clear"
+                                        title={app.t("common.clearFilter", "Borrar")}
+                                        aria-label={`${app.t("common.clearFilter", "Borrar")} ${app.t(shortcut.labelKey, shortcut.fallback)}`}
+                                        onclick={() => { if (draft) draft[shortcut.key] = ''; }}
+                                    >×</button>
+                                </div>
+                            </label>
+                        {/each}
                     </div>
                     <div class="heading">
                         <strong>{app.t("settings.profiles", "Perfiles portables")}</strong>
@@ -1574,26 +1614,22 @@
         gap: 8px;
     }
 
-    .shortcut-preset {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-        gap: 6px;
-        padding: 8px;
-        border: 1px solid var(--border);
-        border-radius: 5px;
-        background: var(--surface-alt);
-        color: var(--muted);
-        font-size: 10px;
+    .shortcut-control {
+        display: flex;
+        align-items: center;
+        gap: 4px;
     }
 
-    .shortcut-preset kbd {
-        padding: 2px 5px;
-        border: 1px solid var(--border);
-        border-bottom-width: 2px;
-        border-radius: 3px;
-        background: var(--surface);
-        color: var(--text);
-        font: inherit;
+    .shortcut-control :global(input) {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .shortcut-clear {
+        flex: 0 0 auto;
+        min-width: 32px;
+        min-height: 32px;
+        padding: 4px 8px;
     }
 
     .update-row button {

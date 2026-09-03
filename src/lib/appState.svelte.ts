@@ -68,6 +68,10 @@ class AppStore {
      *  pestañas faltantes es asíncrono y dos ciclos simultáneos duplicaban la
      *  cantidad de terminales. */
     private paneCyclePromise: Promise<void> | null = null;
+    /** Crear y cerrar son IPC asíncronos. Mantenerlos en una sola cola evita
+     *  que un cierre rápido se ejecute antes de que la pestaña nueva haya
+     *  terminado de registrarse en el frontend. */
+    private tabLifecycleQueue: Promise<void> = Promise.resolve();
 
     activeTab = $derived(this.tabs.find((tab) => tab.id === this.activeTabId) ?? null);
 
@@ -96,6 +100,11 @@ class AppStore {
         // Windows.
         if (typeof document !== 'undefined') document.title = info.name;
         this.applyPayload(prefs);
+        // El tamaño inicial es una preferencia de arranque, no una orden que
+        // deba reaplicarse cada vez que se guarda otro ajuste.
+        void api.setWindowMaximized(prefs.preferences.startMaximized).catch((error) => {
+            console.debug('[AppStore] no se pudo aplicar el tamaño inicial', error);
+        });
 
         // La detección de entornos habla con el sistema (`where`, el PATH del
         // registro) y puede tardar. No se espera: las pestañas ya funcionan.
@@ -275,11 +284,11 @@ class AppStore {
         this.panes = unicas.length < 2 ? [] : unicas.slice(0, siguiente);
     }
 
-    /** Navega entre casillas de la rejilla dividida en dirección cardinal (Alt + Flechas). */
+    /** Navega entre casillas según el atajo direccional configurable. */
     navigatePaneDirection(direction: 'left' | 'right' | 'up' | 'down'): void {
         const visible = this.visibleTabs;
         if (!this.activeTabId) return;
-        // En vista de una sola terminal, Alt+flechas navega por todas las
+        // En vista de una sola terminal, una dirección navega por todas las
         // pestañas. En vista dividida conserva la navegación espacial.
         if (visible.length < 2) {
             if (this.tabs.length < 2) return;
@@ -337,11 +346,13 @@ class AppStore {
     }
 
     async createTab(envId?: string, paneCount?: number): Promise<string | null> {
-        const created = await api.createTab(envId, paneCount);
-        if (!created) return null;
-        this.tabs = [...this.tabs, created];
-        this.activeTabId = created.id;
-        return created.id;
+        return this.enqueueTabLifecycle(async () => {
+            const created = await api.createTab(envId, paneCount);
+            if (!created) return null;
+            this.tabs = [...this.tabs, created];
+            this.activeTabId = created.id;
+            return created.id;
+        });
     }
 
     /** Trae al frente la pestaña donde un panel ha acabado escribiendo, que no
@@ -364,7 +375,20 @@ class AppStore {
     }
 
     async closeTab(tabId: string): Promise<void> {
-        await api.closeTab(tabId);
+        await this.enqueueTabLifecycle(async () => {
+            await api.closeTab(tabId);
+        });
+    }
+
+    private enqueueTabLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+        const next = this.tabLifecycleQueue
+            .catch(() => undefined)
+            .then(operation);
+        this.tabLifecycleQueue = next.then(
+            () => undefined,
+            () => undefined,
+        );
+        return next;
     }
 
     /** Lo llama el evento `tab-closed`: el backend es quien decide de verdad

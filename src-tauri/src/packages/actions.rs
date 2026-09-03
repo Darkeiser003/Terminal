@@ -1072,9 +1072,9 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-ant", "Java · Ant", "ant", &[("default", "ant")], Some("ant -version"), LANGUAGES_GROUP),
     pkg("pkg-sbt", "Scala · sbt", "sbt", &[("default", "sbt")], Some("sbt --version"), LANGUAGES_GROUP),
     pkg("pkg-bazel", "C/C++ · Bazel", "bazel", &[("default", "bazel")], Some("bazel --version"), LANGUAGES_GROUP),
-    pkg("pkg-ninja", "C/C++ · Ninja", "ninja", &[("default", "ninja-build")], Some("ninja --version"), LANGUAGES_GROUP),
+    pkg("pkg-ninja", "C/C++ · Ninja", "ninja", &[("default", "ninja-build"), ("pacman", "ninja")], Some("ninja --version"), LANGUAGES_GROUP),
     pkg("pkg-meson", "C/C++ · Meson", "meson", &[("default", "meson")], Some("meson --version"), LANGUAGES_GROUP),
-    pkg("pkg-clang-tidy", "C/C++ · clang-tidy", "clang-tidy", &[("default", "clang-tools-extra")], Some("clang-tidy --version"), LANGUAGES_GROUP),
+    pkg("pkg-clang-tidy", "C/C++ · clang-tidy", "clang-tidy", &[("default", "clang-tools-extra"), ("pacman", "clang")], Some("clang-tidy --version"), LANGUAGES_GROUP),
     pkg("pkg-gdb", "C/C++ · GDB", "gdb", &[("default", "gdb")], Some("gdb --version"), LANGUAGES_GROUP),
     pkg("pkg-lldb", "C/C++ · LLDB", "lldb", &[("default", "lldb")], Some("lldb --version"), LANGUAGES_GROUP),
     pkg("pkg-valgrind", "C/C++ · Valgrind", "valgrind", &[("default", "valgrind")], Some("valgrind --version"), LANGUAGES_GROUP),
@@ -1106,7 +1106,7 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     pkg("pkg-postgresql", "PostgreSQL + psql", "psql", &[("default", "postgresql"), ("apt", "postgresql-client"), ("dnf", "postgresql"), ("pacman", "postgresql"), ("zypper", "postgresql"), ("apk", "postgresql-client")], Some("psql --version"), LANGUAGES_GROUP),
     pkg("pkg-duckdb", "DuckDB", "duckdb", &[("default", "duckdb")], Some("duckdb --version"), LANGUAGES_GROUP),
     PkgTool { aur_package: Some("mongosh-bin"), ..pkg("pkg-mongosh", "MongoDB · mongosh", "mongosh", &[], Some("mongosh --version"), LANGUAGES_GROUP) },
-    pkg("pkg-redis-cli", "Redis · redis-cli", "redis-cli", &[("default", "redis")], Some("redis-cli --version"), LANGUAGES_GROUP),
+    pkg("pkg-redis-cli", "Redis · redis-cli", "redis-cli", &[("default", "redis"), ("pacman", "valkey")], Some("redis-cli --version"), LANGUAGES_GROUP),
     pkg("pkg-openvpn", "OpenVPN", "openvpn", &[("default", "openvpn")], Some("openvpn --version"), SSH_GROUP),
     pkg("pkg-wireguard", "WireGuard", "wg", &[("default", "wireguard-tools")], Some("wg --version"), SSH_GROUP),
     pkg("pkg-kubectl", "Kubernetes · kubectl", "kubectl", &[("apt", "kubectl"), ("pacman", "kubectl"), ("dnf", "kubernetes-client"), ("zypper", "kubectl"), ("apk", "kubectl")], Some("kubectl version --client"), DOCKER_GROUP),
@@ -1142,7 +1142,7 @@ static LINUX_VIEWERS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     PkgTool { label_key: Some("tool.viewerImageLinux"), ..pkg("viewer-image",    "Eye of GNOME (imágenes)", "eog",   &[("default", "eog")],    None,                  VIEWER_GROUP) },
     PkgTool { label_key: Some("tool.viewerMedia"),      ..pkg("viewer-media",    "VLC (audio y vídeo)",     "vlc",   &[("default", "vlc")],    Some("vlc --version"), VIEWER_GROUP) },
     PkgTool { label_key: Some("tool.viewerDocument"),   ..pkg("viewer-document", "Evince (PDF)",            "evince",&[("default", "evince")], None,                  VIEWER_GROUP) },
-    PkgTool { label_key: Some("tool.viewerArchive"),    ..pkg("viewer-archive",  "p7zip (comprimidos)",     "7z",    &[("default", "p7zip"), ("apt", "p7zip-full")], Some("7z i"), VIEWER_GROUP) },
+    PkgTool { label_key: Some("tool.viewerArchive"),    ..pkg("viewer-archive",  "p7zip (comprimidos)",     "7z",    &[("default", "p7zip"), ("apt", "p7zip-full"), ("pacman", "7zip")], Some("7z i"), VIEWER_GROUP) },
 ]);
 
 /// Gestores de archivos gráficos. Solo hacen falta en Linux: Windows y macOS
@@ -3739,7 +3739,7 @@ static LINUX_WINDOWS_COMPAT_TOOLS: Lazy<Vec<(PkgTool, &'static str)>> = Lazy::ne
     (pkg("compat-virt-manager", "virt-manager", "virt-manager", &[ ("default", "virt-manager") ], Some("virt-manager --version"), WINDOWS_COMPAT_GROUP), COMPAT_VIRT_MANAGER),
     (pkg("compat-gnome-boxes", "GNOME Boxes", "gnome-boxes", &[ ("default", "gnome-boxes") ], Some("gnome-boxes --version"), WINDOWS_COMPAT_GROUP), COMPAT_GNOME_BOXES),
     (pkg("compat-winetricks", "Winetricks", "winetricks", &[ ("default", "winetricks") ], Some("winetricks --version"), WINDOWS_COMPAT_GROUP), COMPAT_WINETRICKS),
-    (pkg("compat-dxvk", "DXVK", "setup_dxvk", &[("default", "dxvk")], Some("setup_dxvk"), WINDOWS_COMPAT_GROUP), COMPAT_DXVK),
+    (pkg("compat-dxvk", "DXVK", "setup_dxvk", &[("default", "dxvk"), ("pacman", "dxvk-mingw-git")], Some("setup_dxvk"), WINDOWS_COMPAT_GROUP), COMPAT_DXVK),
     // El paquete vkd3d instala `vkd3d-compiler`, no un binario llamado
     // `vkd3d`. Usar el nombre del paquete como sonda dejaba la herramienta
     // marcada como ausente aunque estuviera instalada correctamente.
@@ -4241,7 +4241,7 @@ fn power_shell_actions(
 // shells llevan los suyos en LINUX_TOOLS; aquí quedan solo los de las
 // herramientas que no pasan por tool_lifecycle_actions.
 #[rustfmt::skip]
-static LINUX_DOCKER_PKG: &[(&str, &str)] = &[("apt", "docker.io"), ("dnf", "docker"), ("pacman", "docker"), ("zypper", "docker"), ("apk", "docker")];
+static LINUX_DOCKER_PKG: &[(&str, &str)] = &[("apt", "docker.io"), ("dnf", "moby-engine"), ("pacman", "docker"), ("zypper", "docker"), ("apk", "docker")];
 #[rustfmt::skip]
 static LINUX_ADB_PKG: &[(&str, &str)] = &[("apt", "android-tools-adb"), ("dnf", "android-tools"), ("pacman", "android-tools"), ("zypper", "android-tools"), ("apk", "android-tools")];
 #[rustfmt::skip]
@@ -4402,10 +4402,7 @@ fn linux_actions(
                     &[("source", pm.to_string())],
                     "Instalar Docker ({source})",
                 ),
-                format!(
-                    "{} {docker_pkg} && sudo systemctl enable --now docker",
-                    commands.install
-                ),
+                format!("{} {docker_pkg}", commands.install),
             )
             .short(t.tp(
                 "action.installShort",
@@ -4414,8 +4411,9 @@ fn linux_actions(
             ))
             .check(Some("docker"))
             .hint(
-                "Para usar docker sin sudo: sudo usermod -aG docker $USER (requiere cerrar sesión \
-                 y volver a entrar).",
+                "Instala el motor y el cliente, pero no arranca el daemon automáticamente. Para \
+                 iniciarlo usa la acción separada. Para usar docker sin sudo: sudo usermod -aG docker \
+                 $USER (requiere cerrar sesión y volver a entrar).",
             ),
             InstallAction::new(
                 "pkg-docker-update",
@@ -5706,6 +5704,14 @@ mod tests {
                 "pacman no debe recibir el paquete inexistente {package}"
             );
         }
+        assert_eq!(
+            buscar(&actions, "viewer-archive").command,
+            "sudo pacman -S --noconfirm 7zip"
+        );
+        assert_eq!(
+            buscar(&actions, "compat-dxvk").command,
+            "sudo pacman -S --noconfirm dxvk-mingw-git"
+        );
     }
 
     #[test]
@@ -5783,7 +5789,7 @@ mod tests {
     fn cada_distribucion_recibe_el_nombre_de_paquete_que_usa_su_gestor() {
         for (pm, java, docker) in [
             ("apt", "default-jdk", "docker.io"),
-            ("dnf", "java-latest-openjdk-devel", "docker"),
+            ("dnf", "java-latest-openjdk-devel", "moby-engine"),
             ("pacman", "jdk-openjdk", "docker"),
             ("zypper", "java-openjdk-devel", "docker"),
             ("apk", "openjdk17-jdk", "docker"),
@@ -5804,6 +5810,50 @@ mod tests {
                 "{pm}: se esperaba el paquete {docker}"
             );
         }
+    }
+
+    #[test]
+    fn arch_usa_los_nombres_reales_de_los_paquetes() {
+        let arch = get_install_actions(
+            &InstallContext {
+                pkg_manager: Some("pacman".to_string()),
+                ..contexto("linux")
+            },
+            &t(),
+        );
+        assert_eq!(
+            buscar(&arch, "pkg-gh").command,
+            "sudo pacman -S --noconfirm github-cli"
+        );
+        assert_eq!(
+            buscar(&arch, "pkg-ninja").command,
+            "sudo pacman -S --noconfirm ninja"
+        );
+        assert_eq!(
+            buscar(&arch, "pkg-clang-tidy").command,
+            "sudo pacman -S --noconfirm clang"
+        );
+        assert_eq!(
+            buscar(&arch, "pkg-redis-cli").command,
+            "sudo pacman -S --noconfirm valkey"
+        );
+    }
+
+    #[test]
+    fn instalar_docker_no_intenta_arrancar_el_servicio() {
+        let actions = get_install_actions(
+            &InstallContext {
+                pkg_manager: Some("pacman".to_string()),
+                ..contexto("linux")
+            },
+            &t(),
+        );
+        let docker = buscar(&actions, "pkg-docker");
+        assert_eq!(docker.command, "sudo pacman -S --noconfirm docker");
+        assert!(docker
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("no arranca el daemon")));
     }
 
     #[test]

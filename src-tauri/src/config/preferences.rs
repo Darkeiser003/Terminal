@@ -153,6 +153,12 @@ pub struct Preferences {
     pub show_scripts_panel: bool,
     pub show_quick_actions: bool,
     pub show_explorer_panel: bool,
+    pub show_tab_bar: bool,
+    pub show_environment_selector: bool,
+    pub show_refresh_button: bool,
+    pub show_language_button: bool,
+    pub terminal_only_mode: bool,
+    pub start_maximized: bool,
     pub manual_aliases_text: String,
     pub favorite_repl_ids: String,
     pub hidden_environment_ids: String,
@@ -161,10 +167,21 @@ pub struct Preferences {
     pub shortcut_previous_tab: String,
     pub shortcut_cycle_panes: String,
     pub shortcut_toggle_explorer: String,
+    pub shortcut_toggle_terminal_only: String,
     pub shortcut_pane_left: String,
     pub shortcut_pane_right: String,
     pub shortcut_pane_up: String,
     pub shortcut_pane_down: String,
+    pub shortcut_open_settings: String,
+    pub shortcut_open_projects: String,
+    pub shortcut_open_scripts: String,
+    pub shortcut_open_dependencies: String,
+    pub shortcut_close_panel: String,
+    pub shortcut_refresh_environments: String,
+    pub shortcut_explorer_follow: String,
+    pub shortcut_explorer_cd: String,
+    pub shortcut_clear_terminal: String,
+    pub shortcut_open_system_explorer: String,
     pub theme_id: String,
     pub accent_color: String,
     pub ui_background_color: String,
@@ -278,9 +295,10 @@ fn safe_shortcut(value: Option<&Value>, fallback: &str) -> String {
                 .iter()
                 .any(|previous| previous.eq_ignore_ascii_case(part))
     });
+    let lower_key = key.to_ascii_lowercase();
     let valid_key = key.len() == 1 && key.chars().all(|c| c.is_ascii_alphanumeric())
         || matches!(
-            key.to_ascii_lowercase().as_str(),
+            lower_key.as_str(),
             "tab"
                 | "backslash"
                 | "enter"
@@ -290,6 +308,33 @@ fn safe_shortcut(value: Option<&Value>, fallback: &str) -> String {
                 | "arrowright"
                 | "arrowup"
                 | "arrowdown"
+                | "home"
+                | "end"
+                | "pageup"
+                | "pagedown"
+                | "insert"
+                | "minus"
+                | "equal"
+                | "bracketleft"
+                | "bracketright"
+                | "semicolon"
+                | "quote"
+                | "backquote"
+                | "comma"
+                | "period"
+                | "slash"
+                | "f1"
+                | "f2"
+                | "f3"
+                | "f4"
+                | "f5"
+                | "f6"
+                | "f7"
+                | "f8"
+                | "f9"
+                | "f10"
+                | "f11"
+                | "f12"
         );
     if modifiers_are_unique && valid_key && text.len() <= 64 {
         let mut canonical: Vec<String> = ["ctrl", "alt", "shift", "meta"]
@@ -301,7 +346,6 @@ fn safe_shortcut(value: Option<&Value>, fallback: &str) -> String {
             })
             .map(|modifier| (*modifier).to_string())
             .collect();
-        let lower_key = key.to_ascii_lowercase();
         let canonical_key = match lower_key.as_str() {
             "esc" => "escape",
             "return" => "enter",
@@ -446,6 +490,39 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
     let theme = theme_by_id(&theme_id);
     let font_ids: Vec<&str> = FONT_FAMILIES.iter().map(|font| font.id).collect();
     let language_ids: Vec<&str> = crate::i18n::LANGUAGES.iter().map(|lang| lang.id).collect();
+    // Las primeras versiones usaban Alt+flechas. Esos cuatro valores exactos
+    // interceptan la edición de línea en muchas shells y, al estar guardados,
+    // impedían que los nuevos valores por defecto llegasen a perfiles
+    // existentes. Solo migramos el conjunto heredado completo para conservar
+    // cualquier asignación personalizada o parcial del usuario.
+    let legacy_pane_shortcuts = [
+        ("shortcutPaneLeft", "alt+arrowleft"),
+        ("shortcutPaneRight", "alt+arrowright"),
+        ("shortcutPaneUp", "alt+arrowup"),
+        ("shortcutPaneDown", "alt+arrowdown"),
+    ]
+    .iter()
+    .all(|(key, legacy)| safe_shortcut(get(key), "") == *legacy);
+    let shortcut_pane_left = if legacy_pane_shortcuts {
+        defaults.shortcut_pane_left.clone()
+    } else {
+        safe_shortcut(get("shortcutPaneLeft"), &defaults.shortcut_pane_left)
+    };
+    let shortcut_pane_right = if legacy_pane_shortcuts {
+        defaults.shortcut_pane_right.clone()
+    } else {
+        safe_shortcut(get("shortcutPaneRight"), &defaults.shortcut_pane_right)
+    };
+    let shortcut_pane_up = if legacy_pane_shortcuts {
+        defaults.shortcut_pane_up.clone()
+    } else {
+        safe_shortcut(get("shortcutPaneUp"), &defaults.shortcut_pane_up)
+    };
+    let shortcut_pane_down = if legacy_pane_shortcuts {
+        defaults.shortcut_pane_down.clone()
+    } else {
+        safe_shortcut(get("shortcutPaneDown"), &defaults.shortcut_pane_down)
+    };
 
     Preferences {
         language: one_of(get("language"), &language_ids, &defaults.language),
@@ -487,6 +564,21 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("showExplorerPanel"),
             defaults.show_explorer_panel,
         ),
+        show_tab_bar: bool_or_default(get("showTabBar"), defaults.show_tab_bar),
+        show_environment_selector: bool_or_default(
+            get("showEnvironmentSelector"),
+            defaults.show_environment_selector,
+        ),
+        show_refresh_button: bool_or_default(
+            get("showRefreshButton"),
+            defaults.show_refresh_button,
+        ),
+        show_language_button: bool_or_default(
+            get("showLanguageButton"),
+            defaults.show_language_button,
+        ),
+        terminal_only_mode: bool_or_default(get("terminalOnlyMode"), defaults.terminal_only_mode),
+        start_maximized: bool_or_default(get("startMaximized"), defaults.start_maximized),
         manual_aliases_text: get("manualAliasesText")
             .and_then(Value::as_str)
             .map(|text| text.chars().take(16_384).collect())
@@ -528,10 +620,54 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("shortcutToggleExplorer"),
             &defaults.shortcut_toggle_explorer,
         ),
-        shortcut_pane_left: safe_shortcut(get("shortcutPaneLeft"), &defaults.shortcut_pane_left),
-        shortcut_pane_right: safe_shortcut(get("shortcutPaneRight"), &defaults.shortcut_pane_right),
-        shortcut_pane_up: safe_shortcut(get("shortcutPaneUp"), &defaults.shortcut_pane_up),
-        shortcut_pane_down: safe_shortcut(get("shortcutPaneDown"), &defaults.shortcut_pane_down),
+        shortcut_toggle_terminal_only: safe_shortcut(
+            get("shortcutToggleTerminalOnly"),
+            &defaults.shortcut_toggle_terminal_only,
+        ),
+        shortcut_pane_left,
+        shortcut_pane_right,
+        shortcut_pane_up,
+        shortcut_pane_down,
+        shortcut_open_settings: safe_shortcut(
+            get("shortcutOpenSettings"),
+            &defaults.shortcut_open_settings,
+        ),
+        shortcut_open_projects: safe_shortcut(
+            get("shortcutOpenProjects"),
+            &defaults.shortcut_open_projects,
+        ),
+        shortcut_open_scripts: safe_shortcut(
+            get("shortcutOpenScripts"),
+            &defaults.shortcut_open_scripts,
+        ),
+        shortcut_open_dependencies: safe_shortcut(
+            get("shortcutOpenDependencies"),
+            &defaults.shortcut_open_dependencies,
+        ),
+        shortcut_close_panel: safe_shortcut(
+            get("shortcutClosePanel"),
+            &defaults.shortcut_close_panel,
+        ),
+        shortcut_refresh_environments: safe_shortcut(
+            get("shortcutRefreshEnvironments"),
+            &defaults.shortcut_refresh_environments,
+        ),
+        shortcut_explorer_follow: safe_shortcut(
+            get("shortcutExplorerFollow"),
+            &defaults.shortcut_explorer_follow,
+        ),
+        shortcut_explorer_cd: safe_shortcut(
+            get("shortcutExplorerCd"),
+            &defaults.shortcut_explorer_cd,
+        ),
+        shortcut_clear_terminal: safe_shortcut(
+            get("shortcutClearTerminal"),
+            &defaults.shortcut_clear_terminal,
+        ),
+        shortcut_open_system_explorer: safe_shortcut(
+            get("shortcutOpenSystemExplorer"),
+            &defaults.shortcut_open_system_explorer,
+        ),
         accent_color: safe_hex_color(get("accentColor"), theme.palette.accent),
         ui_background_color: safe_hex_color(get("uiBackgroundColor"), theme.palette.background),
         ui_surface_color: safe_hex_color(get("uiSurfaceColor"), theme.palette.surface),
@@ -766,6 +902,29 @@ mod tests {
         }));
         assert_eq!(prefs.shortcut_new_tab, "ctrl+shift+t");
         assert_eq!(prefs.shortcut_cycle_panes, "ctrl+shift+backslash");
+    }
+
+    #[test]
+    fn migra_solo_el_conjunto_completo_de_atajos_de_flechas_heredado() {
+        let migrated = sanitize_preferences(&json!({
+            "shortcutPaneLeft": "Alt+ArrowLeft",
+            "shortcutPaneRight": "Alt+ArrowRight",
+            "shortcutPaneUp": "Alt+ArrowUp",
+            "shortcutPaneDown": "Alt+ArrowDown"
+        }));
+        assert_eq!(migrated.shortcut_pane_left, "Ctrl+Alt+H");
+        assert_eq!(migrated.shortcut_pane_right, "Ctrl+Alt+L");
+        assert_eq!(migrated.shortcut_pane_up, "Ctrl+Alt+K");
+        assert_eq!(migrated.shortcut_pane_down, "Ctrl+Alt+J");
+
+        let custom = sanitize_preferences(&json!({
+            "shortcutPaneLeft": "Alt+ArrowLeft",
+            "shortcutPaneRight": "Alt+ArrowRight",
+            "shortcutPaneUp": "Alt+ArrowUp",
+            "shortcutPaneDown": "Ctrl+Alt+S"
+        }));
+        assert_eq!(custom.shortcut_pane_left, "alt+arrowleft");
+        assert_eq!(custom.shortcut_pane_down, "ctrl+alt+s");
     }
 
     #[test]

@@ -19,6 +19,15 @@ showProjectsPanel = true
 showScriptsPanel = true
 showQuickActions = true
 showExplorerPanel = true
+showTabBar = true
+showEnvironmentSelector = true
+showRefreshButton = true
+showLanguageButton = true
+# Oculta las barras de controles y deja solo la terminal. Se puede recuperar
+# con el atajo configurable de abajo.
+terminalOnlyMode = false
+# Maximiza la ventana al iniciar, sin obligar a usar siempre ese tamaño.
+startMaximized = false
 manualAliasesText = ""
 favoriteReplIds = ""
 hiddenEnvironmentIds = ""
@@ -30,10 +39,23 @@ shortcutNextTab = "Ctrl+Tab"
 shortcutPreviousTab = "Ctrl+Shift+Tab"
 shortcutCyclePanes = "Ctrl+Shift+Backslash"
 shortcutToggleExplorer = "Ctrl+Shift+E"
-shortcutPaneLeft = "Alt+ArrowLeft"
-shortcutPaneRight = "Alt+ArrowRight"
-shortcutPaneUp = "Alt+ArrowUp"
-shortcutPaneDown = "Alt+ArrowDown"
+shortcutToggleTerminalOnly = "Ctrl+Shift+M"
+# Navegación mnemónica que no usa flechas: H izquierda, J abajo, K arriba, L derecha.
+shortcutPaneLeft = "Ctrl+Alt+H"
+shortcutPaneRight = "Ctrl+Alt+L"
+shortcutPaneUp = "Ctrl+Alt+K"
+shortcutPaneDown = "Ctrl+Alt+J"
+# Acciones sin asignación de fábrica: se pueden grabar desde Ajustes.
+shortcutOpenSettings = ""
+shortcutOpenProjects = ""
+shortcutOpenScripts = ""
+shortcutOpenDependencies = ""
+shortcutClosePanel = ""
+shortcutRefreshEnvironments = ""
+shortcutExplorerFollow = ""
+shortcutExplorerCd = ""
+shortcutClearTerminal = ""
+shortcutOpenSystemExplorer = ""
 
 themeId = "silver"
 accentColor = "#b8bec6"

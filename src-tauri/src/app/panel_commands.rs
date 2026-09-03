@@ -845,7 +845,13 @@ pub fn explorer_follow(state: State<'_, Arc<AppState>>, tab_id: String) -> file_
         .tabs
         .cwd_of(&tab_id)
         .map(|cwd| cwd.to_string_lossy().to_string())
-        .unwrap_or_default();
+        // Durante el reemplazo de una sesión hay un intervalo breve en el que
+        // la pestaña sigue existiendo pero su PTY aún no ha publicado el cwd.
+        // No devolver una ruta vacía: conservar el último directorio visible
+        // permite que el siguiente evento de cwd lo actualice sin dejar el
+        // explorador en un estado imposible de usar.
+        .or_else(|| state.tabs.explorer_dir(&tab_id))
+        .unwrap_or_else(|| crate::paths::home_cwd().to_string_lossy().to_string());
     if !target.is_empty() {
         state.tabs.set_explorer_dir(&tab_id, &target);
     }

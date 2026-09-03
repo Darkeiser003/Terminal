@@ -80,7 +80,7 @@ static KNOWN_TOOLS: &[KnownTool] = &[
     KnownTool { name: "docker",  label: "Docker",            windows: Some("winget-docker"),    macos: Some("brew-docker"), linux: Some("pkg-docker") },
     KnownTool { name: "git",     label: "Git",               windows: Some("winget-git"),       macos: Some("brew-git"),    linux: Some("pkg-git") },
     KnownTool { name: "git-lfs", label: "Git LFS",           windows: Some("winget-git-lfs"),   macos: None,                linux: Some("pkg-git-lfs") },
-    KnownTool { name: "gh",      label: "GitHub CLI",        windows: Some("winget-gh"),        macos: None,                linux: Some("pkg-gh") },
+    KnownTool { name: "gh",      label: "GitHub CLI",        windows: Some("winget-gh"),        macos: Some("brew-gh"),        linux: Some("pkg-gh") },
     KnownTool { name: "rg",      label: "ripgrep",           windows: Some("winget-ripgrep"),   macos: None,                linux: Some("pkg-ripgrep") },
     KnownTool { name: "fd",      label: "fd",                windows: Some("winget-fd"),        macos: None,                linux: None },
     KnownTool { name: "fzf",     label: "fzf",               windows: Some("winget-fzf"),       macos: None,                linux: Some("pkg-fzf") },
@@ -287,6 +287,15 @@ mod tests {
         assert_eq!(en("windows").as_deref(), Some("winget-docker"));
         assert_eq!(en("macos").as_deref(), Some("brew-docker"));
         assert_eq!(en("linux").as_deref(), Some("pkg-docker"));
+
+        let gh = |platform| {
+            resolve_tool_suggestion("gh", platform, &context)
+                .unwrap()
+                .action_id
+        };
+        assert_eq!(gh("windows").as_deref(), Some("winget-gh"));
+        assert_eq!(gh("macos").as_deref(), Some("brew-gh"));
+        assert_eq!(gh("linux").as_deref(), Some("pkg-gh"));
     }
 
     #[test]

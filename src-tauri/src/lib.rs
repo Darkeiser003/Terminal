@@ -212,7 +212,6 @@ pub fn run() {
             commands::app_info,
             commands::log_frontend_error,
             commands::log_frontend_performance,
-            commands::log_open_folder,
             commands_panels::scripts_list,
             commands_panels::scripts_list_here,
             commands_panels::scripts_pick_target,

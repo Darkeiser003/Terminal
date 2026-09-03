@@ -272,6 +272,37 @@ ok()   { printf '    \033[32mOK:\033[0m %s\n' "$1"; }
 warn() { printf '    \033[33mAVISO:\033[0m %s\n' "$1"; }
 err()  { printf '    \033[31mERROR:\033[0m %s\n' "$1" >&2; }
 
+# Las builds locales cargan automáticamente el material de firma fuera del
+# repositorio. CI conserva la precedencia de sus secretos y no usa el HOME del
+# runner como fallback. Las rutas se pueden cambiar explícitamente para una
+# máquina que guarde las claves en otra ubicación.
+load_local_signing_material() {
+    [ -n "${CI:-}" ] && return 0
+
+    local config_root="${XDG_CONFIG_HOME:-${HOME:-}}"
+    local private_path="${LTERMINAL_SIGNING_PRIVATE_KEY_FILE:-}"
+    local public_path="${LTERMINAL_UPDATE_PUBLIC_KEY_FILE:-}"
+    if [ -z "$private_path" ] && [ -n "$config_root" ]; then
+        private_path="$config_root/lterminal/release-signing-private.pem"
+    fi
+    if [ -z "$public_path" ] && [ -n "$config_root" ]; then
+        public_path="$config_root/lterminal/release-signing-public.hex"
+    fi
+
+    if [ -z "${LTERMINAL_SIGNING_PRIVATE_KEY:-}" ] && [ -n "$private_path" ] && [ -r "$private_path" ]; then
+        LTERMINAL_SIGNING_PRIVATE_KEY="$(< "$private_path")"
+        export LTERMINAL_SIGNING_PRIVATE_KEY
+    fi
+    if [ -z "${LTERMINAL_UPDATE_PUBLIC_KEY:-}" ] && [ -n "$public_path" ] && [ -r "$public_path" ]; then
+        LTERMINAL_UPDATE_PUBLIC_KEY="$(tr -d '[:space:]' < "$public_path")"
+        export LTERMINAL_UPDATE_PUBLIC_KEY
+    fi
+
+    if [ -n "${LTERMINAL_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${LTERMINAL_UPDATE_PUBLIC_KEY:-}" ]; then
+        ok "Material de firma local cargado automáticamente"
+    fi
+}
+
 # Resolver la ruta y la versión antes de cualquier comprobación o instalación
 # permite que toda la configuración inicial quede agrupada al principio.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -280,6 +311,8 @@ TAURI_DIR="$PROJECT_ROOT/src-tauri"
 BUNDLE_DIR="$TAURI_DIR/target/release/bundle/appimage"
 CURRENT_VERSION="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROJECT_ROOT/package.json" | head -n 1)"
 CURRENT_VERSION="${CURRENT_VERSION:-1.0.0}"
+
+load_local_signing_material
 
 configure_interactive_options
 
@@ -1123,6 +1156,42 @@ else
     fi
 fi
 
+# Las versiones antiguas de linuxdeploy traen un `strip` que no reconoce
+# `.relr.dyn`, una sección ELF legítima que producen las distribuciones
+# modernas. No se debe compensar desactivando el stripping permanentemente:
+# se refresca el binario cacheado desde el release oficial cuando su build es
+# anterior a la que ya soporta RELR. La descarga es atómica para no dejar un
+# AppImage parcial si se interrumpe.
+LINUXDEPLOY_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/tauri/linuxdeploy-x86_64.AppImage"
+if [ "${APPIMAGE_ARCH:-x86_64}" = "x86_64" ] && [ -x "$LINUXDEPLOY_CACHE" ]; then
+    LINUXDEPLOY_VERSION="$(APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY_CACHE" --version 2>/dev/null || true)"
+    LINUXDEPLOY_BUILD="$(printf '%s\n' "$LINUXDEPLOY_VERSION" | sed -n 's/.*build \([0-9][0-9]*\).*/\1/p')"
+    if [ -z "$LINUXDEPLOY_BUILD" ] || [ "$LINUXDEPLOY_BUILD" -lt 368 ]; then
+        LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+        LINUXDEPLOY_TMP="$LINUXDEPLOY_CACHE.tmp.$$"
+        if command -v curl >/dev/null 2>&1 && \
+            curl -L --fail --silent --show-error --retry 2 --connect-timeout 8 --max-time 60 \
+                "$LINUXDEPLOY_URL" -o "$LINUXDEPLOY_TMP"; then
+            chmod +x "$LINUXDEPLOY_TMP"
+            if APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY_TMP" --version >/dev/null 2>&1; then
+                mv -f "$LINUXDEPLOY_TMP" "$LINUXDEPLOY_CACHE"
+                ok "linuxdeploy actualizado para soportar ELF RELR"
+            else
+                rm -f "$LINUXDEPLOY_TMP"
+                err "La descarga de linuxdeploy no supera su comprobación de ejecución."
+                exit 1
+            fi
+        else
+            rm -f "$LINUXDEPLOY_TMP"
+            if [ "${LTERMINAL_APPIMAGE_NO_STRIP:-0}" != "1" ]; then
+                err "linuxdeploy antiguo y no se pudo actualizar; no se desactiva stripping automáticamente."
+                echo "    Revisa la red o usa LTERMINAL_APPIMAGE_NO_STRIP=1 como fallback consciente." >&2
+                exit 1
+            fi
+        fi
+    fi
+fi
+
 # --- 1.5.2 Verificar todas las rutas de configuración ---
 TAURI_CONF="$TAURI_DIR/tauri.conf.json"
 LINUX_CONF="$TAURI_DIR/tauri.linux.conf.json"
@@ -1419,8 +1488,16 @@ for stale_appdir_file in \
     fi
 done
 # linuxdeploy's embedded strip can fail on newer ELF sections such as .relr.dyn.
-# Disable its internal binary stripping and keep the AppImage build compatible.
-export NO_STRIP=1
+# Prefer stripping (it keeps the release smaller and avoids linuxdeploy's
+# `$NO_STRIP` warning). A caller can opt into the compatibility fallback on a
+# host whose linuxdeploy cannot handle its system linker with
+# LTERMINAL_APPIMAGE_NO_STRIP=1.
+if [ "${LTERMINAL_APPIMAGE_NO_STRIP:-0}" = "1" ]; then
+    export NO_STRIP=1
+    warn "AppImage: stripping desactivado por LTERMINAL_APPIMAGE_NO_STRIP=1."
+else
+    unset NO_STRIP
+fi
 # El build hook de Tauri vuelve a invocar `npm run build`. Propagar esta marca
 # evita que `--skip-checks` se cumpla en el script exterior pero falle dentro
 # del hook por enlaces o fuentes externas sin red.
@@ -1443,6 +1520,11 @@ fi
 # compatible con un appimagetool antiguo instalado en el PATH.
 export APPIMAGE_COMP
 export LDAI_COMP="$APPIMAGE_COMP"
+# Tauri's bundled AppImage plugin only recognizes product-style metadata
+# filenames and reports a false filename/Component-ID mismatch for our valid
+# reverse-DNS component. We validate the XML ourselves below and disable only
+# that duplicate heuristic in both plugin and final appimagetool passes.
+export LDAI_NO_APPSTREAM=1
 # Las herramientas de AppImage también son AppImages. En WSL, contenedores y
 # sistemas sin FUSE deben poder ejecutarse mediante extracción desde el propio
 # paso de bundling, no solo durante la comprobación de humo posterior.
@@ -1536,7 +1618,27 @@ fi
 if [ -f "$APPDIR/LTerminal.png" ] && [ ! -e "$APPDIR/lterminal.png" ]; then
     ln -s LTerminal.png "$APPDIR/lterminal.png"
 fi
-APPIMAGETOOL_ARGS=(--comp "$APPIMAGE_POST_COMP")
+# appimagetool autodetects application metadata by looking for the product
+# named `LTerminal.appdata.xml`. Tauri also stages the same valid component
+# under its reverse-DNS filename; keep one component and use the conventional
+# product filename in the final AppDir so appimagetool does not emit its
+# external metadata advisory.
+APPSTREAM_DIR="$APPDIR/usr/share/metainfo"
+CANONICAL_APPSTREAM="$APPSTREAM_DIR/com.lterminal.terminal.metainfo.xml"
+PRODUCT_APPSTREAM="$APPSTREAM_DIR/LTerminal.appdata.xml"
+if [ -f "$CANONICAL_APPSTREAM" ] && command -v appstreamcli >/dev/null 2>&1; then
+    appstreamcli validate --no-net "$CANONICAL_APPSTREAM"
+fi
+if [ -f "$CANONICAL_APPSTREAM" ] && [ ! -e "$PRODUCT_APPSTREAM" ]; then
+    mv "$CANONICAL_APPSTREAM" "$PRODUCT_APPSTREAM"
+fi
+if [ ! -f "$PRODUCT_APPSTREAM" ]; then
+    err "Falta metadata AppStream final: $PRODUCT_APPSTREAM"
+    exit 1
+fi
+# appimagetool's name heuristic is disabled, but the XML was validated under
+# its canonical reverse-DNS filename immediately above.
+APPIMAGETOOL_ARGS=(--no-appstream --comp "$APPIMAGE_POST_COMP")
 if [ -n "$APPIMAGE_RUNTIME_FILE" ]; then
     APPIMAGETOOL_ARGS+=(--runtime-file "$APPIMAGE_RUNTIME_FILE")
 fi
@@ -1576,18 +1678,23 @@ ok "AppDir Linux coherente: solo lterminal y LTerminal.desktop"
 # Tauri vuelve a construir el frontend mediante beforeBuildCommand. Verificar
 # el bundle que acaba de entrar en el AppImage evita publicar por accidente un
 # frontend viejo si una configuración de Tauri deja de ejecutar ese paso.
+#
+# No se buscan nombres de funciones TypeScript como `shortcutFromEvent`: Vite
+# puede minificarlos o renombrarlos aunque la lógica esté presente. Los
+# marcadores deben ser claves de preferencias/eventos que sobreviven al bundle
+# de producción y forman parte del contrato runtime.
 FRONTEND_BUNDLE="$(find "$PROJECT_ROOT/dist/assets" -maxdepth 1 -type f -name 'index-*.js' -print -quit 2>/dev/null || true)"
 if [ -z "$FRONTEND_BUNDLE" ]; then
     err "No se encontró el bundle JavaScript del frontend en dist/assets."
     exit 1
 fi
-for FRONTEND_MARKER in ControlRight KeyW environment-controls; do
+for FRONTEND_MARKER in shortcutPaneLeft shortcutOpenSystemExplorer environment-controls; do
     if ! grep -Fq "$FRONTEND_MARKER" "$FRONTEND_BUNDLE"; then
         err "El frontend compilado no contiene '$FRONTEND_MARKER': parece una build desactualizada."
         exit 1
     fi
 done
-ok "Frontend compartido actualizado: controles de teclado y preferencias presentes"
+ok "Frontend compartido actualizado: atajos configurables y preferencias presentes"
 
 # Que la build produzca SOLO el AppImage no es un detalle estético: un .deb o un
 # .rpm que se cuelen acabarían publicados en la release sin que nadie los haya
@@ -1721,6 +1828,29 @@ node "$PROJECT_ROOT/scripts/update-release-hash.mjs" \
     --manifest "$RELEASE_DIR/SHA256SUMS.txt" \
     --artifact "$RELEASE_NAME" \
     --hash "$RELEASE_HASH"
+SIGNING_REQUIRED="${LTERMINAL_REQUIRE_SIGNING:-${CI:-0}}"
+if [ -n "${LTERMINAL_SIGNING_PRIVATE_KEY:-}" ]; then
+    if [ -z "${LTERMINAL_UPDATE_PUBLIC_KEY:-}" ]; then
+        rm -f "$RELEASE_DIR/SHA256SUMS.txt.sig"
+        err "Falta LTERMINAL_UPDATE_PUBLIC_KEY: no se puede verificar la firma del manifiesto."
+        exit 1
+    fi
+    node "$PROJECT_ROOT/scripts/sign-release-manifest.mjs" \
+        --manifest "$RELEASE_DIR/SHA256SUMS.txt" \
+        --signature "$RELEASE_DIR/SHA256SUMS.txt.sig"
+    node "$PROJECT_ROOT/scripts/sign-release-manifest.mjs" \
+        --manifest "$RELEASE_DIR/SHA256SUMS.txt" \
+        --signature "$RELEASE_DIR/SHA256SUMS.txt.sig" --verify
+    ok "Firma Ed25519 del manifiesto verificada"
+elif [[ "$SIGNING_REQUIRED" =~ ^(1|true|yes)$ ]]; then
+    err "Falta LTERMINAL_SIGNING_PRIVATE_KEY: una release oficial no puede publicarse sin firma."
+    exit 1
+else
+    # Evita que una firma de una ejecución anterior acompañe accidentalmente
+    # a un manifiesto nuevo cuando la build local no tiene material de firma.
+    rm -f "$RELEASE_DIR/SHA256SUMS.txt.sig"
+    warn "Release local sin firma Ed25519; el actualizador rechazará este artefacto."
+fi
 ok "Release: $RELEASE_DIR/$RELEASE_NAME"
 ok "SHA256: $RELEASE_HASH"
 node "$PROJECT_ROOT/scripts/verify-release-artifacts.mjs" \

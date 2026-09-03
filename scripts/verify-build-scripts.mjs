@@ -18,6 +18,7 @@ const files = {
     profileSh: await readFile(resolve(root, 'src-tauri/resources/profile-bootstrap.sh.in'), 'utf8'),
     profilePs1: await readFile(resolve(root, 'src-tauri/resources/profile-bootstrap.ps1.in'), 'utf8'),
     releaseHash: await readFile(resolve(root, 'scripts/update-release-hash.mjs'), 'utf8'),
+    cargoBuild: await readFile(resolve(root, 'src-tauri/build.rs'), 'utf8'),
     cleanerPs1: await readFile(resolve(root, 'scripts/clean-repository.ps1'), 'utf8'),
     cleanerSh: await readFile(resolve(root, 'scripts/clean-repository.sh'), 'utf8'),
 };
@@ -52,6 +53,7 @@ const cleanerShDirectories = files.cleanerSh.slice(
 )
 
 const checks = [
+    ['Cargo invalida el ejecutable cuando cambia el frontend incrustado', files.cargoBuild.includes('cargo:rerun-if-changed=../dist/index.html')],
     ['Linux ejecuta la batería estática', files.linux.includes('npm run check')],
     ['El build comprueba los registros de instalación', files.package.includes('check:install-sources') && files.linux.includes('npm run check') && files.windows.includes("'check'")],
     ['Un timeout Git queda como aviso y no congela la release', files.links.includes('warning: lastError.startsWith(\'timeout\')') && files.links.includes('GIT_LINK_CHECK_TIMEOUT_MS ?? 15000')],
@@ -75,6 +77,8 @@ const checks = [
     ['Windows documenta una ayuda no destructiva para la build', files.windows.includes('[Alias(\'h\')][switch]$Help') && files.windows.includes('if ($Help)') && files.windowsBat.includes('build.bat -Help') && files.windowsBat.includes('Ayuda mostrada; no se ejecuto') && files.windowsBat.includes('for %%A in (%*)')],
     ['Linux ofrece test ampliado', files.linux.includes('--extended-tests') && files.linux.includes('--full-tests')],
     ['Linux tiene modo no interactivo', files.linux.includes('--non-interactive') && files.linux.includes('NON_INTERACTIVE')],
+    ['Linux carga automáticamente las claves de firma locales fuera de CI', files.linux.includes('load_local_signing_material') && files.linux.includes('release-signing-private.pem') && files.linux.includes('release-signing-public.hex') && files.linux.includes('[ -n "${CI:-}" ] && return 0')],
+    ['Linux no declara verificada una firma que no haya comprobado', files.linux.includes('Falta LTERMINAL_UPDATE_PUBLIC_KEY') && files.linux.includes('--verify') && files.linux.includes('rm -f "$RELEASE_DIR/SHA256SUMS.txt.sig"')],
     ['Linux ofrece selector interactivo con valores predeterminados y conserva CI', files.linux.includes('ask_build_choice') && files.linux.includes('configure_interactive_options') && files.linux.includes('EXPLICIT_OPTIONS') && files.linux.includes('${CI:-}') && files.linux.includes('Enter conserva el valor actual')],
     ['Linux solicita la versión al inicio junto a la configuración', linuxVersionPrompt >= 0 && linuxRequirementsStep > linuxVersionPrompt && files.linux.includes('can_prompt') && files.linux.includes('CURRENT_VERSION')],
     ['Linux ofrece modo explícito sin red', files.linux.includes('--allow-offline-checks') && files.linux.includes('LTERMINAL_LINK_CHECK=warn')],
@@ -171,8 +175,12 @@ const checks = [
     ['La cross-build Windows permite fijar la versión antes de compilar', files.linuxWindows.includes('--version') && files.linuxWindows.includes('CURRENT_VERSION') && files.linuxWindows.includes('set-package-version.mjs') && files.linuxWindows.includes('Versión seleccionada')],
     ['La cross-build Windows valida SemVer antes de comprobar dependencias', files.linuxWindows.includes('La versión indicada no es SemVer válida') && files.linuxWindows.indexOf('La versión indicada no es SemVer válida') < files.linuxWindows.indexOf('ensure_node_and_rust')],
     ['Linux elige una compresión AppImage compatible con su runtime de smoke', files.linux.includes('APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-zstd}"') && files.linux.includes('APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-gzip}"') && files.linux.includes('XZ no es compatible')],
+    ['Linux actualiza linuxdeploy cuando no entiende ELF RELR', files.linux.includes('LINUXDEPLOY_CACHE') && files.linux.includes('LINUXDEPLOY_BUILD') && files.linux.includes('linuxdeploy-x86_64.AppImage') && files.linux.includes('LTERMINAL_APPIMAGE_NO_STRIP')],
+    ['Linux valida AppStream y evita la heurística de nombre del empaquetador', files.linux.includes('LDAI_NO_APPSTREAM') && files.linux.includes('appstreamcli validate --no-net') && files.linux.includes('--no-appstream')],
+    ['Linux conserva stripping por defecto', files.linux.includes('unset NO_STRIP') && files.linux.includes('LTERMINAL_APPIMAGE_NO_STRIP')],
     ['Linux evita la copia conflictiva de GIO TLS', files.linux.includes('libgiognutls.so') && files.linux.includes('rm -f "$APPDIR/usr/lib/gio/modules/libgiognutls.so"')],
     ['Smoke Windows valida el token de arranque', files.windows.includes('$smokeToken')],
+    ['Smoke Windows admite Wine y Proton en entornos aislados', files.linuxWindows.includes('LTERMINAL_WINE_RUNNER') && files.linuxWindows.includes('LTERMINAL_PROTON') && files.linuxWindows.includes('STEAM_COMPAT_DATA_PATH') && files.linuxWindows.includes('tracked_files')],
     ['Smoke Windows exige el marcador de éxito y no solo el token', files.windows.includes('function Test-SmokeReady') && files.windows.includes('sessionMatch') && files.windows.includes('Frontend y terminal preparados') && files.windows.includes('Frontend preparado pero sin sesión PTY')],
     ['Linux valida que la sesión gráfica sea accesible', files.linux.includes('graphical_session_available') && files.linux.includes('xdpyinfo')],
     ['Linux elimina binarios cruzados antes de empaquetar', files.linux.includes('com.winslim.terminal') && files.linux.includes('stale_binary')],

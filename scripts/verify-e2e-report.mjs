@@ -95,6 +95,21 @@ if (!tabIsolation || tabIsolation.passed !== true || tabIsolation.tabs < 3) {
     throw new Error('El E2E no demostró sesiones PTY independientes entre pestañas.');
 }
 
+const rapidTabReplace = events.find((event) => event?.type === 'rapid-tab-replace');
+if (!rapidTabReplace || rapidTabReplace.passed !== true || rapidTabReplace.isolated !== true
+    || !rapidTabReplace.closedTabId || !rapidTabReplace.createdTabId
+    || rapidTabReplace.closedTabId === rapidTabReplace.createdTabId) {
+    throw new Error('El E2E no reprodujo el cierre inmediato de una pestaña durante la creación de otra.');
+}
+
+const explorerCwd = events.find((event) => event?.type === 'explorer-cwd-layout');
+if (!explorerCwd || explorerCwd.passed !== true || explorerCwd.cwdFollowed !== true
+    || !Number.isFinite(explorerCwd.layout?.pathHeight) || explorerCwd.layout.pathHeight > 32
+    || !Number.isFinite(explorerCwd.layout?.gap) || explorerCwd.layout.gap > 4
+    || explorerCwd.layout?.ordered !== true) {
+    throw new Error('El E2E no demostró que el explorador siguiera el cwd sin crear un bloque vacío.');
+}
+
 const keyboardShortcuts = events.find((event) => event?.type === 'keyboard-shortcuts');
 if (!keyboardShortcuts || keyboardShortcuts.passed !== true
     || keyboardShortcuts.newTab !== true

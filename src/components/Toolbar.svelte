@@ -3,7 +3,6 @@
     // versión Electron tenía en `#toolbar`. Los paneles de scripts, explorador,
     // proyectos y ajustes se añaden en las fases siguientes de la migración.
 
-    import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
     import { includesLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
@@ -27,11 +26,6 @@
     }
 
     let { onOpenDeps, onOpenSettings, onOpenScripts, onOpenProjects }: Props = $props();
-
-    /** El botón de Logs abre una carpeta con el gestor del sistema, y eso puede
-     *  no existir en un Windows recortado. Sin esto, el clic no hacía nada y no
-     *  se decía por qué. */
-    let logsError = $state('');
 
     let envMenuOpen = $state(false);
     let envQuery = $state('');
@@ -160,7 +154,7 @@
 
 <div class="toolbar">
     <div class="toolbar-group grow">
-        <div class="env-container">
+        {#if app.preferences?.showEnvironmentSelector !== false}<div class="env-container">
             <button
                 type="button"
                 class="env-select"
@@ -241,18 +235,18 @@
                     {/each}
                 </div>
             {/if}
-        </div>
+        </div>{/if}
 
-        <button
+        {#if app.preferences?.showRefreshButton !== false}<button
             type="button"
             class="icon"
             data-testid="refresh-environments"
             title={app.t('env.refresh', 'Volver a detectar entornos')}
             onclick={() => app.refreshEnvironments()}
-        >⟳</button>
-        {#each favoriteRepls as environment (environment.id)}
+        >⟳</button>{/if}
+        {#if app.preferences?.showEnvironmentSelector !== false}{#each favoriteRepls as environment (environment.id)}
             <button type="button" class="repl-favorite" title={`Abrir ${environment.label}`} onclick={() => app.createTab(environment.id)}>★ {environment.label.replace(' · REPL', '')}</button>
-        {/each}
+        {/each}{/if}
     </div>
 
     <div class="toolbar-group">
@@ -304,28 +298,8 @@
             {app.t('toolbar.settings', 'Ajustes')}
         </button>
 
-        {#if logsError}
-            <span class="notice" role="status">{logsError}</span>
-        {/if}
-        <button
-            type="button"
-            onclick={async () => {
-                logsError = '';
-                // Devuelve la ruta si la abrió, y nada si no pudo.
-                const opened = await api.openLogFolder();
-                if (!opened) {
-                    logsError = app.t(
-                        'toolbar.logsFailed',
-                        'No se pudo abrir la carpeta de registros.'
-                    );
-                }
-            }}
-        >
-            {app.t('toolbar.logs', 'Logs')}
-        </button>
-
         <!-- Selector rápido de idioma -->
-        <div class="lang-container">
+        {#if app.preferences?.showLanguageButton !== false}<div class="lang-container">
             <button
                 type="button"
                 class="icon lang-btn"
@@ -369,7 +343,7 @@
                     {/each}
                 </div>
             {/if}
-        </div>
+        </div>{/if}
     </div>
 </div>
 
@@ -658,11 +632,6 @@
 
     button.icon {
         padding: 4px 8px;
-    }
-
-    .notice {
-        color: var(--danger);
-        font-size: 11px;
     }
 
     .lang-container {

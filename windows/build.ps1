@@ -1214,17 +1214,19 @@ if ($Installer) {
 }
 
 # Evita publicar por accidente un frontend anterior (por ejemplo, una copia
-# del proyecto sin los últimos cambios compartidos). Estos marcadores solo
-# validan funciones del frontend; las herramientas opcionales se detectan en
-# tiempo de ejecución y nunca condicionan la compilación.
+# del proyecto sin los últimos cambios compartidos). No se buscan nombres de
+# funciones TypeScript: Vite puede minificarlos o renombrarlos en producción.
+# Los marcadores son claves de preferencias/eventos estables del contrato
+# runtime; las herramientas opcionales se detectan en ejecución y nunca
+# condicionan la compilación.
 $frontendBundles = Get-ChildItem (Join-Path $ProjectRoot 'dist\assets') -Filter 'index-*.js' -File
 $frontendText = ($frontendBundles | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
-foreach ($marker in @('ControlRight', 'KeyW', 'environment-controls')) {
+foreach ($marker in @('shortcutPaneLeft', 'shortcutOpenSystemExplorer', 'environment-controls')) {
     if ($frontendText -notmatch [regex]::Escape($marker)) {
         throw "El frontend compilado no contiene '$marker': parece una build desactualizada y no se publicara."
     }
 }
-Write-Ok 'Frontend compartido actualizado: Control derecho + WASD y preferencias compactas presentes'
+Write-Ok 'Frontend compartido actualizado: atajos configurables y preferencias compactas presentes'
 
 $exePath = Join-Path $ReleaseDir 'winslim-terminal.exe'
 if (-not (Test-Path $exePath)) { throw "La compilacion termino pero no hay ejecutable en $exePath." }
@@ -1673,6 +1675,30 @@ if ($Installer) {
     if ($installerHashCode -ne 0) { throw "No se pudo actualizar el manifiesto SHA256 del instalador: $checksumManifest" }
     Write-Ok "Instalador publicado: $installerReleasePath"
     Write-Ok "SHA256 instalador: $installerHash"
+}
+
+$signingRequired = ($env:LTERMINAL_REQUIRE_SIGNING -match '^(1|true|yes)$') -or ($env:CI -match '^(1|true|yes)$')
+if ($env:LTERMINAL_SIGNING_PRIVATE_KEY) {
+    $signatureCode = Invoke-Native 'node' @(
+        'scripts/sign-release-manifest.mjs',
+        '--manifest', $checksumManifest,
+        '--signature', (Join-Path $releaseOut 'SHA256SUMS.txt.sig')
+    )
+    if ($signatureCode -ne 0) { throw 'No se pudo firmar SHA256SUMS.txt.' }
+    if ($env:LTERMINAL_UPDATE_PUBLIC_KEY) {
+        $verifyCode = Invoke-Native 'node' @(
+            'scripts/sign-release-manifest.mjs',
+            '--manifest', $checksumManifest,
+            '--signature', (Join-Path $releaseOut 'SHA256SUMS.txt.sig'),
+            '--verify'
+        )
+        if ($verifyCode -ne 0) { throw 'La firma Ed25519 del manifiesto no se pudo verificar.' }
+    }
+    Write-Ok 'Firma Ed25519 del manifiesto verificada'
+} elseif ($signingRequired) {
+    throw 'Falta LTERMINAL_SIGNING_PRIVATE_KEY: una release oficial no puede publicarse sin firma.'
+} else {
+    Write-Warn 'Release local sin firma Ed25519; el actualizador rechazará este artefacto.'
 }
 
 if (-not $NoRun) {

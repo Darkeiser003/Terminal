@@ -17,6 +17,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use super::security;
 use crate::install_dir;
 use crate::self_update::{self, UpdateStatus, Version};
 use crate::state::AppState;
@@ -41,7 +42,8 @@ fn local_status(app: &AppHandle) -> UpdateStatus {
     UpdateStatus {
         current_version: current_version(app),
         can_self_update: crate::github::default_catalog().self_repository.is_some()
-            && install_dir::staging().is_some(),
+            && install_dir::staging().is_some()
+            && security::signing_key_configured(),
         install_path: install.map(|path| path.to_string_lossy().to_string()),
         ..Default::default()
     }
@@ -132,6 +134,7 @@ fn extract(archive: &Path, into: &Path) -> Result<(), String> {
     {
         return Ok(());
     }
+    security::validate_tar_entries(archive)?;
     std::fs::create_dir_all(into).map_err(|error| error.to_string())?;
     let salida = crate::process::run_with_timeout(
         "tar",
@@ -193,6 +196,18 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
     let Some(asset) = release.assets.iter().find(|a| a.name == elegido) else {
         return failed("El adjunto elegido ya no está en la release.");
     };
+    let Some(checksum_asset) = release.assets.iter().find(|a| a.name == "SHA256SUMS.txt") else {
+        return failed("La release no publica SHA256SUMS.txt; por seguridad no se instalará.");
+    };
+    let Some(signature_asset) = release
+        .assets
+        .iter()
+        .find(|a| a.name == "SHA256SUMS.txt.sig")
+    else {
+        return failed(
+            "La release no publica la firma de SHA256SUMS.txt; por seguridad no se instalará.",
+        );
+    };
 
     // Se parte de cero: restos de un intento anterior podrían mezclarse con
     // esta descarga y acabar instalando una mitad de cada versión.
@@ -210,6 +225,37 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
             "destino": staging.to_string_lossy(),
         })
     );
+    let manifest_path = staging.join(&checksum_asset.name);
+    let signature_path = staging.join(&signature_asset.name);
+    if let Err(error) = crate::commands_projects::download_asset_to_with_progress(
+        &checksum_asset.download_url,
+        &manifest_path,
+        |_, _| {},
+    ) {
+        return failed(format!(
+            "No se pudo descargar el manifiesto de checksums: {error}"
+        ));
+    }
+    if let Err(error) = crate::commands_projects::download_asset_to_with_progress(
+        &signature_asset.download_url,
+        &signature_path,
+        |_, _| {},
+    ) {
+        return failed(format!(
+            "No se pudo descargar la firma de la release: {error}"
+        ));
+    }
+    let manifest = match std::fs::read(&manifest_path) {
+        Ok(value) => value,
+        Err(error) => return failed(format!("No se pudo leer SHA256SUMS.txt: {error}")),
+    };
+    let signature = match std::fs::read(&signature_path) {
+        Ok(value) => value,
+        Err(error) => return failed(format!("No se pudo leer la firma de la release: {error}")),
+    };
+    if let Err(error) = security::verify_signature(&manifest, &signature) {
+        return failed(error);
+    }
     let progress_app = app.clone();
     if let Err(error) = crate::commands_projects::download_asset_to_with_progress(
         &asset.download_url,
@@ -229,6 +275,9 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
             );
         },
     ) {
+        return failed(error);
+    }
+    if let Err(error) = security::verify_checksum(&manifest, &asset.name, &descarga) {
         return failed(error);
     }
     let _ = app.emit(
@@ -259,6 +308,9 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
         }
         self_update::payload_root(&extraido)
     };
+    if let Err(error) = self_update::validate_payload_tree(&raiz) {
+        return failed(error);
+    }
     if let Err(error) = self_update::apply(&raiz, &install, &binario) {
         log_error!(
             "No se pudo aplicar la actualización",

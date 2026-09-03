@@ -113,7 +113,7 @@
          de "falta el glifo". Un trazo dibujado a mano no depende de qué fuentes
          tenga el sistema y hereda el color del botón, así que el estado activo
          se ve sin cambiar de icono. -->
-    <button
+    {#if app.preferences?.showExplorerPanel !== false}<button
         type="button"
         class="side-toggle"
         class:on={app.explorerVisible}
@@ -130,7 +130,7 @@
                 stroke-linejoin="round"
             />
         </svg>
-    </button>
+    </button>{/if}
 
     <!-- La vista dividida existía desde el principio pero solo por teclado
          (Ctrl+Shift+\), así que no la encontraba nadie. El icono dibuja la

@@ -1,6 +1,12 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
+    // Tauri incrusta `frontendDist` dentro del ejecutable. El hook ejecuta
+    // Vite antes que Cargo, pero sin esta dependencia Cargo puede reutilizar
+    // un binario anterior cuando el único cambio está en Svelte/CSS. El HTML
+    // referencia los assets con hash, por lo que cambia con cualquier bundle
+    // nuevo y actúa como sello estable del frontend realmente incrustado.
+    println!("cargo:rerun-if-changed=../dist/index.html");
     copy_conpty_next_to_executable();
     tauri_build::build()
 }

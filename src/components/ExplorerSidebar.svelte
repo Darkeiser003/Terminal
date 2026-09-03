@@ -38,6 +38,14 @@
      *  esto solo se sabe por haber hecho la acción: sirve para no ofrecer un
      *  «Pegar» que solo puede fallar. */
     let clipped = $state(false);
+    /** Número de la última lectura: evita que un `cd` rápido sea sobrescrito
+     *  por una respuesta anterior del sistema de archivos. */
+    let listingRequest = 0;
+    /** Mostrar el explorador y enfocar la terminal pueden ocurrir en la misma
+     *  trama. Agrupar esas peticiones evita una carrera en la que cada lectura
+     *  invalida la anterior antes de que alguna llegue a pintar su ruta. */
+    let followInFlight: Promise<void> | null = null;
+    let pendingFollowTabId: string | null = null;
 
     /** Se recarga al cambiar de pestaña y vuelve a la carpeta real de la shell.
      *  Una navegación manual sigue siendo posible; el botón «Seguir» y el foco
@@ -61,41 +69,33 @@
             const tabId = (event as CustomEvent<{ tabId?: string }>).detail?.tabId;
             if (tabId && tabId === app.activeTabId) void follow(tabId);
         };
+        const onExplorerFollow = (event: Event) => {
+            const tabId = (event as CustomEvent<{ tabId?: string }>).detail?.tabId;
+            if (tabId && tabId === app.activeTabId) void follow(tabId);
+        };
+        const onExplorerCd = (event: Event) => {
+            const tabId = (event as CustomEvent<{ tabId?: string }>).detail?.tabId;
+            if (tabId && tabId === app.activeTabId) void act(() => api.cdToExplorerDir(tabId));
+        };
         window.addEventListener('winslim:terminal-focused', onTerminalFocused);
+        window.addEventListener('winslim:explorer-follow', onExplorerFollow);
+        window.addEventListener('winslim:explorer-cd', onExplorerCd);
         return () => {
             disposed = true;
             window.removeEventListener('winslim:terminal-focused', onTerminalFocused);
+            window.removeEventListener('winslim:explorer-follow', onExplorerFollow);
+            window.removeEventListener('winslim:explorer-cd', onExplorerCd);
             void unlisten.then((stop) => stop());
         };
     });
 
     async function load(tabId: string, dir?: string): Promise<void> {
+        const request = ++listingRequest;
         loading = true;
         statusError = false;
         try {
-            listing = await api.listDirectory(tabId, dir);
-            if (listing.error) {
-                statusError = true;
-                status = listing.error;
-            } else {
-                status = '';
-            }
-        } catch (cause) {
-            statusError = true;
-            status = String(cause);
-        } finally {
-            loading = false;
-        }
-    }
-
-    async function follow(tabId: string): Promise<void> {
-        loading = true;
-        statusError = false;
-        try {
-            const next = await api.followTab(tabId);
-            // Una respuesta vieja no debe devolver el explorador a la ruta de
-            // otra pestaña si el usuario cambia de foco mientras se lista.
-            if (app.activeTabId !== tabId) return;
+            const next = await api.listDirectory(tabId, dir);
+            if (app.activeTabId !== tabId || request !== listingRequest) return;
             listing = next;
             if (next.error) {
                 statusError = true;
@@ -104,12 +104,54 @@
                 status = '';
             }
         } catch (cause) {
-            if (app.activeTabId !== tabId) return;
+            if (app.activeTabId !== tabId || request !== listingRequest) return;
             statusError = true;
             status = String(cause);
         } finally {
-            if (app.activeTabId === tabId) loading = false;
+            if (request === listingRequest) loading = false;
         }
+    }
+
+    async function followOnce(tabId: string): Promise<void> {
+        const request = ++listingRequest;
+        loading = true;
+        statusError = false;
+        try {
+            const next = await api.followTab(tabId);
+            // Una respuesta vieja no debe devolver el explorador a la ruta de
+            // otra pestaña ni ocultar un `cd` posterior si el usuario cambia
+            // de foco mientras se lista.
+            if (app.activeTabId !== tabId || request !== listingRequest) return;
+            listing = next;
+            if (next.error) {
+                statusError = true;
+                status = next.error;
+            } else {
+                status = '';
+            }
+        } catch (cause) {
+            if (app.activeTabId !== tabId || request !== listingRequest) return;
+            statusError = true;
+            status = String(cause);
+        } finally {
+            if (request === listingRequest) loading = false;
+        }
+    }
+
+    function follow(tabId: string): Promise<void> {
+        pendingFollowTabId = tabId;
+        if (followInFlight) return followInFlight;
+
+        followInFlight = (async () => {
+            while (pendingFollowTabId) {
+                const nextTabId = pendingFollowTabId;
+                pendingFollowTabId = null;
+                await followOnce(nextTabId);
+            }
+        })().finally(() => {
+            followInFlight = null;
+        });
+        return followInFlight;
     }
 
     async function act<T extends { ok: boolean; error?: string }>(
@@ -246,7 +288,9 @@
             >↑</button>
             <button
                 type="button"
-                title={app.t('explorer.follow', 'Volver al directorio de la terminal')}
+                aria-label={app.t('explorer.follow', 'Seguir la ruta de la terminal')}
+                data-testid="explorer-follow"
+                title={app.t('explorer.follow', 'Seguir la ruta de la terminal')}
                 onclick={async () => {
                     if (!app.activeTabId) return;
                     await follow(app.activeTabId);
@@ -548,7 +592,9 @@
     }
 
     .path {
-        flex: 1 1 100px;
+        /* La barra lateral es una columna: permitir que este elemento crezca
+           ocupaba todo el alto libre y separaba la ruta de sus acciones. */
+        flex: 0 0 auto;
         min-width: 0;
         overflow: hidden;
         padding: 4px 6px;

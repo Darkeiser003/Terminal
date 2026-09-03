@@ -4,6 +4,7 @@ version = "1.4.4"
 description = "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003"
 authors = ["Darkeiser003"]
 license = "UNLICENSED"
+publish = false
 edition = "2021"
 rust-version = "1.77"
 
@@ -37,6 +38,8 @@ dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 sysinfo = { version = "0.36.1", default-features = false, features = ["system", "disk"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+base64 = "0.22"
+ring = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 # Lectura directa del Registro: evita arrancar `reg.exe` decenas de veces al

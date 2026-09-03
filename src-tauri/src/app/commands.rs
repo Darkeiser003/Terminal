@@ -19,7 +19,7 @@ use crate::preferences::{
 };
 use crate::state::AppState;
 use crate::tabs::{TabList, TabSummary, MAX_PTY_INPUT_CHARS};
-use crate::{i18n, identity, logger, settings};
+use crate::{i18n, identity, settings};
 
 static SMOKE_EXIT_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
@@ -260,7 +260,6 @@ pub fn env_switch(
     // pertenecer a otra si el usuario cambió el selector mientras había varias
     // pestañas visibles, y entonces la shell nueva caía en el home.
     let inherited = state.tabs.cwd_of(&tab_id);
-    state.tabs.clear_view(&app, &tab_id);
     let ok = state
         .tabs
         .spawn_pty(&app, &tab_id, &env, inherited.as_deref());
@@ -653,22 +652,6 @@ pub fn log_frontend_performance(payload: FrontendPerformancePayload) {
         meta["details"] = value;
     }
     log_info!("Métrica de rendimiento frontend", meta);
-}
-
-/// `log:open-folder`
-#[tauri::command(async)]
-pub fn log_open_folder(app: AppHandle) -> Option<String> {
-    let dir = logger::log_dir()?;
-    let path = dir.to_string_lossy().to_string();
-    let opened = crate::platform::open_directory(&app, &path);
-    if let Err(error) = opened {
-        log_error!(
-            "No se pudo abrir la carpeta de logs",
-            serde_json::json!({ "dir": path, "error": error })
-        );
-        return None;
-    }
-    Some(path)
 }
 
 #[cfg(test)]

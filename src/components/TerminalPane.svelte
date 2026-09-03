@@ -478,11 +478,13 @@
         writeInternal(`\r\nDiseño aplicado: ${next} panel${next === 1 ? '' : 'es'}.`);
     }
 
-    const canOpenCurrentDirectory = $derived(app.appInfo?.platform === 'windows');
+    const canOpenCurrentDirectory = $derived(
+        app.appInfo?.platform === 'windows' || app.appInfo?.platform === 'linux',
+    );
 
     async function openCurrentDirectory(): Promise<void> {
         if (!canOpenCurrentDirectory) {
-            writeInternal(`\r\n[${app.t('explorer.openInSystem', 'Abrir en el explorador del sistema')}: esta acción está desactivada por defecto en Linux.]`);
+            writeInternal(`\r\n[${app.t('explorer.openInSystem', 'Abrir en el explorador del sistema')}: esta plataforma no está soportada.]`);
             return;
         }
         try {
@@ -497,6 +499,11 @@
         } finally {
             term?.focus();
         }
+    }
+
+    function onOpenCurrentDirectory(event: Event): void {
+        const requestedTabId = (event as CustomEvent<{ tabId?: string }>).detail?.tabId;
+        if (requestedTabId === tabId) void openCurrentDirectory();
     }
 
     async function runInternal(line: string): Promise<{ handled: boolean; shellPrintsPrompt: boolean }> {
@@ -598,12 +605,6 @@
     let lastSize = { cols: 0, rows: 0 };
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     let initialPromptTimer: number | undefined;
-    let tinyViewportCleared = false;
-    // Cuando el frontend tiene que reescribir el prompt en una casilla
-    // estrecha, xterm puede conservar ese wrap aunque después sobren
-    // columnas. Guardar la línea lógica permite recomponerla al recuperar
-    // espacio, en vez de dejar `C:\\Users\\Admini` + `strador>` para siempre.
-    let tinyViewportPrompt = '';
     let userEditing = false;
     // Esperar a que App.svelte vacíe la cola de `term.write` evita recalcular
     // el banner mientras la shell todavía está entregando un bloque de
@@ -663,11 +664,23 @@
         return (event as CustomEvent<{ tabId?: string }>).detail?.tabId === tabId;
     }
 
+    function releaseInput(): void {
+        if (destroyed || inputReady) return;
+        inputReady = true;
+        if (inputReadyTimer) window.clearTimeout(inputReadyTimer);
+        inputReadyTimer = undefined;
+        if (queuedInput) {
+            const pending = queuedInput;
+            queuedInput = '';
+            void api.sendInput(tabId, pending);
+        }
+    }
+
     function onTerminalOutputBusy(event: Event): void {
         if (!eventBelongsToPane(event)) return;
         terminalOutputBusy = true;
         // El banner inicial puede llegar en varios bloques desde ConPTY. Si
-        // entra otro bloque antes del margen de 700 ms, el temporizador que
+        // entra otro bloque antes del siguiente repintado, el temporizador que
         // libera la entrada deja de ser válido: cancelarlo evita que el eco
         // del primer comando se inserte entre dos líneas del banner.
         if (inputReleaseTimer) {
@@ -683,20 +696,12 @@
         if (!inputReady && terminalStartupReady() && !inputReleaseTimer) {
             // El callback de `term.write` confirma el parseo, pero el canvas
             // puede necesitar otro frame para rasterizar las últimas líneas.
-            // Esperar 700 ms antes de soltar la entrada evita que el primer
-            // comando se pinte encima del banner en pestañas nuevas.
+            // Un margen breve permite ese frame sin hacer que las primeras
+            // pulsaciones parezcan invisibles cuando el prompt ya está listo.
             inputReleaseTimer = window.setTimeout(() => {
                 inputReleaseTimer = undefined;
-                if (destroyed || inputReady) return;
-                inputReady = true;
-                if (inputReadyTimer) window.clearTimeout(inputReadyTimer);
-                inputReadyTimer = undefined;
-                if (queuedInput) {
-                    const pending = queuedInput;
-                    queuedInput = '';
-                    void api.sendInput(tabId, pending);
-                }
-            }, 700);
+                releaseInput();
+            }, 50);
         }
         if (fitAfterOutput) {
             fitAfterOutput = false;
@@ -713,10 +718,34 @@
         requestAnimationFrame(() => requestBannerPrint());
     }
 
+    function onEnvironmentSwitchStarted(event: Event): void {
+        if ((event as CustomEvent<{ tabId?: string }>).detail?.tabId !== tabId) return;
+        // La misma instancia de xterm se reutiliza al cambiar de entorno. Su
+        // estado de edición, temporizadores y cola de entrada también tienen
+        // que empezar una nueva época; de lo contrario el prompt de la shell
+        // anterior puede conservar un espejo de texto o liberar una tecla en la
+        // sesión recién creada.
+        mirroredLine = '';
+        userEditing = false;
+        queuedInput = '';
+        inputReady = false;
+        if (inputReleaseTimer) {
+            window.clearTimeout(inputReleaseTimer);
+            inputReleaseTimer = undefined;
+        }
+        if (inputReadyTimer) window.clearTimeout(inputReadyTimer);
+        inputReadyTimer = window.setTimeout(() => {
+            inputReadyTimer = undefined;
+            releaseInput();
+        }, 8000);
+        exposeInputMirror('environment-switch');
+    }
+
     /** Diagnóstico estructural para E2E. No guarda texto ni códigos de teclas:
      *  solo si el espejo conoce la línea, su longitud y la clase del evento. */
     function exposeInputMirror(eventClass: string): void {
         if (!host) return;
+        host.dataset.userEditing = String(userEditing);
         host.dataset.inputMirrorState = mirroredLine === null ? 'unknown' : 'known';
         host.dataset.inputMirrorLength = mirroredLine === null ? '0' : String(mirroredLine.length);
         host.dataset.inputEventClass = eventClass;
@@ -799,6 +828,21 @@
         }
         if (host) host.dataset.promptVisible = 'false';
         return false;
+    }
+
+    function currentEditableLine(): string | null {
+        if (!term) return null;
+        const buffer = term.buffer.active;
+        const cursorRow = buffer.baseY + buffer.cursorY;
+        const line = buffer.getLine(cursorRow)?.translateToString(true).trimEnd() ?? '';
+        if (!line) return null;
+        const promptEnd = Math.max(
+            line.lastIndexOf('❯'),
+            line.lastIndexOf('>'),
+            line.lastIndexOf('$'),
+            line.lastIndexOf('#'),
+        );
+        return promptEnd >= 0 ? line.slice(promptEnd + 1).trimStart() : null;
     }
 
     function paneIsRepl(): boolean {
@@ -886,11 +930,6 @@
         try {
             const dims = fitAddon.proposeDimensions();
             if (dims) {
-                // `CSI 2J` solo se procesa en xterm: el PTY no sabe que su
-                // prompt ha desaparecido del canvas. Guardarlo antes del
-                // resize permite restaurar la misma línea tras limpiar una
-                // casilla baja y mantiene sincronizados el cursor visual y
-                // el cursor real de la shell.
                 const bufferBeforeResize = term.buffer.active;
                 // Si el usuario estaba en el prompt, xterm debe seguir anclado al
                 // final después de recalcular columnas. Al envolver una línea
@@ -898,14 +937,6 @@
                 // dejaba visible una continuación arriba y daba la impresión de
                 // que se había perdido texto al dividir la pestaña.
                 const wasAtBottom = bufferBeforeResize.viewportY >= bufferBeforeResize.baseY - 1;
-                const cursorRowBeforeResize = bufferBeforeResize.baseY + bufferBeforeResize.cursorY;
-                let promptBeforeResize = '';
-                for (let row = Math.max(0, cursorRowBeforeResize - 2); row <= cursorRowBeforeResize; row += 1) {
-                    const line = bufferBeforeResize.getLine(row)?.translateToString(true).trimEnd() ?? '';
-                    if (/^(?:PS\s+)?(?:[A-Za-z]:\\.+[>❯$#]|[^\s@]+@[^\s:]+:.+[❯$#]|(?:~|\/).*[>❯$#])\s*$/u.test(line)) {
-                        promptBeforeResize = line;
-                    }
-                }
                 // Verificar que el alto total ocupado por las filas no sobrepase la caja
                 // usable del host para evitar que la última línea de comandos se solape con el borde.
                 const core = (term as any)._core;
@@ -921,45 +952,6 @@
                 }
                 term.resize(dims.cols, dims.rows);
                 if (wasAtBottom) term.scrollToBottom();
-                // Cuando una ventana ya mostraba un banner largo y se reduce
-                // por debajo del mínimo útil, sus últimas líneas seguirían
-                // visibles en la pantalla aunque el backend deje de generar
-                // banner. Limpiar solo el viewport (no el scrollback) elimina
-                // ese residuo sin borrar el historial del usuario. Mientras
-                // se edita no tocamos la pantalla: el siguiente resize o la
-                // salida de la shell hará la limpieza cuando sea segura.
-                const tinyViewportChanged = term.cols !== lastSize.cols || term.rows !== lastSize.rows;
-                if (term.rows < 12
-                    && !userEditing
-                    && (promptBeforeResize || tinyViewportPrompt)
-                    && (!tinyViewportCleared || tinyViewportChanged)) {
-                    if (promptBeforeResize) tinyViewportPrompt = promptBeforeResize;
-                    term.write(`\x1b[2J\x1b[H${tinyViewportPrompt}`);
-                    tinyViewportCleared = true;
-                } else if (term.rows >= 12) {
-                    tinyViewportCleared = false;
-                    // Si una geometría anterior obligó a reescribir el prompt,
-                    // hacerlo una vez más con el ancho actual elimina el wrap
-                    // residual. En cuanto cabe completo ya no hace falta
-                    // conservar la copia.
-                    if (!userEditing && tinyViewportPrompt) {
-                        if (promptBeforeResize) tinyViewportPrompt = promptBeforeResize;
-                        const restoredPrompt = tinyViewportPrompt;
-                        term.write(`\x1b[2J\x1b[H${restoredPrompt}`);
-                        if (restoredPrompt.length <= term.cols) tinyViewportPrompt = '';
-                    }
-                    // Una reducción fuerte de columnas también puede dejar
-                    // el prompt recortado aunque sobren filas. Reescribirlo
-                    // fuerza a xterm a envolver la ruta con las dimensiones
-                    // nuevas; el scrollback continúa intacto.
-                    else if (!userEditing
-                        && promptBeforeResize
-                        && term.cols < lastSize.cols
-                        && promptBeforeResize.length >= term.cols) {
-                        tinyViewportPrompt = promptBeforeResize;
-                        term.write(`\x1b[2J\x1b[H${promptBeforeResize}`);
-                    }
-                }
             } else {
                 fitAddon.fit();
             }
@@ -1060,6 +1052,32 @@
         mountFinished('ok', { cols: term.cols, rows: term.rows });
 
         term.onData((data) => {
+            // xterm puede activar el informe de foco y emitir ESC[I / ESC[O al
+            // entrar o salir de un diálogo. Esas secuencias sí deben llegar a
+            // la shell, pero no son texto editado: si envenenan `mirroredLine`
+            // el siguiente `:comando` cae en Fish/cmd en vez de interceptarse.
+            const editingData = data
+                .replaceAll('\x1b[I', '')
+                .replaceAll('\x1b[O', '');
+            // Las respuestas VT generadas por xterm para las sondas de
+            // arranque también llegan por onData en algunas versiones de
+            // WebKit. No son edición del usuario: marcarlas como tal
+            // bloqueaba la limpieza segura de una casilla que se encogía.
+            const terminalResponse = /^(?:(?:\x1b\[[0-9;?]*[ -/]*[@-~])|(?:\x1bO.)|(?:\x1b\].*\x07))+$/u.test(editingData);
+            // `onData` solo recibe teclas del usuario, no la salida de la
+            // shell. Mantener este estado separado del espejo ASCII también
+            // cubre nano, REPLs y entradas con teclas de control.
+            if (terminalResponse) {
+                // Mantener el estado de edición anterior; la respuesta se
+                // reenvía abajo para no alterar el protocolo de la shell.
+                // Si el espejo aún no conoce ninguna línea, una bandera
+                // antigua solo puede proceder de una sonda VT agrupada con
+                // esta respuesta; no hay entrada humana que proteger.
+                if (mirroredLine === null) userEditing = false;
+                exposeInputMirror('terminal-response');
+                void api.sendInput(tabId, data);
+                return;
+            }
             if (!inputReady) {
                 queuedInput += data;
                 exposeInputMirror('startup-queued');
@@ -1068,16 +1086,6 @@
             // Si el usuario había desplazado el historial, cualquier entrada
             // nueva debe devolverle a la línea que está editando.
             term?.scrollToBottom();
-            // xterm puede activar el informe de foco y emitir ESC[I / ESC[O al
-            // entrar o salir de un diálogo. Esas secuencias sí deben llegar a
-            // la shell, pero no son texto editado: si envenenan `mirroredLine`
-            // el siguiente `:comando` cae en Fish/cmd en vez de interceptarse.
-            const editingData = data
-                .replaceAll('\x1b[I', '')
-                .replaceAll('\x1b[O', '');
-            // `onData` solo recibe teclas del usuario, no la salida de la
-            // shell. Mantener este estado separado del espejo ASCII también
-            // cubre nano, REPLs y entradas con teclas de control.
             if (editingData.includes('\r') || editingData.includes('\n') || editingData.includes('\u0003')) {
                 userEditing = false;
                 flushPendingBannerSettingsRefresh();
@@ -1107,7 +1115,19 @@
             const enterAt = terminators.length === 1 ? terminators[0].index : undefined;
             const beforeEnter = enterAt === undefined ? mirroredLineData : mirroredLineData.slice(0, enterAt);
             const afterEnter = enterAt === undefined ? '' : mirroredLineData.slice(enterAt + 1);
-            const candidate = mirroredLine === null ? beforeEnter : mirroredLine + beforeEnter;
+            // Tras cambiar de pestaña WebKit puede haber entregado una
+            // respuesta VT entre la tecla y el Enter, dejando el espejo en
+            // estado desconocido aunque xterm conserve la línea visible.
+            // Usarla como respaldo solo para un Enter recupera el interceptor
+            // de comandos internos sin adivinar texto durante la edición.
+            const mirroredCandidate = mirroredLine === null ? currentEditableLine() : mirroredLine;
+            const observedCandidate = enterAt !== undefined && !afterEnter ? currentEditableLine() : null;
+            const mirroredText = mirroredCandidate === null ? beforeEnter : mirroredCandidate + beforeEnter;
+            const internalCandidates = [observedCandidate, mirroredText]
+                .filter((value): value is string => value !== null && value !== undefined && value.length > 0
+                    && (value.trimStart().startsWith(':') || isDirectCreditAlias(value)))
+                .sort((left, right) => right.length - left.length);
+            const candidate = internalCandidates[0] ?? mirroredText;
             if (enterAt !== undefined && !afterEnter
                 && (candidate.trimStart().startsWith(':') || isDirectCreditAlias(candidate))) {
                 const line = candidate;
@@ -1152,19 +1172,13 @@
             void api.sendInput(tabId, data);
         });
 
-        // Devolver false impide que xterm procese además la pulsación (y la
-        // mande al proceso como una tecla más).
+        // Las acciones de navegación no se resuelven aquí: App.svelte las
+        // captura una sola vez, antes del textarea oculto de xterm, y consulta
+        // el mapa configurable de preferencias. Mantener otra ruta fija por
+        // panel hacía que una combinación pudiera navegar y, a la vez, llegar
+        // a la shell según qué nodo recibiera primero el evento.
+        // Devolver false impide que xterm procese además las acciones locales.
         term.attachCustomKeyEventHandler((event) => {
-            if (event.type === 'keydown' && event.altKey && !event.ctrlKey && !event.metaKey) {
-                const directions: Record<string, 'left' | 'right' | 'up' | 'down'> = {
-                    ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down'
-                };
-                const direction = directions[event.key];
-                if (direction) {
-                    app.navigatePaneDirection(direction);
-                    return false;
-                }
-            }
             if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
             const key = (event.key || '').toLowerCase();
             if (key === 'c' && term?.hasSelection()) {
@@ -1195,6 +1209,8 @@
         });
         window.addEventListener('winslim:terminal-output-busy', onTerminalOutputBusy);
         window.addEventListener('winslim:terminal-output-idle', onTerminalOutputIdle);
+        window.addEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
+        window.addEventListener('winslim:open-current-directory', onOpenCurrentDirectory);
 
         // Algunas instalaciones de cmd tardan varios segundos en terminar
         // los alias de arranque y no emiten el primer prompt tras el marcador
@@ -1229,19 +1245,15 @@
                 // normales se liberan antes por `terminal-output-idle`.
                 inputReadyTimer = window.setTimeout(() => {
                     inputReadyTimer = undefined;
-                    if (!destroyed && !inputReady) {
-                        inputReady = true;
-                        if (queuedInput) {
-                            const pending = queuedInput;
-                            queuedInput = '';
-                            void api.sendInput(tabId, pending);
-                        }
-                    }
+                    releaseInput();
                 }, 8000);
             })
             .catch((error) => {
                 handshakeFinished('error', { error: String(error).slice(0, 300) });
                 console.error('[TerminalPane] ready handshake failed', error);
+                // El handshake de diagnóstico no debe convertir una PTY que
+                // sí está viva en una terminal que retiene teclas para siempre.
+                releaseInput();
             });
     });
 
@@ -1258,6 +1270,8 @@
         if (initialPromptTimer) clearTimeout(initialPromptTimer);
         window.removeEventListener('winslim:terminal-output-busy', onTerminalOutputBusy);
         window.removeEventListener('winslim:terminal-output-idle', onTerminalOutputIdle);
+        window.removeEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
+        window.removeEventListener('winslim:open-current-directory', onOpenCurrentDirectory);
         unregisterTerminal(tabId);
         term?.dispose();
     });
@@ -1517,7 +1531,7 @@
             {app.t('menu.paste', 'Pegar')}
         </button>
         <div class="menu-separator" role="separator"></div>
-        <button
+        {#if app.preferences?.showExplorerPanel !== false}<button
             type="button"
             role="menuitem"
             disabled={!canOpenCurrentDirectory}
@@ -1525,7 +1539,7 @@
             onclick={() => runMenu('openDirectory')}
         >
             {app.t('explorer.openInSystem', 'Abrir en el explorador del sistema')}
-        </button>
+        </button>{/if}
     </div>
 {/if}
 
@@ -1550,51 +1564,41 @@
         overflow: hidden;
     }
 
-    /* El cursor es una capa propia de xterm, por encima de la textura de
-       caracteres. No debe quedar tapado por el canvas al repintar WebView2 ni
-       recibir eventos del ratón. */
+    /* Mantener la capa de cursor por encima del canvas evita que un repintado
+       de WebView2 la oculte. xterm hace transparente el cursor durante la fase
+       apagada del parpadeo; un indicador tenue con la misma forma conserva la
+       posición de escritura sin interferir con la geometría que calcula. */
     .terminal-host :global(.xterm-cursor-layer) {
         z-index: 4;
         pointer-events: none;
     }
 
-    /* xterm oculta durante medio ciclo el relleno de un cursor parpadeante.
-       En WebView2 ese frame puede coincidir con una captura, un cambio de
-       foco o un repintado y el usuario percibe que el cursor ha desaparecido.
-       Este trazo fino es una guía persistente de la celda actual; el cursor
-       nativo sigue llevando la forma, el color y el parpadeo configurados. */
     .terminal-host :global(.xterm-cursor) {
         position: relative;
-        z-index: 6;
     }
 
-    .terminal-host :global(.xterm-cursor)::after {
-        content: '';
+    .terminal-host :global(.xterm-cursor::after) {
+        content: "";
         position: absolute;
-        z-index: 1;
-        pointer-events: none;
         box-sizing: border-box;
-        opacity: 0.78;
+        pointer-events: none;
+        opacity: 0.72;
     }
 
-    .terminal-host :global(.xterm-cursor-block)::after {
+    .terminal-host :global(.xterm-cursor-block::after) {
         inset: 0;
         border: 1px solid var(--terminal-cursor);
     }
 
-    .terminal-host :global(.xterm-cursor-bar)::after {
-        top: 0;
-        bottom: 0;
-        left: 0;
-        width: max(1px, var(--terminal-cursor-width, 1px));
+    .terminal-host :global(.xterm-cursor-bar::after) {
+        inset: 0 auto 0 0;
+        width: var(--terminal-cursor-width, 1px);
         background: var(--terminal-cursor);
     }
 
-    .terminal-host :global(.xterm-cursor-underline)::after {
-        right: 0;
-        bottom: 0;
-        left: 0;
-        height: max(1px, var(--terminal-cursor-width, 1px));
+    .terminal-host :global(.xterm-cursor-underline::after) {
+        inset: auto 0 0;
+        height: var(--terminal-cursor-width, 1px);
         background: var(--terminal-cursor);
     }
 

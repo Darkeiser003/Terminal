@@ -9,6 +9,9 @@
 # El smoke bajo Wine necesita un prefijo que ya tenga WebView2 Runtime. Se puede
 # indicar con WINE_SMOKE_PREFIX=/ruta/al/prefijo; crear un prefijo temporal no
 # instala WebView2 y no es una prueba válida de la interfaz.
+# También se admite Proton con LTERMINAL_WINE_RUNNER=proton y
+# LTERMINAL_PROTON=/ruta/al/proton. Proton usa un compatdata aislado para no
+# mezclar su wineserver con una sesión Wine normal.
 
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "ERROR: este script necesita bash. Ejecútalo con ./build-windows.sh." >&2
@@ -35,6 +38,7 @@ AUTO_INSTALL=1
 RUN_WINE=0
 RUN_WINE_TESTS=0
 WINE_REPEATS=1
+WINE_RUNNER="${LTERMINAL_WINE_RUNNER:-wine}"
 SKIP_CHECKS=0
 ALLOW_OFFLINE_CHECKS=0
 CLEAN=0
@@ -48,6 +52,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-install) AUTO_INSTALL=0 ;;
         --wine-smoke|--smoke) RUN_WINE=1 ;;
+        --wine-rust-tests) RUN_WINE_TESTS=1 ;;
         --full-tests|--extended-tests)
             RUN_WINE=1
             RUN_WINE_TESTS=1
@@ -88,7 +93,7 @@ while [ "$#" -gt 0 ]; do
             [ -n "$VERSION_OVERRIDE" ] || { echo "--version necesita un valor SemVer, por ejemplo 1.4.4." >&2; exit 2; }
             ;;
         -h|--help)
-            echo "Uso: $0 [--version X.Y.Z] [--fast] [--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean] [--non-interactive]"
+            echo "Uso: $0 [--version X.Y.Z] [--fast] [--wine-rust-tests|--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean] [--non-interactive]"
             exit 0
             ;;
         *)
@@ -254,26 +259,48 @@ run_wine_rust_tests() {
     fi
     command -v wine >/dev/null 2>&1 || fail "No se encontró Wine para ejecutar los tests Windows."
 
-    local debug_dir wine_debug_dir
-    debug_dir="$WINDOWS_TARGET_DIR/$TARGET/debug"
-    wine_debug_dir="Z:${debug_dir//\//\\}"
+    local runtime_dir wine_runtime_dir timeout_seconds
+    runtime_dir="$WINDOWS_TARGET_DIR/$TARGET/release"
+    wine_runtime_dir="Z:${runtime_dir//\//\\}"
+    timeout_seconds="${LTERMINAL_WINE_TEST_TIMEOUT:-300}"
+    [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || fail "LTERMINAL_WINE_TEST_TIMEOUT debe ser un número positivo de segundos."
     LTERMINAL_TEST_UNDER_WINE=1 \
         WINEDEBUG=-all \
-        WINEPATH="$wine_debug_dir" \
+        WINEPATH="$wine_runtime_dir" \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine \
+        timeout --foreground "${timeout_seconds}s" \
+        env CARGO_TERM_QUIET=false \
         cargo test --manifest-path "$TAURI_DIR/Cargo.toml" \
-            --target "$TARGET" --features tauri/custom-protocol \
+            --target "$TARGET" --release --features tauri/custom-protocol \
             -- --test-threads=1
 }
 
 run_wine_smoke() {
-    if ! command -v wine >/dev/null 2>&1; then
-        install_wine || fail "Se pidió --wine-smoke, pero Wine no está instalado."
+    local runner="$WINE_RUNNER"
+    [ "$runner" = "auto" ] && runner=wine
+    local proton_bin="${LTERMINAL_PROTON:-}"
+    if [ "$runner" = "proton" ]; then
+        if [ -z "$proton_bin" ]; then
+            for candidate in \
+                "$HOME/.local/share/Steam/steamapps/common/Proton 11.0/proton" \
+                "$HOME/.local/share/lutris/runners/wine/proton-cachyos-11.0-x86_64/proton"; do
+                [ -x "$candidate" ] && { proton_bin="$candidate"; break; }
+            done
+        fi
+        [ -x "$proton_bin" ] || fail "No se encontró Proton; usa LTERMINAL_PROTON=/ruta/al/proton."
+    elif [ "$runner" = "wine" ]; then
+        if ! command -v wine >/dev/null 2>&1; then
+            install_wine || fail "Se pidió --wine-smoke, pero Wine no está instalado."
+        fi
+        command -v wine >/dev/null 2>&1 || fail "No se encontró Wine para ejecutar el smoke."
+    else
+        fail "LTERMINAL_WINE_RUNNER debe ser wine, proton o auto."
     fi
-    command -v wine >/dev/null 2>&1 || fail "No se encontró Wine para ejecutar el smoke."
 
     local prefix smoke_dir wine_log app_log app_log_win code owns_prefix webview_key smoke_token
+    local runner_dir proton_compat proton_client
     owns_prefix=0
+    runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/lterminal-wine-runner.XXXXXX")"
     if [ -n "${WINE_SMOKE_PREFIX:-}" ]; then
         prefix="$WINE_SMOKE_PREFIX"
         [ -d "$prefix" ] || fail "WINE_SMOKE_PREFIX no existe: $prefix"
@@ -288,12 +315,27 @@ run_wine_smoke() {
     wine_log="${wine_log:-$(mktemp "${TMPDIR:-/tmp}/lterminal-wine-smoke-log.XXXXXX")}"
     app_log="${app_log:-$(mktemp "${TMPDIR:-/tmp}/lterminal-wine-smoke-app-log.XXXXXX")}"
 
+    if [ "$runner" = "proton" ]; then
+        proton_compat="$runner_dir/compatdata"
+        proton_client="${STEAM_COMPAT_CLIENT_INSTALL_PATH:-$HOME/.local/share/Steam}"
+        mkdir -p "$proton_compat"
+        ln -s "$prefix" "$proton_compat/pfx"
+        printf '11.0-100\n' > "$proton_compat/version"
+        : > "$proton_compat/tracked_files"
+    fi
     webview_key=''
     for candidate in \
-        'HKLM\\Software\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' \
-        'HKLM\\Software\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' \
-        'HKCU\\Software\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'; do
-        if WINEPREFIX="$prefix" WINEDEBUG=-all wine reg query "$candidate" /v pv >/dev/null 2>&1; then
+        'HKLM\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' \
+        'HKLM\Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' \
+        'HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'; do
+        if [ "$runner" = "proton" ]; then
+            if STEAM_COMPAT_DATA_PATH="$proton_compat" \
+                STEAM_COMPAT_CLIENT_INSTALL_PATH="$proton_client" \
+                WINEDEBUG=-all "$proton_bin" run reg query "$candidate" /v pv >/dev/null 2>&1; then
+                webview_key="$candidate"
+                break
+            fi
+        elif WINEPREFIX="$prefix" WINEDEBUG=-all wine reg query "$candidate" /v pv >/dev/null 2>&1; then
             webview_key="$candidate"
             break
         fi
@@ -301,17 +343,32 @@ run_wine_smoke() {
     if [ -z "$webview_key" ]; then
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
         [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
+        rm -rf "$runner_dir"
         fail "El prefijo Wine no tiene WebView2 Runtime. Instálalo en el mismo prefijo y reintenta con WINE_SMOKE_PREFIX=/ruta/al/prefijo; WebView2Loader.dll no sustituye al runtime."
     fi
 
     smoke_token="windows-cross-$$-$(date +%s%N)"
     app_log_win="Z:${app_log//\//\\}"
-    warn "Smoke Windows bajo Wine: se espera el marcador de frontend + PTY y una salida ordenada."
+    warn "Smoke Windows bajo $runner: se espera el marcador de frontend + PTY y una salida ordenada."
     set +e
-    LTERMINAL_SMOKE_TOKEN="$smoke_token" \
-        LTERMINAL_SMOKE_AUTO_EXIT=1 \
-        LTERMINAL_LOG_FILE="$app_log_win" \
-        WINEPREFIX="$prefix" WINEDEBUG=+loaddll timeout --foreground 30s wine "Z:${EXE//\//\\}" >"$wine_log" 2>&1
+    if [ "$runner" = "proton" ]; then
+        LTERMINAL_SMOKE_TOKEN="$smoke_token" \
+            LTERMINAL_SMOKE_AUTO_EXIT=1 \
+            LTERMINAL_E2E_WEBDRIVER=1 \
+            LTERMINAL_E2E_DISABLE_GPU=1 \
+            LTERMINAL_LOG_FILE="$app_log_win" \
+            STEAM_COMPAT_DATA_PATH="$proton_compat" \
+            STEAM_COMPAT_CLIENT_INSTALL_PATH="$proton_client" \
+            PROTON_USE_WINED3D=1 PROTON_NO_ESYNC=1 PROTON_NO_FSYNC=1 \
+            WINEDEBUG=-all timeout --foreground 60s "$proton_bin" run "Z:${EXE//\//\\}" >"$wine_log" 2>&1
+    else
+        LTERMINAL_SMOKE_TOKEN="$smoke_token" \
+            LTERMINAL_SMOKE_AUTO_EXIT=1 \
+            LTERMINAL_E2E_WEBDRIVER=1 \
+            LTERMINAL_E2E_DISABLE_GPU=1 \
+            LTERMINAL_LOG_FILE="$app_log_win" \
+            WINEPREFIX="$prefix" WINEDEBUG=-all timeout --foreground 60s wine "Z:${EXE//\//\\}" >"$wine_log" 2>&1
+    fi
     code=$?
     set -e
     if [ "$code" -ne 0 ]; then
@@ -320,7 +377,8 @@ run_wine_smoke() {
         sed 's/^/        /' "$app_log" >&2 || true
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
         [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
-        fail "El smoke Windows bajo Wine no terminó limpiamente (código $code)."
+        rm -rf "$runner_dir"
+        fail "El smoke Windows bajo $runner no terminó limpiamente (código $code)."
     fi
     if ! grep -Eiq 'WebView2Loader(\.dll)?' "$wine_log"; then
         sed 's/^/      /' "$wine_log" >&2 || true
@@ -328,7 +386,8 @@ run_wine_smoke() {
         sed 's/^/        /' "$app_log" >&2 || true
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
         [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
-        fail "Wine mantuvo el proceso, pero no llegó a cargar WebView2Loader.dll."
+        rm -rf "$runner_dir"
+        fail "$runner mantuvo el proceso, pero no llegó a cargar WebView2Loader.dll."
     fi
     for marker in "\"smokeToken\":\"$smoke_token\"" 'Ventana inicial preparada' 'pty spawneado' 'Frontend y terminal preparados'; do
         if ! grep -Fq "$marker" "$app_log"; then
@@ -336,7 +395,8 @@ run_wine_smoke() {
             sed 's/^/        /' "$app_log" >&2 || true
             [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
             [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
-            fail "El smoke Windows bajo Wine no registró el hito: $marker"
+            rm -rf "$runner_dir"
+            fail "El smoke Windows bajo $runner no registró el hito: $marker"
         fi
     done
     if grep -Fq 'Frontend preparado pero sin sesión PTY' "$app_log"; then
@@ -344,18 +404,21 @@ run_wine_smoke() {
         sed 's/^/        /' "$app_log" >&2 || true
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
         [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
-        fail "El smoke Windows bajo Wine detectó frontend sin sesión PTY."
+        rm -rf "$runner_dir"
+        fail "El smoke Windows bajo $runner detectó frontend sin sesión PTY."
     fi
     if grep -Fq '[ERROR]' "$app_log"; then
         echo "      Log de la app:" >&2
         sed 's/^/        /' "$app_log" >&2 || true
         [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
         [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
-        fail "El smoke Windows bajo Wine dejó errores en la sesión de arranque."
+        rm -rf "$runner_dir"
+        fail "El smoke Windows bajo $runner dejó errores en la sesión de arranque."
     fi
     [ "$owns_prefix" -eq 1 ] && rm -rf "$smoke_dir"
     [ "$owns_prefix" -eq 0 ] && rm -f "$wine_log" "$app_log"
-    ok "Smoke Windows bajo Wine completado (código $code)"
+    rm -rf "$runner_dir"
+    ok "Smoke Windows bajo $runner completado (código $code)"
 }
 
 cd "$PROJECT_ROOT"
@@ -439,7 +502,6 @@ node "$PROJECT_ROOT/scripts/verify-release-artifacts.mjs" \
     --windows "$EXE" \
     --windows-dir "$RELEASE_DIR"
 ok "Estructura PE x64 y runtime Windows verificados"
-
 if [ "$RUN_WINE_TESTS" -eq 1 ]; then
     step "Ejecutando la batería Rust Windows bajo Wine"
     run_wine_rust_tests

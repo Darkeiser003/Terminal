@@ -42,10 +42,12 @@
     "test:frontend-logic": "node scripts/test-frontend-logic.mjs",
     "test:e2e-report": "node scripts/test-e2e-report.mjs",
     "test:release-hash": "node scripts/test-release-hash.mjs",
+    "test:release-signature": "node scripts/test-release-signature.mjs",
     "check:test-surface": "node scripts/verify-test-surface.mjs",
     "check:logic": "node scripts/verify-logic-surface.mjs",
-    "check:local": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:encoding && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:e2e-report && npm run test:release-hash && npm run check:test-surface && npm run check:logic",
-    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:encoding && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:e2e-report && npm run test:release-hash && npm run check:test-surface && npm run check:logic && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
+    "check:flows": "node scripts/verify-flow-documentation.mjs",
+    "check:local": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:e2e-report && npm run test:release-hash && npm run test:release-signature && npm run check:test-surface && npm run check:logic",
+    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:e2e-report && npm run test:release-hash && npm run test:release-signature && npm run check:test-surface && npm run check:logic && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=22.12.0"

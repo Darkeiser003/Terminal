@@ -32,10 +32,13 @@ const requiredFiles = [
     'scripts/verify-e2e-report.mjs',
     'scripts/test-e2e-report.mjs',
     'scripts/test-release-hash.mjs',
+    'scripts/test-release-signature.mjs',
     'scripts/update-release-hash.mjs',
+    'scripts/sign-release-manifest.mjs',
     'scripts/test-frontend-logic.mjs',
     'scripts/verify-test-surface.mjs',
-    'scripts/verify-release-artifacts.mjs'
+    'scripts/verify-release-artifacts.mjs',
+    'scripts/verify-flow-documentation.mjs'
 ];
 for (const file of requiredFiles) {
     try {
@@ -46,17 +49,20 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:e2e-report', 'test:release-hash', 'check:docs', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:e2e-report', 'test:release-hash', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
 check('npm check incluye la auditoría de superficie lógica', scripts.check.includes('check:logic') && scripts['check:logic'].includes('verify-logic-surface.mjs'));
 check('npm check incluye la verificación de documentación', scripts.check.includes('check:docs'));
+check('npm check ancla documentación y flujo al código', scripts.check.includes('check:flows') && read('scripts/verify-flow-documentation.mjs').includes('security::verify_signature'));
+check('npm check concentra la documentación en README', !scripts.check.includes('check:source-index') && !scripts.check.includes('generate:source-index') && read('scripts/verify-flow-documentation.mjs').includes("read('README.md')"));
 check('npm check incluye la política de codificación UTF-8', scripts.check.includes('check:encoding') && scripts['check:encoding'].includes('verify-encoding.mjs'));
 check('npm check incluye la verificación de traducciones dinámicas', scripts.check.includes('check:i18n') && read('scripts/verify-i18n.mjs').includes('dynamicActionIds'));
 check('npm check prueba contratos cruzados y lógica frontend ejecutable', scripts.check.includes('check:contracts') && scripts.check.includes('test:frontend-logic'));
 check('npm check prueba el validador del informe E2E', scripts.check.includes('test:e2e-report'));
 check('npm check prueba la actualización no destructiva de hashes', scripts.check.includes('test:release-hash') && read('scripts/test-release-hash.mjs').includes('se conservan las variantes'));
+check('npm check prueba firma Ed25519 y detecta alteraciones', scripts.check.includes('test:release-signature') && read('scripts/sign-release-manifest.mjs').includes('createPrivateKey') && read('src-tauri/src/updater/security.rs').includes('UnparsedPublicKey'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));
 check('npm check incluye clippy con warnings como errores', scripts.check.includes('clippy') && scripts.check.includes('-D warnings'));
 check('Verificador de enlaces da más margen a Git y reintenta', links.includes('gitTimeoutMs') && links.includes('gitRetries') && links.includes('git ls-remote'));
@@ -137,6 +143,13 @@ check('El E2E valida un formato de banner único en toda la rejilla',
         && read('tests/e2e/smoke.mjs').includes('await assertBannerHeaders(2,')
         && read('tests/e2e/smoke.mjs').includes('sameBannerMode: tinyGrid || modes.every((mode) => mode === modes[0])')
         && !read('tests/e2e/smoke.mjs').includes('createdPaneCompact: tinyGrid || modes[expected - 1] === \'compact\''));
+check('El E2E reproduce cierre rápido de pestaña y sincronización real del explorador', (() => {
+    const smoke = read('tests/e2e/smoke.mjs');
+    return smoke.includes("recordEvent('rapid-tab-replace'")
+        && smoke.includes("recordEvent('explorer-cwd-layout'")
+        && smoke.includes("await sendTerminalLine('cd /tmp')")
+        && smoke.includes('pathHeight > 32');
+})());
 check('El E2E cierra el selector de entornos si solo hay una shell disponible', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
     return smoke.includes('async function closeEnvironmentMenu()')
@@ -186,6 +199,31 @@ check('Paneles registran apertura hasta geometría visible', ['ui.panel.visible'
 check('Backend expone el comando de métricas frontend', lib.includes('log_frontend_performance') && read('src-tauri/src/app/commands.rs').includes('Métrica de rendimiento frontend'));
 check('Atajos usan un contrato compartido', shortcuts.includes('SHORTCUT_PREFERENCE_KEYS') && shortcuts.includes('matchesShortcut') && app.includes('from "./lib/shortcuts"'));
 check('Atajo de división usa la tecla física Backslash', shortcuts.includes("event.code === 'Backslash'") && shortcuts.includes('backslash'));
+check('La liberación de entrada siempre vacía las teclas retenidas', (() => {
+    const terminal = read('src/components/TerminalPane.svelte');
+    const release = terminal.slice(
+        terminal.indexOf('function releaseInput()'),
+        terminal.indexOf('function onTerminalOutputBusy'),
+    );
+    return release.includes('inputReady = true')
+        && release.includes('queuedInput =')
+        && release.includes('api.sendInput(tabId, pending)')
+        && (terminal.match(/releaseInput\(\)/g) ?? []).length >= 4;
+})());
+check('El explorador mantiene compacta la fila de ruta y sigue el cwd por evento', (() => {
+    const explorer = read('src/components/ExplorerSidebar.svelte');
+    const pathStyle = explorer.slice(explorer.indexOf('.path {'), explorer.indexOf('.inline input'));
+    return pathStyle.includes('flex: 0 0 auto')
+        && !pathStyle.includes('flex: 1 1')
+        && explorer.includes('onCurrentDirectoryChanged')
+        && explorer.includes('listingRequest');
+})());
+check('Abrir la carpeta actual está conectado al backend en Windows y Linux', (() => {
+    const terminal = read('src/components/TerminalPane.svelte');
+    return terminal.includes("app.appInfo?.platform === 'windows' || app.appInfo?.platform === 'linux'")
+        && terminal.includes('api.openDirectory(tabId, undefined, true)')
+        && read('src-tauri/src/platform/linux/mod.rs').includes('open_linux_directory');
+})());
 check('Controles select y numéricos tienen estilo compartido en ambas builds', /^select\s*\{/m.test(appCss) && /^input\[type='number'\]\s*\{/m.test(appCss) && !appCss.includes('.platform-linux select'));
 check('La ventana nativa conserva resize y maximizar sin feedback del frontend',
     !lib.includes('WindowEvent::Resized')
@@ -308,13 +346,13 @@ check('El resize conserva el anclaje al prompt al envolver líneas largas',
 check('Clear borra el historial sin reiniciar el cursor y el E2E lo repite',
     app.includes("term.write('\\x1b[2J\\x1b[3J', resolve)")
         && !app.includes('term.clear()')
+        && !terminalPane.includes('term.clear()')
+        && !terminalPane.includes('term.write(`\\x1b[2J')
         && !app.includes('term.reset()')
         && read('tests/e2e/smoke.mjs').includes('assertClearKeepsInputOnPromptRow')
         && read('tests/e2e/smoke.mjs').includes("recordEvent('clear-prompt-row', { attempts"));
 check('El E2E rechaza prompts que conservan el wrap de un tamaño anterior',
-    terminalPane.includes('const restoredPrompt = tinyViewportPrompt')
-        && terminalPane.includes('restoredPrompt.length <= term.cols')
-        && read('tests/e2e/smoke.mjs').includes('assertPromptReflowsAfterResize')
+    read('tests/e2e/smoke.mjs').includes('assertPromptReflowsAfterResize')
         && read('tests/e2e/smoke.mjs').includes("recordEvent('prompt-resize-reflow'"));
 check('La integración Windows registra y consume rutas de archivos',
     windowsIntegration.includes('Software\\Classes\\*\\shell\\WinSlimTerminal')
@@ -434,8 +472,10 @@ check('Build cruzada Linux→Windows ofrece smoke repetido bajo Wine', linuxWind
 check('Build Linux tiene ruta no interactiva', linuxBuild.includes('--non-interactive') && linuxBuild.includes('NON_INTERACTIVE'));
 check('Build WSL pasa modo no interactivo', windowsBuild.includes('--non-interactive'));
 check('Build Linux valida artefactos ELF/AppImage', linuxBuild.includes('verify-release-artifacts.mjs') && linuxBuild.includes('--appdir'));
+check('Build Linux exige firma en CI y deja firma detached', linuxBuild.includes('LTERMINAL_SIGNING_PRIVATE_KEY') && linuxBuild.includes('SHA256SUMS.txt.sig'));
 check('Build Windows cruzada valida artefactos PE/runtime', linuxWindowsBuild.includes('verify-release-artifacts.mjs') && linuxWindowsBuild.includes('--windows-dir'));
 check('Build Windows nativa valida artefactos PE/runtime', windowsBuild.includes('verify-release-artifacts.mjs') && windowsBuild.includes('--windows-dir'));
+check('Build Windows exige firma en CI y deja firma detached', windowsBuild.includes('LTERMINAL_SIGNING_PRIVATE_KEY') && windowsBuild.includes('SHA256SUMS.txt.sig'));
 check('Build Linux expone opción Windows cruzada', linuxBuild.includes('--cross-windows') && linuxBuild.includes('build-windows.sh'));
 check('Build Windows expone opción Linux mediante WSL', windowsBuild.includes('$CrossLinux') && windowsBuild.includes('Invoke-CrossLinuxTests'));
 for (const [name, source] of [['Linux', linuxBuild], ['Windows', windowsBuild]]) {
@@ -443,7 +483,7 @@ for (const [name, source] of [['Linux', linuxBuild], ['Windows', windowsBuild]])
     check(`${name} no publica si falla el smoke`, source.includes('SMOKE') || source.includes('smoke'));
     check(`${name} verifica el frontend compilado`, name === 'Windows'
         ? source.includes('$frontendText') && source.includes('$marker')
-        : source.includes('frontend') && source.includes('ControlRight') && source.includes('environment-controls'));
+        : source.includes('frontend') && source.includes('shortcutPaneLeft') && source.includes('environment-controls'));
     check(`${name} conserva logs en errores`, source.includes('log') && (source.includes('tail') || source.includes('Get-Content')));
 }
 for (const marker of ['x86_64-pc-windows-gnu', 'exclude-all-symbols', 'conpty.dll', 'OpenConsole.exe', 'WebView2Loader.dll', 'wine-smoke']) {

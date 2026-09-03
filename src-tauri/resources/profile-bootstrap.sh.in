@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 PROFILE_REPOSITORY="Darkeiser003/Terminal"
+MAX_DOWNLOAD_BYTES=$((512 * 1024 * 1024))
 PROFILE_FILE="${1:-$PWD/LTerminal-profile.lterminal-profile}"
 case "$(uname -s)" in
     Linux*) ;;
@@ -76,21 +77,35 @@ PY
         echo "ERROR: GitHub no publicó un AppImage compatible." >&2
         exit 1
     }
+    case "$ASSET_NAME" in
+        ''|.|..|*/*|*\\*) echo "ERROR: el nombre del AppImage publicado no es seguro." >&2; exit 1 ;;
+    esac
+    ASSET_SCHEME="${ASSET_URL%%:*}"
+    ASSET_HOST="${ASSET_URL#*://}"
+    ASSET_HOST="${ASSET_HOST%%/*}"
+    case "${ASSET_SCHEME,,}:$ASSET_HOST" in
+        https:github.com|https:objects.githubusercontent.com|https:release-assets.githubusercontent.com|https:github-releases.githubusercontent.com) ;;
+        *) echo "ERROR: la URL del AppImage no pertenece a un host permitido de GitHub." >&2; exit 1 ;;
+    esac
     DOWNLOADED="$TEMP_DIR/$ASSET_NAME"
-    curl --proto '=https' --tlsv1.2 -fL --progress-bar "$ASSET_URL" -o "$DOWNLOADED"
+    curl --proto '=https' --tlsv1.2 -fL --max-filesize "$MAX_DOWNLOAD_BYTES" --progress-bar "$ASSET_URL" -o "$DOWNLOADED"
     CHECKSUMS="$TEMP_DIR/SHA256SUMS.txt"
-    if command -v sha256sum >/dev/null 2>&1 && curl --proto '=https' --tlsv1.2 -fsSL \
+    command -v sha256sum >/dev/null 2>&1 || {
+        echo "ERROR: hace falta sha256sum para instalar una release verificable." >&2
+        exit 1
+    }
+    if ! curl --proto '=https' --tlsv1.2 -fsSL \
         "https://github.com/$PROFILE_REPOSITORY/releases/latest/download/SHA256SUMS.txt" \
         -o "$CHECKSUMS"; then
-        EXPECTED="$(awk -v file="$ASSET_NAME" '$2 == file { print $1; exit }' "$CHECKSUMS")"
-        ACTUAL="$(sha256sum "$DOWNLOADED" | awk '{ print $1 }')"
-        [ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ] || {
-            echo "ERROR: la huella SHA-256 del AppImage no coincide." >&2
-            exit 1
-        }
-    else
-        echo "AVISO: no se pudo verificar SHA256SUMS.txt; se comprobará que la descarga no esté vacía." >&2
+        echo "ERROR: la release no publica un manifiesto SHA256 verificable." >&2
+        exit 1
     fi
+    EXPECTED="$(awk -v file="$ASSET_NAME" '$2 == file { print $1; exit }' "$CHECKSUMS")"
+    ACTUAL="$(sha256sum "$DOWNLOADED" | awk '{ print $1 }')"
+    [[ "$EXPECTED" =~ ^[a-fA-F0-9]{64}$ ]] && [ "$EXPECTED" = "$ACTUAL" ] || {
+        echo "ERROR: la huella SHA-256 del AppImage no coincide." >&2
+        exit 1
+    }
     [ -s "$DOWNLOADED" ] || {
         echo "ERROR: la descarga del AppImage está vacía." >&2
         exit 1

@@ -56,11 +56,12 @@ assert(terminalPane.includes('term.open(terminalHost)')
 assert(terminalPane.includes('cursorInactiveStyle')
     && terminalPane.includes('xterm-cursor-layer'),
     'Cada panel debe conservar una capa de cursor visible aunque no tenga el foco');
-const configuredShortcuts = [...defaults.matchAll(/^shortcut\w+\s*=\s*"([^"]+)"/gm)].map((match) => match[1]);
+const configuredShortcuts = [...defaults.matchAll(/^shortcut\w+\s*=\s*"([^"]*)"/gm)].map((match) => match[1]);
 assert.equal(configuredShortcuts.length, shortcuts.SHORTCUT_PREFERENCE_KEYS.length);
 const normalizedDefaults = configuredShortcuts.map(shortcuts.normalizeShortcut);
-assert(normalizedDefaults.every(Boolean), 'Todos los atajos de fábrica deben ser válidos');
-assert.equal(new Set(normalizedDefaults).size, normalizedDefaults.length, 'Los atajos de fábrica no se pueden repetir');
+assert(normalizedDefaults.every((value, index) => value || configuredShortcuts[index] === ''), 'Todos los atajos de fábrica deben ser válidos o estar vacíos');
+const assignedDefaults = normalizedDefaults.filter(Boolean);
+assert.equal(new Set(assignedDefaults).size, assignedDefaults.length, 'Los atajos de fábrica no se pueden repetir');
 
 const event = (overrides = {}) => ({
     code: 'KeyT',
@@ -75,6 +76,8 @@ assert(shortcuts.matchesShortcut(event(), 'Ctrl+Shift+T'));
 assert(shortcuts.matchesShortcut(event({ code: 'Backslash', key: '|'}), 'Ctrl+Shift+Backslash'));
 assert(!shortcuts.matchesShortcut(event({ altKey: true }), 'Ctrl+Shift+T'));
 assert(shortcuts.matchesShortcut(event({ code: 'ArrowLeft', key: 'ArrowLeft', ctrlKey: false, shiftKey: false, altKey: true }), 'Alt+ArrowLeft'));
+assert.equal(shortcuts.shortcutFromEvent(event({ code: 'KeyH', key: 'h', ctrlKey: true, altKey: true, shiftKey: false })), 'ctrl+alt+h');
+assert.equal(shortcuts.shortcutFromEvent(event({ code: 'ArrowLeft', key: 'ArrowLeft', ctrlKey: true, altKey: false, shiftKey: false })), 'ctrl+arrowleft');
 assert.equal(shortcuts.normalizeShortcut('Ctrl+Ctrl+T'), '');
 assert.equal(shortcuts.normalizeShortcut('Ctrl+Shift+TeclaInventada'), '');
 

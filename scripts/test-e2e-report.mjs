@@ -41,6 +41,8 @@ const valid = {
         { type: 'native-window-resize', platform: 'win32', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
         { type: 'native-window-resize', platform: 'win32', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
         { type: 'tab-isolation', passed: true, tabs: 3 },
+        { type: 'rapid-tab-replace', passed: true, isolated: true, closedTabId: 'tab-1', createdTabId: 'tab-2' },
+        { type: 'explorer-cwd-layout', passed: true, cwdFollowed: true, layout: { pathHeight: 18, gap: 0, ordered: true } },
         { type: 'keyboard-shortcuts', passed: true, newTab: true, nextTab: true, cyclePanes: true, explorerToggle: true },
         { type: 'shell-startup-performance', passed: true, samples: 4, maxMs: 740, limitMs: 2500 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
@@ -100,6 +102,14 @@ try {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'tab-isolation'),
     })).status, 0, 'falta la evidencia de aislamiento entre pestañas');
+    assert.notEqual((await run('missing-rapid-tab-replace', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'rapid-tab-replace'),
+    })).status, 0, 'falta reproducir la carrera de crear y cerrar pestañas');
+    assert.notEqual((await run('missing-explorer-cwd-layout', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'explorer-cwd-layout'),
+    })).status, 0, 'falta la evidencia de cwd y geometría del explorador');
     assert.notEqual((await run('missing-shell-startup', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'shell-startup-performance'),

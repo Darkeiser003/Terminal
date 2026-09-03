@@ -6,8 +6,12 @@ import process from 'node:process';
 // el fallo cerca del inicio del build, antes de descubrirlo al pulsar
 // "Instalar".
 const mode = (process.env.LTERMINAL_INSTALL_SOURCE_CHECK ?? 'warn').toLowerCase();
-const timeoutMs = Math.max(1000, Number(process.env.LTERMINAL_INSTALL_SOURCE_TIMEOUT_MS ?? 5000));
-const retries = Math.max(1, Number(process.env.LTERMINAL_INSTALL_SOURCE_RETRIES ?? 2));
+// Los registros públicos pueden tardar más que una petición normal cuando el
+// runner sale por primera vez a Internet. Un margen de 8 s y tres intentos
+// evita falsos avisos por cold-start sin convertir la comprobación en una
+// espera indefinida; ambos valores siguen siendo configurables para CI.
+const timeoutMs = Math.max(1000, Number(process.env.LTERMINAL_INSTALL_SOURCE_TIMEOUT_MS ?? 8000));
+const retries = Math.max(1, Number(process.env.LTERMINAL_INSTALL_SOURCE_RETRIES ?? 3));
 const sources = [
     ['WinGet manifests', 'https://raw.githubusercontent.com/microsoft/winget-pkgs/master/README.md'],
     ['Chocolatey', 'https://community.chocolatey.org/api/v2/'],
@@ -22,7 +26,11 @@ const sources = [
     ['Hex', 'https://hex.pm/api/packages/plug'],
     ['Hackage', 'https://hackage.haskell.org/package/cabal'],
     ['Dart pub', 'https://pub.dev/api/packages/http'],
-    ['Maven Central', 'https://search.maven.org/solrsearch/select?q=g%3Aorg.junit.jupiter&rows=1&wt=json'],
+    // search.maven.org es un índice de búsqueda y ha dado timeouts
+    // intermitentes. El instalador necesita Maven Central, no el buscador:
+    // consultar el metadata XML del repositorio canónico es más pequeño y
+    // representa mejor la disponibilidad real que necesita la aplicación.
+    ['Maven Central', 'https://repo.maven.apache.org/maven2/org/junit/jupiter/junit-jupiter-api/maven-metadata.xml'],
     ['LuaRocks', 'https://luarocks.org/manifest.json'],
     ['AUR', 'https://aur.archlinux.org/rpc?v=5&type=search&arg=paru'],
 ];
@@ -55,7 +63,7 @@ async function probe(url) {
         } finally {
             clearTimeout(timer);
         }
-        if (attempt < retries) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        if (attempt < retries) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
     }
     return { ok: false, error: lastError };
 }

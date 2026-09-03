@@ -70,13 +70,21 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
     // dentro del banner. Los REPL no cargan aliases ni `sysinfo`, así que el
     // banner automático no aporta nada y sí puede hacer ilegible la sesión.
     let is_repl = request.env.repl || request.env.kind == crate::environments::ShellKind::Repl;
+    // Aunque el viewport inicial sea demasiado bajo y el texto esté vacío,
+    // conservamos los archivos y la referencia del script. Al primer resize
+    // real `refresh_initial_banner_files` los rellena antes de ejecutar el
+    // inicializador, de modo que el banner no se pierde definitivamente.
     let show_banner = request.show_banner && !is_repl;
     let banner_text = if show_banner {
-        let note = match request.env.note.as_deref() {
-            Some(note) => format!("\x1b[33m{note}\x1b[0m\r\n\r\n"),
-            None => String::new(),
-        };
-        format!("\r\n{}{note}", request.banner)
+        if request.banner.is_empty() {
+            String::new()
+        } else {
+            let note = match request.env.note.as_deref() {
+                Some(note) => format!("\x1b[33m{note}\x1b[0m\r\n\r\n"),
+                None => String::new(),
+            };
+            format!("\r\n{}{note}", request.banner)
+        }
     } else {
         String::new()
     };
@@ -402,6 +410,43 @@ mod tests {
         assert!(files.init_command.is_none());
         let dir = dir().expect("la carpeta de sesión se crea");
         assert!(!dir.join(format!("banner-{tab_id}.txt")).exists());
+        remove_for_tab(tab_id);
+    }
+
+    #[test]
+    fn un_banner_vacio_no_crea_salida_inicial() {
+        let tab_id = "empty-banner-regression";
+        remove_for_tab(tab_id);
+        let env = Environment::new(
+            "shell:bash",
+            "Bash",
+            crate::environments::ShellKind::Bash,
+            "bash",
+            &[],
+        );
+        let request = SessionRequest {
+            tab_id,
+            env: &env,
+            script_aliases: &[],
+            app_name: "LTerminal",
+            nsudo_path: None,
+            windows_manager: None,
+            manager_label: None,
+            show_banner: true,
+            banner: "",
+            initial_banner: true,
+            clear_reprint_banner: true,
+        };
+        let files = write_session_files(&request, &Translator::new("es"));
+        assert!(files.banner_text.is_empty());
+        assert!(files.init_command.is_some());
+        let dir = dir().expect("la carpeta de sesión se crea");
+        assert!(dir.join(format!("banner-{tab_id}.txt")).exists());
+        assert!(
+            std::fs::read_to_string(dir.join(format!("banner-{tab_id}.txt")))
+                .unwrap()
+                .is_empty()
+        );
         remove_for_tab(tab_id);
     }
 }
