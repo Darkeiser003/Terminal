@@ -38,7 +38,7 @@ jobs:
           LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
           LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
         run: npm run dist:linux -- --version "${RELEASE_TAG#v}" --no-run --no-extended-tests --no-install
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
@@ -67,7 +67,7 @@ jobs:
           LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
           LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
         run: ./windows/build.ps1 -Version ($env:RELEASE_TAG -replace '^v', '') -NoRun -NonInteractive -FullTests
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
