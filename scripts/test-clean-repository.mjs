@@ -19,15 +19,12 @@ try {
     const externalData = join(fixture, 'external-data');
     const scripts = join(project, 'scripts');
     const source = join(project, 'src');
-    const docs = join(project, 'docs');
     const generated = join(project, 'node_modules');
     const scalaBuild = join(project, '.scala-build');
-    const evidence = join(docs, 'evidence');
     await mkdir(project, { recursive: true });
     await Promise.all([
         mkdir(scripts),
         mkdir(source),
-        mkdir(evidence, { recursive: true }),
         mkdir(generated),
         mkdir(scalaBuild),
         mkdir(temp),
@@ -39,8 +36,6 @@ try {
     const cleaner = await readFile(new URL('./clean-repository.sh', import.meta.url), 'utf8');
     await writeFile(join(scripts, 'clean-repository.sh'), cleaner, { mode: 0o755 });
     await writeFile(join(source, 'keep.txt'), 'user data\n');
-    await writeFile(join(docs, 'guide.md'), 'maintained documentation\n');
-    await writeFile(join(evidence, 'screenshot.png'), 'generated evidence\n');
     await writeFile(join(generated, 'generated.txt'), 'generated\n');
     await writeFile(join(scalaBuild, 'generated.txt'), 'generated cache\n');
     await writeFile(join(externalData, 'logs', 'keep.log'), 'user log\n');
@@ -66,8 +61,6 @@ try {
     assert.equal(await readFile(join(externalData, 'logs', 'keep.log'), 'utf8'), 'user log\n', 'no se atraviesa el enlace de la carpeta de configuración');
     await assert.rejects(lstat(generated), { code: 'ENOENT' }, 'las salidas normales sí se limpian');
     await assert.rejects(lstat(scalaBuild), { code: 'ENOENT' }, 'la caché Scala ignorada también se limpia');
-    await assert.rejects(lstat(evidence), { code: 'ENOENT' }, 'las capturas de auditoría también se limpian');
-    assert.equal(await readFile(join(docs, 'guide.md'), 'utf8'), 'maintained documentation\n', 'la documentación mantenida se conserva');
     console.log('OK: el limpiador borra salidas reales sin atravesar enlaces de salida o configuración.');
 } finally {
     await rm(fixture, { recursive: true, force: true });

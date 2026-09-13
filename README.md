@@ -1,4 +1,4 @@
-# WinSlim Terminal / LTerminal (1.4.4)
+# WinSlim Terminal / LTerminal (1.0.0)
 
 ---
 
@@ -17,7 +17,7 @@ contratos de seguridad y la matriz de pruebas mantenida del repositorio.
 
 | | |
 |---|---|
-| Versión | 1.4.4 |
+| Versión | 1.0.0 |
 | Plataformas | Windows 10/11 (x64), Linux (x64) |
 | Runtime | Tauri 2 · Rust 1.77+ · Node.js ≥ 22.12.0 (solo para compilar) |
 | Licencia | UNLICENSED (privado) |
@@ -289,7 +289,7 @@ XDG_CONFIG_HOME="$e2e_profile/config" \
 XDG_DATA_HOME="$e2e_profile/data" \
 XDG_STATE_HOME="$e2e_profile/state" \
 XDG_CACHE_HOME="$e2e_profile/cache" \
-E2E_BINARY="$PWD/release/dev/LTerminal-1.4.4-x86_64-dev.AppImage" \
+E2E_BINARY="$PWD/release/dev/LTerminal-1.0.0-x86_64-dev.AppImage" \
 E2E_MOUSE_SELECTION_ONLY=1 npm run e2e
 ```
 
@@ -363,7 +363,7 @@ se solicite una excepción (`-NoInstaller`, `-NoExtendedTests`, `-SkipChecks`,
 Para validar la compatibilidad Windows desde Linux:
 
 ```bash
-linux/build-windows.sh --version 1.4.4 --wine-smoke
+linux/build-windows.sh --version 1.0.0 --wine-smoke
 ```
 
 Esta ruta compila en `src-tauri/target/windows-cross/x86_64-pc-windows-gnu/release/`
@@ -445,7 +445,7 @@ informe E2E se conserva en `%TEMP%\winslim-terminal-e2e-<id>.json` cuando falla.
 
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
-`-Version 1.4.4 -NonInteractive` en Windows o `--version 1.4.4` en Linux.
+`-Version 1.0.0 -NonInteractive` en Windows o `--version 1.0.0` en Linux.
 
 Cada script comprueba los requisitos, instala dependencias, pasa `npm run check`,
 compila, monta el artefacto, hace una comprobación de humo (abre la app y mira
@@ -560,8 +560,7 @@ mantenida del repositorio.
 El recorrido completo, con el orden de arranque, el ciclo de vida de una
 pestaña, la frontera IPC, los procesos, el actualizador y los límites de
 confianza está desarrollado en este README junto con la estrategia de pruebas,
-la matriz Linux/Wine/Windows y las capturas E2E temporales, que se guardan
-fuera del repositorio.
+la matriz Linux/Wine/Windows y la evidencia visual E2E.
 
 ```
 src-tauri/src/

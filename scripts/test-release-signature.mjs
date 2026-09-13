@@ -27,7 +27,7 @@ function run(args, env = {}) {
 }
 
 try {
-    await writeFile(manifest, 'a'.repeat(64) + '  LTerminal-1.4.4-x86_64.AppImage\n');
+    await writeFile(manifest, 'a'.repeat(64) + '  LTerminal-1.0.0-x86_64.AppImage\n');
     let result = await run(['--manifest', manifest, '--signature', signature], {
         LTERMINAL_SIGNING_PRIVATE_KEY: privatePem.toString(),
     });
@@ -36,7 +36,7 @@ try {
         LTERMINAL_UPDATE_PUBLIC_KEY: publicHex,
     });
     assert.equal(result.code, 0, result.stderr);
-    await writeFile(manifest, 'b'.repeat(64) + '  LTerminal-1.4.4-x86_64.AppImage\n');
+    await writeFile(manifest, 'b'.repeat(64) + '  LTerminal-1.0.0-x86_64.AppImage\n');
     result = await run(['--manifest', manifest, '--signature', signature, '--verify'], {
         LTERMINAL_UPDATE_PUBLIC_KEY: publicHex,
     });

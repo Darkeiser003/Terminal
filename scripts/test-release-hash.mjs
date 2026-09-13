@@ -24,42 +24,42 @@ function run(...args) {
 try {
     let result = await run(
         '--manifest', manifest,
-        '--artifact', 'fresh-1.4.4.zip',
+        '--artifact', 'fresh-1.0.0.zip',
         '--hash', first,
     );
     assert.equal(result.code, 0, result.stderr);
     let content = await readFile(manifest, 'utf8');
-    assert.equal(content, `${first}  fresh-1.4.4.zip\n`, 'debe crear el manifiesto si aún no existe');
+    assert.equal(content, `${first}  fresh-1.0.0.zip\n`, 'debe crear el manifiesto si aún no existe');
 
     await writeFile(manifest, [
-        '# hashes de la release 1.4.4 · compilación local',
-        `${first}  WinSlimTerminal-Unpacked-1.4.4.zip`,
-        `${second}  LTerminal-1.4.4-x86_64.AppImage`,
+        '# hashes de la release 1.0.0 · compilación local',
+        `${first}  WinSlimTerminal-Unpacked-1.0.0.zip`,
+        `${second}  LTerminal-1.0.0-x86_64.AppImage`,
         '',
     ].join('\n'));
 
     result = await run(
         '--manifest', manifest,
-        '--artifact', 'WinSlimTerminal-1.4.4-x64-setup.exe',
+        '--artifact', 'WinSlimTerminal-1.0.0-x64-setup.exe',
         '--hash', replacement,
     );
     assert.equal(result.code, 0, result.stderr);
     content = await readFile(manifest, 'utf8');
-    assert.match(content, new RegExp(`${first}  WinSlimTerminal-Unpacked-1\\.4\\.4\\.zip`));
-    assert.match(content, new RegExp(`${second}  LTerminal-1\\.4\\.4-x86_64\\.AppImage`));
-    assert.match(content, new RegExp(`${replacement}  WinSlimTerminal-1\\.4\\.4-x64-setup\\.exe`));
+    assert.match(content, new RegExp(`${first}  WinSlimTerminal-Unpacked-1\\.0\\.0\\.zip`));
+    assert.match(content, new RegExp(`${second}  LTerminal-1\\.0\\.0-x86_64\\.AppImage`));
+    assert.match(content, new RegExp(`${replacement}  WinSlimTerminal-1\\.0\\.0-x64-setup\\.exe`));
 
     result = await run(
         '--manifest', manifest,
-        '--artifact', 'WinSlimTerminal-Unpacked-1.4.4.zip',
+        '--artifact', 'WinSlimTerminal-Unpacked-1.0.0.zip',
         '--hash', replacement,
     );
     assert.equal(result.code, 0, result.stderr);
     content = await readFile(manifest, 'utf8');
     assert.match(content, /compilación local/, 'los comentarios Unicode deben conservarse');
-    assert.equal((content.match(/WinSlimTerminal-Unpacked-1\.4\.4\.zip/g) ?? []).length, 1);
-    assert.match(content, new RegExp(`${replacement}  WinSlimTerminal-Unpacked-1\\.4\\.4\\.zip`));
-    assert.match(content, new RegExp(`${second}  LTerminal-1\\.4\\.4-x86_64\\.AppImage`));
+    assert.equal((content.match(/WinSlimTerminal-Unpacked-1\.0\.0\.zip/g) ?? []).length, 1);
+    assert.match(content, new RegExp(`${replacement}  WinSlimTerminal-Unpacked-1\\.0\\.0\\.zip`));
+    assert.match(content, new RegExp(`${second}  LTerminal-1\\.0\\.0-x86_64\\.AppImage`));
 
     result = await run('--manifest', manifest, '--artifact', 'bad.zip', '--hash', 'not-a-hash');
     assert.notEqual(result.code, 0, 'un hash inválido debe rechazarse');

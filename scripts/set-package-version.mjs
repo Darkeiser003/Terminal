@@ -8,7 +8,7 @@ const semver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+
 
 if (!version || !semver.test(version)) {
   throw new Error(
-    "Indica una versión SemVer válida, por ejemplo 1.4.4 o 1.5.0-beta.1."
+    "Indica una versión SemVer válida, por ejemplo 1.0.0 o 1.1.0-beta.1."
   );
 }
 

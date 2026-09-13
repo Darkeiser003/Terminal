@@ -282,6 +282,14 @@ fn waits_for_initial_clear(env: &Environment) -> bool {
     crate::alias_profiles::transport_loads_host_files(env.transport) && !is_repl
 }
 
+/// Un transporte sin script de inicio (como ADB) no tiene un marcador que
+/// libere la salida retenida: necesita el primer resize medido por xterm. Al
+/// cambiar de entorno se reutiliza un xterm ya listo y puede conservar el
+/// mismo tamaño, por lo que el frontend no enviará otro resize por sí solo.
+fn should_release_transport_startup(tab: &Tab) -> bool {
+    tab.ready && tab.pending_init_command.is_none() && tab.initial_banner_pending
+}
+
 fn manual_aliases_from_text(text: &str) -> Vec<crate::alias_profiles::ScriptAlias> {
     let mut aliases = Vec::new();
     for line in text.lines().take(200) {
@@ -448,8 +456,9 @@ struct Tab {
     /// rejilla anterior y después intentaba refluirlo encima del prompt.
     pending_init_command: Option<String>,
     /// Para transportes sin script de inicialización (Docker/ADB/Wine), el
-    /// banner se entrega como salida PTY en el primer resize real. Los REPL
-    /// dejan este indicador vacío para no intercalar texto con su prompt.
+    /// banner se entrega como salida PTY en el primer resize real, o al
+    /// reutilizar el viewport vigente cuando el xterm ya estaba montado. Los
+    /// REPL dejan este indicador vacío para no intercalar texto con su prompt.
     initial_banner_pending: bool,
     /// Carpeta que el panel «Aquí» está escaneando para esta pestaña.
     here_scripts_dir: Option<String>,
@@ -1125,16 +1134,20 @@ impl TabManager {
                         "durationMs": banner_started.elapsed().as_millis(),
                     })
                 );
-                if let Some(tab) = self.registry.lock().find_mut(tab_id) {
-                    tab.banner_rows = banner_rows;
-                    tab.banner_text = banner_text.clone();
-                    tab.viewport = viewport;
-                    let initial_banner_pending =
-                        session_files.init_command.is_none() && !banner_text.is_empty();
-                    tab.initializing =
-                        session_files.init_command.is_some() || initial_banner_pending;
-                    tab.initial_banner_pending = initial_banner_pending;
-                }
+                let release_transport_startup =
+                    if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                        tab.banner_rows = banner_rows;
+                        tab.banner_text = banner_text.clone();
+                        tab.viewport = viewport;
+                        let initial_banner_pending =
+                            session_files.init_command.is_none() && !banner_text.is_empty();
+                        tab.initializing =
+                            session_files.init_command.is_some() || initial_banner_pending;
+                        tab.initial_banner_pending = initial_banner_pending;
+                        should_release_transport_startup(tab)
+                    } else {
+                        false
+                    };
 
                 match session_files.init_command {
                     Some(command) => {
@@ -1154,8 +1167,25 @@ impl TabManager {
                         // Docker/ADB/Wine no pueden cargar el archivo temporal
                         // del host. Su banner se entrega como salida PTY en el
                         // primer resize real, cuando xterm ya tiene sus
-                        // dimensiones definitivas. Los REPL no reciben banner:
-                        // su prompt es una línea de entrada viva.
+                        // dimensiones definitivas. Si el xterm ya estaba
+                        // montado al cambiar de entorno, sus medidas actuales
+                        // también son definitivas: reutilizarlas aquí evita
+                        // retener para siempre el prompt de ADB cuando el
+                        // tamaño no cambia y no llega otro evento resize.
+                        if release_transport_startup {
+                            self.resize(app, tab_id, viewport.cols, viewport.rows);
+                            log_info!(
+                                "Inicio de transporte liberado con el viewport existente",
+                                serde_json::json!({
+                                    "tabId": tab_id,
+                                    "envId": env.id,
+                                    "cols": viewport.cols,
+                                    "rows": viewport.rows,
+                                })
+                            );
+                        }
+                        // Los REPL no reciben banner: su prompt es una línea
+                        // de entrada viva.
                     }
                 }
                 true
@@ -2080,6 +2110,30 @@ mod tests {
         assert_eq!(tab.summary().env_id.as_deref(), Some("fish"));
         assert!(tab.env.is_none(), "el entorno ejecutándose espera al PTY");
         assert!(tab.session.is_none(), "el PTY aún no se ha creado");
+    }
+
+    #[test]
+    fn transporte_sin_inicializador_reutiliza_el_viewport_si_la_pestana_ya_esta_lista() {
+        let env = Environment {
+            id: "adb:test-device".into(),
+            label: "ADB test device".into(),
+            kind: crate::environments::ShellKind::Android,
+            transport: crate::environments::Transport::Android,
+            ..Environment::default()
+        };
+        let mut tab = Tab::pending("tab-adb".into(), &env, Viewport::default(), 1);
+        tab.ready = true;
+        tab.initializing = true;
+        tab.initial_banner_pending = true;
+        tab.banner_text = "banner".into();
+
+        assert!(should_release_transport_startup(&tab));
+
+        tab.ready = false;
+        assert!(!should_release_transport_startup(&tab));
+        tab.ready = true;
+        tab.pending_init_command = Some("init".into());
+        assert!(!should_release_transport_startup(&tab));
     }
 
     #[test]

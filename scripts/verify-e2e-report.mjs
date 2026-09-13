@@ -198,7 +198,7 @@ if (!responsive || responsive.panes < 2 || responsive.cases < 20
 // también la evidencia textual que dejó cada pane.
 const bannerReady = events.filter((event) => event?.type === 'banner-ready');
 if (bannerReady.length === 0) throw new Error('El E2E no dejó evidencia textual del banner.');
-// Linux usa la cabecera compacta «LTerminal 1.4.4»; Windows mantiene
+// Linux usa la cabecera compacta «LTerminal 1.0.0»; Windows mantiene
 // «WinSlim Terminal». Ambas representan un único bloque válido.
 const bannerHeader = /^(?:LTerminal\b|WinSlim\b.*\bTerminal\b)/i;
 // La GPU puede incluir legítimamente memoria dedicada («1 GB»). Solo es una

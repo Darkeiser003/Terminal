@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag SemVer que se va a publicar, por ejemplo v1.4.4
+        description: Tag SemVer que se va a publicar, por ejemplo v1.0.0
         required: true
         type: string
 

@@ -93,7 +93,7 @@ $generatedDirectories = @(
     '.cache', '.parcel-cache', '.turbo', '.svelte-kit', '.scala-build',
     'coverage', '.nyc_output', 'test-results', 'playwright-report',
     'allure-results', 'AppDir', 'target', 'build', 'tmp', 'temp',
-    'src-tauri/target', 'src-tauri/gen', 'docs/evidence'
+    'src-tauri/target', 'src-tauri/gen'
 )
 
 $directoryTargets = [Collections.Generic.List[string]]::new()
@@ -337,11 +337,6 @@ foreach ($target in $markdownTargets) {
     } catch {
         Add-FailedTarget $target $_.Exception.Message
     }
-}
-$docsDirectory = Join-Path $ProjectRoot 'docs'
-if ((Test-Path -LiteralPath $docsDirectory -PathType Container) -and
-    -not (Get-ChildItem -LiteralPath $docsDirectory -Force | Select-Object -First 1)) {
-    Remove-Item -LiteralPath $docsDirectory -Force
 }
 foreach ($target in $externalTargets) {
     try {

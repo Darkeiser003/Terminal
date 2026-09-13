@@ -88,14 +88,14 @@ while [ "$#" -gt 0 ]; do
         --version)
             shift
             if [ "$#" -eq 0 ] || [ -z "$1" ] || [[ "$1" == -* ]]; then
-                echo "--version necesita un valor SemVer, por ejemplo 1.4.4." >&2
+                echo "--version necesita un valor SemVer, por ejemplo 1.0.0." >&2
                 exit 2
             fi
             VERSION_OVERRIDE="$1"
             ;;
         --version=*)
             VERSION_OVERRIDE="${1#*=}"
-            [ -n "$VERSION_OVERRIDE" ] || { echo "--version necesita un valor SemVer, por ejemplo 1.4.4." >&2; exit 2; }
+            [ -n "$VERSION_OVERRIDE" ] || { echo "--version necesita un valor SemVer, por ejemplo 1.0.0." >&2; exit 2; }
             ;;
         -h|--help)
             echo "Uso: $0 [--version X.Y.Z] [--fast] [--wine-rust-tests|--wine-smoke|--smoke|--full-tests] [--wine-repeats N] [--skip-checks] [--allow-offline-checks] [--no-install] [--clean] [--non-interactive]"

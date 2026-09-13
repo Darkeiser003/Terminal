@@ -12,7 +12,6 @@ const read = (relative) => readFileSync(resolve(root, relative), 'utf8');
 const failures = [];
 const checks = [];
 const readme = read('README.md');
-const gitignore = read('.gitignore');
 const readmeNormalized = readme.replace(/\s+/g, ' ');
 const hasReadme = (marker) => readmeNormalized.includes(marker.replace(/\s+/g, ' '));
 
@@ -36,7 +35,7 @@ check('La documentación técnica vive en README', ['## Arquitectura', '## Contr
 check('README documenta el arranque y el ciclo PTY', ['orden de arranque', 'ciclo de vida de una pestaña', 'primera PTY'].every(hasReadme));
 check('README documenta las capas y dominios del proyecto', ['src-tauri/src/', 'src/', 'scripts/', 'terminal/', 'updater/'].every(hasReadme));
 check('README documenta Linux/Wine/Windows', ['Linux', 'Wine', 'Windows'].every(hasReadme));
-check('README documenta la matriz de pruebas y la evidencia temporal', ['trece fases', 'capturas', 'informe JSON', 'fuera del repositorio'].every(hasReadme));
+check('README documenta la matriz de pruebas y la evidencia', ['trece fases', 'capturas', 'informe JSON'].every(hasReadme));
 check('README documenta alcance, evidencia y límites', ['Auditoría de release y comportamiento observable', 'límites de confianza', 'no se declara aprobado'].every(hasReadme));
 
 for (const marker of ['migrate_local_data', 'frontend_ready', 'tabs.shutdown', 'generate_handler!']) {
@@ -62,7 +61,24 @@ for (const marker of ['captureScreenshot', 'smokeReport.captures', 'E2E_CAPTURE_
     check(`El E2E conserva ${marker}`, e2e.includes(marker) || hasReadme(marker === 'verify-e2e-report' ? 'informe JSON' : marker));
 }
 
-check('Las capturas de auditoría no se versionan', gitignore.includes('/docs/evidence/'));
+for (const filename of [
+    '01-arranque-banner.png',
+    '02-dependencias-contraidas.png',
+    '03-dependencias-desplegadas.png',
+    '04-cuatro-paneles.png',
+    '05-responsive.png',
+    '06-fastfetch-final.png',
+]) {
+    const imagePath = resolve(root, 'docs/evidence', filename);
+    let isPng = false;
+    try {
+        const bytes = readFileSync(imagePath);
+        isPng = bytes.length > 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    } catch {
+        isPng = false;
+    }
+    check(`La evidencia visual es PNG válido: ${filename}`, isPng);
+}
 
 if (failures.length) {
     console.error(`Documentación de flujo incompleta (${failures.length}/${checks.length} fallos):`);

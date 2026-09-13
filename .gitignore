@@ -4,10 +4,6 @@ node_modules/
 /.node_modules.windows.*
 /dist/
 /release/
-# Export local redundante: las releases se conservan en release/, no en Git.
-/release.zip
-# Capturas de auditoría visual; las pruebas guardan su evidencia fuera del repo.
-/docs/evidence/
 
 # Cachés y temporales de los empaquetadores (Vite, Svelte, Tauri/Cargo).
 # Se mantienen las rutas de configuración y los locks versionados.
@@ -55,6 +51,7 @@ audit-*.log
 build-*.log
 link-check.log
 /*-e2e-captures*/
+/docs/evidence/
 
 # Paquetes de distribución generados fuera de release/ (Windows/Linux/macOS).
 # No se ignoran ejecutables genéricos: algunos recursos nativos pueden ser
@@ -69,6 +66,7 @@ link-check.log
 /*.appxbundle
 /*.dmg
 /*.pkg
+/release.zip
 
 # Archivos temporales, volcados y restos de parches.
 *.tmp

@@ -59,7 +59,7 @@ const valid = {
         { type: 'keyboard-shortcuts', passed: true, newTab: true, nextTab: true, cyclePanes: true, explorerToggle: true },
         { type: 'shell-startup-performance', passed: true, samples: 4, maxMs: 740, limitMs: 2500 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
-        { type: 'banner-ready', promptsVisible: true, preview: ['WinSlim Terminal 1.4.4\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
+        { type: 'banner-ready', promptsVisible: true, preview: ['WinSlim Terminal 1.0.0\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
     ],
 };
 const directory = await mkdtemp(join(tmpdir(), 'lterminal-e2e-report-test-'));
@@ -171,7 +171,7 @@ try {
     assert.notEqual((await run('mixed-banner', {
         ...valid,
         events: valid.events.map((event) => event.type === 'banner-ready'
-            ? { ...event, preview: ['WinSlim Terminal 1.4.4\nPlaca ASUS 1 GB (60%)'] }
+            ? { ...event, preview: ['WinSlim Terminal 1.0.0\nPlaca ASUS 1 GB (60%)'] }
             : event),
     })).status, 0, 'un banner mezclado debe fallar');
     assert.notEqual((await run('missing-prompt', {

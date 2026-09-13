@@ -35,7 +35,7 @@ generated_directories=(
   .cache .parcel-cache .turbo .svelte-kit .scala-build
   coverage .nyc_output test-results playwright-report allure-results
   AppDir target build tmp temp
-  src-tauri/target src-tauri/gen docs/evidence
+  src-tauri/target src-tauri/gen
 )
 
 assert_project_target() {
@@ -235,7 +235,6 @@ for target in "${markdown_targets[@]}"; do
   assert_project_target "$target"
   rm -f -- "$target" || failed_targets+=("$target")
 done
-rmdir "$project_root/docs" 2>/dev/null || true
 for target in "${external_targets[@]}"; do
   assert_external_target "$target"
   if external_target_has_symlink_parent "$target"; then
