@@ -1,0 +1,8 @@
+VISTA PREVIA — 6 ruta(s) bajo /mnt/c/Users/Administrador/Desktop/Proyectos WinSlim/Terminal
+  node_modules
+  dist
+  src-tauri/target
+  src-tauri/gen
+  /home/administrador/.config/lterminal/logs
+  /home/administrador/.cache/lterminal/appimage
+No se ha borrado nada. Ejecuta: scripts/clean-repository.sh --apply

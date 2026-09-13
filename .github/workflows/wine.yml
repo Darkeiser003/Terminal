@@ -1,0 +1,30 @@
+name: Wine
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-windows-under-wine:
+    name: Tests Rust Windows bajo Wine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Toolchain MinGW y Wine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
+      - run: npm ci
+      - name: Compilar y ejecutar tests Windows con Wine
+        run: bash linux/build-windows.sh --no-install --skip-checks --wine-rust-tests
+        env:
+          LTERMINAL_REQUIRE_SIGNING: '0'

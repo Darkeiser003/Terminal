@@ -1,0 +1,508 @@
+// El estado que comparte toda la interfaz: pestañas, entornos y preferencias.
+//
+// En la versión Electron esto vivía en variables sueltas de renderer.js. Aquí
+// es un único objeto con runas, así que los componentes se recalculan solos
+// cuando cambia y no hace falta repintar nada a mano.
+
+import * as api from './api';
+import { createKeyedSerialQueue } from './keyed-serial-queue';
+import { platformBrandText } from './localization';
+
+/** Cuántas terminales caben a la vez en la rejilla. Cuatro es el límite en el
+ *  que cada una sigue siendo usable a tamaño de ventana normal. */
+export const MAX_PANES = 4;
+import { applyTheme } from './theme';
+import type {
+    AppInfo,
+    Environment,
+    EnvChangedEvent,
+    FontFamily,
+    Inventory,
+    LanguageOption,
+    Preferences,
+    PreferencesPayload,
+    TabSummary,
+    ThemePreset,
+    ToolSuggestion,
+    TranslationCatalog
+} from './types';
+
+class AppStore {
+    tabs = $state<TabSummary[]>([]);
+    activeTabId = $state<string | null>(null);
+    environments = $state<Environment[]>([]);
+    preferences = $state<Preferences | null>(null);
+    /** Los valores de fábrica, para poder enseñar de qué se está saliendo. */
+    defaults = $state<Preferences | null>(null);
+    themes = $state<ThemePreset[]>([]);
+    fonts = $state<FontFamily[]>([]);
+    languages = $state<LanguageOption[]>([]);
+    catalog = $state<TranslationCatalog>({ language: 'es', strings: {} });
+    appInfo = $state<AppInfo | null>(null);
+    /** Entornos que ya han terminado de detectarse. Mientras es falso, el
+     *  selector enseña "Detectando…" en vez de una lista incompleta. */
+    environmentsLoaded = $state(false);
+    /** Lo que sabemos del sistema tras la detección completa. Null hasta que
+     *  termina: al arrancar solo se han mirado las shells nativas. */
+    inventory = $state<Inventory | null>(null);
+    /** La última sugerencia de instalación por pestaña, para poder ofrecerla
+     *  sin repetirla. */
+    suggestions = $state<Record<string, ToolSuggestion>>({});
+
+    /** Qué pestaña ocupa cada casilla de la rejilla, en orden. Con una sola
+     *  casilla es la vista normal: manda `activeTabId` y esto no se usa. */
+    panes = $state<string[]>([]);
+
+    /** El explorador lateral está a la vista. */
+    explorerVisible = $state(false);
+
+    /** Evita que un refresco lento de entornos pueda devolver la lista a un
+     *  estado anterior si el usuario pulsa refrescar varias veces. */
+    private environmentRequest = 0;
+    /** Identifica intentos de cambio de shell para ignorar respuestas IPC
+     *  atrasadas si el usuario inicia otro cambio en la misma pestaña. */
+    private environmentSwitchRequest = 0;
+    /** El backend reemplaza una PTY por pestaña: serializar por tab preserva
+     *  el orden, pero no bloquea cambios independientes en otras terminales. */
+    private readonly enqueueEnvironmentSwitch = createKeyedSerialQueue<string>();
+    /** Las preferencias se guardan en orden: dos clics rápidos no deben hacer
+     *  que la respuesta vieja pise el cambio más reciente. */
+    private preferencesSaveQueue: Promise<void> = Promise.resolve();
+    /** Las aperturas rápidas de Ajustes no deben aplicar una respuesta vieja
+     *  después de una lectura más reciente del backend. */
+    private preferencesReloadRequest = 0;
+    /** Un ciclo de paneles en curso debe terminar antes de aceptar otro: abrir
+     *  pestañas faltantes es asíncrono y dos ciclos simultáneos duplicaban la
+     *  cantidad de terminales. */
+    private paneCyclePromise: Promise<void> | null = null;
+    /** Crear y cerrar son IPC asíncronos. Mantenerlos en una sola cola evita
+     *  que un cierre rápido se ejecute antes de que la pestaña nueva haya
+     *  terminado de registrarse en el frontend. */
+    private tabLifecycleQueue: Promise<void> = Promise.resolve();
+
+    activeTab = $derived(this.tabs.find((tab) => tab.id === this.activeTabId) ?? null);
+
+    /** Traduce una clave con su respaldo en español escrito en el propio
+     *  componente, igual que hacía `t()` en el backend. */
+    t(key: string, fallback: string): string {
+        const text = this.catalog.strings[key] ?? fallback;
+        // Los catálogos son compartidos, pero la identidad es bidireccional:
+        // Windows tampoco debe heredar LTerminal de un texto común.
+        return platformBrandText(text, this.appInfo?.platform, this.appInfo?.name);
+    }
+
+    async load(): Promise<void> {
+        const [list, prefs, info] = await Promise.all([
+            api.listTabs(),
+            api.getPreferences(),
+            api.getAppInfo()
+        ]);
+
+        this.tabs = list.tabs;
+        this.activeTabId = list.activeTabId;
+        this.appInfo = info;
+        // El HTML inicial es compartido por las dos builds. La identidad real
+        // llega del backend, así que el título del documento también debe
+        // seguir la plataforma: LTerminal en Linux y WinSlim Terminal en
+        // Windows.
+        if (typeof document !== 'undefined') document.title = info.name;
+        this.applyPayload(prefs);
+        // El tamaño inicial es una preferencia de arranque, no una orden que
+        // deba reaplicarse cada vez que se guarda otro ajuste.
+        void api.setWindowMaximized(prefs.preferences.startMaximized).catch((error) => {
+            console.debug('[AppStore] no se pudo aplicar el tamaño inicial', error);
+        });
+
+        // La detección de entornos habla con el sistema (`where`, el PATH del
+        // registro) y puede tardar. No se espera: las pestañas ya funcionan.
+        void this.loadEnvironments();
+    }
+
+    async loadEnvironments(): Promise<void> {
+        const request = ++this.environmentRequest;
+        try {
+            const inventory = await api.listEnvironments(this.activeTabId ?? undefined);
+            if (request !== this.environmentRequest) return;
+            this.environments = inventory.envs;
+            this.environmentsLoaded = true;
+        } catch (error) {
+            if (request === this.environmentRequest) {
+                this.environmentsLoaded = true;
+                console.error('[AppStore] environment load failed', error);
+            }
+        }
+    }
+
+    async refreshEnvironments(): Promise<void> {
+        const request = ++this.environmentRequest;
+        this.environmentsLoaded = false;
+        try {
+            const inventory = await api.refreshEnvironments(this.activeTabId ?? undefined);
+            if (request !== this.environmentRequest) return;
+            this.environments = inventory.envs;
+            this.environmentsLoaded = true;
+        } catch (error) {
+            if (request === this.environmentRequest) {
+                this.environmentsLoaded = true;
+                console.error('[AppStore] environment refresh failed', error);
+            }
+            throw error;
+        }
+    }
+
+    /** Lo llama el evento `envs-updated`, cuando la detección completa (WSL,
+     *  Docker, ADB, lenguajes) termina en segundo plano. */
+    applyInventory(inventory: Inventory): void {
+        this.inventory = inventory;
+        this.environments = inventory.envs;
+        this.environmentsLoaded = true;
+    }
+
+    /** Lo llama el evento `env-changed`: el backend confirma la etiqueta real
+     *  de la sesión nueva. */
+    applyEnvironmentChange(event: EnvChangedEvent): void {
+        this.tabs = this.tabs.map((tab) =>
+            tab.id === event.tabId ? { ...tab, envId: event.id, label: event.label } : tab
+        );
+        // La sesión nueva empieza limpia: lo que faltaba en la anterior no tiene
+        // por qué faltar aquí.
+        this.dismissSuggestion(event.tabId);
+    }
+
+    noteSuggestion(tabId: string, suggestion: ToolSuggestion): void {
+        this.suggestions = { ...this.suggestions, [tabId]: suggestion };
+    }
+
+    dismissSuggestion(tabId: string): void {
+        const { [tabId]: _removed, ...rest } = this.suggestions;
+        this.suggestions = rest;
+    }
+
+    /** Las pestañas que se están viendo ahora mismo: las casillas de la rejilla
+     *  si hay división, y si no, solo la activa. */
+    get visibleTabs(): string[] {
+        if (this.panes.length < 2) return this.activeTabId ? [this.activeTabId] : [];
+        return this.panes;
+    }
+
+    /** Mueve una pestaña dentro de la barra. La cuadrícula dividida conserva
+     *  las mismas terminales visibles, pero adopta también el nuevo orden para
+     *  que arrastrar una pestaña cambie de sitio su terminal en pantalla. */
+    reorderTab(tabId: string, targetId: string, after = false): void {
+        if (tabId === targetId) return;
+        const from = this.tabs.findIndex((tab) => tab.id === tabId);
+        const target = this.tabs.findIndex((tab) => tab.id === targetId);
+        if (from === -1 || target === -1) return;
+
+        const reordered = [...this.tabs];
+        const [moved] = reordered.splice(from, 1);
+        const targetAfterRemoval = reordered.findIndex((tab) => tab.id === targetId);
+        reordered.splice(targetAfterRemoval + (after ? 1 : 0), 0, moved);
+        this.tabs = reordered;
+
+        if (this.panes.length > 1) {
+            const visible = new Set(this.panes);
+            this.panes = reordered
+                .map((tab) => tab.id)
+                .filter((id) => visible.has(id));
+        }
+    }
+
+    /** Rota entre 1, 2, 3 y 4 casillas.
+     *
+     *  Las casillas que no tengan pestaña con la que llenarse la abren: pedir
+     *  «ver cuatro a la vez» y que no pase nada porque solo hay una pestaña no
+     *  es una limitación que el usuario tenga por qué conocer. Se abren en el
+     *  entorno de la pestaña activa, que es lo que estaba usando.
+     *
+     *  Volver a una casilla no cierra nada — las pestañas siguen en la barra,
+     *  solo deja de verse más de una a la vez. */
+    async cyclePanes(): Promise<void> {
+        if (this.paneCyclePromise) return this.paneCyclePromise;
+        const operation = this.cyclePanesOnce().catch((error) => {
+            console.error('[AppStore] pane cycle failed', error);
+        });
+        this.paneCyclePromise = operation;
+        try {
+            await operation;
+        } finally {
+            if (this.paneCyclePromise === operation) this.paneCyclePromise = null;
+        }
+    }
+
+    /** Establece directamente el número de casillas visibles. Se usa por la
+     *  consola interna (`:panes 1|2|3|4`) además del botón que rota el diseño.
+     *  Reutilizar el ciclo existente conserva la lógica de abrir las pestañas
+     *  que falten y evita dos algoritmos que pudieran desincronizar la rejilla. */
+    async setPaneCount(count: number): Promise<void> {
+        const target = Math.min(MAX_PANES, Math.max(1, Math.trunc(count)));
+        for (let attempts = 0; attempts < MAX_PANES; attempts += 1) {
+            const current = this.panes.length < 2 ? 1 : this.panes.length;
+            if (current === target) return;
+            await this.cyclePanes();
+        }
+    }
+
+    private async cyclePanesOnce(): Promise<void> {
+        const actual = this.panes.length < 2 ? 1 : this.panes.length;
+        const siguiente = (actual % MAX_PANES) + 1;
+        if (siguiente < 2) {
+            this.panes = [];
+            return;
+        }
+        // La que estaba en uso manda el orden y se queda en la primera casilla.
+        // Hay que anotarla antes: abrir una pestaña la activa, y sin esto la
+        // recién creada se colaría delante de aquella en la que se estaba.
+        const primera = this.activeTabId;
+        const entorno = this.activeTab?.envId ?? undefined;
+        const faltan = siguiente - this.tabs.length;
+        // Establecer el diseño de rejilla antes de abrir pestañas faltantes
+        // para que las nuevas nazcan directamente con la medida dividida.
+        const ordenInicial = [...(primera ? [primera] : []), ...this.tabs.map((tab) => tab.id)];
+        const unicasIniciales: string[] = [];
+        for (const id of ordenInicial) {
+            if (!unicasIniciales.includes(id)) unicasIniciales.push(id);
+        }
+        if (unicasIniciales.length >= 2) {
+            this.panes = unicasIniciales.slice(0, siguiente);
+        }
+
+        for (let i = 0; i < faltan; i++) {
+            const createdId = await this.createTab(entorno, siguiente);
+            // `createTab` activa la nueva pestaña, pero hasta ahora la rejilla
+            // seguía en modo de una sola casilla cuando solo existía una
+            // pestaña. Eso hacía que el banner naciera completo y luego solo
+            // se redimensionaran las dos casillas. Incorporar el identificador
+            // recién creado inmediatamente garantiza que su primer xterm ya
+            // se monta dentro de la rejilla compacta.
+            if (primera && createdId) {
+                const nextPanes = [...this.panes.filter((id) => id !== createdId), createdId];
+                this.panes = nextPanes.slice(0, siguiente);
+            }
+        }
+        if (primera) await this.activateTab(primera);
+        const orden = [...(primera ? [primera] : []), ...this.tabs.map((tab) => tab.id)];
+        const unicas: string[] = [];
+        for (const id of orden) {
+            if (!unicas.includes(id)) unicas.push(id);
+        }
+        // Puede quedarse corto si abrir una pestaña falló; con menos de dos la
+        // división no aporta nada.
+        this.panes = unicas.length < 2 ? [] : unicas.slice(0, siguiente);
+    }
+
+    /** Navega entre casillas según el atajo direccional configurable. */
+    navigatePaneDirection(direction: 'left' | 'right' | 'up' | 'down'): void {
+        const visible = this.visibleTabs;
+        if (!this.activeTabId) return;
+        // En vista de una sola terminal, una dirección navega por todas las
+        // pestañas. En vista dividida conserva la navegación espacial.
+        if (visible.length < 2) {
+            if (this.tabs.length < 2) return;
+            const current = this.tabs.findIndex((tab) => tab.id === this.activeTabId);
+            const forward = direction === 'right' || direction === 'down';
+            const target = (current + (forward ? 1 : -1) + this.tabs.length) % this.tabs.length;
+            void this.activateTab(this.tabs[target].id);
+            return;
+        }
+        const current = visible.indexOf(this.activeTabId);
+        if (current === -1) return;
+
+        let target = current;
+        const count = visible.length;
+
+        if (count === 2) {
+            target = current === 0 ? 1 : 0;
+        } else if (count === 3) {
+            if (current === 0) {
+                target = (direction === 'right' || direction === 'left') ? 1 : 2;
+            } else if (current === 1) {
+                target = (direction === 'left' || direction === 'right') ? 0 : 2;
+            } else if (current === 2) {
+                target = direction === 'right' ? 1 : 0;
+            }
+        } else if (count >= 4) {
+            switch (current) {
+                case 0:
+                    target = (direction === 'right' || direction === 'left') ? 1 : 2;
+                    break;
+                case 1:
+                    target = (direction === 'left' || direction === 'right') ? 0 : 3;
+                    break;
+                case 2:
+                    target = (direction === 'right' || direction === 'left') ? 3 : 0;
+                    break;
+                case 3:
+                    target = (direction === 'left' || direction === 'right') ? 2 : 1;
+                    break;
+            }
+        }
+
+        if (target !== current && visible[target]) {
+            void this.activateTab(visible[target]);
+        }
+    }
+
+    /** Mantiene la rejilla coherente cuando la lista de pestañas cambia: una
+     *  casilla que apunte a una pestaña cerrada dejaría un hueco negro. */
+    private syncPanes(): void {
+        if (this.panes.length === 0) return;
+        const vivas = this.panes.filter((id) => this.tabs.some((tab) => tab.id === id));
+        // Si quedan menos de dos, la división ya no aporta nada.
+        this.panes = vivas.length < 2 ? [] : vivas;
+    }
+
+    async createTab(envId?: string, paneCount?: number): Promise<string | null> {
+        return this.enqueueTabLifecycle(async () => {
+            const created = await api.createTab(envId, paneCount);
+            if (!created) return null;
+            this.tabs = [...this.tabs, created];
+            this.activeTabId = created.id;
+            return created.id;
+        });
+    }
+
+    /** Trae al frente la pestaña donde un panel ha acabado escribiendo, que no
+     *  siempre es la que lo pidió: desde un REPL la acción se manda a una shell
+     *  de verdad, y el backend puede haber tenido que abrirla. */
+    async adoptTab(tabId: string, created: boolean): Promise<void> {
+        // Una pestaña que creó el backend no está en la lista todavía: se pide
+        // entera en vez de inventarse su etiqueta, que la decide él.
+        if (created || !this.tabs.some((tab) => tab.id === tabId)) {
+            const list = await api.listTabs();
+            this.tabs = list.tabs;
+        }
+        await this.activateTab(tabId);
+    }
+
+    async activateTab(tabId: string): Promise<void> {
+        if (this.activeTabId === tabId) return;
+        this.activeTabId = tabId;
+        await api.activateTab(tabId);
+    }
+
+    async closeTab(tabId: string): Promise<void> {
+        await this.enqueueTabLifecycle(async () => {
+            await api.closeTab(tabId);
+        });
+    }
+
+    private enqueueTabLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+        const next = this.tabLifecycleQueue
+            .catch(() => undefined)
+            .then(operation);
+        this.tabLifecycleQueue = next.then(
+            () => undefined,
+            () => undefined,
+        );
+        return next;
+    }
+
+    /** Lo llama el evento `tab-closed`: el backend es quien decide de verdad
+     *  cuándo desaparece una pestaña. */
+    handleTabClosed(tabId: string, activeTabId: string | null): void {
+        this.tabs = this.tabs.filter((tab) => tab.id !== tabId);
+        this.activeTabId = activeTabId;
+        this.syncPanes();
+    }
+
+    /** Devuelve si el backend llegó a abrir la sesión nueva. La etiqueta
+     *  definitiva la confirma después el evento `env-changed`. */
+    switchEnvironment(tabId: string, envId: string): Promise<boolean> {
+        return this.enqueueEnvironmentSwitch(tabId, () => this.performEnvironmentSwitch(tabId, envId));
+    }
+
+    private async performEnvironmentSwitch(tabId: string, envId: string): Promise<boolean> {
+        const requestId = ++this.environmentSwitchRequest;
+        // El cambio de entorno incluye una fase que no forma parte del IPC:
+        // la shell nueva tiene que ejecutar su inicializador y pintar el primer
+        // bloque. Avisar al renderer antes de invocar permite medir ese tiempo
+        // real, no solo los 10–50 ms que tarda el backend en crear el PTY.
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('winslim:environment-switch-started', {
+                detail: { tabId, envId, requestId },
+            }));
+        }
+        try {
+            const switched = await api.switchEnvironment(tabId, envId);
+            if (typeof window !== 'undefined') {
+                // El backend ya retiró la sesión anterior y solicitó la nueva
+                // cuando devuelve true. Si rechazó la solicitud, la terminal
+                // conserva su sesión y debe recuperar la entrada que quedó en
+                // pausa durante el IPC.
+                window.dispatchEvent(new CustomEvent(
+                    switched ? 'winslim:environment-switch-requested' : 'winslim:environment-switch-cancelled',
+                    { detail: { tabId, envId, requestId } },
+                ));
+            }
+            return switched;
+        } catch (error) {
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('winslim:environment-switch-cancelled', {
+                    detail: { tabId, envId, requestId },
+                }));
+            }
+            throw error;
+        }
+    }
+
+    async savePreferences(patch: Partial<Preferences>): Promise<void> {
+        const operation = this.preferencesSaveQueue.then(async () => {
+            if (!this.preferences) return;
+            const before = this.preferences;
+            const payload = await api.savePreferences({ ...this.preferences, ...patch });
+            const after = payload.preferences;
+            const bannerChanged = before.showSystemBanner !== after.showSystemBanner
+                || before.bannerHiddenItems !== after.bannerHiddenItems
+                || before.fastfetchColor !== after.fastfetchColor;
+            this.applyPayload(payload);
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged } }));
+            }
+        });
+        // Dejar la cola viva después de un fallo permite que un segundo intento
+        // siga guardando, mientras la llamada concreta conserva su error para
+        // que el panel pueda mostrarlo.
+        this.preferencesSaveQueue = operation.catch((error) => {
+            console.error('[AppStore] preference save failed', error);
+        });
+        return operation;
+    }
+
+    /** Vuelve a los valores de fábrica. El backend es quien decide cuáles son:
+     *  aquí no hay una segunda copia que se pudiera desincronizar. */
+    async resetPreferences(): Promise<void> {
+        const operation = this.preferencesSaveQueue.then(async () => {
+            this.applyPayload(await api.resetPreferences());
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged: true } }));
+            }
+        });
+        // Reset también entra en la cola: no puede terminar antes de un
+        // guardado lanzado por un comando interno ni ser pisado por él después.
+        this.preferencesSaveQueue = operation.catch((error) => {
+            console.error('[AppStore] preference reset failed', error);
+        });
+        return operation;
+    }
+
+    /** Recarga las preferencias desde el backend, que es la única fuente: el
+     *  panel de Ajustes las pide cada vez que se abre. */
+    async reloadPreferences(): Promise<void> {
+        const request = ++this.preferencesReloadRequest;
+        const payload = await api.getPreferences();
+        if (request === this.preferencesReloadRequest) this.applyPayload(payload);
+    }
+
+    private applyPayload(payload: PreferencesPayload): void {
+        this.preferences = payload.preferences;
+        this.defaults = payload.defaults;
+        this.themes = payload.themes;
+        this.fonts = payload.fonts;
+        this.languages = payload.languages;
+        this.catalog = payload.catalog;
+        applyTheme(payload.preferences, payload.themes, payload.fonts);
+    }
+}
+
+export const app = new AppStore();

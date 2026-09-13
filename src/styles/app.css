@@ -1,0 +1,126 @@
+/* Estilos globales. Los valores de las variables los reescribe theme.ts a
+   partir de las preferencias; los de aquí son los del tema "silver", que es el
+   de fábrica, para que la ventana no parpadee en blanco antes de cargarlas. */
+
+@import '@xterm/xterm/css/xterm.css';
+
+:root {
+    /* WebKitGTK, usado por Tauri en Linux, elige de aquí los colores de los
+       controles nativos (incluidos los botones de los campos numéricos). */
+    color-scheme: dark;
+    --app-bg: #080808;
+    --surface: #191919;
+    --surface-alt: #111111;
+    --surface-hover: #292b2e;
+    --border: #3b3d40;
+    --text: #d7d7d7;
+    --muted: #8b8e92;
+    --accent: #b8bec6;
+    --accent-soft: #34383d;
+    /* Estados compartidos: los paneles no deben inventar un rojo/amarillo
+       distinto según la pantalla en la que aparezca el aviso. */
+    --danger: #e06c75;
+    --warning: #e5c07b;
+    --success: #4ec9b0;
+    --favorite: #f2c94c;
+    --online: #54d6b0;
+    --terminal-bg: #080808;
+    --terminal-fg: #d7d7d7;
+    --terminal-cursor: #b8bec6;
+    --terminal-cursor-width: 1px;
+    --terminal-padding: 10px;
+    --terminal-font: 'Cascadia Code', Consolas, 'Courier New', monospace;
+}
+
+/* Los dos WebView (WebKitGTK y WebView2) dejan que el sistema pinte una parte
+   distinta del <select>. Sin esta base compartida Linux puede acabar con una
+   caja clara y Windows con otra altura/flecha. El menú desplegable sigue siendo
+   nativo en cada sistema, pero el control cerrado que forma parte del layout es
+   el mismo en ambas builds. */
+select {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 24px !important;
+    background-color: var(--surface-alt) !important;
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+        linear-gradient(135deg, var(--muted) 50%, transparent 50%) !important;
+    background-position:
+        calc(100% - 10px) 50%,
+        calc(100% - 6px) 50% !important;
+    background-repeat: no-repeat !important;
+    background-size: 4px 4px !important;
+    color: var(--text) !important;
+}
+
+select option,
+select optgroup {
+    background: var(--surface);
+    color: var(--text);
+}
+
+input[type='number'] {
+    color-scheme: dark;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html,
+body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--app-bg);
+    color: var(--text);
+    font-family: var(--terminal-font);
+    /* La app no es una página web: seleccionar texto de la interfaz con el
+       ratón solo estorba. xterm gestiona su selección internamente. */
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Foco visible uniforme para teclado y navegación asistida. Los campos de
+   Ajustes que necesitan un halo más amplio lo conservan en sus reglas locales. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[role='button']:focus-visible,
+[role='tab']:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+/* La ventana no navega ni abre contenido externo: arrastrar un archivo encima
+   no debe reemplazar la interfaz por él. `dragDropEnabled: false` lo bloquea en
+   el lado nativo; esto cubre el caso de la propia página. */
+body {
+    -webkit-user-drag: none;
+}
+
+/* Scrollbar ultra fina, moderna y redondeada para toda la aplicación y terminales */
+::-webkit-scrollbar,
+.xterm-viewport::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+}
+
+::-webkit-scrollbar-track,
+.xterm-viewport::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb,
+.xterm-viewport::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 3px;
+    transition: background 0.15s ease;
+}
+
+::-webkit-scrollbar-thumb:hover,
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.35);
+}

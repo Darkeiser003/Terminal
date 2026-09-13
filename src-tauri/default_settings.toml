@@ -1,0 +1,90 @@
+# Valores de fábrica compartidos por LTerminal y WinSlim Terminal.
+#
+# No se copia automáticamente al perfil del usuario: `Preferences` lo carga,
+# lo valida y lo expone al frontend. El archivo existe para que los valores por
+# defecto sean auditables sin recorrer código Rust.
+
+language = "auto"
+scriptsHereDepth = 3
+autoStartDocker = false
+exclusiveAccordionGroups = true
+autoOpenFirstGroup = false
+showSystemBanner = true
+# `clear`/`cls` vuelve a mostrar el mismo fastfetch tras limpiar la pantalla.
+clearReprintBanner = true
+# Elementos ocultos del banner, separados por comas. Vacío = información completa.
+bannerHiddenItems = "host,kernel,environment,motherboard,gpu,storage,datetime"
+showDependenciesPanel = true
+showProjectsPanel = true
+showScriptsPanel = true
+showQuickActions = true
+showExplorerPanel = true
+showTabBar = true
+showEnvironmentSelector = true
+showRefreshButton = true
+showLanguageButton = true
+# Oculta las barras de controles y deja solo la terminal. Se puede recuperar
+# con el atajo configurable de abajo.
+terminalOnlyMode = false
+# Maximiza la ventana al iniciar, sin obligar a usar siempre ese tamaño.
+startMaximized = false
+manualAliasesText = ""
+favoriteReplIds = ""
+hiddenEnvironmentIds = ""
+
+# Atajos globales. Se guardan como combinaciones normalizadas para poder
+# reasignarlos sin que el frontend dependa de la distribución del teclado.
+shortcutNewTab = "Ctrl+Shift+T"
+shortcutNextTab = "Ctrl+Tab"
+shortcutPreviousTab = "Ctrl+Shift+Tab"
+shortcutCyclePanes = "Ctrl+Shift+Backslash"
+shortcutToggleExplorer = "Ctrl+Shift+E"
+shortcutToggleTerminalOnly = "Ctrl+Shift+M"
+# Navegación entre terminales: Ctrl izquierdo + W/A/S/D.
+shortcutPaneLeft = "Ctrl+A"
+shortcutPaneRight = "Ctrl+D"
+shortcutPaneUp = "Ctrl+W"
+shortcutPaneDown = "Ctrl+S"
+# Acciones sin asignación de fábrica: se pueden grabar desde Ajustes.
+shortcutOpenSettings = ""
+shortcutOpenProjects = ""
+shortcutOpenScripts = ""
+shortcutOpenDependencies = ""
+shortcutClosePanel = ""
+shortcutRefreshEnvironments = ""
+shortcutExplorerFollow = ""
+shortcutExplorerCd = ""
+shortcutClearTerminal = ""
+shortcutOpenSystemExplorer = ""
+
+themeId = "silver"
+accentColor = "#b8bec6"
+uiBackgroundColor = "#080808"
+uiSurfaceColor = "#191919"
+uiSurfaceAltColor = "#111111"
+uiBorderColor = "#3b3d40"
+uiTextColor = "#d7d7d7"
+uiMutedColor = "#8b8e92"
+terminalSelectionColor = "#4b5056"
+fastfetchColor = "#b8bec6"
+terminalCursorColor = "#b8bec6"
+terminalBackground = "#080808"
+terminalForeground = "#d7d7d7"
+terminalFontFamily = "ubuntu-mono"
+terminalFontSize = 12
+terminalLineHeight = 1.5
+terminalLetterSpacing = 0.0
+terminalCursorStyle = "block"
+terminalFontWeight = "normal"
+terminalPadding = 10
+terminalScrollback = 5000
+terminalCursorBlink = true
+terminalScrollSensitivity = 3
+copyOnSelect = false
+uiDensity = "comfortable"
+
+defaultEnvironmentId = ""
+defaultScriptEnvironmentId = ""
+fileManagerId = ""
+viewportCols = 80
+viewportRows = 24

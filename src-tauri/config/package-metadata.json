@@ -1,0 +1,18 @@
+{
+  "brand": "WinSlim Project",
+  "productName": "WinSlim Terminal",
+  "mainBinaryName": "winslim-terminal",
+  "identifier": "com.winslim.terminal",
+  "description": "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003",
+  "author": "Darkeiser003",
+  "license": "UNLICENSED",
+  "copyright": "Copyright © 2026 Darkeiser003",
+  "shortDescription": "Terminal multipestaña y centro local de herramientas",
+  "longDescription": "Terminal multipestaña con detección de entornos (cmd, PowerShell, WSL, Docker, ADB), lanzador de scripts, explorador de archivos y hub de proyectos de GitHub.",
+  "repository": "https://github.com/Darkeiser003/Terminal",
+  "homepage": "",
+  "supportEmail": "tebarcascallarromen@gmail.com",
+  "credits": [
+    "Darkeiser003"
+  ]
+}

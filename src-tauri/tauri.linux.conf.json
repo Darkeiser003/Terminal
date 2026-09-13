@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LTerminal",
+  "mainBinaryName": "lterminal",
+  "identifier": "com.lterminal.terminal",
+  "app": {
+    "windows": [
+      {
+        "title": "LTerminal"
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["appimage"],
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false,
+        "files": {
+          "usr/share/metainfo/com.lterminal.terminal.metainfo.xml": "resources/com.lterminal.terminal.metainfo.xml"
+        }
+      }
+    }
+  }
+}
