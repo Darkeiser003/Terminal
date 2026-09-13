@@ -198,11 +198,18 @@ ejecución anterior, hay que liberarlo antes.
 
 Los limpiadores eliminan únicamente salidas reproducibles, artefactos de
 auditoría visual, cachés e informes conocidos, incluidos los Markdown que tienen
-nombre de informe generado. No tocan documentación mantenida. También retiran los rastros
-de smoke/E2E en `%TEMP%` (o `/tmp`), los logs de build en AppData y las cachés
-privadas de LTerminal. `release/` y todo su contenido están protegidos y nunca
-se borran. Por seguridad, la vista previa es el comportamiento predeterminado;
-el borrado requiere una opción explícita.
+nombre de informe generado. No tocan documentación mantenida. En `%TEMP%` (o
+`/tmp`) solo consideran nombres reservados por LTerminal para backups de versión,
+descargas de herramientas, logs de build, Wine, smoke y E2E. Las extracciones
+AppImage —que usan un nombre genérico con hash— solo se limpian si contienen el
+ejecutable y el desktop de LTerminal; se conservan si algún proceso las está
+usando o no se puede comprobar su actividad. No se borran temporales genéricos
+de otras aplicaciones. El builder Windows guarda los instaladores temporales en
+`winslim-terminal-build-*`, que elimina al terminar o el limpiador recoge si el
+proceso se interrumpe. También retiran logs de build en AppData y cachés privadas
+de LTerminal. `release/` y todo su contenido están protegidos y nunca se borran.
+Por seguridad, la vista previa es el comportamiento predeterminado; el borrado
+requiere una opción explícita.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/clean-repository.ps1
@@ -254,10 +261,10 @@ directamente en la terminal.
 | `npm run check:i18n` | Comprueba la paridad de los 15 catálogos, textos visibles, marcadores dinámicos y fugas de idioma en búsquedas y comandos internos. |
 | `npm run check:contracts` | Cruza las preferencias Rust/TOML/TypeScript, los comandos internos Rust/Svelte y los recursos nativos Linux/Windows. |
 | `npm run test:frontend-logic` | Ejecuta la lógica pura de idioma, identidad, scroll de terminal y los 20 atajos sin necesitar una ventana. |
-| `npm run test:cleaner` | Ejecuta la limpieza en un proyecto temporal con `dist` enlazado a `src` y logs bajo una configuración enlazada; verifica que no toca los destinos. |
+| `npm run test:cleaner` | Prueba los limpiadores Bash y PowerShell en proyectos temporales; verifica los enlaces, conserva `release/` y descargas externas genéricas, y elimina solo temporales identificados de LTerminal. |
 | `npm run test:version-restore` | Fuerza fallos de build y una copia de seguridad ausente; comprueba que no se anuncia éxito y que los cuatro manifiestos quedan byte a byte como estaban al terminar la prueba. |
 | `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o Acciones rápidas sin comprobar. |
-| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` cambia a shells alternativas, ejecuta un comando en cada PTY y restaura la shell inicial. |
+| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` prueba shells alternativas; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run build:fast` | Atajo multiplataforma para `build` con `LTERMINAL_SKIP_CHECKS=1`; útil durante el desarrollo, no sustituye una release completa. |
@@ -300,6 +307,12 @@ la salida del PTY, captura el menú con la shell realmente seleccionada, rechaza
 errores de sintaxis del inicializador y vuelve a la shell original (Fish
 habitualmente en Linux).
 
+Para comprobar el refresco de pantalla por el transporte ADB sin conectar un
+dispositivo, usa ese mismo perfil con `E2E_ADB_REFRESH_ONLY=1 npm run e2e`. El
+smoke antepone un `adb` simulado y aislado al `PATH`, selecciona su dispositivo,
+emite tres frames separados y conserva capturas. La prueba falla si no se
+repinta la salida o si cambia la geometría del panel durante el flujo.
+
 Las builds normales (`dist:win`, `dist:win:installer` y `dist:linux`) usan el
 perfil release comprimido: LTO completo, una unidad de generación y símbolos
 eliminados. Para iteraciones de desarrollo están disponibles `-Fast` en
@@ -333,6 +346,14 @@ Windows con la suite Rust bajo Wine y previsualizar la limpieza antes de
 aplicarla. En Linux pregunta antes de instalar dependencias del sistema; en
 Windows avisa antes de iniciar el builder, que puede preparar Node.js, Rust o
 herramientas de Visual Studio si faltan. `release/` se conserva al limpiar.
+
+La firma de commits Git es independiente de la compilación y de la firma
+Ed25519 de las releases. No se solicita al buildear. Para activar la firma SSH
+automática solo en este checkout, ejecuta
+`bash build-tools/build.sh --setup-git-signing`. También puedes elegir la
+opción 5 del menú. El asistente usa una clave SSH existente, configura Git
+localmente y muestra la clave pública que debes añadir en GitHub como
+**Signing key**; nunca sube la clave ni muestra la privada.
 
 Los menús llaman a los builders mantenidos que siguen debajo de `linux/` y
 `windows/`; esos puntos directos se conservan para CI y automatización avanzada.
@@ -389,7 +410,7 @@ desconocidas y los valores ausentes se rechazan antes de empezar.
 La cross-build usa un job de Cargo por defecto para no agotar la memoria durante
 LTO y los tests PE bajo Wine; `CARGO_BUILD_JOBS=2` o superior queda como ajuste
 explícito para máquinas con memoria suficiente. La batería PE bajo Wine dispone
-de 900 segundos para incluir una compilación de tests fría; se puede ajustar con
+de 1800 segundos para incluir una compilación de tests fría; se puede ajustar con
 `LTERMINAL_WINE_TEST_TIMEOUT`.
 
 Para hacer la validación cruzada completa desde Linux, incluyendo la batería

@@ -10,17 +10,36 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$RootPrefix = $ProjectRoot.TrimEnd([char]92) + [IO.Path]::DirectorySeparatorChar
-$ReleaseRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'release')).TrimEnd([char]92)
-$TempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char]92)
-$AppDataRoot = [IO.Path]::GetFullPath([Environment]::GetFolderPath('ApplicationData')).TrimEnd([char]92)
-$LocalAppDataRoot = [IO.Path]::GetFullPath([Environment]::GetFolderPath('LocalApplicationData')).TrimEnd([char]92)
+function Get-NormalizedDirectoryPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $pathRoot = [IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Length -gt $pathRoot.Length) {
+        $fullPath = $fullPath.TrimEnd([char[]]@([char]92, [char]47))
+    }
+    return $fullPath
+}
+
+$ProjectRoot = Get-NormalizedDirectoryPath (Split-Path -Parent $PSScriptRoot)
+$RootPrefix = $ProjectRoot + [IO.Path]::DirectorySeparatorChar
+$ReleaseRoot = Get-NormalizedDirectoryPath (Join-Path $ProjectRoot 'release')
+$TempRoot = Get-NormalizedDirectoryPath ([IO.Path]::GetTempPath())
+$appDataPath = [Environment]::GetFolderPath('ApplicationData')
+if ([string]::IsNullOrWhiteSpace($appDataPath)) {
+    $appDataPath = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME '.config' }
+}
+$localAppDataPath = [Environment]::GetFolderPath('LocalApplicationData')
+if ([string]::IsNullOrWhiteSpace($localAppDataPath)) {
+    $localAppDataPath = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME '.local/share' }
+}
+$AppDataRoot = Get-NormalizedDirectoryPath $appDataPath
+$LocalAppDataRoot = Get-NormalizedDirectoryPath $localAppDataPath
 
 if ($Help) {
     Write-Host 'Uso: powershell -ExecutionPolicy Bypass -File scripts\clean-repository.ps1 [-Apply]' -ForegroundColor Cyan
     Write-Host 'Sin -Apply solo muestra las rutas.'
-    Write-Host 'Con -Apply elimina salidas, temporales E2E, logs y cachés privadas; release\ se conserva.'
+    Write-Host 'Con -Apply elimina salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas; release\ se conserva.'
     exit 0
 }
 
@@ -53,7 +72,7 @@ function Assert-ExternalPath {
 
     $fullPath = [IO.Path]::GetFullPath($Path)
     foreach ($root in @($TempRoot, $AppDataRoot, $LocalAppDataRoot)) {
-        $prefix = $root.TrimEnd([char]92) + [IO.Path]::DirectorySeparatorChar
+        $prefix = (Get-NormalizedDirectoryPath $root) + [IO.Path]::DirectorySeparatorChar
         if ($fullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
             $current = [IO.Path]::GetDirectoryName($fullPath)
             while ($current -and $current.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -73,7 +92,7 @@ function Test-ExternalPathHasReparseParent {
 
     $fullPath = [IO.Path]::GetFullPath($Path)
     foreach ($root in @($TempRoot, $AppDataRoot, $LocalAppDataRoot)) {
-        $prefix = $root.TrimEnd([char]92) + [IO.Path]::DirectorySeparatorChar
+        $prefix = (Get-NormalizedDirectoryPath $root) + [IO.Path]::DirectorySeparatorChar
         if (-not $fullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
         $current = [IO.Path]::GetDirectoryName($fullPath)
         while ($current -and $current.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -152,9 +171,8 @@ function Find-NonReadmeMarkdown {
 }
 Find-NonReadmeMarkdown $ProjectRoot
 
-# Rastros fuera del repositorio que pertenecen exclusivamente a builds, smoke
-# y E2E. No se elimina la configuración de usuario: solo logs y cachés de la
-# aplicación/driver que los scripts generan.
+# Rastros fuera del repositorio con nombres propios de builds, smoke y E2E. No
+# se elimina la configuración de usuario: solo logs y cachés de la aplicación.
 $externalTargets = [Collections.Generic.List[string]]::new()
 function Add-ExternalTarget {
     param([string]$Path)
@@ -182,14 +200,74 @@ function Add-ExternalPatternTargets {
     }
 }
 
+$script:AppImageProcessPathsLoaded = $false
+$script:AppImageProcessPathsVerifiable = $false
+$script:AppImageProcessPaths = @()
+function Test-LiveProcessInDirectory {
+    param([string]$Path)
+
+    if (-not $script:AppImageProcessPathsLoaded) {
+        $script:AppImageProcessPathsLoaded = $true
+        $procRoot = '/proc'
+        $readlink = Get-Command 'readlink' -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath $procRoot -PathType Container) -and $readlink) {
+            $processPaths = [Collections.Generic.List[string]]::new()
+            foreach ($process in Get-ChildItem -LiteralPath $procRoot -Directory -ErrorAction SilentlyContinue) {
+                if ($process.Name -notmatch '^\d+$') { continue }
+                foreach ($entryName in @('exe', 'cwd')) {
+                    $entryPath = Join-Path $process.FullName $entryName
+                    try {
+                        $processPath = (& $readlink.Source -- $entryPath 2>$null | Select-Object -First 1)
+                    } catch {
+                        continue
+                    }
+                    if ($processPath) { $processPaths.Add([string]$processPath) }
+                }
+            }
+            $script:AppImageProcessPaths = @($processPaths.ToArray())
+            $script:AppImageProcessPathsVerifiable = $true
+        }
+    }
+    if (-not $script:AppImageProcessPathsVerifiable) { return $true }
+
+    $normalizedPath = Get-NormalizedDirectoryPath $Path
+    $prefix = $normalizedPath + [IO.Path]::DirectorySeparatorChar
+    foreach ($processPath in $script:AppImageProcessPaths) {
+        if ($processPath.Equals($normalizedPath, [StringComparison]::Ordinal) -or $processPath.StartsWith($prefix, [StringComparison]::Ordinal)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 $tempPatterns = @(
     'winslim-terminal-e2e-*.json', 'winslim-terminal-e2e-captures-*',
-    'winslim-terminal-webview2-e2e-*', 'winslim-terminal-smoke-*',
-    'lterminal-smoke-*', 'lterminal-e2e-report.*', 'lterminal-wine-smoke*',
-    'lterminal-appimage-*', 'lterminal-e2e-*',
-    'node-v22.14.0-x64.msi', 'rustup-init.exe'
+    'winslim-terminal-webview2-e2e-*', 'winslim-terminal-smoke-*', 'winslim-terminal-version-*',
+    'lterminal-smoke-*', 'lterminal-adb-audit.*', 'lterminal-release-audit-captures.*',
+    'lterminal-e2e-report.*', 'lterminal-version-backup.*',
+    'lterminal-npm-audit.*', 'lterminal-fake-adb-*', 'lterminal-cleaner-test-*',
+    'lterminal-build-menu-test-*', 'lterminal-release-signature-*', 'lterminal-windows-cross-release-*',
+    'winslim-release-hash-*', 'lterminal-node-download.*',
+    'lterminal-rustup-installer.*', 'lterminal-build-smoke.*', 'lterminal-build-smoke-app.*',
+    'lterminal-release-validation.*', 'lterminal-wine-*',
+    'lterminal-appimage-*', 'lterminal-e2e-*', 'winslim-terminal-build-*'
 )
 Add-ExternalPatternTargets $TempRoot $tempPatterns
+
+# AppImage usa un nombre temporal genérico con hash. Solo se limpia cuando la
+# extracción contiene los dos marcadores propios de LTerminal y no hay ningún
+# proceso usando su ejecutable o directorio de trabajo.
+foreach ($candidate in Get-ChildItem -LiteralPath $TempRoot -Force -Directory -Filter 'appimage_extracted_*' -ErrorAction SilentlyContinue) {
+    if (Test-ReparsePoint $candidate.FullName) { continue }
+    $binary = Join-Path $candidate.FullName 'usr/bin/lterminal'
+    $desktop = Join-Path $candidate.FullName 'usr/share/applications/LTerminal.desktop'
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf) -or -not (Test-Path -LiteralPath $desktop -PathType Leaf)) { continue }
+    if (Test-LiveProcessInDirectory $candidate.FullName) {
+        Write-Host "  Se conserva AppImage de LTerminal activo o no verificable: $($candidate.FullName)"
+        continue
+    }
+    Add-ExternalTarget $candidate.FullName
+}
 
 # Sesiones temporales por PID creadas por la aplicación durante smoke/E2E. No
 # se elimina una sesión cuyo proceso siga vivo para no romper una terminal en

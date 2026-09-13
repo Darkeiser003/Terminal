@@ -20,7 +20,7 @@ case "${1:-}" in
   --apply) apply=true ;;
   -h|--help)
     printf '%s\n' 'Uso: scripts/clean-repository.sh [--apply]'
-    printf '%s\n' 'Sin --apply solo muestra las rutas; con --apply borra salidas, temporales E2E, logs y cachés privadas.'
+    printf '%s\n' 'Sin --apply solo muestra las rutas; con --apply borra salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas.'
     printf '%s\n' 'release/ y la configuración de usuario se conservan.'
     exit 0
     ;;
@@ -73,6 +73,35 @@ external_target_has_symlink_parent() {
         done
         return 1
         ;;
+    esac
+  done
+  return 1
+}
+
+appimage_process_paths_loaded=false
+appimage_process_paths_verifiable=true
+appimage_process_paths=()
+appimage_extraction_has_live_process() {
+  local target="$1" process_link process_path
+  # Leer /proc una sola vez: las extracciones pueden ser varias y el listado
+  # completo de procesos se usa para comprobarlas todas.
+  if [[ "$appimage_process_paths_loaded" != true ]]; then
+    appimage_process_paths_loaded=true
+    if [[ ! -d /proc ]] || ! command -v readlink >/dev/null 2>&1; then
+      appimage_process_paths_verifiable=false
+    else
+      for process_link in /proc/[0-9]*/exe /proc/[0-9]*/cwd; do
+        [[ -L "$process_link" ]] || continue
+        process_path="$(readlink -- "$process_link" 2>/dev/null || true)"
+        [[ -n "$process_path" ]] && appimage_process_paths+=("$process_path")
+      done
+    fi
+  fi
+  # Si no se puede inspeccionar la tabla de procesos, conservar es lo seguro.
+  [[ "$appimage_process_paths_verifiable" == true ]] || return 0
+  for process_path in "${appimage_process_paths[@]}"; do
+    case "$process_path" in
+      "$target"|"$target"/*) return 0 ;;
     esac
   done
   return 1
@@ -147,9 +176,9 @@ for markdown in "$project_root"/**/*.md; do
 done
 shopt -u globstar nullglob
 
-# Rastros de smoke/E2E, logs de build y cachés privadas de LTerminal fuera del
-# repositorio. No se toca la configuración de usuario ni la caché global de
-# Tauri; release/ queda siempre fuera de los objetivos.
+# Rastros con nombres propios de builds/smoke/E2E, logs de build y cachés
+# privadas de LTerminal fuera del repositorio. No se toca la configuración de
+# usuario ni la caché global de Tauri; release/ queda siempre fuera.
 external_targets=()
 add_external_target() {
   local target="$1"
@@ -172,11 +201,43 @@ for target in \
   "$temp_root"/winslim-terminal-e2e-captures-* \
   "$temp_root"/winslim-terminal-webview2-e2e-* \
   "$temp_root"/winslim-terminal-smoke-* \
+  "$temp_root"/winslim-terminal-build-* \
   "$temp_root"/lterminal-smoke-* \
+  "$temp_root"/lterminal-adb-audit.* \
+  "$temp_root"/lterminal-release-audit-captures.* \
   "$temp_root"/lterminal-e2e-report.* \
   "$temp_root"/lterminal-e2e-* \
-  "$temp_root"/lterminal-wine-smoke* \
+  "$temp_root"/lterminal-version-backup.* \
+  "$temp_root"/winslim-terminal-version-* \
+  "$temp_root"/lterminal-npm-audit.* \
+  "$temp_root"/lterminal-fake-adb-* \
+  "$temp_root"/lterminal-cleaner-test-* \
+  "$temp_root"/lterminal-build-menu-test-* \
+  "$temp_root"/lterminal-release-signature-* \
+  "$temp_root"/lterminal-windows-cross-release-* \
+  "$temp_root"/winslim-release-hash-* \
+  "$temp_root"/lterminal-node-download.* \
+  "$temp_root"/lterminal-rustup-installer.* \
+  "$temp_root"/lterminal-build-smoke.* \
+  "$temp_root"/lterminal-build-smoke-app.* \
+  "$temp_root"/lterminal-release-validation.* \
+  "$temp_root"/lterminal-wine-* \
   "$temp_root"/lterminal-appimage-*; do
+  add_external_target "$target"
+done
+shopt -u nullglob
+
+# El runtime AppImage usa un nombre genérico con hash. Solo se considera
+# nuestro si incluye el binario y el desktop de LTerminal; además se conserva
+# mientras algún proceso tenga cwd o ejecutable dentro de la extracción.
+shopt -s nullglob
+for target in "$temp_root"/appimage_extracted_*; do
+  [[ -d "$target" && ! -L "$target" ]] || continue
+  [[ -x "$target/usr/bin/lterminal" && -f "$target/usr/share/applications/LTerminal.desktop" ]] || continue
+  if appimage_extraction_has_live_process "$target"; then
+    printf '  Se conserva AppImage de LTerminal activo o no verificable: %s\n' "$target"
+    continue
+  fi
   add_external_target "$target"
 done
 shopt -u nullglob

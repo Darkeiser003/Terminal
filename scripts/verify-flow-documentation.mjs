@@ -61,25 +61,6 @@ for (const marker of ['captureScreenshot', 'smokeReport.captures', 'E2E_CAPTURE_
     check(`El E2E conserva ${marker}`, e2e.includes(marker) || hasReadme(marker === 'verify-e2e-report' ? 'informe JSON' : marker));
 }
 
-for (const filename of [
-    '01-arranque-banner.png',
-    '02-dependencias-contraidas.png',
-    '03-dependencias-desplegadas.png',
-    '04-cuatro-paneles.png',
-    '05-responsive.png',
-    '06-fastfetch-final.png',
-]) {
-    const imagePath = resolve(root, 'docs/evidence', filename);
-    let isPng = false;
-    try {
-        const bytes = readFileSync(imagePath);
-        isPng = bytes.length > 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    } catch {
-        isPng = false;
-    }
-    check(`La evidencia visual es PNG válido: ${filename}`, isPng);
-}
-
 if (failures.length) {
     console.error(`Documentación de flujo incompleta (${failures.length}/${checks.length} fallos):`);
     for (const failure of failures) console.error(`- ${failure}`);

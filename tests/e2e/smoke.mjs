@@ -1,7 +1,7 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process';
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 
@@ -96,6 +96,47 @@ const webviewUserDataFolder = process.platform === 'win32'
 const ownsWebViewUserDataFolder = Boolean(webviewUserDataFolder && !configuredWebViewUserDataFolder);
 if (webviewUserDataFolder) await mkdir(webviewUserDataFolder, { recursive: true });
 let sessionCreationFinished = false;
+
+// El modo enfocado ADB instala un ejecutable falso en un directorio temporal
+// delante del PATH. Así prueba el descubrimiento real y el transporte PTY sin
+// depender de un móvil/emulador ni tocar la instalación del usuario.
+const adbRefreshOnly = process.env.E2E_ADB_REFRESH_ONLY === '1';
+let fakeAdbDirectory = null;
+if (adbRefreshOnly) {
+    if (process.platform === 'win32') {
+        throw new Error('E2E_ADB_REFRESH_ONLY requiere un host POSIX para simular adb');
+    }
+    fakeAdbDirectory = await mkdtemp(join(tmpdir(), 'lterminal-fake-adb-'));
+    const fakeAdbPath = join(fakeAdbDirectory, 'adb');
+    await writeFile(fakeAdbPath, [
+        '#!/bin/sh',
+        'if [ "$1" = "devices" ] && [ "$2" = "-l" ]; then',
+        '    printf "List of devices attached\\nLTERMINAL-FAKE-DEVICE device product:terminal model:LTerminal_Fake device:terminal\\n"',
+        '    exit 0',
+        'fi',
+        'if [ "$1" = "-s" ] && [ "$2" = "LTERMINAL-FAKE-DEVICE" ] && [ "$3" = "shell" ]; then',
+        '    printf "\\r\\nLTERMINAL_FAKE_ADB_READY\\r\\nshell@android:/ $ "',
+        '    while IFS= read -r command; do',
+        '        case "$command" in',
+        '            *LTERMINAL_ADB_REFRESH_STREAM*)',
+        '                printf "\\r\\nLTERMINAL_ADB_FRAME_ONE\\r\\n"',
+        '                sleep 1',
+        '                printf "\\r\\nLTERMINAL_ADB_FRAME_TWO\\r\\n"',
+        '                sleep 1',
+        '                printf "\\r\\nLTERMINAL_ADB_FRAME_THREE\\r\\n"',
+        '                ;;',
+        '            *) printf "\\r\\nADB_FAKE_COMMAND: %s\\r\\n" "$command" ;;',
+        '        esac',
+        '    done',
+        '    exit 0',
+        'fi',
+        'printf "fake adb: argumentos no soportados: %s\\n" "$*" >&2',
+        'exit 2',
+        '',
+    ].join('\n'));
+    await chmod(fakeAdbPath, 0o755);
+    process.env.PATH = [fakeAdbDirectory, process.env.PATH].filter(Boolean).join(delimiter);
+}
 
 // Algunas versiones de WebView2 escriben DevToolsActivePort dentro de
 // <UDF>\EBWebView, pero EdgeDriver sigue buscándolo en <UDF>. Mientras se crea
@@ -2238,6 +2279,69 @@ async function exerciseShellMatrix() {
     return { originalId, availableIds, testedIds, testedAlternates, restoredTo: originalId };
 }
 
+async function exerciseAdbRefreshWithoutLayout() {
+    if (!fakeAdbDirectory) throw new Error('El ADB falso no fue preparado antes de iniciar el driver');
+    await click(await findWhenReady('.env-select'));
+    const option = await findWhenReady('.env-menu [data-environment-id="adb:LTERMINAL-FAKE-DEVICE"]', 15000);
+    if ((await attribute(option, 'aria-disabled')) === 'true') {
+        throw new Error('El dispositivo ADB simulado aparece deshabilitado');
+    }
+    await click(option);
+    const readyMarker = 'LTERMINAL_FAKE_ADB_READY';
+    await waitUntil(async () => {
+        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
+        const text = await textOf(rows);
+        return text.includes(readyMarker);
+    }, 15000, 'selección y arranque de la shell ADB simulada');
+    const baseline = await contentGeometry();
+    const baselineRefresh = await terminalOutputRefreshSnapshot();
+    await captureScreenshot('adb-refresh-ready');
+
+    const streamStartedAt = Date.now();
+    await sendTerminalLine('stream LTERMINAL_ADB_REFRESH_STREAM');
+    const frames = [];
+    for (const [index, marker] of [
+        'LTERMINAL_ADB_FRAME_ONE',
+        'LTERMINAL_ADB_FRAME_TWO',
+        'LTERMINAL_ADB_FRAME_THREE',
+    ].entries()) {
+        await waitUntil(async () => (await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'))).includes(marker),
+            6000, `salida progresiva ADB ${marker}`);
+        const refreshed = await terminalOutputRefreshSnapshot();
+        const geometry = await contentGeometry();
+        if (geometry.panes.length !== baseline.panes.length
+            || geometry.panes[0]?.tabId !== baseline.panes[0]?.tabId
+            || geometry.panes[0]?.cell?.width !== baseline.panes[0]?.cell?.width
+            || geometry.panes[0]?.cell?.height !== baseline.panes[0]?.cell?.height
+            || geometry.panes[0]?.terminal?.cols !== baseline.panes[0]?.terminal?.cols
+            || geometry.panes[0]?.terminal?.rows !== baseline.panes[0]?.terminal?.rows) {
+            throw new Error(`El flujo ADB cambió el layout durante la salida: ${JSON.stringify({ baseline, geometry })}`);
+        }
+        if (refreshed.refreshCount <= baselineRefresh.refreshCount
+            || refreshed.lastRefresh?.reason !== 'pty-output-idle') {
+            throw new Error(`La salida ADB no solicitó repintado del viewport: ${JSON.stringify({ baselineRefresh, refreshed, marker })}`);
+        }
+        const capture = await captureScreenshot(`adb-refresh-frame-${index + 1}`);
+        if (!capture) throw new Error(`No se pudo conservar la captura visual del frame ADB ${index + 1}`);
+        frames.push({
+            marker,
+            elapsedMs: Date.now() - streamStartedAt,
+            refreshCount: refreshed.refreshCount,
+            lastRefresh: refreshed.lastRefresh,
+            layoutUnchanged: true,
+            capture: capture.split(/[\\/]/).at(-1),
+        });
+    }
+    recordEvent('adb-progressive-output-repaint', {
+        passed: true,
+        transport: 'adb-shell-pty',
+        trigger: 'pty-output-idle',
+        layoutUnchanged: true,
+        frames,
+    });
+    return frames;
+}
+
 async function readCurrentLog() {
     const configRoot = process.platform === 'win32'
         ? (process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'))
@@ -2557,6 +2661,15 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write(`E2E enfocado OK: shells ${matrix.availableIds.join(', ')}; alternativas probadas ${matrix.testedAlternates.join(', ') || 'ninguna'}; restaurada ${matrix.restoredTo} (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (adbRefreshOnly) {
+        markPhase('salida progresiva ADB sin cambios de layout');
+        const frames = await exerciseAdbRefreshWithoutLayout();
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'adb-progressive-output-repaint';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E enfocado OK: ${frames.length} frames ADB repintados sin resize (${Date.now() - smokeStartedAt} ms).\n`);
     } else {
     markPhase('selección de texto mediante arrastre real');
     await verifyMouseDragSelection('LTERMINAL_MOUSE_DRAG_SELECTION_FULL_E2E');
@@ -4366,6 +4479,11 @@ try {
         });
     } else if (ownsWebViewUserDataFolder && smokeReport.status === 'failed') {
         process.stderr.write(`Perfil WebView2 E2E conservado para diagnóstico: ${webviewUserDataFolder}\n`);
+    }
+    if (fakeAdbDirectory) {
+        await rm(fakeAdbDirectory, { recursive: true, force: true }).catch((error) => {
+            process.stderr.write(`No se pudo limpiar el ADB falso temporal ${fakeAdbDirectory}: ${error}\n`);
+        });
     }
     await writeFile(smokeReportPath, `${JSON.stringify(smokeReport, null, 2)}\n`).catch((error) => {
         process.stderr.write(`No se pudo escribir el informe de smoke ${smokeReportPath}: ${error}\n`);

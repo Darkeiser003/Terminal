@@ -870,7 +870,7 @@ install_node_22() {
         *) err "Node.js no ofrece un binario automático para la arquitectura $machine."; return 1 ;;
     esac
     warn "Se instalará Node.js 22 para el usuario actual desde nodejs.org."
-    tmp="$(mktemp -d)"
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/lterminal-node-download.XXXXXX")"
     sums="$tmp/SHASUMS256.txt"
     curl --proto '=https' --tlsv1.2 -fsSL \
         https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o "$sums"
@@ -908,7 +908,7 @@ install_rust_toolchain() {
         rustup default stable
     else
         local installer
-        installer="$(mktemp)"
+        installer="$(mktemp "${TMPDIR:-/tmp}/lterminal-rustup-installer.XXXXXX")"
         warn "Falta Rust; se descargará el instalador oficial rustup."
         curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$installer"
         sh "$installer" -y --profile minimal --default-toolchain stable
@@ -1842,8 +1842,8 @@ ok "Runtime AppImage verificable"
 if ! graphical_session_available; then
     warn "La sesión gráfica no es accesible desde esta shell: no se ejecuta el smoke visual. El AppImage sí se generó."
 else
-    SMOKE_LOG="$(mktemp)"
-    SMOKE_APP_LOG="$(mktemp)"
+    SMOKE_LOG="$(mktemp "${TMPDIR:-/tmp}/lterminal-build-smoke.XXXXXX")"
+    SMOKE_APP_LOG="$(mktemp "${TMPDIR:-/tmp}/lterminal-build-smoke-app.XXXXXX")"
     SMOKE_TOKEN="build-$$-$(date +%s%N)"
     # El smoke debe ser idéntico en máquinas con FUSE y sin FUSE. El montaje
     # directo puede heredar librerías/variables del host y producir un falso

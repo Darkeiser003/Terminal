@@ -461,6 +461,14 @@ check('La matriz E2E exige identificar la shell original por su marca selecciona
         && smoke.includes("option.classList.contains('selected')")
         && smoke.includes("const originalSource = 'aria-selected/class'")
         && e2eReportVerifier.includes("shellMatrix.originalSource !== 'aria-selected/class'"));
+check('Smoke E2E reproduce ADB con dispositivo falso y valida varios repintados sin cambios de layout',
+    smoke.includes('E2E_ADB_REFRESH_ONLY')
+        && smoke.includes('LTERMINAL-FAKE-DEVICE')
+        && smoke.includes('adb-progressive-output-repaint')
+        && smoke.includes('pty-output-idle')
+        && smoke.includes('layoutUnchanged: true')
+        && smoke.includes("captureScreenshot(`adb-refresh-frame-${index + 1}`)")
+        && read('README.md').includes('E2E_ADB_REFRESH_ONLY=1 npm run e2e'));
 check('Smoke E2E valida una respuesta real de la shell', smoke.includes('LTERMINAL_E2E_COMMAND_OK') && smoke.includes('xterm-rows'));
 check('Smoke E2E prueba refrescos consecutivos de entornos', smoke.includes('refresh-environments') && smoke.includes('for (let attempt') && smoke.includes('fin de refrescos concurrentes'));
 check('Smoke E2E prueba clics concurrentes de división', smoke.includes('burstCount') && smoke.includes('crearon demasiados paneles'));

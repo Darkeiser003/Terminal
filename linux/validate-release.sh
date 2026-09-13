@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPIMAGE="${1:-$(find "$ROOT/release" -maxdepth 1 -name 'LTerminal-*.AppImage' -print -quit)}"
 LOG="$HOME/.config/lterminal/logs/main.log"
 TOKEN="release-$$-$(date +%s)"
-OUTPUT="$(mktemp)"
+OUTPUT="$(mktemp "${TMPDIR:-/tmp}/lterminal-release-validation.XXXXXX")"
 PID=""
 
 cleanup() {

@@ -60,6 +60,7 @@ $VendorDir   = Join-Path $TauriDir 'vendor\conpty'
 Set-Location $ProjectRoot
 
 $script:VersionManifestBackupDir = $null
+$script:BuildTempDir = Join-Path ([IO.Path]::GetTempPath()) "winslim-terminal-build-$PID-$([guid]::NewGuid().ToString('N'))"
 $script:VersionManifestPaths = @(
     (Join-Path $ProjectRoot 'package.json'),
     (Join-Path $ProjectRoot 'package-lock.json'),
@@ -870,7 +871,8 @@ if (-not $currentNodeVersion -or $currentNodeVersion -lt $minNodeVersion) {
         Write-Step 'Instalando Node.js (v22.14.0 LTS) mediante descarga directa (MSI)...'
         try {
             $msiUrl = 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi'
-            $msiPath = Join-Path $env:TEMP 'node-v22.14.0-x64.msi'
+            New-Item -ItemType Directory -Force -Path $script:BuildTempDir | Out-Null
+            $msiPath = Join-Path $script:BuildTempDir 'node-v22.14.0-x64.msi'
             Write-Host "    Descargando $msiUrl ..." -ForegroundColor Yellow
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
@@ -923,7 +925,8 @@ if (-not (Test-Command 'cargo')) {
         Write-Step 'Instalando Rust mediante descarga directa de rustup-init.exe...'
         try {
             $rustupUrl = 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe'
-            $rustupPath = Join-Path $env:TEMP 'rustup-init.exe'
+            New-Item -ItemType Directory -Force -Path $script:BuildTempDir | Out-Null
+            $rustupPath = Join-Path $script:BuildTempDir 'rustup-init.exe'
             Write-Host "    Descargando $rustupUrl ..." -ForegroundColor Yellow
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupPath -UseBasicParsing
@@ -1796,5 +1799,15 @@ if ($script:PostBuildIssues.Count -gt 0) {
     exit 1
 }
 } finally {
-    Restore-VersionManifests
+    try {
+        Restore-VersionManifests
+    } finally {
+        if ($script:BuildTempDir -and (Test-Path -LiteralPath $script:BuildTempDir -PathType Container)) {
+            try {
+                Remove-Item -LiteralPath $script:BuildTempDir -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Warning "No se pudo eliminar el temporal de build propio $script:BuildTempDir : $($_.Exception.Message)"
+            }
+        }
+    }
 }

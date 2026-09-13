@@ -18,11 +18,17 @@ Menú de desarrollo y compilación de LTerminal
 
 Uso:
   bash build-tools/build.sh
+  bash build-tools/build.sh --setup-git-signing
 
 Abre submenús para desarrollo/preview, compilación, pruebas y limpieza.
+La configuración de firma Git es explícita y no se ejecuta durante las builds.
 Los compiladores detallados siguen disponibles para automatización en linux/.
 HELP
     exit 0
+fi
+if [[ "${1:-}" == "--setup-git-signing" ]]; then
+    shift
+    exec bash "$ROOT/build-tools/configure-git-signing.sh" --repo "$ROOT" "$@"
 fi
 if [[ "$#" -gt 0 ]]; then
     printf 'Opción desconocida: %s\nUsa --help para ver el uso.\n' "$1" >&2
@@ -216,6 +222,7 @@ while true; do
     printf '  2. Compilar\n'
     printf '  3. Pruebas y smoke sin recompilar\n'
     printf '  4. Limpiar cachés y builds temporales\n'
+    printf '  5. Configurar firma SSH de commits para GitHub\n'
     printf '  0. Salir\n'
     read -r -p 'Elige una opción: ' choice || break
     case "$choice" in
@@ -223,6 +230,7 @@ while true; do
         2) build_menu ;;
         3) tests_menu ;;
         4) clean_menu ;;
+        5) run_action 'Configurando la firma de commits en este repositorio' bash "$ROOT/build-tools/configure-git-signing.sh" --repo "$ROOT" ;;
         0) break ;;
         *) printf 'Opción no válida.\n' ;;
     esac

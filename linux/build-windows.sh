@@ -390,9 +390,9 @@ run_wine_rust_tests() {
     wine_test_prefix="${WINE_SMOKE_PREFIX:-${WINEPREFIX:-$HOME/.cache/lterminal/wine-smoke-prefix}}"
     mkdir -p "$wine_test_prefix"
     warn "Prefijo Wine para la batería Rust: $wine_test_prefix"
-    # En una target release frío, compilar las dependencias del ejecutable de
-    # tests puede superar cinco minutos aunque correr los tests tarde segundos.
-    timeout_seconds="${LTERMINAL_WINE_TEST_TIMEOUT:-900}"
+    # En un target release frío, compilar el ejecutable PE de tests puede tardar
+    # bastante más que ejecutarlos; deja margen sin exigir ajuste manual.
+    timeout_seconds="${LTERMINAL_WINE_TEST_TIMEOUT:-1800}"
     [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || fail "LTERMINAL_WINE_TEST_TIMEOUT debe ser un número positivo de segundos."
     if WINEPREFIX="$wine_test_prefix" \
         LTERMINAL_TEST_UNDER_WINE=1 \
