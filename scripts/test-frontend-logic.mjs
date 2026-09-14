@@ -53,6 +53,33 @@ assert.equal(terminalPrompt.interactiveReplPromptIsVisible('C:\\Users\\Romen @#'
     'xonsh reconoce el prompt de administrador con ruta Windows');
 assert.equal(terminalPrompt.interactiveReplPromptIsVisible('Welcome to the xonsh shell 0.24.2', 'xonsh'), false,
     'el banner de xonsh no se confunde con un prompt');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('~>                                                                 romen@PC', 'elvish'), true,
+    'Elvish reconoce el prompt izquierdo y el prompt derecho en la misma fila');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('/home/romen/proyecto> romen@PC', 'elvish'), true,
+    'Elvish reconoce su prompt con una ruta absoluta');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('~>                                                                 romen@PC', 'fish'), false,
+    'el prompt particular de Elvish no habilita por error una shell normal');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('Welcome to Elvish', 'elvish'), false,
+    'el saludo de Elvish no se confunde con el prompt');
+for (const [environment, prompt, input] of [
+    ['lang:tcl', '%', ''],
+    ['lang:tcl', '% puts "hola"', 'puts "hola"'],
+    ['lang:maxima', '(%i1)', ''],
+    ['lang:maxima', '(%i2) 1 + 1', '1 + 1'],
+    ['lang:common-lisp-sbcl', '*', ''],
+    ['lang:swi-prolog', '?- member(X, [1, 2]).', 'member(X, [1, 2]).'],
+    ['lang:swi-prolog', '| ?-', ''],
+    ['lang:forth', 'ok', ''],
+]) {
+    assert.equal(terminalPrompt.interactiveReplPromptIsVisible(prompt, environment), true,
+        `${environment}: se reconoce su prompt específico`);
+    assert.equal(terminalPrompt.interactiveReplInputLine(prompt, environment), input,
+        `${environment}: el espejo omite el prompt y conserva la línea editable`);
+}
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('%', 'fish'), false,
+    'un porcentaje aislado no se confunde con un prompt de shell');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('*', 'lang:python'), false,
+    'un asterisco aislado no se confunde con el prompt de otros REPL');
 assert.equal(terminalPrompt.interactiveReplPromptIsVisible('~ Snailed it ~', 'nu'), false,
     'el prompt de xonsh no cambia la detección de Nushell');
 
@@ -80,6 +107,37 @@ assert.equal(terminalColumns.longestVisibleLogicalLineWidth(Number.NaN, 0, 1, ()
     'una longitud no finita no rompe el cálculo del viewport');
 assert.equal(terminalColumns.longestVisibleLogicalLineWidth(1, 0, Number.NaN, () => ({ columns: 2, isWrapped: false })), 0,
     'un rango visible no finito se trata como vacío');
+
+const cells = (values) => ({
+    length: values.length,
+    getCell: (index) => values[index]
+        ? { getChars: () => values[index].chars, getWidth: () => values[index].width }
+        : undefined,
+});
+assert.equal(terminalColumns.occupiedTerminalColumns(cells([
+    { chars: 'a', width: 1 },
+    { chars: '界', width: 2 },
+    { chars: '', width: 0 },
+    { chars: ' ', width: 1 },
+]), 4), 3, 'los caracteres CJK ocupan sus dos columnas reales y se recortan los espacios finales');
+assert.equal(terminalColumns.occupiedTerminalColumns(cells([
+    { chars: 'é', width: 1 },
+    { chars: '🙂', width: 2 },
+    { chars: '', width: 0 },
+]), 3), 3, 'marcas combinadas y emoji se miden por ancho de celda, no por unidades UTF-16');
+assert.equal(terminalColumns.occupiedTerminalColumns(cells([
+    { chars: 'x', width: 1 },
+    { chars: 'z', width: 1 },
+    { chars: 'z', width: 1 },
+]), 1), 1, 'celdas antiguas que exceden las columnas actuales no sobredimensionan el PTY');
+assert.equal(terminalColumns.occupiedTerminalColumns(cells([
+    { chars: 'x', width: 1 },
+    { chars: '界', width: 2 },
+]), 2), 2, 'un glifo ancho al borde no reporta columnas fuera de la rejilla');
+assert.equal(terminalColumns.occupiedTerminalColumns(cells([
+    { chars: ' ', width: 1 },
+    { chars: ' ', width: 1 },
+]), 2), 0, 'una fila vacía o con espacios finales no pide columnas extra');
 
 const renderFrames = [];
 const renderErrors = [];

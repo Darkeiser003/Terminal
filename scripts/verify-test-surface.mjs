@@ -35,10 +35,12 @@ const requiredFiles = [
     'scripts/test-e2e-report.mjs',
     'scripts/test-e2e-url-matcher.mjs',
     'scripts/test-release-hash.mjs',
+    'scripts/test-release-manifest.mjs',
     'scripts/test-windows-cross-release.mjs',
     'scripts/package-windows-cross.mjs',
     'scripts/test-release-signature.mjs',
     'scripts/update-release-hash.mjs',
+    'scripts/create-release-manifest.mjs',
     'scripts/sign-release-manifest.mjs',
     'scripts/test-frontend-logic.mjs',
     'scripts/verify-test-surface.mjs',
@@ -54,19 +56,36 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:e2e-url-matcher', 'test:release-hash', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:github-security', 'check:logic']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:e2e-url-matcher', 'test:release-hash', 'test:release-manifest', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:github-security', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
 check('npm check incluye la auditoría de superficie lógica', scripts.check.includes('check:logic') && scripts['check:logic'].includes('verify-logic-surface.mjs'));
 check('npm check incluye la verificación de documentación', scripts.check.includes('check:docs'));
+check('Las builds normales y con checks reducidos ejecutan la auditoría local de GitHub',
+    scripts.check.includes('check:github-security')
+        && read('linux/build.sh').includes('npm run check:github-security')
+        && read('linux/build-windows.sh').includes('npm run check:github-security')
+        && read('windows/build.ps1').includes("'check:github-security'"));
+check('El escáner zizmor produce SARIF sobre .github y distingue notas informativas',
+    read('scripts/verify-github-security.mjs').includes("'--format', 'sarif', '--collect=all', '.github'")
+        && read('scripts/verify-github-security.mjs').includes("['note', 'none']")
+        && read('scripts/verify-github-security.mjs').includes('LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS'));
+check('GitHub vuelve a escanear en cambios y publica resultados SARIF de zizmor',
+    read('.github/workflows/workflow-security.yml').includes('pull_request:')
+        && read('.github/workflows/workflow-security.yml').includes('security-events: write')
+        && read('.github/workflows/workflow-security.yml').includes('zizmorcore/zizmor-action@'));
 check('npm check ancla documentación y flujo al código', scripts.check.includes('check:flows') && read('scripts/verify-flow-documentation.mjs').includes('security::verify_signature'));
 check('npm check concentra la documentación en README', !scripts.check.includes('check:source-index') && !scripts.check.includes('generate:source-index') && read('scripts/verify-flow-documentation.mjs').includes("read('README.md')"));
 check('npm check incluye la política de codificación UTF-8', scripts.check.includes('check:encoding') && scripts['check:encoding'].includes('verify-encoding.mjs'));
 check('npm check incluye la verificación de traducciones dinámicas', scripts.check.includes('check:i18n') && read('scripts/verify-i18n.mjs').includes('dynamicActionIds'));
 check('npm check prueba contratos cruzados y lógica frontend ejecutable', scripts.check.includes('check:contracts') && scripts.check.includes('test:frontend-logic'));
 check('npm check prueba el validador del informe E2E', scripts.check.includes('test:e2e-report'));
+check('El validador acepta y verifica los informes E2E enfocados de matriz de shells',
+    read('scripts/verify-e2e-report.mjs').includes("report.focusedScenario === 'environment-shell-matrix'")
+        && read('scripts/test-e2e-report.mjs').includes('focusedShellMatrix'));
 check('npm check prueba la actualización no destructiva de hashes', scripts.check.includes('test:release-hash') && read('scripts/test-release-hash.mjs').includes('se conservan las variantes'));
+check('La publicación combina Linux y Windows en un manifiesto determinista antes de firmarlo', scripts.check.includes('test:release-manifest') && read('scripts/create-release-manifest.mjs').includes('SHA256SUMS.txt') && read('.github/workflows/release.yml').includes('needs: [linux, windows]'));
 check('npm check prueba firma Ed25519 y detecta alteraciones', scripts.check.includes('test:release-signature') && read('scripts/sign-release-manifest.mjs').includes('createPrivateKey') && read('src-tauri/src/updater/security.rs').includes('UnparsedPublicKey'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));
 check('npm check incluye clippy con warnings como errores', scripts.check.includes('clippy') && scripts.check.includes('-D warnings'));
@@ -450,11 +469,19 @@ check('Smoke E2E prueba varias shells con comandos reales y restaura la shell in
         && smoke.includes('exerciseShellMatrix')
         && smoke.includes('environment-probe')
         && smoke.includes('environment-probe-skipped')
-        && smoke.includes('markerOccurrences >= 2')
+        && smoke.includes('probeOutputMarkerRows(output ?? \'\', probe.command, marker)')
+        && read('scripts/e2e-environment-probes.mjs').includes('probeOutputContainsMarker')
+        && read('scripts/e2e-environment-probes.mjs').includes('probeOutputMarkerRows')
         && smoke.includes('environment-shell-matrix')
         && smoke.includes('environment-switch-restore')
         && smoke.includes('availableOptions.map')
         && smoke.includes('safeEnvironmentMarker')
+        && smoke.includes('document.activeElement === arguments[0]')
+        && smoke.includes("return 'verified-pointer-fallback'")
+        && smoke.includes('terminalFocusMethod')
+        && smoke.includes("id === 'lang:kotlin'")
+        && smoke.includes("id === 'wine-cmd'")
+        && smoke.includes('no scripting plugin loaded')
         && smoke.includes('originalCaptureLabel')
         && smoke.includes('shell-matrix-${process.platform}-original-selected')
         && toolbar.includes('data-testid="environment-option"'));
@@ -467,12 +494,15 @@ check('Las sondas de entorno cubren todos los REPL del catálogo o explican un d
         && read('scripts/e2e-environment-probes.mjs').includes('serviceBackedRepls')
         && read('scripts/test-e2e-environment-probes.mjs').includes('allLanguageIds.length, 91')
         && e2eReportVerifier.includes('availableIds.some((id) => !accountedIds.includes(id))'));
-check('La matriz distingue shells REPL y reconoce sus prompts propios (Nushell y xonsh)',
+check('La matriz reconoce prompts especiales de shells y REPLs, con edición de entrada probada',
     read('scripts/e2e-environment-probes.mjs').includes('interactiveReplShellIds')
         && smoke.includes("probe?.kind === 'repl'")
         && read('src/components/TerminalPane.svelte').includes('interactiveReplPromptIsVisible')
-        && read('src/lib/terminal-prompt.ts').includes("environmentId !== 'nu' && environmentId !== 'xonsh'")
+        && read('src/components/TerminalPane.svelte').includes('interactiveReplInputLine')
+        && ['specialReplPrompts', 'tcl:', 'maxima:', "'common-lisp-sbcl':", "'swi-prolog':", 'forth:']
+            .every((marker) => read('src/lib/terminal-prompt.ts').includes(marker))
         && read('scripts/test-frontend-logic.mjs').includes('prompt derecho')
+        && read('scripts/test-frontend-logic.mjs').includes('el espejo omite el prompt y conserva la línea editable')
         && read('scripts/test-frontend-logic.mjs').includes('backend dumb sin prompt_toolkit'));
 check('La actualización de AppImage vuelve a habilitar ejecución en Linux',
     read('src-tauri/src/updater/commands.rs').includes('make_appimage_executable')

@@ -5,6 +5,7 @@
 //! proceso hijo si el padre es una app GUI, así que todas las llamadas pasan
 //! por aquí para aplicar `CREATE_NO_WINDOW`.
 
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
@@ -19,27 +20,86 @@ use crate::platform::traits::ProcessPlatform;
 const APPIMAGE_PRIVATE_ENV: &[&str] = &[
     "APPDIR",
     "APPIMAGE",
+    "APPIMAGE_EXTRACT_AND_RUN",
     "ARGV0",
     "LD_AUDIT",
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
+    // linuxdeploy's AppRun exports these for the application process itself.
+    // If a host Python tool (notably xonsh) inherits them, it tries to load
+    // the AppImage's private stdlib and fails before its prompt is created.
+    "PYTHONHOME",
+    "PYTHONPATH",
 ];
 
 fn running_from_appimage() -> bool {
     std::env::var_os("APPIMAGE").is_some()
+        || std::env::var_os("APPDIR").is_some()
+        || std::env::var("APPIMAGE_EXTRACT_AND_RUN").as_deref() == Ok("1")
         || std::env::var("LD_LIBRARY_PATH")
             .ok()
-            .is_some_and(|value| value.contains("/tmp/.mount_"))
+            .is_some_and(|value| contains_appimage_runtime_path(&value))
+        || std::env::var("PYTHONHOME")
+            .ok()
+            .is_some_and(|value| contains_appimage_runtime_path(&value))
+}
+
+fn contains_appimage_runtime_path(value: &str) -> bool {
+    value.contains("/.mount_") || value.contains("/appimage_extracted_")
+}
+
+/// AppImage's extract-and-run wrapper does not reliably export APPDIR. Its
+/// PythonHOME still points to `<extraction>/usr`, which lets us identify the
+/// private executable directories to remove from children as well.
+fn appimage_directory() -> Option<std::ffi::OsString> {
+    appimage_directory_from(std::env::var_os("APPDIR"), std::env::var_os("PYTHONHOME"))
+}
+
+fn appimage_directory_from(
+    appdir: Option<std::ffi::OsString>,
+    python_home: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    appdir.or_else(|| {
+        let path = Path::new(python_home.as_deref()?);
+        (path.file_name() == Some(std::ffi::OsStr::new("usr")))
+            .then(|| path.parent().map(|parent| parent.as_os_str().to_owned()))
+            .flatten()
+    })
 }
 
 /// Entorno que pueden heredar comandos y shells. Un AppImage monta sus
-/// bibliotecas privadas en `/tmp/.mount_*`; heredarlas hace que binarios del
-/// sistema como git carguen una versión incompatible de libpcre2.
+/// bibliotecas, rutas de ejecutables y Python privados; heredarlos puede hacer
+/// que herramientas del host carguen librerías incompatibles o que xonsh use
+/// una biblioteca estándar que no existe dentro del AppDir.
 pub fn child_environment() -> Vec<(String, String)> {
     let isolate_appimage = running_from_appimage();
+    let appdir = isolate_appimage.then(appimage_directory).flatten();
     std::env::vars()
         .filter(|(key, _)| !isolate_appimage || !APPIMAGE_PRIVATE_ENV.contains(&key.as_str()))
+        .map(|(key, value)| {
+            let value = if key == "PATH" {
+                appdir
+                    .as_deref()
+                    .map(|appdir| strip_appdir_paths(&value, appdir))
+                    .unwrap_or(value)
+            } else {
+                value
+            };
+            (key, value)
+        })
         .collect()
+}
+
+/// Reduce a PATH to entries outside the AppDir. Kept separate from process
+/// state so the relocation behavior can be tested without mutating global env.
+fn strip_appdir_paths(value: &str, appdir: &std::ffi::OsStr) -> String {
+    let appdir = Path::new(appdir);
+    let host_paths = std::env::split_paths(value)
+        .filter(|entry| !entry.starts_with(appdir))
+        .collect::<Vec<_>>();
+    std::env::join_paths(host_paths)
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| value.to_owned())
 }
 
 /// Aplica el aislamiento al `Command` normal de Rust. Los procesos creados
@@ -50,6 +110,29 @@ pub fn sanitize_child_environment(command: &mut Command) {
         for key in APPIMAGE_PRIVATE_ENV {
             command.env_remove(key);
         }
+        if let (Some(appdir), Ok(path)) = (appimage_directory(), std::env::var("PATH")) {
+            command.env("PATH", strip_appdir_paths(&path, &appdir));
+        }
+    }
+}
+
+/// El `CommandBuilder` de `portable-pty` precarga el entorno global. Añadirle
+/// solo las variables saneadas no basta: las variables omitidas siguen dentro
+/// de su mapa base. Hay que quitarlas explícitamente antes de arrancar shells.
+pub fn sanitize_pty_child_environment(command: &mut portable_pty::CommandBuilder) {
+    if !running_from_appimage() {
+        return;
+    }
+
+    remove_appimage_private_environment_from_pty(command);
+    if let (Some(appdir), Ok(path)) = (appimage_directory(), std::env::var("PATH")) {
+        command.env("PATH", strip_appdir_paths(&path, &appdir));
+    }
+}
+
+fn remove_appimage_private_environment_from_pty(command: &mut portable_pty::CommandBuilder) {
+    for key in APPIMAGE_PRIVATE_ENV {
+        command.env_remove(key);
     }
 }
 
@@ -232,6 +315,62 @@ mod tests {
     fn las_variables_privadas_del_appimage_son_conocidas_y_acotadas() {
         assert!(APPIMAGE_PRIVATE_ENV.contains(&"LD_LIBRARY_PATH"));
         assert!(APPIMAGE_PRIVATE_ENV.contains(&"APPIMAGE"));
+        assert!(APPIMAGE_PRIVATE_ENV.contains(&"APPIMAGE_EXTRACT_AND_RUN"));
+        assert!(APPIMAGE_PRIVATE_ENV.contains(&"PYTHONHOME"));
+        assert!(APPIMAGE_PRIVATE_ENV.contains(&"PYTHONPATH"));
         assert!(!APPIMAGE_PRIVATE_ENV.contains(&"PATH"));
+    }
+
+    #[test]
+    fn el_pty_quita_del_entorno_base_las_variables_privadas_del_appimage() {
+        let mut command = portable_pty::CommandBuilder::new("xonsh");
+        for key in APPIMAGE_PRIVATE_ENV {
+            command.env(key, "valor-privado-de-prueba");
+        }
+
+        remove_appimage_private_environment_from_pty(&mut command);
+
+        for key in APPIMAGE_PRIVATE_ENV {
+            assert!(command.get_env(key).is_none(), "{key} sigue en el PTY");
+        }
+    }
+
+    #[test]
+    fn una_shell_del_appimage_conserva_path_del_host_y_no_hereda_el_appdir() {
+        let appdir = std::env::temp_dir().join("LTerminal.AppDir");
+        let private_bin = appdir.join("usr").join("bin");
+        let host_bins = [
+            std::env::temp_dir().join("host-tools"),
+            std::env::temp_dir().join("system-bin"),
+        ];
+        let original =
+            std::env::join_paths([private_bin, host_bins[0].clone(), host_bins[1].clone()])
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+
+        let sanitized = strip_appdir_paths(&original, appdir.as_os_str());
+        let entries = std::env::split_paths(std::ffi::OsStr::new(&sanitized)).collect::<Vec<_>>();
+
+        assert_eq!(entries, host_bins);
+    }
+
+    #[test]
+    fn appimage_extract_and_run_se_puede_identificar_desde_pythonhome() {
+        let appdir = std::env::temp_dir().join("appimage_extracted_regression");
+        let python_home = appdir.join("usr");
+        let identified = appimage_directory_from(None, Some(python_home.into_os_string()));
+        assert_eq!(identified.as_deref(), Some(appdir.as_os_str()));
+    }
+
+    #[test]
+    fn detecta_las_rutas_temporales_de_appimage_montado_y_extraido() {
+        assert!(contains_appimage_runtime_path(
+            "/tmp/.mount_LTerminal/usr/lib"
+        ));
+        assert!(contains_appimage_runtime_path(
+            "/tmp/appimage_extracted_1234/usr"
+        ));
+        assert!(!contains_appimage_runtime_path("/opt/python/usr"));
     }
 }

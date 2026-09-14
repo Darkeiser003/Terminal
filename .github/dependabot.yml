@@ -4,6 +4,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       tauri-plugins:
         applies-to: version-updates
@@ -28,6 +30,8 @@ updates:
     directory: /src-tauri
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       tauri-ecosystem:
         applies-to: version-updates
@@ -46,6 +50,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions-minor-patch:
         applies-to: version-updates

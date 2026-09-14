@@ -540,7 +540,15 @@ el aviso, y la instalación vuelve a comprobar la firma, descarga el paquete y
 exige una coincidencia exacta de SHA-256 antes de extraer o aplicar el payload.
 Una release oficial falla si no recibe
 `LTERMINAL_SIGNING_PRIVATE_KEY` en el entorno de CI. La clave privada nunca se
-guarda en el repositorio.
+guarda en el repositorio ni se entrega a los jobs que compilan los binarios.
+
+El workflow de publicación compila Linux y Windows sin permisos de escritura
+ni acceso a la clave privada. Después de que ambos builds suban sus artefactos,
+un único job reúne los archivos, genera un manifiesto SHA-256 común y lo firma
+con Ed25519 antes de adjuntar todo a la release. Así se evita que dos jobs
+reemplacen entre sí el manifiesto o su firma; solo el job final recibe
+`contents: write` y la clave privada. La clave pública se pasa también a los
+builds para incrustarla en el actualizador.
 
 En una máquina de desarrollo, `linux/build.sh` carga automáticamente esas dos
 claves desde `~/.config/lterminal/release-signing-private.pem` y
@@ -1064,12 +1072,28 @@ fallo no se vería hasta escribir el panel que lo necesitaba.
 Los workflows de GitHub Actions separan las comprobaciones por superficie:
 CodeQL analiza el código Rust, TypeScript/JavaScript y los workflows; Gitleaks
 busca secretos; `actionlint` y zizmor revisan sintaxis y seguridad de Actions;
+el preflight local también comprueba que cada acción esté fijada a un SHA,
+que checkout no conserve credenciales, que los permisos de publicación sean
+mínimos y que no se restaure caché en la publicación. `npm run check:github-security`
+ejecuta estas reglas y vuelve a lanzar `actionlint`/zizmor si están instalados;
+las builds rápidas mantienen esta comprobación aunque se omita el resto de tests.
+El verificador local es de solo lectura: no reescribe workflows ni cierra avisos
+remotos. Tras corregirlos, la ejecución de CI vuelve a analizar y subir SARIF, y
+GitHub actualiza el estado de Code Scanning. Define
+`LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS=1` para hacer fallar también el control
+local si falta alguno de esos dos escáneres.
 CI ejecuta `npm audit`, `cargo audit` y `cargo deny`; Dependency Review compara
 los cambios de dependencias de cada PR con el aviso de vulnerabilidades y la
 política de licencias; OpenSSF Scorecard revisa semanalmente las prácticas de
 seguridad del repositorio. Los resultados SARIF se publican en Code Scanning.
-Dependabot agrupa actualizaciones minor/patch por ecosistema y mantiene las
-major separadas para poder revisarlas antes de integrarlas.
+Dependabot agrupa actualizaciones minor/patch por ecosistema y aplica un
+periodo explícito de siete días antes de las actualizaciones de versión; las
+versiones major quedan separadas para poder revisarlas antes de integrarlas.
+
+Scorecard también informa sobre la licencia y el distintivo OpenSSF Best
+Practices. Se mantienen pendientes por una razón deliberada: los manifiestos
+declaran `UNLICENSED`, y no se debe elegir una licencia ni afirmar un distintivo
+que el proyecto aún no haya obtenido automáticamente.
 
 No se conserva el workflow de ejemplo de APIsec: apuntaba al proyecto de
 prueba `VAmPI`, mientras que LTerminal es una aplicación de escritorio y no

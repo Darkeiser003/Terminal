@@ -16,8 +16,8 @@
     import * as perf from '../lib/performance';
     import { retryUntilReady } from '../lib/terminal-ready';
     import { normalizeWheelDelta } from '../lib/terminal-scroll';
-    import { longestVisibleLogicalLineWidth } from '../lib/terminal-columns';
-    import { interactiveReplPromptIsVisible } from '../lib/terminal-prompt';
+    import { longestVisibleLogicalLineWidth, occupiedTerminalColumns } from '../lib/terminal-columns';
+    import { interactiveReplInputLine, interactiveReplPromptIsVisible } from '../lib/terminal-prompt';
     import { cursorInactiveStyle, cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
     import type { Environment, Preferences } from '../lib/types';
@@ -702,7 +702,9 @@
             terminal.rows,
             (row) => {
                 const line = buffer.getLine(row);
-                let columns = Math.min(MAX_HORIZONTAL_COLS, line?.translateToString(true).length ?? 0);
+                let columns = line
+                    ? occupiedTerminalColumns(line, terminal.cols, MAX_HORIZONTAL_COLS)
+                    : 0;
                 if (row === cursorAbsoluteRow) {
                     // `translateToString(true)` recorta los espacios finales. En
                     // una línea que solo contiene espacios la posición del cursor
@@ -727,7 +729,7 @@
         const firstRow = buffer.viewportY;
         for (let row = 0; row < term.rows; row += 1) {
             const line = buffer.getLine(firstRow + row);
-            if ((line?.translateToString(true).length ?? 0) > visibleCols) return true;
+            if (line && occupiedTerminalColumns(line, term.cols, MAX_HORIZONTAL_COLS) > visibleCols) return true;
         }
         return false;
     }
@@ -1215,6 +1217,9 @@
         const cursorRow = buffer.baseY + buffer.cursorY;
         const line = buffer.getLine(cursorRow)?.translateToString(true).trimEnd() ?? '';
         if (!line) return null;
+        const environmentId = app.tabs.find((tab) => tab.id === tabId)?.envId;
+        const replInput = interactiveReplInputLine(line, environmentId);
+        if (replInput !== null) return replInput;
         const promptEnd = Math.max(
             line.lastIndexOf('❯'),
             line.lastIndexOf('>'),

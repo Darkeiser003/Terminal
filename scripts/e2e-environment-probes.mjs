@@ -20,16 +20,16 @@ const replCommands = {
     quickjs: (m) => `print('${m}')`,
     'v8-shell': (m) => `print('${m}')`,
     ruby: (m) => `puts '${m}'`,
-    java: (m) => `System.out.println('${m}');`,
-    php: (m) => `echo '${m}\\n';`,
+    java: (m) => `System.out.println("${m}");`,
+    php: (m) => `echo '${m}' . PHP_EOL;`,
     lua: (m) => `print('${m}')`,
     luajit: (m) => `print('${m}')`,
     r: (m) => `cat('${m}\\n')`,
     groovy: (m) => `println '${m}'`,
-    perl: (m) => `print '${m}\\n'`,
-    julia: (m) => `println('${m}')`,
-    kotlin: (m) => `println('${m}')`,
-    csharp: (m) => `Console.WriteLine('${m}');`,
+    perl: (m) => `print "${m}\\n"`,
+    julia: (m) => `println("${m}")`,
+    kotlin: (m) => `println("${m}")`,
+    csharp: (m) => `Console.WriteLine("${m}");`,
     fsharp: (m) => `printfn "${m}";;`,
     haskell: (m) => `putStrLn "${m}"`,
     scala: (m) => `println("${m}")`,
@@ -80,7 +80,7 @@ const replCommands = {
     picat: (m) => `writeln('${m}').`,
     logtalk: (m) => `write('${m}'), nl.`,
     mercury: (m) => `io.write_string("${m}\\n", !IO).`,
-    forth: (m) => `." ${m}"`,
+    forth: (m) => `." ${m}" cr`,
     fennel: (m) => `(print "${m}")`,
     janet: (m) => `(print "${m}")`,
     purescript: (m) => `log "${m}"`,
@@ -90,8 +90,37 @@ const replCommands = {
     wolfram: (m) => `Print["${m}"]`,
     matlab: (m) => `disp('${m}')`,
     smalltalk: (m) => `Transcript show: '${m}'; cr.`,
-    postscript: (m) => `(${m}) print flush`,
+    postscript: (m) => `(${m}) print (\\n) print flush`,
 };
+
+/** Summarize terminal rows without retaining or logging arbitrary user output. */
+export function probeOutputMarkerRows(output, command, marker) {
+    const rows = Array.isArray(output) ? output : String(output ?? '').split('\n');
+    return rows.map((row) => {
+        const clean = String(row ?? '')
+            .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+            .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+            .replace(/\r/g, '')
+            .normalize('NFKC');
+        // WebDriver can flatten all xterm rows into one string. Eliminar el
+        // comando completo (incluidos sus ecos en errores de compilación)
+        // antes de buscar el marcador distingue la salida real del eco.
+        const outputOnly = command ? clean.split(command).join(' ') : clean;
+        const line = outputOnly.trim();
+        return {
+            length: clean.length,
+            containsMarker: clean.includes(marker),
+            commandEcho: Boolean(command) && clean.includes(command),
+            markerAfterEchoRemoval: line.includes(marker),
+        };
+    }).slice(-8);
+}
+
+/** True only when the unique marker appears in output, not just in echoed code. */
+export function probeOutputContainsMarker(output, command, marker) {
+    return probeOutputMarkerRows(output, command, marker)
+        .some((row) => row.markerAfterEchoRemoval);
+}
 
 export function languageIdForEnvironment(id) {
     if (id.startsWith('plugin:lang:')) return id.slice('plugin:lang:'.length);

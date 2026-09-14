@@ -90,7 +90,7 @@ for (const file of resourceFiles) {
 }
 
 const zipProbe = spawnSync('zip', ['-v'], { encoding: 'utf8', stdio: 'ignore' });
-if (zipProbe.error || zipProbe.status !== 0) {
+if (zipProbe.status !== 0) {
     throw new Error('La herramienta zip no está disponible o no se puede ejecutar correctamente. Instálala antes de compilar.');
 }
 
@@ -155,11 +155,11 @@ try {
         cwd: stagedPortable,
         encoding: 'utf8',
     });
-    if (zip.error || zip.status !== 0) {
+    if (zip.status !== 0) {
         throw new Error(`No se pudo crear el ZIP portable: ${zip.error?.message ?? zip.stderr ?? zip.status}`);
     }
     const zipTest = spawnSync('zip', ['-T', stagedArchive], { encoding: 'utf8' });
-    if (zipTest.error || zipTest.status !== 0) {
+    if (zipTest.status !== 0) {
         throw new Error(`El ZIP generado no superó su prueba de integridad: ${zipTest.stderr ?? zipTest.status}`);
     }
 
@@ -171,7 +171,7 @@ try {
         '--artifact', archiveName,
         '--hash', digest,
     ], { encoding: 'utf8' });
-    if (updateHash.error || updateHash.status !== 0) {
+    if (updateHash.status !== 0) {
         throw new Error(`No se pudo actualizar SHA256SUMS.txt: ${updateHash.stderr ?? updateHash.error?.message ?? updateHash.status}`);
     }
 

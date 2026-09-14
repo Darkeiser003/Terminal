@@ -188,6 +188,7 @@ where
     for (key, value) in crate::process::child_environment() {
         command.env(key, value);
     }
+    crate::process::sanitize_pty_child_environment(&mut command);
     command.env("TERM", "xterm-256color");
 
     let child = pair.slave.spawn_command(command)?;

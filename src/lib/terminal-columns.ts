@@ -3,6 +3,46 @@ export interface TerminalRowWidth {
     isWrapped: boolean;
 }
 
+export interface TerminalBufferCell {
+    getChars(): string;
+    getWidth(): number;
+}
+
+export interface TerminalBufferLine {
+    length: number;
+    getCell(index: number): TerminalBufferCell | undefined;
+}
+
+/**
+ * Devuelve las columnas ocupadas por el contenido visible de una fila.
+ * `String.length` cuenta unidades UTF-16, no celdas de terminal: por ejemplo,
+ * un carácter CJK ocupa dos columnas aunque su longitud sea uno. Se ignoran
+ * espacios finales como en `translateToString(true)` y se limita la lectura a
+ * las columnas actuales, ya que xterm puede conservar celdas tras un resize.
+ */
+export function occupiedTerminalColumns(
+    line: TerminalBufferLine,
+    currentColumns: number,
+    maxColumns = 2048,
+): number {
+    const integer = (value: number, fallback: number) => Number.isFinite(value) ? Math.floor(value) : fallback;
+    const safeMaxColumns = Math.max(0, integer(maxColumns, 2048));
+    const safeCurrentColumns = Math.max(0, integer(currentColumns, 0));
+    const limit = Math.min(safeMaxColumns, safeCurrentColumns, Math.max(0, integer(line.length, 0)));
+    let occupied = 0;
+
+    for (let column = 0; column < limit; column += 1) {
+        const cell = line.getCell(column);
+        if (!cell) continue;
+        const chars = cell.getChars();
+        if (!chars || /^\s+$/u.test(chars)) continue;
+        const width = Math.max(0, integer(cell.getWidth(), 0));
+        if (width === 0) continue;
+        occupied = Math.min(limit, column + width);
+    }
+    return occupied;
+}
+
 /**
  * Mide el ancho lógico máximo que realmente se ve en la ventana de xterm.
  * Las filas blandamente envueltas se reconstruyen como una sola línea, pero

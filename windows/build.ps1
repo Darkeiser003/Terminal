@@ -1190,6 +1190,11 @@ if (-not $SkipChecks) {
     }
     Write-Ok 'Todo verde'
 } else {
+    Write-Step 'Ejecutando la auditoría mínima de workflows de GitHub'
+    $securityCheckCode = Invoke-Native 'npm' @('run', 'check:github-security') -CaptureOutput
+    if ($securityCheckCode -ne 0) {
+        throw "La auditoría de workflows de GitHub falló (código $securityCheckCode)."
+    }
     Write-Warn 'Comprobaciones saltadas por peticion (-SkipChecks)'
 }
 
@@ -1755,7 +1760,11 @@ if ($Installer) {
     Write-Ok "SHA256 instalador: $installerHash"
 }
 
-$signingRequired = ($env:LTERMINAL_REQUIRE_SIGNING -match '^(1|true|yes)$') -or ($env:CI -match '^(1|true|yes)$')
+$signingRequired = if (-not [string]::IsNullOrWhiteSpace($env:LTERMINAL_REQUIRE_SIGNING)) {
+    $env:LTERMINAL_REQUIRE_SIGNING -match '^(1|true|yes)$'
+} else {
+    $env:CI -match '^(1|true|yes)$'
+}
 if ($env:LTERMINAL_SIGNING_PRIVATE_KEY) {
     $signatureCode = Invoke-Native 'node' @(
         'scripts/sign-release-manifest.mjs',

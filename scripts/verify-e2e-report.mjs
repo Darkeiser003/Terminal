@@ -17,6 +17,59 @@ if (report.status !== 'passed') {
 if (report.logValidated !== true) throw new Error('El E2E no validó el log de su propia ejecución.');
 if (!Number.isFinite(report.durationMs) || report.durationMs <= 0) throw new Error('El E2E no registró una duración válida.');
 
+if (report.focusedScenario === 'environment-shell-matrix') {
+    const events = Array.isArray(report.events) ? report.events : [];
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const matrix = events.find((event) => event?.type === 'environment-shell-matrix');
+    const availableIds = Array.isArray(matrix?.availableIds) ? matrix.availableIds : [];
+    const testedIds = Array.isArray(matrix?.testedIds) ? matrix.testedIds : [];
+    const skipped = Array.isArray(matrix?.skipped) ? matrix.skipped : [];
+    const probes = events.filter((event) => event?.type === 'environment-probe');
+    const probeSkips = events.filter((event) => event?.type === 'environment-probe-skipped');
+    const restore = events.find((event) => event?.type === 'environment-switch-restore');
+    const successfulIds = new Set(probes.filter((event) => event.passed === true
+        && event.startupClean === true
+        && event.markerOutputDetected === true
+        && ['native-click', 'verified-pointer-fallback'].includes(event.terminalFocusMethod)
+        && ['shell', 'repl'].includes(event.kind)).map((event) => event.id));
+    const skippedIds = skipped.map((entry) => entry?.id);
+    const accountedIds = [...testedIds, ...skippedIds];
+    const expectedAlternates = testedIds.filter((id) => id !== matrix?.originalId);
+    const captures = new Set((report.captures ?? []).map((capture) => capture?.label));
+
+    if (!phases.has('arranque de interfaz') || !phases.has('cambio de shell')
+        || !matrix || matrix.passed !== true
+        || !Array.isArray(matrix.availableIds) || availableIds.length === 0
+        || !Array.isArray(matrix.testedIds) || !Array.isArray(matrix.skipped)
+        || matrix.originalSource !== 'aria-selected/class'
+        || matrix.restoredTo !== matrix.originalId
+        || new Set(availableIds).size !== availableIds.length
+        || new Set(testedIds).size !== testedIds.length
+        || new Set(skippedIds).size !== skippedIds.length
+        || new Set(accountedIds).size !== accountedIds.length
+        || accountedIds.length !== availableIds.length
+        || availableIds.some((id) => !accountedIds.includes(id))
+        || testedIds.length !== probes.length
+        || testedIds.some((id) => !successfulIds.has(id))
+        || skipped.length !== probeSkips.length
+        || skipped.some((entry) => !entry?.reason?.trim()
+            || !probeSkips.some((event) => event.id === entry.id && event.reason === entry.reason))
+        || JSON.stringify(matrix.testedAlternates) !== JSON.stringify(expectedAlternates)
+        || matrix.probeCount !== probes.length
+        || matrix.shellProbeCount !== probes.filter((event) => event.kind === 'shell').length
+        || matrix.replProbeCount !== probes.filter((event) => event.kind === 'repl').length
+        || !restore || restore.passed !== true || restore.to !== matrix.originalId
+        || (matrix.originalId === 'fish' && restore.restoredFish !== true)
+        || !captures.has(matrix.originalCaptureLabel) || !captures.has(matrix.captureLabel)) {
+        throw new Error('El E2E enfocado de shells no probó/restauró todos los entornos o carece de capturas verificables.');
+    }
+    await new Promise((resolve) => process.stdout.write(
+        `Informe E2E enfocado validado: ${probes.length} shells/REPLs probados, ${skipped.length} omisiones explicadas y shell original restaurada.\n`,
+        resolve,
+    ));
+    process.exit(0);
+}
+
 const requiredPhases = [
     'arranque de interfaz',
     'selección de texto mediante arrastre real',
@@ -90,7 +143,8 @@ const probeIds = environmentProbes.map((event) => event.id);
 const probeSkipIds = probeSkips.map((event) => event.id);
 const successfulProbeIds = new Set(environmentProbes
     .filter((event) => event.passed === true && event.startupClean === true
-        && Number.isFinite(event.markerOccurrences) && event.markerOccurrences >= 2
+        && event.markerOutputDetected === true
+        && ['native-click', 'verified-pointer-fallback'].includes(event.terminalFocusMethod)
         && ['shell', 'repl'].includes(event.kind))
     .map((event) => event.id));
 const skippedIds = skipped.map((event) => event?.id);
@@ -166,6 +220,18 @@ const minimumSplit = events.find((event) => event?.type === 'multi-pane-minimum'
 if (!minimumSplit || minimumSplit.passed !== true || minimumSplit.geometryValid !== true
     || minimumSplit.paneCount < 2 || minimumSplit.panes?.length < 2) {
     throw new Error('El E2E no demostró una división útil y sin solapamientos en el tamaño mínimo.');
+}
+
+const splitColumns = events.find((event) => event?.type === 'split-terminal-columns-minimal');
+if (!splitColumns || splitColumns.passed !== true || splitColumns.panes?.length !== 2
+    || splitColumns.panes.some((pane) => !Number.isFinite(pane.cols)
+        || !Number.isFinite(pane.visibleCols)
+        || !Number.isFinite(pane.hostWidth)
+        || !Number.isFinite(pane.hostScrollWidth)
+        || pane.hostWidth <= 0
+        || pane.cols > pane.visibleCols + 1
+        || pane.hostScrollWidth > pane.hostWidth + 2)) {
+    throw new Error('El E2E no demostró columnas mínimas y ausencia de espacio horizontal sobrante en ambos paneles divididos.');
 }
 
 const responsiveMinimum = events.find((event) => event?.type === 'responsive-minimum');

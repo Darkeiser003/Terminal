@@ -103,7 +103,6 @@ try {
         },
         timeout: 15000,
     });
-    assert.equal(result.error, undefined, `No se pudo ejecutar el limpiador: ${result.error?.message}`);
     assert.equal(result.status, 0, `El limpiador terminó con ${result.status}:\n${result.stdout}\n${result.stderr}`);
     if (activeAppImageProcess) {
         assert.match(result.stdout, /Se conserva AppImage de LTerminal activo/);
@@ -138,7 +137,7 @@ try {
         encoding: 'utf8',
         timeout: 10000,
     });
-    if (!powerShellProbe.error && powerShellProbe.status === 0) {
+    if (powerShellProbe.status === 0) {
         const psProject = join(fixture, 'powershell-project');
         const psScripts = join(psProject, 'scripts');
         const psRelease = join(psProject, 'release');
@@ -175,7 +174,6 @@ try {
             },
             timeout: 15000,
         });
-        assert.equal(psResult.error, undefined, `No se pudo ejecutar el limpiador PowerShell: ${psResult.error?.message}`);
         assert.equal(psResult.status, 0, `El limpiador PowerShell terminó con ${psResult.status}:\n${psResult.stdout}\n${psResult.stderr}`);
         await assert.rejects(lstat(psBuildTemp), { code: 'ENOENT' }, 'PowerShell limpia el staging propio de descargas Windows');
         assert.equal(await readFile(join(psRelease, 'WinSlimTerminal-1.0.0.zip'), 'utf8'), 'published release\n', 'PowerShell conserva release/');

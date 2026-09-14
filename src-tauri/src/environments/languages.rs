@@ -76,8 +76,8 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "perl", label: "Perl", windows_exe: "perl", unix_exe: "perl", args: &["-de1"],
         note: Some("Perl no incluye un REPL propio: se abre su depurador interactivo.") },
     LanguageDef { id: "julia", label: "Julia", windows_exe: "julia", unix_exe: "julia", args: &[], note: None },
-    LanguageDef { id: "kotlin", label: "Kotlin", windows_exe: "kotlinc", unix_exe: "kotlinc", args: &[],
-        note: Some("kotlinc sin archivo abre el intérprete interactivo.") },
+    LanguageDef { id: "kotlin", label: "Kotlin", windows_exe: "kotlinc", unix_exe: "kotlinc", args: &["-Xrepl"],
+        note: Some("Kotlin 2.2 o posterior requiere -Xrepl para habilitar el intérprete; algunas distribuciones omiten el plugin de scripting.") },
     LanguageDef { id: "csharp", label: "C#", windows_exe: "csi", unix_exe: "csi", args: &[],
         note: Some("Requiere C# Interactive (csi), incluido con algunos SDK y herramientas .NET.") },
     LanguageDef { id: "fsharp", label: "F#", windows_exe: "dotnet", unix_exe: "dotnet", args: &["fsi"],
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn se_conservan_los_argumentos_y_la_nota_de_cada_lenguaje() {
-        let (is_installed, resolve_path) = probe_with(&["php", "perl", "lua"]);
+        let (is_installed, resolve_path) = probe_with(&["php", "perl", "lua", "kotlinc"]);
         let envs = detect_language_environments(
             "linux",
             &Probe {
@@ -456,6 +456,14 @@ mod tests {
         let lua = envs.iter().find(|env| env.id == "lang:lua").unwrap();
         assert!(lua.args.is_empty());
         assert_eq!(lua.note, None);
+
+        let kotlin = envs.iter().find(|env| env.id == "lang:kotlin").unwrap();
+        assert_eq!(kotlin.args, vec!["-Xrepl".to_string()]);
+        assert!(kotlin
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("plugin de scripting"));
     }
 
     #[test]

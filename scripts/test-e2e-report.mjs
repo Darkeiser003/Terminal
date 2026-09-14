@@ -42,10 +42,10 @@ const valid = {
         { type: 'terminal-output-repaint', passed: true, trigger: 'pty-output-idle', refreshCount: 1, rowsRefreshed: 24, layoutUnchanged: true, marker: 'LTERMINAL_OUTPUT_REPAINT_FIXTURE', capture: 'pty-output-repaint-no-layout-event' },
         { type: 'horizontal-help-geometry', passed: true, snapshot: { host: { clientWidth: 400, scrollWidth: 850 }, indicator: { opacity: '1' } }, horizontalWheelProbe: { lineMode: { defaultPrevented: true }, pixelMode: { defaultPrevented: true }, pageMode: { defaultPrevented: true } } },
         { type: 'terminal-columns-reclaim', passed: true, beforeCols: 100, visibleCols: 50, afterCols: 50, hostWidth: 400, hostScrollWidth: 400, historyRetained: true, historyHeight: 800, historyViewportHeight: 400, commands: 24 },
-        { type: 'environment-probe', id: 'bash', kind: 'shell', markerOccurrences: 2, startupClean: true, passed: true },
-        { type: 'environment-probe', id: 'zsh', kind: 'shell', markerOccurrences: 2, startupClean: true, passed: true },
-        { type: 'environment-probe', id: 'fish', kind: 'shell', markerOccurrences: 2, startupClean: true, passed: true },
-        { type: 'environment-probe', id: 'lang:python', kind: 'repl', language: 'python', markerOccurrences: 2, startupClean: true, passed: true },
+        { type: 'environment-probe', id: 'bash', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
+        { type: 'environment-probe', id: 'zsh', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
+        { type: 'environment-probe', id: 'fish', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
+        { type: 'environment-probe', id: 'lang:python', kind: 'repl', language: 'python', markerOutputDetected: true, terminalFocusMethod: 'verified-pointer-fallback', startupClean: true, passed: true },
         { type: 'environment-probe-skipped', id: 'lang:postgresql', kind: 'skip', reason: 'necesita un servicio externo y credenciales' },
         { type: 'environment-shell-matrix', originalId: 'fish', originalSource: 'aria-selected/class', availableIds: ['fish', 'bash', 'zsh', 'lang:python', 'lang:postgresql'], testedIds: ['fish', 'bash', 'zsh', 'lang:python'], testedAlternates: ['bash', 'zsh', 'lang:python'], skipped: [{ id: 'lang:postgresql', kind: 'skip', reason: 'necesita un servicio externo y credenciales' }], probeCount: 4, shellProbeCount: 3, replProbeCount: 1, restoredTo: 'fish', originalCaptureLabel: 'shell-matrix-linux-original-selected', captureLabel: 'shell-matrix-linux-restored', passed: true },
         { type: 'environment-switch-restore', to: 'fish', restoredFish: true, passed: true },
@@ -54,6 +54,10 @@ const valid = {
         { type: 'context-menu', actions: ['cut', 'delete'] },
         { type: 'dependencies', groups: 8, subgroups: 6, repeatedLoads: 3, platformGroup: 'Virtualización' },
         { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
+        { type: 'split-terminal-columns-minimal', passed: true, panes: [
+            { cols: 48, visibleCols: 48, hostWidth: 400, hostScrollWidth: 400 },
+            { cols: 47, visibleCols: 47, hostWidth: 392, hostScrollWidth: 392 },
+        ] },
         { type: 'responsive-minimum', passed: true, configured: { width: 481, height: 271 }, requested: { width: 512, height: 281 }, applied: { width: 513, height: 282 } },
         { type: 'native-window-resize', platform: 'linux', nativeResizeMethod: 'webdriver', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
         { type: 'native-window-resize', platform: 'linux', nativeResizeMethod: 'webdriver', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
@@ -75,8 +79,29 @@ async function run(name, report) {
     return spawnSync(process.execPath, [verifier, path], { encoding: 'utf8' });
 }
 
+const focusedShellMatrix = {
+    ...valid,
+    focusedScenario: 'environment-shell-matrix',
+    phases: [
+        { name: 'driver', durationMs: 10 },
+        { name: 'arranque de interfaz', durationMs: 10 },
+        { name: 'cambio de shell', durationMs: 10 },
+    ],
+    events: valid.events.filter((event) => event.type === 'environment-probe'
+        || event.type === 'environment-probe-skipped'
+        || event.type === 'environment-shell-matrix'
+        || event.type === 'environment-switch-restore'
+        || (event.type === 'phase' && ['arranque de interfaz', 'cambio de shell'].includes(event.name))),
+};
+
 try {
     assert.equal((await run('valid', valid)).status, 0, 'un informe completo debe pasar');
+    assert.equal((await run('focused-shell-matrix', focusedShellMatrix)).status, 0,
+        'un informe enfocado debe validar la cobertura/restauración de su matriz sin exigir las fases ajenas');
+    assert.notEqual((await run('focused-shell-matrix-without-restore', {
+        ...focusedShellMatrix,
+        events: focusedShellMatrix.events.filter((event) => event.type !== 'environment-switch-restore'),
+    })).status, 0, 'un smoke enfocado no debe pasar si no restaura la shell inicial');
     assert.equal((await run('valid-direct-dependency-card', {
         ...valid,
         events: valid.events.map((event) => event.type === 'dependencies'
@@ -124,9 +149,15 @@ try {
     assert.notEqual((await run('echo-without-command-output', {
         ...valid,
         events: valid.events.map((event) => event.type === 'environment-probe' && event.id === 'zsh'
-            ? { ...event, markerOccurrences: 1 }
+            ? { ...event, markerOutputDetected: false }
             : event),
     })).status, 0, 'el eco del comando sin salida evaluada no cuenta como sonda PTY');
+    assert.notEqual((await run('unverified-terminal-focus', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'environment-probe' && event.id === 'zsh'
+            ? { ...event, terminalFocusMethod: 'unverified' }
+            : event),
+    })).status, 0, 'la matriz debe comprobar que el foco del teclado realmente llegó a xterm');
     assert.notEqual((await run('unaccounted-installed-environment', {
         ...valid,
         events: valid.events
@@ -163,6 +194,16 @@ try {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'multi-pane-minimum'),
     })).status, 0, 'falta la evidencia de división útil en el tamaño mínimo');
+    assert.notEqual((await run('missing-split-columns-minimum', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'split-terminal-columns-minimal'),
+    })).status, 0, 'falta la evidencia de ancho mínimo en ambos paneles divididos');
+    assert.notEqual((await run('split-columns-overflow', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'split-terminal-columns-minimal'
+            ? { ...event, panes: event.panes.map((pane, index) => index === 0 ? { ...pane, cols: 80, hostScrollWidth: 900 } : pane) }
+            : event),
+    })).status, 0, 'un panel con columnas y scrollWidth sobrantes debe invalidar el informe');
     assert.notEqual((await run('missing-responsive-minimum', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'responsive-minimum'),

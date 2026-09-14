@@ -21,7 +21,7 @@ const ignoredDirectories = new Set(['target', 'node_modules', 'dist', '.git', 'v
 // El verificador de registros tiene sus propios reintentos y modo warn; si se
 // escanea como documentación volveríamos a consultar las mismas diez URLs y
 // duplicaríamos el coste de cada build.
-const ignoredFiles = new Set(['Cargo.lock', 'verify-install-sources.mjs']);
+const ignoredFiles = new Set(['Cargo.lock', 'verify-install-sources.mjs', 'test-e2e-url-matcher.mjs']);
 // Algunos enlaces aparecen únicamente como destinos de acciones del usuario
 // (abrir una página de descargas/documentación). No son artefactos ni fuentes
 // necesarias para compilar; se siguen comprobando, pero una caída temporal del
@@ -59,6 +59,7 @@ function skipReason(url) {
         const hostname = parsed.hostname;
         if (hostname === 'localhost'
             || hostname.endsWith('.localhost')
+            || hostname.endsWith('.invalid')
             || hostname === '127.0.0.1'
             || hostname === '::1'
             || hostname.includes('*')
@@ -162,7 +163,11 @@ async function checkUrl(url) {
         }
         if (attempt < retries) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
     }
-    return { ok: false, status: 0, error: lastError };
+    // Un 5xx tras agotar los intentos indica indisponibilidad temporal del
+    // servidor/proxy, no una URL rota. Se informa, pero no se bloquea una
+    // compilación reproducible por un incidente remoto.
+    const status = Number(lastError.match(/^HTTP (5\d\d)$/)?.[1] ?? 0);
+    return { ok: false, warning: status >= 500, status, error: lastError };
 }
 
 const files = (await Promise.all(sourceRoots.map(filesUnder))).flat();

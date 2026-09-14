@@ -29,7 +29,7 @@
     "check:assets": "node scripts/verify-runtime-assets.mjs",
     "check:architecture": "node scripts/verify-architecture.mjs",
     "check:build-scripts": "node scripts/verify-build-scripts.mjs",
-    "check:github-security": "node scripts/verify-github-security.mjs",
+    "check:github-security": "node scripts/verify-github-security.mjs --scan",
     "check:workspace": "node scripts/verify-workspace.mjs",
     "metadata:sync": "node scripts/sync-package-metadata.mjs",
     "check:metadata": "node scripts/sync-package-metadata.mjs --check",
@@ -49,12 +49,13 @@
     "test:e2e-url-matcher": "node scripts/test-e2e-url-matcher.mjs",
     "test:e2e-environment-probes": "node scripts/test-e2e-environment-probes.mjs",
     "test:release-hash": "node scripts/test-release-hash.mjs",
+    "test:release-manifest": "node scripts/test-release-manifest.mjs",
     "test:release-signature": "node scripts/test-release-signature.mjs",
     "check:test-surface": "node scripts/verify-test-surface.mjs",
     "check:logic": "node scripts/verify-logic-surface.mjs",
     "check:flows": "node scripts/verify-flow-documentation.mjs",
-    "check:local": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-signature && npm run check:test-surface && npm run check:logic",
-    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-signature && npm run check:test-surface && npm run check:logic && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
+    "check:local": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-manifest && npm run test:release-signature && npm run check:test-surface && npm run check:logic",
+    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-manifest && npm run test:release-signature && npm run check:test-surface && npm run check:logic && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=22.12.0"

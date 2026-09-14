@@ -794,6 +794,8 @@ if [ "$SKIP_CHECKS" -eq 0 ]; then
     npm run check
 else
     export LTERMINAL_SKIP_CHECKS=1
+    step "Ejecutando la auditoría mínima de workflows de GitHub"
+    npm run check:github-security
     warn "Comprobaciones omitidas: el frontend se seguirá compilando, pero se omitirán las comprobaciones externas y svelte-check."
 fi
 

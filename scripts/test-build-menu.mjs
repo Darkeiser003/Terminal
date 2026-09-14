@@ -26,7 +26,6 @@ try {
         input: '4\n\n0\n',
         timeout: 10_000,
     });
-    assert.equal(result.error, undefined, `No se pudo ejecutar el menú: ${result.error?.message}`);
     assert.equal(result.status, 0, `El menú terminó con ${result.status}:\n${result.stdout}\n${result.stderr}`);
     const output = `${result.stdout}\n${result.stderr}`;
     assert.match(output, /Configurar firma SSH de commits para GitHub/);
@@ -108,7 +107,6 @@ try {
             env: { ...process.env, TMPDIR: isolatedTempRoot },
             timeout: 20_000,
         });
-        assert.equal(cleanerPreview.error, undefined, `La vista previa PowerShell no pudo ejecutarse: ${cleanerPreview.error?.message}`);
         assert.equal(cleanerPreview.status, 0, `La vista previa PowerShell falló:\n${cleanerPreview.stdout}\n${cleanerPreview.stderr}`);
         assert.match(cleanerPreview.stdout, /VISTA PREVIA/);
         assert.match(cleanerPreview.stdout, /lterminal-smoke-path-prefix-regression/);
@@ -125,7 +123,6 @@ try {
             input: '4\n\nn\n0\n',
             timeout: 10_000,
         });
-        assert.equal(powerShellResult.error, undefined, `No se pudo ejecutar el menú PowerShell: ${powerShellResult.error?.message}`);
         assert.equal(powerShellResult.status, 0, `El menú PowerShell terminó con ${powerShellResult.status}:\n${powerShellResult.stdout}\n${powerShellResult.stderr}`);
         const powerShellOutput = `${powerShellResult.stdout}\n${powerShellResult.stderr}`;
         assert.match(powerShellOutput, /VISTA PREVIA/);

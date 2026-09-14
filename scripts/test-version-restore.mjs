@@ -39,7 +39,7 @@ function run(label, command, args) {
             timeout: 20_000,
             maxBuffer: 1024 * 1024,
         });
-        assert.equal(result.error, undefined, `${label} no pudo ejecutarse: ${result.error?.message}`);
+        assert.notEqual(result.status, null, `${label} no pudo iniciarse: ${result.error?.message ?? ''}`);
         assert.notEqual(result.status, 0, `${label} no falló después de aplicar la versión`);
         assert.deepEqual(snapshot(), before, `${label} dejó algún manifiesto modificado`);
     } finally {
@@ -70,7 +70,7 @@ function runMissingBackup(label, command, args) {
     const recoveryName = output.match(/\b(lterminal-version-backup\.[A-Za-z0-9]+|winslim-terminal-version-\d+)\b/)?.[1];
     const recoveryDir = recoveryName ? join(tmpdir(), recoveryName) : null;
     try {
-        assert.equal(result.error, undefined, `${label} no pudo ejecutarse: ${result.error?.message}`);
+        assert.notEqual(result.status, null, `${label} no pudo iniciarse: ${result.error?.message ?? ''}`);
         assert.notEqual(result.status, 0, `${label} anunció éxito sin la copia de seguridad`);
         assert.match(output, /Falta la copia de seguridad|falta la copia de seguridad/i,
             `${label} no informó qué copia de seguridad faltaba`);

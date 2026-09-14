@@ -1556,6 +1556,8 @@ if [ "$SKIP_CHECKS" -eq 0 ]; then
     npm run check
     ok "Todo verde"
 else
+    step "Ejecutando la auditoría mínima de workflows de GitHub"
+    npm run check:github-security
     warn "Comprobaciones saltadas por petición (--skip-checks)"
 fi
 

@@ -592,7 +592,10 @@ mod tests {
 
         make_appimage_executable(&appimage).unwrap();
 
-        assert_eq!(std::fs::metadata(appimage).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::metadata(appimage).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[test]

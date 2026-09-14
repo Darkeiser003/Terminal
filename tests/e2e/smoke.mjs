@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
-import { environmentProbe, safeEnvironmentMarker } from '../../scripts/e2e-environment-probes.mjs';
+import { environmentProbe, probeOutputMarkerRows, safeEnvironmentMarker } from '../../scripts/e2e-environment-probes.mjs';
 import { containsExactHttpsUrl } from './terminal-url-matcher.mjs';
 
 // WebKitGTK puede intentar crear buffers GBM aunque la sesión gráfica de
@@ -387,36 +387,48 @@ async function clickInView(element) {
 }
 
 async function focusTerminal(xterm, input) {
+    let nativeClickError = null;
     try {
         // Tras un resize con el explorador abierto, WebKit puede conservar un
         // rectángulo de xterm más ancho que la celda y rechazar el click nativo
         // aunque la parte visible siga siendo utilizable. Primero se prueba la
         // ruta real, desplazando el nodo al viewport como haría una persona.
         await clickInView(xterm);
-        return;
     } catch (firstError) {
-        // El fallback mantiene los handlers reales de xterm: reproduce el
-        // mousedown/click sobre el host visible y enfoca su textarea auxiliar.
-        // Así el smoke no confunde una limitación geométrica de WebKit con un
-        // fallo de teclado de la aplicación.
-        const focused = await request(`/session/${sessionId}/execute/sync`, 'POST', {
-            script: `const host = arguments[0];
-                const input = arguments[1];
-                const rect = host.getBoundingClientRect();
-                const x = Math.max(1, Math.min(window.innerWidth - 1, rect.left + Math.max(4, Math.min(rect.width - 4, 12))));
-                const y = Math.max(1, Math.min(window.innerHeight - 1, rect.top + Math.max(4, Math.min(rect.height - 4, 12))));
-                for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-                    const event = type.startsWith('pointer')
-                        ? new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', isPrimary: true })
-                        : new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 });
-                    host.dispatchEvent(event);
-                }
-                input.focus();
-                return document.activeElement === input;`,
-            args: [{ [elementKey]: xterm }, { [elementKey]: input }],
-        });
-        if (!focused) throw firstError;
+        nativeClickError = firstError;
     }
+    await new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS));
+    const nativeFocusWorked = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: 'return document.activeElement === arguments[0];',
+        args: [{ [elementKey]: input }],
+    }).catch(() => false);
+    if (nativeFocusWorked) return 'native-click';
+
+    // Solo se usa el fallback si el click aceptado por WebDriver no entregó
+    // foco al receptor de xterm. En WebKit, un click sin cambio de foco no
+    // produce error, pero las teclas siguientes se pierden silenciosamente.
+    const focused = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const host = arguments[0];
+            const input = arguments[1];
+            const rect = host.getBoundingClientRect();
+            const x = Math.max(1, Math.min(window.innerWidth - 1, rect.left + Math.max(4, Math.min(rect.width - 4, 12))));
+            const y = Math.max(1, Math.min(window.innerHeight - 1, rect.top + Math.max(4, Math.min(rect.height - 4, 12))));
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                const event = type.startsWith('pointer')
+                    ? new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', isPrimary: true })
+                    : new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 });
+                host.dispatchEvent(event);
+            }
+            input.focus();
+            return document.activeElement === input;`,
+        args: [{ [elementKey]: xterm }, { [elementKey]: input }],
+    });
+    if (!focused) {
+        throw new Error('El click en la terminal no enfocó el receptor de teclado de xterm', {
+            cause: nativeClickError ?? undefined,
+        });
+    }
+    return 'verified-pointer-fallback';
 }
 
 async function pointerClickInView(element) {
@@ -824,7 +836,7 @@ async function sendTerminalKeys(line, pane = null, { enter = true, settle = true
     // incluso aceptar el click sobre ella sin transferirle foco, así que el
     // smoke siempre enfoca el contenedor visible y deja que xterm delegue al
     // receptor interno de teclado.
-    await focusTerminal(xterm, input);
+    const focusMethod = await focusTerminal(xterm, input);
     // WebKit entrega el click y el focus en frames distintos; sin este margen
     // el primer lote de key actions puede llegar antes de que xterm conecte
     // su textarea auxiliar.
@@ -869,6 +881,7 @@ async function sendTerminalKeys(line, pane = null, { enter = true, settle = true
         }
     }
     if (settle) await new Promise((resolve) => setTimeout(resolve, COMMAND_SETTLE_MS));
+    return focusMethod;
 }
 
 async function sendTerminalLine(line, pane = null) {
@@ -960,6 +973,11 @@ async function terminalHorizontalSnapshot(cell) {
             const viewport = root.querySelector('.xterm-viewport');
             const screen = root.querySelector('.xterm-screen');
             const host = root.querySelector('[data-testid="terminal-host"]');
+            const pane = root.matches('.tab-pane')
+                ? root
+                : root.querySelector('.tab-pane:not(.hidden)');
+            const visibleRows = [...root.querySelectorAll('.xterm-rows > div')]
+                .map((row) => (row.textContent || '').replace(/\\s+$/u, '').length);
             const indicator = root.querySelector('.horizontal-overflow-indicator');
             const indicatorStyle = indicator ? getComputedStyle(indicator) : null;
             return {
@@ -973,16 +991,18 @@ async function terminalHorizontalSnapshot(cell) {
                 screen: screen ? {
                     clientWidth: screen.clientWidth,
                     scrollWidth: screen.scrollWidth,
-                    rectWidth: Math.round(screen.getBoundingClientRect().width),
+                    rectWidth: screen.getBoundingClientRect().width,
                     inlineWidth: screen.style.width,
                 } : null,
                 host: host ? {
                     clientWidth: host.clientWidth,
                     scrollWidth: host.scrollWidth,
-                    overflow: host.dataset.horizontalOverflow || '',
-                    cols: host.dataset.terminalCols || '',
-                    rows: host.dataset.terminalRows || '',
+                    rectWidth: host.getBoundingClientRect().width,
+                    overflow: pane.dataset.horizontalOverflow || '',
+                    cols: pane.dataset.terminalCols || '',
+                    rows: pane.dataset.terminalRows || '',
                 } : null,
+                visibleRowLengths: visibleRows,
                 indicator: indicator ? {
                     className: indicator.className,
                     opacity: indicatorStyle?.opacity || '',
@@ -1341,6 +1361,34 @@ async function rawTerminalTexts(expected) {
 async function promptStates(expected) {
     const hosts = await findAll('.tab-pane:not(.hidden)[data-prompt-visible]');
     return Promise.all(hosts.slice(0, expected).map((host) => attribute(host[elementKey], 'data-prompt-visible')));
+}
+
+async function promptDiagnostics() {
+    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const pane = document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)');
+            const rows = pane?.querySelector('.xterm-rows');
+            const terminalRows = rows ? [...rows.children].slice(-6).map((row) => {
+                const text = (row.textContent ?? '').trim();
+                return {
+                    empty: text.length === 0,
+                    pathPrompt: (text.startsWith('~') || text.startsWith('/') || /^[A-Za-z]:/.test(text))
+                        && text.includes('>'),
+                    rightPrompt: text.trim().includes(' '),
+                    standardTerminator: ['>', '❯', '$', '#'].some((suffix) => text.endsWith(suffix)),
+                    length: text.length,
+                };
+            }) : [];
+            return {
+                promptVisible: pane?.dataset.promptVisible ?? null,
+                inputReady: pane?.dataset.inputReady ?? null,
+                environmentSwitchRequestId: pane?.dataset.environmentSwitchRequestId ?? null,
+                promptCursorRow: pane?.dataset.promptCursorRow ?? null,
+                promptCursorViewportRow: pane?.dataset.promptCursorViewportRow ?? null,
+                promptBaseY: pane?.dataset.promptBaseY ?? null,
+                terminalRows,
+            };`,
+        args: [],
+    });
 }
 
 async function promptBannerGeometry(expected) {
@@ -2280,8 +2328,31 @@ async function exerciseShellMatrix() {
         }), 35000, `handshake y entrada listos para ${id}`);
         const probe = probes.get(id);
         const readinessStartedAt = Date.now();
-        if (probe?.kind === 'repl') {
-            await waitUntil(async () => (await promptStates(1))[0] === 'true', 30000, `prompt del REPL ${id}`);
+        if (probe?.kind === 'repl' || id === 'wine-cmd') {
+            let unavailableReason = null;
+            try {
+                await waitUntil(async () => {
+                    if ((await promptStates(1))[0] === 'true') return true;
+                    if (id === 'lang:kotlin') {
+                        const terminalText = (await rawTerminalTexts(1).catch(() => []))[0] ?? '';
+                        if (/(?:Kotlin REPL is deprecated and should be enabled explicitly|unable to run REPL, no scripting plugin loaded)/i.test(terminalText)) {
+                            unavailableReason = 'El kotlinc instalado no puede iniciar el REPL: falta activar -Xrepl o cargar el plugin de scripting.';
+                            return true;
+                        }
+                    }
+                    return false;
+                }, 30000, `prompt del REPL ${id}`);
+            } catch (error) {
+                const diagnostic = await promptDiagnostics().catch((diagnosticError) => ({
+                    diagnosticError: diagnosticError?.message ?? String(diagnosticError),
+                }));
+                throw new Error(`No se cumplió prompt del REPL ${id}; estado=${JSON.stringify(diagnostic)}`, {
+                    cause: error,
+                });
+            }
+            if (unavailableReason) {
+                return { elapsedMs: Date.now() - readinessStartedAt, unavailableReason };
+            }
         } else {
             await waitForBannerPanes(1, 20000);
         }
@@ -2303,24 +2374,34 @@ async function exerciseShellMatrix() {
         const readiness = await selectEnvironment(id);
         const probe = probes.get(id);
         if (!probe || probe.kind === 'skip') throw new Error(`No hay sonda ejecutable para ${id}`);
+        if (readiness.unavailableReason) {
+            const skip = { id, kind: 'skip', reason: readiness.unavailableReason };
+            skipped.push(skip);
+            recordEvent('environment-probe-skipped', skip);
+            process.stdout.write(`E2E omitido: ${id} — ${skip.reason}\n`);
+            return null;
+        }
         const marker = safeEnvironmentMarker(id);
-        await sendTerminalLine(probe.command);
-        let markerOccurrences = 0;
-        await waitUntil(async () => {
-            const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-            const output = await textOf(rows);
-            markerOccurrences = output.split(marker).length - 1;
-            // La primera aparición puede ser solo el eco del código que se
-            // envió. La segunda demuestra que el proceso evaluó el comando y
-            // escribió el marcador en el PTY.
-            return markerOccurrences >= 2;
-        }, 15000, `salida evaluada por el PTY de ${id}`);
+        const terminalFocusMethod = await sendTerminalLine(probe.command);
+        let markerOutputDetected = false;
+        let outputRowSummary = [];
+        try {
+            await waitUntil(async () => {
+                const [output] = await rawTerminalTexts(1);
+                outputRowSummary = probeOutputMarkerRows(output ?? '', probe.command, marker);
+                markerOutputDetected = outputRowSummary.some((row) => row.markerAfterEchoRemoval);
+                return markerOutputDetected;
+            }, 15000, `salida evaluada por el PTY de ${id}`);
+        } catch (error) {
+            throw new Error(`${error.message}; filasPTY=${JSON.stringify(outputRowSummary)}`, { cause: error });
+        }
         const result = {
             id,
             kind: probe.kind,
             language: probe.language ?? null,
             marker,
-            markerOccurrences,
+            markerOutputDetected,
+            terminalFocusMethod,
             bannerReadyMs: readiness.elapsedMs,
             totalMs: Date.now() - startedAt,
             startupClean: true,
@@ -2926,6 +3007,62 @@ try {
         await waitForBannerPanes(2, 20000);
         await assertBannerHeaders(2, 'rejilla 2 paneles tras crear la segunda pestaña');
     }
+    for (const pane of await visiblePanes()) {
+        await sendTerminalLine(process.platform === 'win32' ? 'cls' : 'clear', pane[elementKey]);
+    }
+    let splitColumnSnapshots = [];
+    try {
+        await waitUntil(async () => {
+            splitColumnSnapshots = [];
+            for (const pane of await visiblePanes()) {
+                const snapshot = await terminalHorizontalSnapshot(pane[elementKey]);
+                const cols = Number(snapshot.host?.cols ?? 0);
+                const width = snapshot.screen?.rectWidth ?? 0;
+                const cellWidth = width / Math.max(1, cols);
+                const visibleCols = Math.floor((snapshot.host?.clientWidth ?? 0) / Math.max(1, cellWidth));
+                splitColumnSnapshots.push({
+                    cols,
+                    visibleCols,
+                    hostWidth: snapshot.host?.clientWidth ?? 0,
+                    hostRectWidth: snapshot.host?.rectWidth ?? 0,
+                    hostScrollWidth: snapshot.host?.scrollWidth ?? 0,
+                    screenWidth: width,
+                    cellWidth,
+                    overflow: snapshot.host?.overflow ?? '',
+                    longestVisibleRow: Math.max(0, ...(snapshot.visibleRowLengths ?? [])),
+                });
+            }
+            const paneHasUsableGeometry = (pane) => pane.hostWidth > 0
+                && pane.cols > 0 && pane.visibleCols > 0;
+            const fitsViewport = (pane) => pane.cols <= pane.visibleCols + 1
+                && pane.hostScrollWidth <= pane.hostWidth + 2;
+            // Una línea larga visible puede justificar que xterm exponga más
+            // columnas que las que caben en el panel: en ese caso el scroll
+            // horizontal debe ser real y la propia línea debe ocupar ese
+            // ancho. No confundir ese contenido desplazable con espacio vacío
+            // reservado por defecto, y exigir que la otra casilla sí se ajuste.
+            const overflowIsContentDriven = (pane) => pane.overflow === 'true'
+                && pane.cols > pane.visibleCols + 1
+                && pane.hostScrollWidth > pane.hostWidth + 2
+                && pane.longestVisibleRow > pane.visibleCols
+                && pane.cols <= pane.longestVisibleRow + 2;
+            return splitColumnSnapshots.length === 2
+                && splitColumnSnapshots.every((pane) => paneHasUsableGeometry(pane)
+                    && (fitsViewport(pane) || overflowIsContentDriven(pane)))
+                && splitColumnSnapshots.some(fitsViewport);
+        }, 15000, 'columnas mínimas sin espacio horizontal sobrante en los dos paneles');
+    } catch (error) {
+        recordEvent('split-terminal-columns-failed', { panes: splitColumnSnapshots });
+        throw new Error(
+            `${error.message}; medidas=${JSON.stringify(splitColumnSnapshots)}`,
+            { cause: error },
+        );
+    }
+    await captureScreenshot('split-column-minimum');
+    recordEvent('split-terminal-columns-minimal', {
+        panes: splitColumnSnapshots,
+        passed: true,
+    });
     const autoExpanded = afterSplit.width > beforeSplit.width || afterSplit.height > beforeSplit.height;
     recordEvent('multi-pane-minimum', {
         before: { width: beforeSplit.width, height: beforeSplit.height },

@@ -42,7 +42,6 @@ try {
     await writeFile(signature, 'firma anterior');
 
     let result = await run();
-    assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const portable = join(release, `WinSlimTerminal-${version}`);
     const archive = join(release, `WinSlimTerminal-Unpacked-${version}.zip`);
@@ -70,12 +69,10 @@ try {
 
     await writeFile(join(source, 'OpenConsole.exe'), 'fixture:OpenConsole.exe\n');
     result = await run();
-    assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     await assert.rejects(readFile(signature), { code: 'ENOENT' }, 'una actualización del manifiesto no debe dejar una firma vieja inválida');
 
     result = await run(true);
-    assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const devDir = join(release, 'dev');
     assert.ok((await readdir(devDir)).includes(`WinSlimTerminal-${version}-dev`));

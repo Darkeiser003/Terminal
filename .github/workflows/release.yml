@@ -10,68 +10,124 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   linux:
-    name: AppImage firmado
+    name: AppImage Linux
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.12.0
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
       - name: Dependencias de AppImage
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf fuse3 file
       - run: npm ci
-      - name: Build y firma
+      - name: Compilar AppImage
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-          LTERMINAL_REQUIRE_SIGNING: '1'
-          LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
+          LTERMINAL_REQUIRE_SIGNING: '0'
           LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
         run: npm run dist:linux -- --version "${RELEASE_TAG#v}" --no-run --no-extended-tests --no-install
-      - uses: softprops/action-gh-release@v2
+      - name: Guardar artefactos Linux para publicación conjunta
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: |
-            release/**/*.AppImage
-            release/**/SHA256SUMS.txt
-            release/**/SHA256SUMS.txt.sig
+          name: lterminal-linux-release
+          path: release/*.AppImage
+          if-no-files-found: error
 
   windows:
-    name: ZIP/NSIS Windows firmado
+    name: ZIP portable e instalador NSIS Windows
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.12.0
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
       - run: npm ci
-      - name: Build y firma
+      - name: Compilar ZIP e instalador
         shell: pwsh
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-          LTERMINAL_REQUIRE_SIGNING: '1'
-          LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
+          LTERMINAL_REQUIRE_SIGNING: '0'
           LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
         run: ./windows/build.ps1 -Version ($env:RELEASE_TAG -replace '^v', '') -NoRun -NonInteractive -FullTests
-      - uses: softprops/action-gh-release@v2
+      - name: Guardar artefactos Windows para publicación conjunta
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: |
-            release/**/*.zip
-            release/**/*.exe
-            release/**/SHA256SUMS.txt
-            release/**/SHA256SUMS.txt.sig
+          name: lterminal-windows-release
+          path: |
+            release/*.zip
+            release/*-x64-setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: Firmar manifiesto y publicar release
+    runs-on: ubuntu-latest
+    needs: [linux, windows]
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - name: Descargar artefactos de ambos sistemas
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name lterminal-linux-release --dir release
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name lterminal-windows-release --dir release
+      - name: Crear, firmar y verificar un manifiesto común
+        env:
+          LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
+          LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
+        run: |
+          node scripts/create-release-manifest.mjs --directory release
+          node scripts/sign-release-manifest.mjs --manifest release/SHA256SUMS.txt --signature release/SHA256SUMS.txt.sig
+          node scripts/sign-release-manifest.mjs --manifest release/SHA256SUMS.txt --signature release/SHA256SUMS.txt.sig --verify
+      - name: Publicar artefactos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release/*)
+          if ((${#assets[@]} < 5)); then
+            echo 'Faltan artefactos Linux/Windows, el manifiesto o la firma.' >&2
+            exit 1
+          fi
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
+              || gh release view "$RELEASE_TAG" >/dev/null
+          fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber

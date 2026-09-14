@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 
@@ -12,8 +13,15 @@ const dependabot = read('.github/dependabot.yml');
 const attributes = read('.gitattributes');
 const ignore = read('.gitignore');
 const failures = [];
+const workflowDirectory = resolve(root, '.github/workflows');
+const workflowFiles = readdirSync(workflowDirectory)
+    .filter((name) => /\.ya?ml$/i.test(name))
+    .sort();
+const workflows = workflowFiles.map((name) => ({ name, text: read(`.github/workflows/${name}`) }));
+let staticChecksRun = 0;
 
 function check(name, passed) {
+    staticChecksRun += 1;
     if (!passed) failures.push(name);
 }
 
@@ -23,7 +31,7 @@ check(
 );
 check(
     'CodeQL no intenta compilar los workflows como si fueran código de aplicación',
-    /autobuild@v\d+\s*\n\s*if:\s*matrix\.language\s*!=\s*'actions'/.test(codeql),
+    /autobuild@[0-9a-f]{40}(?:\s+#.*)?\s*\n\s*if:\s*matrix\.language\s*!=\s*'actions'/.test(codeql),
 );
 check(
     'actionlint está fijado a una versión concreta y se ejecuta sobre los workflows',
@@ -75,8 +83,148 @@ check(
         && attributes.includes('*.woff2 binary'),
 );
 
+const actionReferences = [];
+const checkoutSteps = [];
+for (const workflow of workflows) {
+    const lines = workflow.text.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+        const uses = lines[index].match(/^\s*-\s+uses:\s*([^\s#]+)/);
+        if (!uses) continue;
+        const reference = uses[1];
+        if (reference.startsWith('./')) continue;
+        actionReferences.push({ workflow: workflow.name, line: index + 1, reference, comment: lines[index] });
+
+        const stepIndent = lines[index].match(/^\s*/)?.[0].length ?? 0;
+        let end = index + 1;
+        while (end < lines.length) {
+            const nextStep = lines[end].match(/^(\s*)-\s+/);
+            if (nextStep && nextStep[1].length <= stepIndent) break;
+            end += 1;
+        }
+        if (/^actions\/checkout(?:\/|@)/i.test(reference)) {
+            checkoutSteps.push({ workflow: workflow.name, line: index + 1, block: lines.slice(index, end).join('\n') });
+        }
+    }
+}
+
+check(
+    'Todas las acciones externas de todos los workflows están fijadas a un SHA completo y anotadas con su versión',
+    actionReferences.length > 0 && actionReferences.every(({ reference, comment }) =>
+        /@[0-9a-f]{40}(?:\/[^\s#]+)?$/i.test(reference) && /#\s*(?:v\d|stable\s*@)/i.test(comment)),
+);
+check(
+    'Cada checkout desactiva la persistencia local de credenciales',
+    checkoutSteps.length > 0 && checkoutSteps.every(({ block }) => /persist-credentials:\s*false\b/.test(block)),
+);
+const releaseWorkflow = read('.github/workflows/release.yml');
+const releaseBuildJobs = releaseWorkflow.split(/\n  publish:\n/)[0] ?? '';
+const releasePublishJob = releaseWorkflow.split(/\n  publish:\n/)[1] ?? '';
+check(
+    'La release compila con permisos de solo lectura y reserva contents: write para el job de publicación, sin caché de paquetes',
+    /^permissions:\s*\{\s*\}\s*$/m.test(releaseWorkflow)
+        && (releaseWorkflow.match(/^\s{6}contents:\s*read\s*$/gm) ?? []).length === 2
+        && (releaseWorkflow.match(/^\s{6}contents:\s*write\s*$/gm) ?? []).length === 1
+        && /^\s{6}actions:\s*read\s*$/m.test(releaseWorkflow)
+        && (releaseWorkflow.match(/^\s{10}package-manager-cache:\s*false\s*$/gm) ?? []).length === 2
+        && !/^\s{10}cache:\s*\S+/m.test(releaseWorkflow),
+);
+check(
+    'La publicación espera ambos builds, combina sus adjuntos, genera un manifiesto común y lo firma/verifica una sola vez',
+    /publish:[\s\S]*?needs:\s*\[linux,\s*windows\]/.test(releaseWorkflow)
+        && (releaseWorkflow.match(/gh run download/g) ?? []).length === 2
+        && releaseWorkflow.includes('scripts/create-release-manifest.mjs')
+        && releaseBuildJobs.includes('LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}')
+        && !releaseBuildJobs.includes('LTERMINAL_SIGNING_PRIVATE_KEY')
+        && releasePublishJob.includes('LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}')
+        && (releaseWorkflow.match(/scripts\/sign-release-manifest\.mjs/g) ?? []).length === 2,
+);
+check(
+    'La publicación de releases usa el gh CLI integrado de forma idempotente, sin acción externa adicional',
+    !/softprops\/action-gh-release|actions\/upload-release-asset/.test(releaseWorkflow)
+        && (releaseWorkflow.match(/gh release upload/g) ?? []).length === 1
+        && releaseWorkflow.includes('--clobber'),
+);
+check(
+    'CodeQL solo entrega security-events: write al job que analiza código',
+    /^permissions:\s*$/m.test(codeql)
+        && !/^\s{2}security-events:\s*write\s*$/m.test(codeql)
+        && /^\s{6}security-events:\s*write\s*$/m.test(codeql),
+);
+
+const dependabotEntries = dependabot.split(/^\s*-\s+package-ecosystem:/m).slice(1);
+check(
+    'Cada ecosistema de Dependabot tiene al menos 7 días de cooldown explícito',
+    dependabotEntries.length === 3 && dependabotEntries.every((entry) =>
+        /^\s{4}cooldown:\s*\n\s{6}default-days:\s*(?:[7-9]|[1-9]\d+)\s*$/m.test(entry)),
+);
+
+function missingScanner(label) {
+    const message = `${label} no está instalado localmente; el escaneo remoto de workflows sigue activo en GitHub Actions.`;
+    if (process.env.LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS === '1') failures.push(message);
+    else console.log(`AVISO: ${message} Usa LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS=1 para exigir ambos analizadores locales.`);
+}
+
+function runActionlint() {
+    const result = spawnSync('actionlint', [], { cwd: root, encoding: 'utf8', windowsHide: true });
+    if (result.error?.code === 'ENOENT') return missingScanner('actionlint');
+    if (result.error && result.status !== 0) {
+        failures.push(`actionlint no pudo iniciarse: ${result.error.message}`);
+        return;
+    }
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    if (result.status !== 0) failures.push(`actionlint encontró problemas (código ${result.status ?? 'desconocido'}).`);
+    else console.log('✓ actionlint: sintaxis, expresiones y esquemas de workflows correctos.');
+}
+
+function runZizmor() {
+    // SARIF deja que el build distinga avisos informativos de hallazgos que
+    // deben bloquearlo; el escaneo sin auditorías online es determinista y no
+    // depende de token ni conexión. GitHub ejecuta el escaneo completo y sube
+    // sus resultados para actualizar Security > Code scanning.
+    const result = spawnSync('zizmor', [
+        '--no-online-audits', '--format', 'sarif', '--collect=all', '.github',
+    ], { cwd: root, encoding: 'utf8', windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+    if (result.error?.code === 'ENOENT') return missingScanner('zizmor');
+    if (result.error && result.status !== 0) {
+        failures.push(`zizmor no pudo iniciarse: ${result.error.message}`);
+        return;
+    }
+    if (result.stderr) process.stderr.write(result.stderr);
+
+    let findings;
+    try {
+        const report = JSON.parse(result.stdout);
+        findings = (report.runs ?? []).flatMap((run) => run.results ?? []);
+    } catch (error) {
+        failures.push(`zizmor no produjo un informe SARIF legible: ${error.message}`);
+        return;
+    }
+
+    const actionable = findings.filter((finding) => !['note', 'none'].includes(finding.level));
+    const notes = findings.length - actionable.length;
+    for (const finding of actionable) {
+        const location = finding.locations?.[0]?.physicalLocation;
+        const file = location?.artifactLocation?.uri ?? '.github';
+        const line = location?.region?.startLine;
+        const where = line ? `${file}:${line}` : file;
+        failures.push(`zizmor ${finding.level ?? 'finding'} (${finding.ruleId ?? 'sin regla'}) en ${where}`);
+    }
+    if (result.status !== 0 && actionable.length === 0) {
+        failures.push(`zizmor no pudo completar el escaneo (código ${result.status ?? 'desconocido'}).`);
+    }
+    if (actionable.length === 0 && result.status === 0) {
+        console.log(`✓ zizmor: ${findings.length} hallazgos bloqueantes; ${notes} notas informativas en .github.`);
+    }
+}
+
+if (process.argv.includes('--scan')) {
+    runActionlint();
+    runZizmor();
+}
+
 if (failures.length) {
     throw new Error(`Configuración de seguridad GitHub incompleta:\n- ${failures.join('\n- ')}`);
 }
 
-console.log('Configuración de seguridad GitHub verificada (10 contratos).');
+console.log(`Configuración de seguridad GitHub verificada (${staticChecksRun} reglas, ${actionReferences.length} acciones fijadas, ${checkoutSteps.length} checkouts, ${workflowFiles.length} workflows).`);

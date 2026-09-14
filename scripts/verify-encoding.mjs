@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname } from 'node:path';
 
@@ -13,7 +13,12 @@ const utf8 = new TextDecoder('utf-8', { fatal: true });
 const bom = Buffer.from([0xef, 0xbb, 0xbf]);
 const errors = [];
 
-const trackedFiles = execFileSync('git', ['ls-files', '-z'], { encoding: 'buffer' })
+const trackedFilesResult = spawnSync('git', ['ls-files', '-z'], { encoding: 'buffer', windowsHide: true });
+if (trackedFilesResult.status !== 0) {
+    const detail = trackedFilesResult.error?.message || trackedFilesResult.stderr?.toString('utf8').trim();
+    throw new Error(`No se pudieron enumerar los archivos versionados${detail ? `: ${detail}` : ''}`);
+}
+const trackedFiles = trackedFilesResult.stdout
     .toString('utf8')
     .split('\0')
     .filter(Boolean)
