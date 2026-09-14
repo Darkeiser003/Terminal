@@ -113,22 +113,42 @@ try {
         assert.match(cleanerPreview.stdout, /No se ha borrado nada/);
         assert.equal(await readFile(smokeMarker, 'utf8'), 'La vista previa no debe borrar este archivo.\n');
 
-        const mockPowerShell = join(mockBin, 'pwsh');
-        await writeFile(mockPowerShell, '#!/bin/sh\nexit 73\n');
-        await chmod(mockPowerShell, 0o755);
-        const powerShellResult = spawnSync(powerShellPath, ['-NoProfile', '-File', 'build-tools/build.ps1'], {
+        // PowerShell prefers the path of its running executable when resolving
+        // `pwsh`, so putting a fake executable first in PATH still launched
+        // the real cleaner as a child. Inject a function into this isolated
+        // PowerShell runspace instead; this also avoids Read-Host input being
+        // consumed by a nested PowerShell process.
+        const successfulPreview = spawnSync(powerShellPath, ['-NoProfile', '-Command', [
+            "function pwsh { Write-Output 'VISTA PREVIA'; Write-Output 'No se ha borrado nada'; $global:LASTEXITCODE = 0 }",
+            ". './build-tools/build.ps1'",
+        ].join('; ')], {
             cwd: root,
             encoding: 'utf8',
             env: { ...process.env, PATH: `${mockBin}${delimiter}${process.env.PATH ?? ''}` },
             input: '4\n\nn\n0\n',
             timeout: 10_000,
         });
-        assert.equal(powerShellResult.status, 0, `El menú PowerShell terminó con ${powerShellResult.status}:\n${powerShellResult.stdout}\n${powerShellResult.stderr}`);
-        const powerShellOutput = `${powerShellResult.stdout}\n${powerShellResult.stderr}`;
+        assert.equal(successfulPreview.status, 0, `El menú PowerShell terminó con ${successfulPreview.status}; señal=${successfulPreview.signal}; error=${successfulPreview.error?.message ?? 'ninguno'}:\n${successfulPreview.stdout}\n${successfulPreview.stderr}`);
+        const powerShellOutput = `${successfulPreview.stdout}\n${successfulPreview.stderr}`;
         assert.match(powerShellOutput, /VISTA PREVIA/);
         assert.match(powerShellOutput, /No se ha borrado nada/);
         assert.match(powerShellOutput, /release\/ se conserva/);
         assert.doesNotMatch(powerShellOutput, /Eliminando cachés y salidas temporales conocidas/);
+
+        const failedPreview = spawnSync(powerShellPath, ['-NoProfile', '-Command', [
+            "function pwsh { Write-Output 'MOCK_PWSH_EXIT_73'; $global:LASTEXITCODE = 73 }",
+            ". './build-tools/build.ps1'",
+        ].join('; ')], {
+            cwd: root,
+            encoding: 'utf8',
+            input: '4\n\n0\n',
+            timeout: 10_000,
+        });
+        assert.equal(failedPreview.status, 0, `El fallo simulado de la vista previa no se recuperó: ${failedPreview.error?.message ?? failedPreview.status}\n${failedPreview.stdout}\n${failedPreview.stderr}`);
+        const failedPreviewOutput = `${failedPreview.stdout}\n${failedPreview.stderr}`;
+        assert.match(failedPreviewOutput, /MOCK_PWSH_EXIT_73/);
+        assert.match(failedPreviewOutput, /La vista previa falló; se cancela la limpieza/);
+        assert.doesNotMatch(failedPreviewOutput, /release\/ se conserva\. ¿Aplicar ahora/);
     }
 
     console.log('OK: menú, cancelación de limpieza y configuración explícita de firma SSH verificados.');

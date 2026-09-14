@@ -66,8 +66,12 @@ for (const [environment, prompt, input] of [
     ['lang:tcl', '% puts "hola"', 'puts "hola"'],
     ['lang:maxima', '(%i1)', ''],
     ['lang:maxima', '(%i2) 1 + 1', '1 + 1'],
+    ['lang:duckdb', 'memory D', ''],
+    ['lang:duckdb', 'memory D SELECT 1;', 'SELECT 1;'],
     ['lang:common-lisp-sbcl', '*', ''],
     ['lang:swi-prolog', '?- member(X, [1, 2]).', 'member(X, [1, 2]).'],
+    ['lang:swi-prolog', '1 ?-', ''],
+    ['lang:swi-prolog', '1 ?- member(X, [1, 2]).', 'member(X, [1, 2]).'],
     ['lang:swi-prolog', '| ?-', ''],
     ['lang:forth', 'ok', ''],
 ]) {
@@ -78,10 +82,16 @@ for (const [environment, prompt, input] of [
 }
 assert.equal(terminalPrompt.interactiveReplPromptIsVisible('%', 'fish'), false,
     'un porcentaje aislado no se confunde con un prompt de shell');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('memory D', 'fish'), false,
+    'el prompt de DuckDB solo se acepta dentro de su REPL');
 assert.equal(terminalPrompt.interactiveReplPromptIsVisible('*', 'lang:python'), false,
     'un asterisco aislado no se confunde con el prompt de otros REPL');
 assert.equal(terminalPrompt.interactiveReplPromptIsVisible('~ Snailed it ~', 'nu'), false,
     'el prompt de xonsh no cambia la detección de Nushell');
+assert.equal(terminalPrompt.interactiveReplBannerSignalsReady('Type `bye` to exit', 'lang:forth'), true,
+    'Gforth no muestra prompt inicial: su banner documentado habilita la primera entrada');
+assert.equal(terminalPrompt.interactiveReplBannerSignalsReady('Type `bye` to exit', 'lang:python'), false,
+    'el banner de Gforth no habilita por error otro REPL');
 
 const columnRows = [
     { columns: 900, isWrapped: false }, // scrollback anterior: no debe gobernar el PTY
@@ -107,6 +117,18 @@ assert.equal(terminalColumns.longestVisibleLogicalLineWidth(Number.NaN, 0, 1, ()
     'una longitud no finita no rompe el cálculo del viewport');
 assert.equal(terminalColumns.longestVisibleLogicalLineWidth(1, 0, Number.NaN, () => ({ columns: 2, isWrapped: false })), 0,
     'un rango visible no finito se trata como vacío');
+assert.equal(terminalColumns.requiredTerminalColumns(58, 58), 58,
+    'una línea corta ocupa solo el ancho indispensable del viewport');
+assert.equal(terminalColumns.requiredTerminalColumns(58, 163), 163,
+    'una línea larga visible conserva columnas para el scroll horizontal');
+assert.equal(terminalColumns.requiredTerminalColumns(58, 58), 58,
+    'al salir del viewport la ayuda larga, el PTY recupera su ancho mínimo');
+assert.equal(terminalColumns.requiredTerminalColumns(58, 20, 76), 76,
+    'la reserva de columnas para la edición mantiene visible el cursor');
+assert.equal(terminalColumns.requiredTerminalColumns(3000, 5000, 4000, 2048), 2048,
+    'las dimensiones visibles, el contenido y la reserva se limitan al máximo');
+assert.equal(terminalColumns.requiredTerminalColumns(Number.NaN, Number.NaN, Number.NaN), 1,
+    'valores no finitos producen un mínimo seguro y nunca dimensiones inválidas');
 
 const cells = (values) => ({
     length: values.length,
@@ -301,6 +323,10 @@ assert(terminalPane.includes('function onTerminalWheel(event: WheelEvent): void'
     && terminalPane.includes("addEventListener('wheel', onTerminalWheel, { capture: true, passive: false })")
     && terminalPane.includes('viewport.scrollLeft + normalizedDelta'),
     'Shift+rueda debe desplazar horizontalmente sin quitar la rueda vertical de xterm');
+assert(terminalPane.includes('const requiredCols = requiredTerminalColumns(')
+    && terminalPane.includes('dims.cols = requiredTerminalColumns(')
+    && terminalPane.includes('return requiredCols !== term.cols;'),
+    'el ajuste horizontal debe crecer por líneas visibles y reducirse al ancho mínimo al desaparecer');
 assert(app.includes('scheduleTerminalRefresh(settled')
     && app.includes("'winslim:terminal-output-refreshed'")
     && !app.includes('settled.clearTextureAtlas()')

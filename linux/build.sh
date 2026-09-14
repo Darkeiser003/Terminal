@@ -1496,10 +1496,10 @@ dependencies_ready() {
 linux_native_dependencies_ready() {
     case "$(uname -m)" in
         x86_64)
-            node -e "require('@rollup/rollup-linux-x64-gnu'); require('@esbuild/linux-x64')" >/dev/null 2>&1
+            node -e "require('@rollup/rollup-linux-x64-gnu'); const p=require.resolve('@esbuild/linux-x64/bin/esbuild'); require('node:fs').accessSync(p, require('node:fs').constants.X_OK)" >/dev/null 2>&1
             ;;
         aarch64|arm64)
-            node -e "require('@rollup/rollup-linux-arm64-gnu'); require('@esbuild/linux-arm64')" >/dev/null 2>&1
+            node -e "require('@rollup/rollup-linux-arm64-gnu'); const p=require.resolve('@esbuild/linux-arm64/bin/esbuild'); require('node:fs').accessSync(p, require('node:fs').constants.X_OK)" >/dev/null 2>&1
             ;;
         *)
             # Para arquitecturas nuevas no inventamos un nombre opcional: el

@@ -479,9 +479,9 @@ check('Smoke E2E prueba varias shells con comandos reales y restaura la shell in
         && smoke.includes('document.activeElement === arguments[0]')
         && smoke.includes("return 'verified-pointer-fallback'")
         && smoke.includes('terminalFocusMethod')
-        && smoke.includes("id === 'lang:kotlin'")
         && smoke.includes("id === 'wine-cmd'")
-        && smoke.includes('no scripting plugin loaded')
+        && !read('src-tauri/src/environments/languages.rs').includes('id: "kotlin"')
+        && read('scripts/test-e2e-environment-probes.mjs').includes("!allLanguageIds.includes('kotlin')")
         && smoke.includes('originalCaptureLabel')
         && smoke.includes('shell-matrix-${process.platform}-original-selected')
         && toolbar.includes('data-testid="environment-option"'));
@@ -492,14 +492,21 @@ check('La matriz compara el nombre visible de la shell sin estrellas ni adornos 
 check('Las sondas de entorno cubren todos los REPL del catálogo o explican un descarte seguro',
     packageJson.scripts?.['test:e2e-environment-probes'] === 'node scripts/test-e2e-environment-probes.mjs'
         && read('scripts/e2e-environment-probes.mjs').includes('serviceBackedRepls')
-        && read('scripts/test-e2e-environment-probes.mjs').includes('allLanguageIds.length, 91')
+        && read('scripts/test-e2e-environment-probes.mjs').includes('allLanguageIds.length, 89')
+        && read('scripts/test-e2e-environment-probes.mjs').includes('probeOutputHasResultBeforeMarker')
+        && smoke.includes('rawTerminalTextWithin(horizontalCell)')
         && e2eReportVerifier.includes('availableIds.some((id) => !accountedIds.includes(id))'));
 check('La matriz reconoce prompts especiales de shells y REPLs, con edición de entrada probada',
     read('scripts/e2e-environment-probes.mjs').includes('interactiveReplShellIds')
         && smoke.includes("probe?.kind === 'repl'")
+        && smoke.includes("id === 'lang:forth'")
+        && smoke.includes('input-ready-no-prompt')
+        && smoke.includes('startupHintVisible')
+        && e2eReportVerifier.includes('startupHintCapture === \'shell-lang-forth-startup-help\'')
         && read('src/components/TerminalPane.svelte').includes('interactiveReplPromptIsVisible')
         && read('src/components/TerminalPane.svelte').includes('interactiveReplInputLine')
-        && ['specialReplPrompts', 'tcl:', 'maxima:', "'common-lisp-sbcl':", "'swi-prolog':", 'forth:']
+        && read('src/components/TerminalPane.svelte').includes('interactiveReplBannerSignalsReady')
+        && ['specialReplPrompts', 'tcl:', 'maxima:', 'duckdb:', "'common-lisp-sbcl':", "'swi-prolog':", 'forth:']
             .every((marker) => read('src/lib/terminal-prompt.ts').includes(marker))
         && read('scripts/test-frontend-logic.mjs').includes('prompt derecho')
         && read('scripts/test-frontend-logic.mjs').includes('el espejo omite el prompt y conserva la línea editable')
@@ -513,10 +520,21 @@ check('Un fallo de la matriz de shells conserva captura antes de restaurar la or
         && smoke.indexOf('failure-before-restore') < smoke.indexOf('let restored = currentId === originalId'));
 check('El ancho adicional del PTY se limita a líneas lógicas del viewport actual',
     read('src/lib/terminal-columns.ts').includes('longestVisibleLogicalLineWidth')
+        && read('src/lib/terminal-columns.ts').includes('requiredTerminalColumns')
         && read('src/components/TerminalPane.svelte').includes('longestVisibleLineWidth()')
+        && read('src/components/TerminalPane.svelte').includes('return requiredCols !== term.cols;')
+        && read('scripts/test-frontend-logic.mjs').includes('el PTY recupera su ancho mínimo')
         && read('scripts/test-frontend-logic.mjs').includes('una línea antigua fuera de pantalla no fuerza columnas adicionales')
         && smoke.includes("recordEvent('terminal-columns-reclaim'")
         && e2eReportVerifier.includes("type === 'terminal-columns-reclaim'"));
+check('El E2E no deja ventanas grises huérfanas y valida el cierre de su grupo aislado',
+    smoke.includes('detached: process.platform !== \'win32\'')
+        && smoke.includes('process.kill(-groupId, 0)')
+        && smoke.includes("recordEvent('e2e-process-cleanup'")
+        && e2eReportVerifier.includes("type === 'e2e-process-cleanup'")
+        && smoke.includes('await sendTerminalLine(`echo ${line}`, horizontalCell)')
+        && smoke.includes('probeOutputMarkerRows(terminalText, `echo ${line}`, line)')
+        && smoke.includes('row.markerAfterEchoRemoval'));
 check('La matriz E2E detecta errores de sintaxis en el bootstrap de shells alternativas',
     smoke.includes('defining function based on alias')
         && smoke.includes('parse error near')

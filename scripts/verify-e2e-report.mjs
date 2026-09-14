@@ -11,6 +11,13 @@ try {
     throw new Error(`El informe E2E no existe o no es JSON válido: ${reportPath} (${error})`);
 }
 
+const reportEvents = Array.isArray(report.events) ? report.events : [];
+const processCleanup = reportEvents.find((event) => event?.type === 'e2e-process-cleanup');
+if (!processCleanup || processCleanup.passed !== true || processCleanup.closed !== true
+    || (report.host?.platform !== 'win32' && processCleanup.processGroupClosed !== true)) {
+    throw new Error('El E2E no cerró su árbol de procesos ni confirmó que no deja una ventana de prueba huérfana.');
+}
+
 if (report.status !== 'passed') {
     throw new Error(`El E2E no terminó correctamente: ${report.status ?? 'sin estado'} (${report.error ?? 'sin detalle'})`);
 }
@@ -30,6 +37,10 @@ if (report.focusedScenario === 'environment-shell-matrix') {
     const successfulIds = new Set(probes.filter((event) => event.passed === true
         && event.startupClean === true
         && event.markerOutputDetected === true
+        && (event.id !== 'lang:forth'
+            || (event.expectedResultBeforeMarker === '3' && event.expectedResultDetected === true
+                && event.startupHintVisible === true
+                && event.startupHintCapture === 'shell-lang-forth-startup-help'))
         && ['native-click', 'verified-pointer-fallback'].includes(event.terminalFocusMethod)
         && ['shell', 'repl'].includes(event.kind)).map((event) => event.id));
     const skippedIds = skipped.map((entry) => entry?.id);
@@ -60,7 +71,8 @@ if (report.focusedScenario === 'environment-shell-matrix') {
         || matrix.replProbeCount !== probes.filter((event) => event.kind === 'repl').length
         || !restore || restore.passed !== true || restore.to !== matrix.originalId
         || (matrix.originalId === 'fish' && restore.restoredFish !== true)
-        || !captures.has(matrix.originalCaptureLabel) || !captures.has(matrix.captureLabel)) {
+        || !captures.has(matrix.originalCaptureLabel) || !captures.has(matrix.captureLabel)
+        || (testedIds.includes('lang:forth') && !captures.has('shell-lang-forth-startup-help'))) {
         throw new Error('El E2E enfocado de shells no probó/restauró todos los entornos o carece de capturas verificables.');
     }
     await new Promise((resolve) => process.stdout.write(
@@ -89,7 +101,7 @@ const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
 const missing = requiredPhases.filter((phase) => !phases.has(phase));
 if (missing.length) throw new Error(`El E2E terminó sin ejecutar estas fases: ${missing.join(', ')}`);
 
-const events = Array.isArray(report.events) ? report.events : [];
+const events = reportEvents;
 if (events.length < requiredPhases.length) throw new Error(`El E2E solo registró ${events.length} eventos.`);
 const mouseSelection = events.find((event) => event?.type === 'terminal-mouse-selection');
 if (!mouseSelection || mouseSelection.passed !== true
@@ -127,7 +139,8 @@ if (!widthReclaim || widthReclaim.passed !== true
     || widthReclaim.afterCols > widthReclaim.visibleCols + 1
     || widthReclaim.hostScrollWidth > widthReclaim.hostWidth + 2
     || widthReclaim.historyRetained !== true
-    || widthReclaim.commands < 12) {
+    || widthReclaim.generatedLines < 12
+    || widthReclaim.outputMarkerVisible !== true) {
     throw new Error('El E2E no demostró que el PTY recupere sus columnas visibles mientras conserva el scrollback.');
 }
 const shellMatrix = events.find((event) => event?.type === 'environment-shell-matrix');
@@ -144,6 +157,10 @@ const probeSkipIds = probeSkips.map((event) => event.id);
 const successfulProbeIds = new Set(environmentProbes
     .filter((event) => event.passed === true && event.startupClean === true
         && event.markerOutputDetected === true
+        && (event.id !== 'lang:forth'
+            || (event.expectedResultBeforeMarker === '3' && event.expectedResultDetected === true
+                && event.startupHintVisible === true
+                && event.startupHintCapture === 'shell-lang-forth-startup-help'))
         && ['native-click', 'verified-pointer-fallback'].includes(event.terminalFocusMethod)
         && ['shell', 'repl'].includes(event.kind))
     .map((event) => event.id));
@@ -193,6 +210,9 @@ for (const captureLabel of [shellMatrix.originalCaptureLabel, shellMatrix.captur
     if (!captureLabel || !(report.captures ?? []).some((capture) => capture?.label === captureLabel)) {
         throw new Error(`El E2E no conservó la captura de shell ${captureLabel ?? 'sin etiqueta'}.`);
     }
+}
+if (testedIds.includes('lang:forth') && !report.captures?.some((capture) => capture?.label === 'shell-lang-forth-startup-help')) {
+    throw new Error('El E2E no conservó la captura que demuestra que la ayuda inicial de Gforth queda visible.');
 }
 if (!events.some((event) => event?.type === 'preference' && event?.name === 'showQuickActions' && event?.value === false)) {
     throw new Error('El E2E no comprobó que el comando interno ocultase Acciones rápidas.');

@@ -3,6 +3,7 @@ const shellIds = new Set([
 ]);
 
 const interactiveReplShellIds = new Set(['nu', 'xonsh', 'elvish']);
+const nonInteractiveLanguageTools = new Set(['dart']);
 
 const serviceBackedRepls = new Set([
     'postgresql', 'mysql', 'mariadb', 'mongodb', 'redis',
@@ -28,7 +29,6 @@ const replCommands = {
     groovy: (m) => `println '${m}'`,
     perl: (m) => `print "${m}\\n"`,
     julia: (m) => `println("${m}")`,
-    kotlin: (m) => `println("${m}")`,
     csharp: (m) => `Console.WriteLine("${m}");`,
     fsharp: (m) => `printfn "${m}";;`,
     haskell: (m) => `putStrLn "${m}"`,
@@ -80,7 +80,7 @@ const replCommands = {
     picat: (m) => `writeln('${m}').`,
     logtalk: (m) => `write('${m}'), nl.`,
     mercury: (m) => `io.write_string("${m}\\n", !IO).`,
-    forth: (m) => `." ${m}" cr`,
+    forth: (m) => `1 2 + . cr ." ${m}" cr`,
     fennel: (m) => `(print "${m}")`,
     janet: (m) => `(print "${m}")`,
     purescript: (m) => `log "${m}"`,
@@ -122,6 +122,23 @@ export function probeOutputContainsMarker(output, command, marker) {
         .some((row) => row.markerAfterEchoRemoval);
 }
 
+/** True when an evaluated result appears immediately before its unique marker. */
+export function probeOutputHasResultBeforeMarker(output, command, result, marker) {
+    const rows = Array.isArray(output) ? output : String(output ?? '').split('\n');
+    const clean = rows.map((row) => String(row ?? '')
+        .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+        .replace(/\r/g, '')
+        .normalize('NFKC'))
+        .map((row) => command ? row.split(command).join(' ') : row)
+        .join('\n');
+    const markerIndex = clean.lastIndexOf(marker);
+    if (markerIndex < 0) return false;
+    const precedingOutput = clean.slice(Math.max(0, markerIndex - 80), markerIndex);
+    const escapedResult = String(result).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[\\s])${escapedResult}[\\s]*$`).test(precedingOutput);
+}
+
 export function languageIdForEnvironment(id) {
     if (id.startsWith('plugin:lang:')) return id.slice('plugin:lang:'.length);
     if (id.startsWith('lang:')) return id.slice('lang:'.length);
@@ -140,6 +157,9 @@ export function environmentProbe(option, marker) {
 
     const language = languageIdForEnvironment(id);
     if (language) {
+        if (nonInteractiveLanguageTools.has(language)) {
+            return { kind: 'skip', language, reason: 'el SDK de Dart es una CLI de proyectos y no ofrece un REPL interactivo' };
+        }
         if (serviceBackedRepls.has(language)) {
             return { kind: 'skip', language, reason: 'necesita un servicio externo y credenciales' };
         }
@@ -147,7 +167,12 @@ export function environmentProbe(option, marker) {
         if (!makeCommand) {
             return { kind: 'skip', language, reason: 'no hay una sonda interactiva segura definida para este REPL' };
         }
-        return { kind: 'repl', language, command: makeCommand(marker) };
+        return {
+            kind: 'repl',
+            language,
+            command: makeCommand(marker),
+            ...(language === 'forth' ? { expectedResultBeforeMarker: '3' } : {}),
+        };
     }
 
     // Son intérpretes interactivos con gramática propia: reciben una orden

@@ -16,8 +16,12 @@
     import * as perf from '../lib/performance';
     import { retryUntilReady } from '../lib/terminal-ready';
     import { normalizeWheelDelta } from '../lib/terminal-scroll';
-    import { longestVisibleLogicalLineWidth, occupiedTerminalColumns } from '../lib/terminal-columns';
-    import { interactiveReplInputLine, interactiveReplPromptIsVisible } from '../lib/terminal-prompt';
+    import { longestVisibleLogicalLineWidth, occupiedTerminalColumns, requiredTerminalColumns } from '../lib/terminal-columns';
+    import {
+        interactiveReplBannerSignalsReady,
+        interactiveReplInputLine,
+        interactiveReplPromptIsVisible,
+    } from '../lib/terminal-prompt';
     import { cursorInactiveStyle, cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
     import type { Environment, Preferences } from '../lib/types';
@@ -797,7 +801,13 @@
         const cellWidth = terminalCellWidth();
         if (!viewport || !cellWidth || !term) return false;
         const visibleCols = Math.max(1, Math.floor(viewport.clientWidth / cellWidth));
-        return longestVisibleLineWidth() > Math.max(visibleCols, term.cols);
+        const requiredCols = requiredTerminalColumns(
+            visibleCols,
+            longestVisibleLineWidth(),
+            0,
+            MAX_HORIZONTAL_COLS,
+        );
+        return requiredCols !== term.cols;
     }
 
     // WebView2 puede conservar una textura parcial de xterm justo después de
@@ -1246,9 +1256,9 @@
         if (!term) return false;
         // Las shells normales esperan a que termine el fastfetch para no
         // liberar el primer comando encima del banner. Un REPL no lo recibe:
-        // su criterio de disponibilidad es únicamente que su prompt (`>>>`,
-        // `irb(main):001>`, etc.) ya esté visible.
-        if (paneIsRepl()) return terminalPromptVisible();
+        // su criterio es que aparezca su prompt (`>>>`, `irb(main):001>`, etc.)
+        // o la señal de arranque documentada de un REPL sin prompt inicial.
+        if (paneIsRepl()) return terminalPromptVisible() || terminalPromptlessReplStartupReady();
         // Si el usuario ha desactivado el banner, no existe ningún bloque que
         // esperar: exigir todavía el título de fastfetch retenía la entrada
         // hasta el temporizador de seguridad y hacía parecer que un resize o
@@ -1280,6 +1290,19 @@
         return terminalPromptVisible()
             && /(?:WinSlim Terminal|LTerminal)\s+\d/i.test(latestBanner)
             && (fullBannerComplete || compactBannerComplete);
+    }
+
+    function terminalPromptlessReplStartupReady(): boolean {
+        if (!term) return false;
+        const environmentId = app.tabs.find((tab) => tab.id === tabId)?.envId;
+        const buffer = term.buffer.active;
+        const cursorRow = buffer.baseY + buffer.cursorY;
+        const startRow = Math.max(0, cursorRow - 64);
+        let recentOutput = '';
+        for (let row = startRow; row <= cursorRow; row += 1) {
+            recentOutput += `${buffer.getLine(row)?.translateToString(true) ?? ''}\n`;
+        }
+        return interactiveReplBannerSignalsReady(recentOutput, environmentId);
     }
 
     function flushPendingBannerSettingsRefresh(): void {
@@ -1342,9 +1365,21 @@
                     }
                 }
                 const longestLine = longestVisibleLineWidth();
-                dims.cols = Math.min(
+                const viewport = getHorizontalViewport();
+                const cellWidth = terminalCellWidth();
+                const visibleCols = viewport && cellWidth > 0
+                    ? Math.max(1, Math.floor(viewport.clientWidth / cellWidth))
+                    : dims.cols;
+                // FitAddon puede medir el lienzo ya ensanchado por el
+                // scroll horizontal, y devolver sus columnas antiguas. La
+                // caja visible —no el ancho desplazable— es la base para
+                // recuperar el tamaño mínimo cuando el contenido largo deja
+                // de estar en pantalla.
+                dims.cols = requiredTerminalColumns(
+                    visibleCols,
+                    longestLine,
+                    minimumCols,
                     MAX_HORIZONTAL_COLS,
-                    Math.max(dims.cols, longestLine, minimumCols),
                 );
                 term.resize(dims.cols, dims.rows);
                 if (wasAtBottom) term.scrollToBottom();

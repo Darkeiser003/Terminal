@@ -4,6 +4,7 @@ import {
     environmentProbe,
     languageIdForEnvironment,
     probeOutputContainsMarker,
+    probeOutputHasResultBeforeMarker,
     probeOutputMarkerRows,
     safeEnvironmentMarker,
 } from './e2e-environment-probes.mjs';
@@ -39,7 +40,13 @@ for (const id of allLanguageIds) {
     }
 }
 assert.deepEqual(uncovered, [], 'cada REPL del catálogo debe tener una sonda o una omisión segura explícita');
-assert.equal(allLanguageIds.length, 91, 'el test debe detectar nuevas altas en las fuentes de entornos');
+assert.equal(allLanguageIds.length, 89, 'Kotlin no se anuncia como REPL hasta validar su plugin de scripting');
+assert.ok(!allLanguageIds.includes('kotlin'), 'Kotlin sigue disponible desde la shell, pero no como REPL que falla al arrancar');
+assert.deepEqual(environmentProbe({ id: 'lang:dart' }, 'LTERMINAL_DART_PROBE'), {
+    kind: 'skip',
+    language: 'dart',
+    reason: 'el SDK de Dart es una CLI de proyectos y no ofrece un REPL interactivo',
+}, 'Dart se conserva como herramienta, pero no se anuncia ni se prueba como REPL');
 
 for (const id of ['fish', 'bash', 'zsh', 'sh', 'pwsh', 'powershell', 'cmd', 'gitbash', 'wine-cmd']) {
     assert.deepEqual(environmentProbe({ id }, 'LTERMINAL_SHELL_PROBE'), {
@@ -90,13 +97,31 @@ assert.deepEqual(probeOutputMarkerRows('echo LTERMINAL_PROBE\nLTERMINAL_PROBE', 
 ], 'el diagnóstico indica si la fila fue eco, salida exacta o texto mezclado sin exponerlo');
 for (const [id, expected] of [
     ['java', 'System.out.println("LTERMINAL_PROBE");'],
-    ['kotlin', 'println("LTERMINAL_PROBE")'],
     ['julia', 'println("LTERMINAL_PROBE")'],
+    ['crystal', 'puts "LTERMINAL_PROBE"'],
     ['csharp', 'Console.WriteLine("LTERMINAL_PROBE");'],
     ['php', "echo 'LTERMINAL_PROBE' . PHP_EOL;"],
 ]) {
     assert.equal(environmentProbe({ id: `lang:${id}` }, 'LTERMINAL_PROBE').command, expected,
         `${id}: la sonda debe ser sintaxis válida y emitir una línea completa`);
 }
+assert.deepEqual(environmentProbe({ id: 'lang:forth' }, 'LTERMINAL_FORTH_PROBE'), {
+    kind: 'repl',
+    language: 'forth',
+    command: '1 2 + . cr ." LTERMINAL_FORTH_PROBE" cr',
+    expectedResultBeforeMarker: '3',
+}, 'la sonda Forth debe comprobar cálculo real además de emitir su marcador');
+assert.equal(probeOutputHasResultBeforeMarker(
+    ['1 2 + . cr ." LTERMINAL_FORTH_PROBE" cr', '3', 'LTERMINAL_FORTH_PROBE'],
+    '1 2 + . cr ." LTERMINAL_FORTH_PROBE" cr',
+    '3',
+    'LTERMINAL_FORTH_PROBE',
+), true, 'el REPL Forth debe mostrar el resultado de la suma antes del marcador');
+assert.equal(probeOutputHasResultBeforeMarker(
+    ['1 2 + . cr ." LTERMINAL_FORTH_PROBE" cr', 'LTERMINAL_FORTH_PROBE'],
+    '1 2 + . cr ." LTERMINAL_FORTH_PROBE" cr',
+    '3',
+    'LTERMINAL_FORTH_PROBE',
+), false, 'el eco y el marcador no sustituyen la ejecución aritmética');
 
-console.log(`Sondas E2E verificadas: ${allLanguageIds.length} REPLs catalogados, shells inocuas y omisiones seguras.`);
+console.log(`Sondas E2E verificadas: ${allLanguageIds.length} REPLs catalogados, shell inocuas y omisiones seguras.`);

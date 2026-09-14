@@ -4,7 +4,12 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
-import { environmentProbe, probeOutputMarkerRows, safeEnvironmentMarker } from '../../scripts/e2e-environment-probes.mjs';
+import {
+    environmentProbe,
+    probeOutputHasResultBeforeMarker,
+    probeOutputMarkerRows,
+    safeEnvironmentMarker,
+} from '../../scripts/e2e-environment-probes.mjs';
 import { containsExactHttpsUrl } from './terminal-url-matcher.mjs';
 
 // WebKitGTK puede intentar crear buffers GBM aunque la sesión gráfica de
@@ -173,7 +178,14 @@ async function bridgeWebView2DevToolsActivePort() {
 
 const driverArgs = ['--port', driverPort, '--native-port', nativePort];
 if (nativeDriver) driverArgs.push('--native-driver', nativeDriver);
-const driver = spawn(driverPath, driverArgs, { stdio: ['ignore', 'inherit', 'inherit'] });
+// El driver puede cerrar la sesión WebDriver y aun así dejar vivo el proceso
+// Tauri (y una ventana gris sin frontend). En POSIX, aislar cada ejecución en
+// su propio grupo permite limpiar solo el driver y sus descendientes sin tocar
+// otras instancias de LTerminal abiertas por el usuario.
+const driver = spawn(driverPath, driverArgs, {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    detached: process.platform !== 'win32',
+});
 let driverStartupError = null;
 driver.once('error', (error) => {
     driverStartupError = new Error(`No se pudo iniciar tauri-driver (${driverPath}): ${error.message}`);
@@ -344,6 +356,72 @@ async function waitForDriver() {
     }
     if (driverStartupError) throw driverStartupError;
     throw new Error('tauri-driver no respondió en 15 segundos');
+}
+
+function processGroupExists(groupId) {
+    try {
+        process.kill(-groupId, 0);
+        return true;
+    } catch (error) {
+        return error?.code === 'EPERM';
+    }
+}
+
+async function stopDriverProcessTree() {
+    const pid = driver.pid;
+    if (!pid) return { strategy: 'no-driver-pid', closed: true, durationMs: 0 };
+    const startedAt = Date.now();
+    if (process.platform !== 'win32') {
+        const groupExists = () => processGroupExists(pid);
+        const signalGroup = (signal) => {
+            try {
+                process.kill(-pid, signal);
+            } catch (error) {
+                if (error?.code !== 'ESRCH') throw error;
+            }
+        };
+        signalGroup('SIGTERM');
+        const waitForGroupExit = async (timeoutMs) => {
+            const deadline = Date.now() + timeoutMs;
+            while (groupExists() && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            return !groupExists();
+        };
+        let closed = await waitForGroupExit(2500);
+        if (!closed) {
+            signalGroup('SIGKILL');
+            closed = await waitForGroupExit(1000);
+        }
+        return {
+            strategy: 'dedicated-process-group',
+            processGroupClosed: closed,
+            passed: closed,
+            closed,
+            durationMs: Date.now() - startedAt,
+        };
+    }
+
+    // `taskkill /T` queda acotado al PID exclusivo del tauri-driver que acaba
+    // de lanzar este smoke; el cierre WebDriver ya tuvo oportunidad de ser
+    // limpio y esto evita dejar una GUI de prueba huérfana en Windows.
+    try {
+        await execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 5000 });
+    } catch {
+        driver.kill('SIGTERM');
+    }
+    const exitDeadline = Date.now() + 2000;
+    while (driver.exitCode === null && driver.signalCode === null && Date.now() < exitDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const closed = driver.exitCode !== null || driver.signalCode !== null;
+    return {
+        strategy: 'taskkill-driver-tree',
+        driverClosed: closed,
+        passed: closed,
+        closed,
+        durationMs: Date.now() - startedAt,
+    };
 }
 
 async function find(css) {
@@ -1358,6 +1436,11 @@ async function rawTerminalTexts(expected) {
     return texts.slice(0, expected);
 }
 
+async function rawTerminalTextWithin(cell) {
+    const rows = await findAllWithin(cell, '.xterm-rows');
+    return rows.length ? textOf(rows[0][elementKey]) : '';
+}
+
 async function promptStates(expected) {
     const hosts = await findAll('.tab-pane:not(.hidden)[data-prompt-visible]');
     return Promise.all(hosts.slice(0, expected).map((host) => attribute(host[elementKey], 'data-prompt-visible')));
@@ -2293,11 +2376,21 @@ async function exerciseShellMatrix() {
         if (sameEnvironment) {
             const readinessStartedAt = Date.now();
             // La fase anterior puede haber desplazado el banner fuera del
-            // viewport con ayuda/créditos. Al reutilizar la shell no debe
-            // volver a exigirse que el banner siga visible: el prompt listo
-            // es la señal correcta para shell y REPL por igual.
-            await waitUntil(async () => (await promptStates(1))[0] === 'true', 30000, `prompt del entorno ${id}`);
-            return { elapsedMs: Date.now() - readinessStartedAt };
+            // viewport con ayuda/créditos. Gforth no tiene prompt inicial:
+            // su estado inputReady confirma que el REPL ya acepta entrada.
+            await waitUntil(async () => {
+                if (id === 'lang:forth') {
+                    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+                        script: `return document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)')?.dataset.inputReady === 'true';`,
+                        args: [],
+                    });
+                }
+                return (await promptStates(1))[0] === 'true';
+            }, 30000, `entrada del entorno ${id}`);
+            return {
+                elapsedMs: Date.now() - readinessStartedAt,
+                readinessSignal: id === 'lang:forth' ? 'input-ready-no-prompt' : 'prompt',
+            };
         }
         const menuOptions = await findAll(`.env-menu [data-environment-id="${id}"]`);
         if (menuOptions.length === 0) await click(await findWhenReady('.env-select'));
@@ -2328,18 +2421,11 @@ async function exerciseShellMatrix() {
         }), 35000, `handshake y entrada listos para ${id}`);
         const probe = probes.get(id);
         const readinessStartedAt = Date.now();
-        if (probe?.kind === 'repl' || id === 'wine-cmd') {
-            let unavailableReason = null;
+        const readinessSignal = id === 'lang:forth' ? 'input-ready-no-prompt' : 'prompt';
+        if ((probe?.kind === 'repl' || id === 'wine-cmd') && id !== 'lang:forth') {
             try {
                 await waitUntil(async () => {
                     if ((await promptStates(1))[0] === 'true') return true;
-                    if (id === 'lang:kotlin') {
-                        const terminalText = (await rawTerminalTexts(1).catch(() => []))[0] ?? '';
-                        if (/(?:Kotlin REPL is deprecated and should be enabled explicitly|unable to run REPL, no scripting plugin loaded)/i.test(terminalText)) {
-                            unavailableReason = 'El kotlinc instalado no puede iniciar el REPL: falta activar -Xrepl o cargar el plugin de scripting.';
-                            return true;
-                        }
-                    }
                     return false;
                 }, 30000, `prompt del REPL ${id}`);
             } catch (error) {
@@ -2350,13 +2436,10 @@ async function exerciseShellMatrix() {
                     cause: error,
                 });
             }
-            if (unavailableReason) {
-                return { elapsedMs: Date.now() - readinessStartedAt, unavailableReason };
-            }
-        } else {
+        } else if (id !== 'lang:forth') {
             await waitForBannerPanes(1, 20000);
         }
-        const readiness = { elapsedMs: Date.now() - readinessStartedAt };
+        const readiness = { elapsedMs: Date.now() - readinessStartedAt, readinessSignal };
         if (probe?.kind === 'shell') {
             const startupRows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
             const startupText = await textOf(startupRows);
@@ -2382,15 +2465,31 @@ async function exerciseShellMatrix() {
             return null;
         }
         const marker = safeEnvironmentMarker(id);
+        let startupHintVisible = true;
+        let startupHintCapture = null;
+        if (id === 'lang:forth') {
+            await waitUntil(async () => {
+                const output = await rawTerminalTextWithin(await findWhenReady('.cell:not(.hidden)'));
+                startupHintVisible = /Ejemplo: 1 2 \+ \. cr -> 3/i.test(output ?? '');
+                return startupHintVisible;
+            }, 5000, 'ayuda inicial de Gforth visible junto al cursor');
+            startupHintCapture = 'shell-lang-forth-startup-help';
+            await captureScreenshot(startupHintCapture);
+        }
         const terminalFocusMethod = await sendTerminalLine(probe.command);
         let markerOutputDetected = false;
+        let expectedResultDetected = probe.expectedResultBeforeMarker === undefined;
         let outputRowSummary = [];
         try {
             await waitUntil(async () => {
-                const [output] = await rawTerminalTexts(1);
+                const output = await rawTerminalTextWithin(await findWhenReady('.cell:not(.hidden)'));
                 outputRowSummary = probeOutputMarkerRows(output ?? '', probe.command, marker);
                 markerOutputDetected = outputRowSummary.some((row) => row.markerAfterEchoRemoval);
-                return markerOutputDetected;
+                expectedResultDetected = probe.expectedResultBeforeMarker === undefined
+                    || probeOutputHasResultBeforeMarker(
+                        output ?? '', probe.command, probe.expectedResultBeforeMarker, marker,
+                    );
+                return markerOutputDetected && expectedResultDetected;
             }, 15000, `salida evaluada por el PTY de ${id}`);
         } catch (error) {
             throw new Error(`${error.message}; filasPTY=${JSON.stringify(outputRowSummary)}`, { cause: error });
@@ -2401,6 +2500,11 @@ async function exerciseShellMatrix() {
             language: probe.language ?? null,
             marker,
             markerOutputDetected,
+            ...(probe.expectedResultBeforeMarker === undefined ? {} : {
+                expectedResultBeforeMarker: probe.expectedResultBeforeMarker,
+                expectedResultDetected,
+            }),
+            ...(id === 'lang:forth' ? { startupHintVisible, startupHintCapture } : {}),
             terminalFocusMethod,
             bannerReadyMs: readiness.elapsedMs,
             totalMs: Date.now() - startedAt,
@@ -4429,23 +4533,41 @@ try {
     }
     const reclaimCommands = Math.min(64, Math.max(24, Number(horizontalHelpSnapshot.host.rows || 24) + 4));
     const reclaimMarker = `LTERMINAL_WIDTH_RECLAIM_${Date.now().toString(36).toUpperCase()}`;
-    for (let index = 0; index < reclaimCommands; index += 1) {
-        await sendTerminalLine(`echo ${reclaimMarker}_${index}`, horizontalCell);
+    const reclaimOutputLines = Array.from(
+        { length: reclaimCommands },
+        (_, index) => `${reclaimMarker}_${index}`,
+    );
+    // Mantener cada orden corta: WebDriver/xterm puede perder caracteres al
+    // inyectar una línea de cientos de caracteres. Esperar cada resultado
+    // evita medir el texto ecoado de readline como si fuera salida del PTY.
+    let reclaimMarkerVisible = false;
+    let reclaimOutputSummary = [];
+    let reclaimTerminalTail = '';
+    for (const [index, line] of reclaimOutputLines.entries()) {
+        await sendTerminalLine(`echo ${line}`, horizontalCell);
+        try {
+            await waitUntil(async () => {
+                const terminalText = await rawTerminalTextWithin(horizontalCell);
+                reclaimTerminalTail = String(terminalText ?? '').slice(-1200);
+                reclaimOutputSummary = probeOutputMarkerRows(terminalText, `echo ${line}`, line);
+                reclaimMarkerVisible = reclaimOutputSummary.some((row) => row.markerAfterEchoRemoval);
+                return reclaimMarkerVisible;
+            }, 8000, `salida PTY del marcador ${index + 1}/${reclaimOutputLines.length}`);
+        } catch (error) {
+            throw new Error(`${error.message}; filasPTY=${JSON.stringify(reclaimOutputSummary)}; terminalTail=${JSON.stringify(reclaimTerminalTail)}`, { cause: error });
+        }
     }
     let finalWidthSnapshot = horizontalHelpSnapshot;
     try {
         await waitUntil(async () => {
             finalWidthSnapshot = await terminalHorizontalSnapshot(horizontalCell);
-            const rows = await findAllWithin(horizontalCell, '.xterm-rows');
-            const visibleText = rows[0] ? await textOf(rows[0][elementKey]) : '';
             return Number(finalWidthSnapshot.host?.cols) <= visibleCols + 1
                 && finalWidthSnapshot.host.scrollWidth <= finalWidthSnapshot.host.clientWidth + 2
-                && finalWidthSnapshot.host.overflow !== 'true'
-                && visibleText.includes(`${reclaimMarker}_${reclaimCommands - 1}`);
+                && finalWidthSnapshot.host.overflow !== 'true';
         }, 20000, 'recuperación del ancho visible con la ayuda en el scrollback');
     } catch (error) {
         await captureScreenshot('scroll-horizontal-ancho-no-recuperado');
-        throw new Error(`El scrollback antiguo mantuvo el PTY más ancho que la ventana: ${JSON.stringify({ helpCols, visibleCols, finalWidthSnapshot })}`, { cause: error });
+        throw new Error(`El PTY no recuperó el ancho visible después de desplazar la ayuda: ${JSON.stringify({ helpCols, visibleCols, reclaimMarkerVisible, finalWidthSnapshot })}`, { cause: error });
     }
     const historyHeight = finalWidthSnapshot.viewport?.scrollHeight ?? 0;
     const historyViewportHeight = finalWidthSnapshot.viewport?.clientHeight ?? 0;
@@ -4459,7 +4581,8 @@ try {
         historyRetained: historyHeight > historyViewportHeight,
         historyHeight,
         historyViewportHeight,
-        commands: reclaimCommands,
+        generatedLines: reclaimOutputLines.length,
+        outputMarkerVisible: reclaimMarkerVisible,
         passed: historyHeight > historyViewportHeight,
     });
     if (historyHeight <= historyViewportHeight) {
@@ -4763,7 +4886,25 @@ try {
     throw error;
 } finally {
     if (sessionId) await request(`/session/${sessionId}`, 'DELETE').catch(() => {});
-    driver.kill('SIGTERM');
+    try {
+        const cleanup = await stopDriverProcessTree();
+        recordEvent('e2e-process-cleanup', cleanup);
+        if (!cleanup.closed) {
+            smokeReport.status = 'failed';
+            smokeReport.error = [smokeReport.error, 'No se pudo cerrar el grupo de procesos aislado del E2E.']
+                .filter(Boolean)
+                .join('\n');
+            process.exitCode = 1;
+            process.stderr.write('E2E: quedó vivo un proceso del grupo dedicado; se informa como fallo.\n');
+        }
+    } catch (error) {
+        smokeReport.status = 'failed';
+        smokeReport.error = [smokeReport.error, `No se pudo limpiar el árbol del E2E: ${error}`]
+            .filter(Boolean)
+            .join('\n');
+        process.exitCode = 1;
+        process.stderr.write(`E2E: falló la limpieza del proceso del driver: ${error}\n`);
+    }
     smokeReport.finishedAt = new Date().toISOString();
     smokeReport.durationMs = Date.now() - smokeStartedAt;
     smokeReport.phases = phaseTimings;

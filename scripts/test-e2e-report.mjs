@@ -38,10 +38,11 @@ const valid = {
     ],
     events: [
         ...phases.map((name) => ({ type: 'phase', name })),
+        { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
         { type: 'terminal-mouse-selection', passed: true, gesture: 'pointerDown → pointerMove while pressed → pointerUp' },
         { type: 'terminal-output-repaint', passed: true, trigger: 'pty-output-idle', refreshCount: 1, rowsRefreshed: 24, layoutUnchanged: true, marker: 'LTERMINAL_OUTPUT_REPAINT_FIXTURE', capture: 'pty-output-repaint-no-layout-event' },
         { type: 'horizontal-help-geometry', passed: true, snapshot: { host: { clientWidth: 400, scrollWidth: 850 }, indicator: { opacity: '1' } }, horizontalWheelProbe: { lineMode: { defaultPrevented: true }, pixelMode: { defaultPrevented: true }, pageMode: { defaultPrevented: true } } },
-        { type: 'terminal-columns-reclaim', passed: true, beforeCols: 100, visibleCols: 50, afterCols: 50, hostWidth: 400, hostScrollWidth: 400, historyRetained: true, historyHeight: 800, historyViewportHeight: 400, commands: 24 },
+        { type: 'terminal-columns-reclaim', passed: true, beforeCols: 100, visibleCols: 50, afterCols: 50, hostWidth: 400, hostScrollWidth: 400, historyRetained: true, historyHeight: 800, historyViewportHeight: 400, generatedLines: 24, outputMarkerVisible: true },
         { type: 'environment-probe', id: 'bash', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
         { type: 'environment-probe', id: 'zsh', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
         { type: 'environment-probe', id: 'fish', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
@@ -91,11 +92,46 @@ const focusedShellMatrix = {
         || event.type === 'environment-probe-skipped'
         || event.type === 'environment-shell-matrix'
         || event.type === 'environment-switch-restore'
+        || event.type === 'e2e-process-cleanup'
         || (event.type === 'phase' && ['arranque de interfaz', 'cambio de shell'].includes(event.name))),
 };
 
 try {
     assert.equal((await run('valid', valid)).status, 0, 'un informe completo debe pasar');
+    const withForthProbe = (expectedResultDetected, startupHintVisible = true) => ({
+        ...valid,
+        captures: [...valid.captures, { label: 'shell-lang-forth-startup-help', path: 'forth-startup.png' }],
+        events: valid.events.map((event) => event.type === 'environment-shell-matrix'
+            ? {
+                ...event,
+                availableIds: [...event.availableIds, 'lang:forth'],
+                testedIds: [...event.testedIds, 'lang:forth'],
+                testedAlternates: [...event.testedAlternates, 'lang:forth'],
+                probeCount: event.probeCount + 1,
+                replProbeCount: event.replProbeCount + 1,
+            }
+            : event).concat({
+            type: 'environment-probe',
+            id: 'lang:forth',
+            kind: 'repl',
+            language: 'forth',
+            marker: 'LTERMINAL_ENV_LANG_FORTH',
+            markerOutputDetected: true,
+            expectedResultBeforeMarker: '3',
+            expectedResultDetected,
+            startupHintVisible,
+            startupHintCapture: 'shell-lang-forth-startup-help',
+            terminalFocusMethod: 'native-click',
+            startupClean: true,
+            passed: true,
+        }),
+    });
+    assert.equal((await run('forth-arithmetic-passed', withForthProbe(true))).status, 0,
+        'el informe debe aceptar Forth solo cuando verifica la operación aritmética real');
+    assert.notEqual((await run('forth-arithmetic-missing', withForthProbe(false))).status, 0,
+        'el marcador de Forth sin resultado calculado no demuestra que el REPL funcione');
+    assert.notEqual((await run('forth-startup-help-missing', withForthProbe(true, false))).status, 0,
+        'Forth no debe pasar si la ayuda de arranque no queda visible antes de escribir');
     assert.equal((await run('focused-shell-matrix', focusedShellMatrix)).status, 0,
         'un informe enfocado debe validar la cobertura/restauración de su matriz sin exigir las fases ajenas');
     assert.notEqual((await run('focused-shell-matrix-without-restore', {
@@ -112,6 +148,12 @@ try {
         ...valid,
         phases: valid.phases.slice(1),
     })).status, 0, 'una fase ausente debe fallar');
+    assert.notEqual((await run('orphaned-e2e-window', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'e2e-process-cleanup'
+            ? { ...event, processGroupClosed: false, passed: false, closed: false }
+            : event),
+    })).status, 0, 'un E2E no debe pasar si deja viva una ventana/proceso de prueba');
     assert.notEqual((await run('missing-mouse-selection', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'terminal-mouse-selection'),

@@ -76,8 +76,6 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "perl", label: "Perl", windows_exe: "perl", unix_exe: "perl", args: &["-de1"],
         note: Some("Perl no incluye un REPL propio: se abre su depurador interactivo.") },
     LanguageDef { id: "julia", label: "Julia", windows_exe: "julia", unix_exe: "julia", args: &[], note: None },
-    LanguageDef { id: "kotlin", label: "Kotlin", windows_exe: "kotlinc", unix_exe: "kotlinc", args: &["-Xrepl"],
-        note: Some("Kotlin 2.2 o posterior requiere -Xrepl para habilitar el intérprete; algunas distribuciones omiten el plugin de scripting.") },
     LanguageDef { id: "csharp", label: "C#", windows_exe: "csi", unix_exe: "csi", args: &[],
         note: Some("Requiere C# Interactive (csi), incluido con algunos SDK y herramientas .NET.") },
     LanguageDef { id: "fsharp", label: "F#", windows_exe: "dotnet", unix_exe: "dotnet", args: &["fsi"],
@@ -108,10 +106,10 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "cling", label: "C/C++ · Cling", windows_exe: "cling", unix_exe: "cling", args: &[], note: None },
     LanguageDef { id: "lfortran", label: "Fortran · LFortran", windows_exe: "lfortran", unix_exe: "lfortran", args: &[], note: None },
     LanguageDef { id: "nim", label: "Nim", windows_exe: "nim", unix_exe: "nim", args: &["secret"], note: None },
-    LanguageDef { id: "crystal", label: "Crystal", windows_exe: "crystal", unix_exe: "crystal", args: &[], note: None },
+    // El ejecutable sin subcomando solo imprime la ayuda; `crystal i` es el REPL.
+    LanguageDef { id: "crystal", label: "Crystal", windows_exe: "crystal", unix_exe: "crystal", args: &["i"], note: None },
     LanguageDef { id: "v", label: "V", windows_exe: "v", unix_exe: "v", args: &["repl"], note: None },
     LanguageDef { id: "swift", label: "Swift", windows_exe: "swift", unix_exe: "swift", args: &[], note: None },
-    LanguageDef { id: "dart", label: "Dart", windows_exe: "dart", unix_exe: "dart", args: &[], note: None },
     LanguageDef { id: "standard-ml", label: "Standard ML", windows_exe: "sml", unix_exe: "sml", args: &[], note: None },
     LanguageDef { id: "elm", label: "Elm", windows_exe: "elm", unix_exe: "elm", args: &["repl"], note: None },
     LanguageDef { id: "scheme-guile", label: "Scheme · Guile", windows_exe: "guile", unix_exe: "guile", args: &[], note: None },
@@ -122,12 +120,19 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "postgresql", label: "PostgreSQL", windows_exe: "psql", unix_exe: "psql", args: &[], note: None },
     LanguageDef { id: "mysql", label: "MySQL", windows_exe: "mysql", unix_exe: "mysql", args: &[], note: None },
     LanguageDef { id: "mariadb", label: "MariaDB", windows_exe: "mariadb", unix_exe: "mariadb", args: &[], note: None },
-    LanguageDef { id: "duckdb", label: "DuckDB", windows_exe: "duckdb", unix_exe: "duckdb", args: &[], note: None },
+    // Evita que la CLI consulte el color de fondo del terminal y espere 5 s si
+    // el PTY no implementa esa consulta; además el modo oscuro coincide con la UI.
+    LanguageDef { id: "duckdb", label: "DuckDB", windows_exe: "duckdb", unix_exe: "duckdb", args: &["-dark-mode"], note: None },
     LanguageDef { id: "mongodb", label: "MongoDB", windows_exe: "mongosh", unix_exe: "mongosh", args: &[], note: None },
     LanguageDef { id: "redis", label: "Redis", windows_exe: "redis-cli", unix_exe: "redis-cli", args: &[], note: None },
     LanguageDef { id: "swi-prolog", label: "Prolog · SWI", windows_exe: "swipl", unix_exe: "swipl", args: &[], note: None },
     LanguageDef { id: "gnu-prolog", label: "Prolog · GNU", windows_exe: "gprolog", unix_exe: "gprolog", args: &[], note: None },
-    LanguageDef { id: "forth", label: "Forth", windows_exe: "gforth", unix_exe: "gforth", args: &[], note: None },
+    LanguageDef { id: "forth", label: "Forth", windows_exe: "gforth", unix_exe: "gforth",
+        // Gforth ejecuta -e antes de llamar a bootmessage. Si imprimimos la
+        // ayuda directamente, el banner posterior la desplaza; envolvemos el
+        // hook y conservamos su acción original con DEFER@.
+        args: &["-e", "' bootmessage defer@ constant lterminal-original-bootmessage : lterminal-bootmessage ( -- ) lterminal-original-bootmessage execute cr .\" Ejemplo: 1 2 + . cr -> 3. Escribe bye para salir.\" cr ; ' lterminal-bootmessage IS bootmessage"],
+        note: Some("Gforth no muestra un prompt visible al inicio. Escribe una expresión Forth; por ejemplo, 1 2 + . cr muestra 3. Para salir, escribe bye.") },
     LanguageDef { id: "fennel", label: "Fennel", windows_exe: "fennel", unix_exe: "fennel", args: &[], note: None },
     LanguageDef { id: "janet", label: "Janet", windows_exe: "janet", unix_exe: "janet", args: &[], note: None },
     LanguageDef { id: "gjs", label: "JavaScript · GJS", windows_exe: "gjs", unix_exe: "gjs", args: &[], note: None },
@@ -384,6 +389,60 @@ mod tests {
     }
 
     #[test]
+    fn crystal_inicia_el_interprete_interactivo_en_ambas_plataformas() {
+        let (is_installed, resolve_path) = probe_with(&["crystal"]);
+        let probe = Probe {
+            is_installed: &is_installed,
+            resolve_path: &resolve_path,
+        };
+
+        for platform in ["linux", "windows"] {
+            let environment = detect_language_environments(platform, &probe)
+                .into_iter()
+                .find(|environment| environment.id == "lang:crystal")
+                .expect("Crystal instalado debe detectarse como REPL");
+            assert!(environment.repl);
+            assert_eq!(environment.kind, ShellKind::Repl);
+            assert_eq!(environment.args, vec!["i"]);
+        }
+    }
+
+    #[test]
+    fn dart_cli_no_se_ofrece_como_repl_interactivo() {
+        let (is_installed, resolve_path) = probe_with(&["dart"]);
+        let environments = detect_language_environments(
+            "linux",
+            &Probe {
+                is_installed: &is_installed,
+                resolve_path: &resolve_path,
+            },
+        );
+
+        assert!(!environments
+            .iter()
+            .any(|environment| environment.id == "lang:dart"));
+    }
+
+    #[test]
+    fn duckdb_evade_la_espera_de_color_en_ambas_plataformas() {
+        let (is_installed, resolve_path) = probe_with(&["duckdb"]);
+        let probe = Probe {
+            is_installed: &is_installed,
+            resolve_path: &resolve_path,
+        };
+
+        for platform in ["linux", "windows"] {
+            let environment = detect_language_environments(platform, &probe)
+                .into_iter()
+                .find(|environment| environment.id == "lang:duckdb")
+                .expect("DuckDB instalado debe detectarse como REPL");
+            assert!(environment.repl);
+            assert_eq!(environment.kind, ShellKind::Repl);
+            assert_eq!(environment.args, vec!["-dark-mode"]);
+        }
+    }
+
+    #[test]
     fn scala_usa_el_launcher_real_de_arch_y_el_de_windows() {
         let (is_installed, resolve_path) = probe_with(&["scala3"]);
         let linux = detect_language_environments(
@@ -438,7 +497,7 @@ mod tests {
 
     #[test]
     fn se_conservan_los_argumentos_y_la_nota_de_cada_lenguaje() {
-        let (is_installed, resolve_path) = probe_with(&["php", "perl", "lua", "kotlinc"]);
+        let (is_installed, resolve_path) = probe_with(&["php", "perl", "lua", "kotlinc", "gforth"]);
         let envs = detect_language_environments(
             "linux",
             &Probe {
@@ -457,13 +516,22 @@ mod tests {
         assert!(lua.args.is_empty());
         assert_eq!(lua.note, None);
 
-        let kotlin = envs.iter().find(|env| env.id == "lang:kotlin").unwrap();
-        assert_eq!(kotlin.args, vec!["-Xrepl".to_string()]);
-        assert!(kotlin
+        assert!(!envs.iter().any(|env| env.id == "lang:kotlin"),
+            "kotlinc no debe anunciarse como REPL mientras el launcher no carga de forma fiable el plugin de scripting");
+
+        let forth = envs.iter().find(|env| env.id == "lang:forth").unwrap();
+        assert_eq!(
+            forth.args,
+            vec![
+                "-e".to_string(),
+                "' bootmessage defer@ constant lterminal-original-bootmessage : lterminal-bootmessage ( -- ) lterminal-original-bootmessage execute cr .\" Ejemplo: 1 2 + . cr -> 3. Escribe bye para salir.\" cr ; ' lterminal-bootmessage IS bootmessage".to_string(),
+            ]
+        );
+        assert!(forth
             .note
             .as_deref()
             .unwrap()
-            .contains("plugin de scripting"));
+            .contains("no muestra un prompt visible"));
     }
 
     #[test]
@@ -547,7 +615,7 @@ mod tests {
         assert!(CATALOG_DEFS
             .iter()
             .all(|definition| !definition.windows_exe.is_empty()));
-        // 82 definiciones base + 28 del catálogo modular; los plugins pueden
+        // 81 definiciones base + 28 del catálogo modular; los plugins pueden
         // ampliar esta cifra sin alterar la garantía de compatibilidad base.
         assert!(LANGUAGE_DEFS.len() + CATALOG_DEFS.len() >= 100);
     }

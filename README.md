@@ -317,7 +317,7 @@ cada shell/REPL con sonda segura disponible; exige ver el eco y el resultado
 evaluado en el PTY, registra las herramientas omitidas con su motivo, rechaza
 errores del inicializador y restaura el entorno original. No inicia servicios
 de bases de datos, contenedores, elevaciones ni dispositivos ADB reales.
-`npm run test:e2e-environment-probes` comprueba localmente que los 91 REPL
+`npm run test:e2e-environment-probes` comprueba localmente que los 89 REPL
 declarados entre el código y el catálogo tienen una sonda o una omisión segura.
 
 Para comprobar el refresco de pantalla por el transporte ADB sin conectar un
@@ -1107,7 +1107,7 @@ El selector agrupa los entornos por familia:
 | Grupo | Contenido |
 |---|---|
 | Shells del sistema | cmd, PowerShell, PowerShell 7, Git Bash, bash, zsh, fish, sh, distribuciones WSL y sus shells, `cmd.exe · Wine` |
-| Lenguajes · intérprete interactivo | REPL detectados bajo demanda: Python, Node.js, Ruby, Java, PHP, Lua, R, Groovy, Deno, Bun, Perl, Julia, Kotlin, C#/F#, Haskell, Scala, Clojure, Elixir, Erlang, OCaml, Racket y Rust mediante evcxr |
+| Lenguajes · intérprete interactivo | REPL detectados bajo demanda: Python, Node.js, Ruby, Java, PHP, Lua, R, Groovy, Deno, Bun, Perl, Julia, C#/F#, Haskell, Scala, Clojure, Elixir, Erlang, OCaml, Racket, Forth y Rust mediante evcxr |
 | Docker · contenedores en ejecución | Entrar en un contenedor vivo |
 | Docker · imágenes | Crear un contenedor nuevo y efímero |
 | Android (ADB) | Un entorno por dispositivo conectado |
@@ -1120,8 +1120,19 @@ funcionar: contenedores Docker (montan una carpeta fija en `/workspace`),
 dispositivos ADB, y rutas UNC como `\\wsl$\...`, que cmd.exe no admite como
 directorio actual.
 
+Kotlin sigue disponible como herramienta instalable y se puede iniciar desde
+una shell, pero por ahora no aparece como REPL dedicado: algunos paquetes de
+`kotlinc` no cargan el plugin de scripting que necesita `-Xrepl`. Se volverá a
+ofrecer en el selector cuando la detección pueda confirmar que ese plugin está
+realmente disponible.
+
 Un **REPL no es una shell**: no recibe alias, y las acciones que escriben
 comandos se enrutan a una pestaña con una shell real, abriéndola si hace falta.
+Gforth no muestra un prompt inicial por diseño. La terminal conserva su banner y
+añade justo debajo una ayuda visible: escribe `1 2 + . cr` y debe mostrar `3`, o
+`bye` para salir; responde `ok` después de procesar cada línea. El E2E comprueba
+tanto que esa ayuda aparece antes de escribir como el resultado calculado, no
+solo que el proceso haya arrancado.
 
 ---
 
