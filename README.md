@@ -1059,6 +1059,23 @@ fallo no se vería hasta escribir el panel que lo necesitaba.
   tope de tamaño aplicado mientras se escribe.
 - **Sin tokens.** La integración con GitHub usa solo la API pública.
 
+### Escaneos del repositorio
+
+Los workflows de GitHub Actions separan las comprobaciones por superficie:
+CodeQL analiza el código Rust, TypeScript/JavaScript y los workflows; Gitleaks
+busca secretos; `actionlint` y zizmor revisan sintaxis y seguridad de Actions;
+CI ejecuta `npm audit`, `cargo audit` y `cargo deny`; Dependency Review compara
+los cambios de dependencias de cada PR con el aviso de vulnerabilidades y la
+política de licencias; OpenSSF Scorecard revisa semanalmente las prácticas de
+seguridad del repositorio. Los resultados SARIF se publican en Code Scanning.
+Dependabot agrupa actualizaciones minor/patch por ecosistema y mantiene las
+major separadas para poder revisarlas antes de integrarlas.
+
+No se conserva el workflow de ejemplo de APIsec: apuntaba al proyecto de
+prueba `VAmPI`, mientras que LTerminal es una aplicación de escritorio y no
+expone la API HTTP que ese escáner necesita. Si se incorpora una API real en el
+futuro, se podrá añadir un escaneo DAST específico para ese servicio.
+
 ## Entornos y shells
 
 El selector agrupa los entornos por familia:

@@ -4,11 +4,53 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      tauri-plugins:
+        applies-to: version-updates
+        patterns:
+          - "@tauri-apps/*"
+        update-types:
+          - minor
+          - patch
+      frontend-runtime:
+        applies-to: version-updates
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      frontend-tooling:
+        applies-to: version-updates
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
       interval: weekly
+    groups:
+      tauri-ecosystem:
+        applies-to: version-updates
+        patterns:
+          - "tauri"
+          - "tauri-*"
+        update-types:
+          - minor
+          - patch
+      rust-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

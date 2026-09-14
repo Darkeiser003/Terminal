@@ -11,4 +11,6 @@ currently being supported with security updates.
 
 ## Reporting a Vulnerability
 
-Contact me
+Report vulnerabilities privately through [GitHub Security Advisories](https://github.com/Darkeiser003/Terminal/security/advisories/new).
+Do not publish exploit details in a public issue. If private reporting is not
+available for the repository, contact the repository owner before disclosure.
