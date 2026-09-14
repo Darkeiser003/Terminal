@@ -150,6 +150,7 @@
   "toolbar.settings": "Налаштування",
   "toolbar.settingsTitle": "Налаштувати зовнішній вигляд та поведінку",
   "update.available": "Доступна новіша версія: {version}.",
+  "update.packagesAvailable": "Доступні оновлення для програм, якими керує {manager}.",
   "update.into": "Буде встановлено в {path}",
   "action.adb-authorize.label": "Перезапустити ADB та повторно запросити авторизацію",
   "action.adb-authorize.shortLabel": "Перезапустити та запросити авторизацію",

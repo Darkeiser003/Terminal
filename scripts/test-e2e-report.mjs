@@ -55,8 +55,8 @@ const valid = {
         { type: 'dependencies', groups: 8, subgroups: 6, repeatedLoads: 3, platformGroup: 'Virtualización' },
         { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
         { type: 'responsive-minimum', passed: true, configured: { width: 481, height: 271 }, requested: { width: 512, height: 281 }, applied: { width: 513, height: 282 } },
-        { type: 'native-window-resize', platform: 'linux', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
-        { type: 'native-window-resize', platform: 'linux', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
+        { type: 'native-window-resize', platform: 'linux', nativeResizeMethod: 'webdriver', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
+        { type: 'native-window-resize', platform: 'linux', nativeResizeMethod: 'webdriver', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
         { type: 'tab-isolation', passed: true, tabs: 3 },
         { type: 'rapid-tab-replace', passed: true, isolated: true, closedTabId: 'tab-1', createdTabId: 'tab-2' },
         { type: 'explorer-cwd-layout', passed: true, cwdFollowed: true, layout: { pathHeight: 18, gap: 0, ordered: true } },
@@ -175,6 +175,25 @@ try {
         ...valid,
         captures: [],
     })).status, 0, 'faltan las capturas del redimensionado nativo');
+    assert.equal((await run('hyprland-resize-fallback', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'native-window-resize'
+            ? { ...event, nativeResizeMethod: 'hyprland-resizeactive-fallback' }
+            : event),
+    })).status, 0, 'el fallback de compositor se admite solo tras comprobar el rect real');
+    assert.notEqual((await run('windows-hyprland-fallback', {
+        ...valid,
+        host: { ...valid.host, platform: 'windows' },
+        events: valid.events.map((event) => event.type === 'native-window-resize'
+            ? { ...event, platform: 'windows', nativeResizeMethod: 'hyprland-resizeactive-fallback' }
+            : event),
+    })).status, 0, 'un informe Windows no puede declarar el fallback exclusivo de Hyprland');
+    assert.notEqual((await run('resize-method-missing', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'native-window-resize'
+            ? { ...event, nativeResizeMethod: undefined }
+            : event),
+    })).status, 0, 'el informe debe identificar qué mecanismo nativo aplicó el resize');
     assert.notEqual((await run('missing-tab-isolation', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'tab-isolation'),

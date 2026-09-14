@@ -150,6 +150,7 @@
   "toolbar.settings": "Setări",
   "toolbar.settingsTitle": "Personalizează aspectul și comportamentul",
   "update.available": "Este disponibilă o versiune mai nouă: {version}.",
+  "update.packagesAvailable": "Sunt disponibile actualizări pentru aplicațiile gestionate de {manager}.",
   "update.into": "Va fi instalat în {path}",
   "action.adb-authorize.label": "Repornește ADB și solicită din nou autorizarea",
   "action.adb-authorize.shortLabel": "Repornește și solicită autorizare",

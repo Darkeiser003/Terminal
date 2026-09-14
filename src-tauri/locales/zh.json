@@ -150,6 +150,7 @@
   "toolbar.settings": "设置",
   "toolbar.settingsTitle": "自定义外观与行为选项",
   "update.available": "存在新版本: {version}。",
+  "update.packagesAvailable": "通过 {manager} 管理的应用有可用更新。",
   "update.into": "将安装至 {path}",
   "action.adb-authorize.label": "重启 ADB 并重新请求授权",
   "action.adb-authorize.shortLabel": "重启并请求授权",

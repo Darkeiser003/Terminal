@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [javascript-typescript, rust]
+        language: [javascript-typescript, rust, actions]
     steps:
       - uses: actions/checkout@v4
       - name: Dependencias Rust/Linux
@@ -30,6 +30,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
       - uses: github/codeql-action/autobuild@v3
+        if: matrix.language != 'actions'
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:${{ matrix.language }}

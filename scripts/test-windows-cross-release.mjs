@@ -23,6 +23,10 @@ const release = join(fixture, 'release');
 const helper = join(root, 'scripts/package-windows-cross.mjs');
 const version = '9.8.7';
 const required = ['winslim-terminal.exe', 'conpty.dll', 'OpenConsole.exe', 'WebView2Loader.dll'];
+const manifest = join(release, 'SHA256SUMS.txt');
+const signature = join(release, 'SHA256SUMS.txt.sig');
+const linuxArtifact = `LTerminal-${version}-x86_64.AppImage`;
+const linuxDigest = 'a'.repeat(64);
 
 async function run(fast = false) {
     const args = [helper, '--source', source, '--project', root, '--release', release, '--version', version];
@@ -32,26 +36,29 @@ async function run(fast = false) {
 
 try {
     await mkdir(source, { recursive: true });
+    await mkdir(release, { recursive: true });
     for (const name of required) await writeFile(join(source, name), `fixture:${name}\n`);
+    await writeFile(manifest, `${linuxDigest}  ${linuxArtifact}\n`);
+    await writeFile(signature, 'firma anterior');
 
     let result = await run();
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const portable = join(release, `WinSlimTerminal-${version}`);
     const archive = join(release, `WinSlimTerminal-Unpacked-${version}.zip`);
-    const manifest = join(release, 'SHA256SUMS.txt');
     for (const name of required) assert.equal(await readFile(join(portable, name), 'utf8'), `fixture:${name}\n`);
     assert.ok((await readdir(portable)).includes('scripts'), 'se deben incluir los recursos Tauri en su ruta portable');
     const hashLine = (await readFile(manifest, 'utf8')).split('\n').find((line) => line.endsWith(`  WinSlimTerminal-Unpacked-${version}.zip`));
     assert.ok(hashLine, 'el manifiesto debe identificar el ZIP publicado');
     assert.equal(hashLine.slice(0, 64), createHash('sha256').update(await readFile(archive)).digest('hex'));
+    assert.match(await readFile(manifest, 'utf8'), new RegExp(`${linuxDigest}  ${linuxArtifact}`), 'publicar Windows conserva hashes Linux previos');
+    await assert.rejects(readFile(signature), { code: 'ENOENT' }, 'cambiar el manifiesto elimina una firma anterior que ya no corresponde');
     const entries = spawnSync('zip', ['-sf', archive], { encoding: 'utf8' });
     assert.equal(entries.status, 0, entries.stderr);
     assert.match(entries.stdout, /winslim-terminal\.exe/);
     assert.match(entries.stdout, /scripts\/operations\/ssh-manager\.ps1/);
 
     const existingArchive = await readFile(archive);
-    const signature = join(release, 'SHA256SUMS.txt.sig');
     await writeFile(signature, 'firma anterior');
     await writeFile(join(portable, 'keep-on-failure.txt'), 'previous package stays intact');
     await rm(join(source, 'OpenConsole.exe'));

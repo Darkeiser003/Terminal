@@ -34,6 +34,7 @@ import type {
     LookupResult,
     OpenDirectoryResult,
     PinResult,
+    PackageUpdateStatus,
     PreferencesPayload,
     Preferences,
     ProfileTransferResult,
@@ -383,15 +384,18 @@ export const runInstallAction = (tabId: string, actionId: string) =>
  *  motivo dentro y sin ofrecer nada. */
 export const checkForUpdate = () => invokeLogged<UpdateStatus>('update_check');
 
+/** Comprobación automática tras montar la interfaz; las copias de desarrollo
+ *  vuelven de inmediato y no consultan la red. */
+export const checkForUpdateOnStartup = () =>
+    invokeLogged<UpdateStatus>('update_check_on_startup');
+
+/** Busca actualizaciones de aplicaciones con el gestor nativo, sin instalarlas. */
+export const checkPackageUpdatesOnStartup = () =>
+    invokeLogged<PackageUpdateStatus>('package_updates_check');
+
 /** Descarga la versión nueva DONDE la app está instalada, la aplica y reinicia.
  *  Si va bien no devuelve nada: el proceso muere durante la llamada. */
 export const installUpdate = () => invokeLogged<UpdateResult>('update_install');
-
-/** El backend ha encontrado una versión más reciente al arrancar. */
-export const onUpdateAvailable = (
-    callback: (status: UpdateStatus) => void
-): Promise<UnlistenFn> =>
-    listen<UpdateStatus>('update-available', (event) => callback(event.payload));
 
 export const onUpdateProgress = (callback: (progress: UpdateProgress) => void): Promise<UnlistenFn> =>
     listen<UpdateProgress>('update-progress', (event) => callback(event.payload));

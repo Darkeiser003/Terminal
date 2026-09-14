@@ -28,6 +28,25 @@ const files = {
     gitSigning: await readFile(resolve(root, 'build-tools/configure-git-signing.sh'), 'utf8'),
 };
 
+function sourceHasHttpsEndpoint(source, expectedHost, pathPattern) {
+    const candidates = source.match(/https:\/\/[^'"`\s]+/g) ?? [];
+    return candidates.some((candidate) => {
+        try {
+            const endpoint = new URL(candidate);
+            return endpoint.protocol === 'https:'
+                && endpoint.hostname.toLowerCase() === expectedHost
+                && endpoint.username === ''
+                && endpoint.password === ''
+                && endpoint.port === ''
+                && endpoint.search === ''
+                && endpoint.hash === ''
+                && pathPattern.test(endpoint.pathname);
+        } catch {
+            return false;
+        }
+    });
+}
+
 const installerBlock = files.windows.indexOf('if ($Installer) {');
 const installerBinaryBuild = files.windows.indexOf("$code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--no-bundle')", installerBlock);
 const installerLoaderPreparation = files.windows.indexOf('Ensure-WebView2Loader | Out-Null', installerBlock);
@@ -132,7 +151,7 @@ const checks = [
     ['Los comandos npm rápidos omiten las fases caras de forma explícita', files.package.includes('dist:win:fast') && files.package.includes('-SkipChecks') && files.package.includes('dist:linux:fast') && files.package.includes('--no-extended-tests') && files.package.includes('dist:win:linux:fast') && files.package.includes('--skip-checks')],
     ['Windows ofrece instalador offline de WebView2', files.windows.includes('$Installer') && files.windows.includes('tauri.windows.installer.conf.json') && files.windows.includes('bundle\\nsis')],
     ['Windows instala automáticamente tauri-driver cuando E2E lo necesita', files.windows.includes('se instalará automáticamente con cargo') && !files.windows.includes("-and $InstallE2eDriver -and") && files.windows.includes('tauri-driver no apareció en PATH')],
-    ['Windows prepara Edge WebDriver compatible sin exigir Microsoft Edge', files.windows.includes('Get-WebView2RuntimeVersion') && files.windows.includes('LATEST_RELEASE_') && files.windows.includes('msedgedriver.microsoft.com') && files.windows.includes('sin instalar Microsoft Edge') && files.windows.includes('$env:TAURI_NATIVE_DRIVER = $nativeE2eDriver')],
+    ['Windows prepara Edge WebDriver compatible sin exigir Microsoft Edge', files.windows.includes('Get-WebView2RuntimeVersion') && sourceHasHttpsEndpoint(files.windows, 'msedgedriver.microsoft.com', /^\/LATEST_RELEASE_[^/]+_WINDOWS$/) && sourceHasHttpsEndpoint(files.windows, 'msedgedriver.microsoft.com', /^\/[^/]+\/edgedriver_[^/]+\.zip$/) && files.windows.includes('sin instalar Microsoft Edge') && files.windows.includes('$env:TAURI_NATIVE_DRIVER = $nativeE2eDriver')],
     ['Linux puede lanzar E2E', files.linux.includes('npm run e2e')],
     ['Linux publica el AppImage aunque falle el E2E y deja diagnóstico final', files.linux.includes('if ! APPIMAGE_EXTRACT_AND_RUN=') && files.linux.includes('TAURI_NATIVE_DRIVER=') && files.linux.includes('post_build_issue "E2E falló') && files.linux.includes('POST_BUILD_FAILURE')],
     ['E2E Linux pasa el driver nativo', files.linux.includes('TAURI_NATIVE_DRIVER=')],
@@ -239,7 +258,7 @@ const checks = [
     ['Perfil Linux usa su nombre de archivo', files.profileSh.includes('LTerminal-profile.lterminal-profile')],
     ['Perfil Windows detecta la aplicación', files.profilePs1.includes('Find-Terminal')],
     ['Perfil Windows valida el sistema operativo', files.profilePs1.includes('necesita Windows')],
-    ['Perfil Windows instala desde GitHub', files.profilePs1.includes('api.github.com')],
+    ['Perfil Windows instala desde la API oficial HTTPS de GitHub', sourceHasHttpsEndpoint(files.profilePs1, 'api.github.com', /^\/repos\/\$ProfileRepository\/releases\/latest$/)],
     ['Perfil Windows entrega --import-profile', files.profilePs1.includes('--import-profile')],
 ];
 

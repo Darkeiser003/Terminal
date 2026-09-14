@@ -1,7 +1,8 @@
 const shellIds = new Set([
-    'bash', 'zsh', 'fish', 'sh', 'pwsh', 'powershell', 'cmd', 'gitbash',
-    'wine-cmd', 'nu', 'xonsh', 'elvish',
+    'bash', 'zsh', 'fish', 'sh', 'pwsh', 'powershell', 'cmd', 'gitbash', 'wine-cmd',
 ]);
+
+const interactiveReplShellIds = new Set(['nu', 'xonsh', 'elvish']);
 
 const serviceBackedRepls = new Set([
     'postgresql', 'mysql', 'mariadb', 'mongodb', 'redis',
@@ -118,6 +119,13 @@ export function environmentProbe(option, marker) {
             return { kind: 'skip', language, reason: 'no hay una sonda interactiva segura definida para este REPL' };
         }
         return { kind: 'repl', language, command: makeCommand(marker) };
+    }
+
+    // Son intérpretes interactivos con gramática propia: reciben una orden
+    // inocua de eco y se consideran listos por su prompt, no por el banner de
+    // las shells POSIX que nunca se inyecta en estos entornos.
+    if (interactiveReplShellIds.has(id)) {
+        return { kind: 'repl', language: id, command: `echo ${marker}` };
     }
 
     if (shellIds.has(id) || id.startsWith('wsl:')) {

@@ -22,6 +22,7 @@ const shortcuts = await importTypeScript('src/lib/shortcuts.ts');
 const terminalScroll = await importTypeScript('src/lib/terminal-scroll.ts');
 const terminalColumns = await importTypeScript('src/lib/terminal-columns.ts');
 const terminalReady = await importTypeScript('src/lib/terminal-ready.ts');
+const terminalPrompt = await importTypeScript('src/lib/terminal-prompt.ts');
 const keyedQueue = await importTypeScript('src/lib/keyed-serial-queue.ts');
 const terminalRender = await importTypeScript('src/lib/terminal-render.ts');
 
@@ -34,6 +35,26 @@ assert.equal(terminalScroll.normalizeWheelDelta(3, 1, 18, 600), 54, 'la rueda en
 assert.equal(terminalScroll.normalizeWheelDelta(1, 2, 18, 600), 600, 'la rueda en páginas se convierte según el ancho visible');
 assert.equal(terminalScroll.normalizeWheelDelta(-2, 1, Number.NaN, 600), -32, 'una altura de línea no disponible usa el respaldo');
 assert.equal(terminalScroll.normalizeWheelDelta(Number.NaN, 0, 18, 600), 0, 'no propaga deltas no finitos');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('~>                         09/14/2026 01:46 PM', 'nu'), true,
+    'Nushell está listo aunque su prompt derecho aparezca tras el cursor');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('/home/romen/proyecto>  hora derecha', 'nu'), true,
+    'Nushell reconoce una ruta de trabajo absoluta y su prompt derecho');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('C:\\Users\\Romen> hora derecha', 'nu'), true,
+    'Nushell reconoce rutas Windows');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('~> hora derecha', 'fish'), false,
+    'el prompt especial de Nushell no altera la detección de otras shells');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('Welcome to Nushell', 'nu'), false,
+    'el saludo del REPL no se confunde con un prompt');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('\u001b[38;5;167m~\u001b[0m Snailed it ~', 'xonsh'), true,
+    'xonsh reconoce el prompt alternativo del backend dumb sin prompt_toolkit');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('romen@PC ~/proyecto main @', 'xonsh'), true,
+    'xonsh reconoce su prompt normal terminado en @');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('C:\\Users\\Romen @#', 'xonsh'), true,
+    'xonsh reconoce el prompt de administrador con ruta Windows');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('Welcome to the xonsh shell 0.24.2', 'xonsh'), false,
+    'el banner de xonsh no se confunde con un prompt');
+assert.equal(terminalPrompt.interactiveReplPromptIsVisible('~ Snailed it ~', 'nu'), false,
+    'el prompt de xonsh no cambia la detección de Nushell');
 
 const columnRows = [
     { columns: 900, isWrapped: false }, // scrollback anterior: no debe gobernar el PTY

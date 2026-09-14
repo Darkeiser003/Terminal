@@ -17,6 +17,7 @@
     import { retryUntilReady } from '../lib/terminal-ready';
     import { normalizeWheelDelta } from '../lib/terminal-scroll';
     import { longestVisibleLogicalLineWidth } from '../lib/terminal-columns';
+    import { interactiveReplPromptIsVisible } from '../lib/terminal-prompt';
     import { cursorInactiveStyle, cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
     import type { Environment, Preferences } from '../lib/types';
@@ -692,12 +693,13 @@
      */
     function longestVisibleLineWidth(): number {
         if (!term) return 0;
-        const buffer = term.buffer.active;
+        const terminal = term;
+        const buffer = terminal.buffer.active;
         const cursorAbsoluteRow = buffer.baseY + buffer.cursorY;
         return longestVisibleLogicalLineWidth(
             buffer.length,
             buffer.viewportY,
-            term.rows,
+            terminal.rows,
             (row) => {
                 const line = buffer.getLine(row);
                 let columns = Math.min(MAX_HORIZONTAL_COLS, line?.translateToString(true).length ?? 0);
@@ -707,7 +709,7 @@
                     // es, por tanto, el único dato que conserva el ancho real de
                     // la edición. Reservar una celda extra cuando llega al borde
                     // evita que el siguiente espacio provoque un salto de línea.
-                    const cursorWidth = buffer.cursorX + (buffer.cursorX >= term.cols - 1 ? 2 : 1);
+                    const cursorWidth = buffer.cursorX + (buffer.cursorX >= terminal.cols - 1 ? 2 : 1);
                     columns = Math.max(columns, cursorWidth);
                 }
                 return line ? { columns, isWrapped: line.isWrapped } : undefined;
@@ -1173,6 +1175,7 @@
         if (!term) return false;
         const buffer = term.buffer.active;
         const cursorAbsoluteRow = buffer.baseY + buffer.cursorY;
+        const environmentId = app.tabs.find((tab) => tab.id === tabId)?.envId;
         if (host) {
             host.dataset.promptCursorRow = String(cursorAbsoluteRow);
             host.dataset.promptCursorViewportRow = String(buffer.cursorY);
@@ -1183,7 +1186,8 @@
         const end = Math.min(buffer.length - 1, cursorAbsoluteRow + 1);
         for (let row = start; row <= end; row += 1) {
             const text = buffer.getLine(row)?.translateToString(true).trimEnd() ?? '';
-            if (/^(?:PS\s+)?(?:[A-Za-z]:\\.+[>❯$#]|[^\s@]+@[^\s:]+:.+[❯$#]|(?:~|\/)?.*[❯$#])\s*$/u.test(text)) {
+            if (interactiveReplPromptIsVisible(text, environmentId)
+                || /^(?:PS\s+)?(?:[A-Za-z]:\\.+[>❯$#]|[^\s@]+@[^\s:]+:.+[❯$#]|(?:~|\/)?.*[❯$#])\s*$/u.test(text)) {
                 if (host) host.dataset.promptVisible = 'true';
                 return true;
             }
@@ -1196,7 +1200,8 @@
         // repintado el cursor puede quedar momentáneamente sobre una métrica
         // del banner. Solo es prompt si conserva el terminador que usa una
         // shell interactiva (`>`, `❯`, `$` o `#`).
-        if (cursorLine && /[>❯$#]\s*$/u.test(cursorLine)) {
+        if (cursorLine && (interactiveReplPromptIsVisible(cursorLine, environmentId)
+            || /[>❯$#]\s*$/u.test(cursorLine))) {
             if (host) host.dataset.promptVisible = 'true';
             return true;
         }

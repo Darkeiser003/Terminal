@@ -297,6 +297,15 @@ fn staged_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 /// nueva corriendo.
 pub fn apply(root: &Path, install: &Path, binary_name: &str) -> Result<(), String> {
     verify_payload(root, binary_name)?;
+    validate_payload_tree(root)?;
+    let install = install
+        .canonicalize()
+        .map_err(|error| format!("No se pudo resolver la carpeta de instalación: {error}"))?;
+    let install_metadata = std::fs::symlink_metadata(&install)
+        .map_err(|error| format!("No se pudo inspeccionar la carpeta de instalación: {error}"))?;
+    if install_metadata.file_type().is_symlink() || !install_metadata.is_dir() {
+        return Err("La carpeta de instalación debe ser un directorio real.".into());
+    }
     let archivos = staged_files(root)?;
     if archivos.is_empty() {
         return Err("La actualización descargada está vacía.".to_string());
@@ -306,14 +315,49 @@ pub fn apply(root: &Path, install: &Path, binary_name: &str) -> Result<(), Strin
     // instalación sigue completa y en marcha.
     let mut copiados: Vec<PathBuf> = Vec::new();
     for relativa in &archivos {
-        let destino = install.join(añadir_sufijo(relativa, NEW_SUFFIX));
-        if let Some(padre) = destino.parent() {
-            if let Err(error) = std::fs::create_dir_all(padre) {
+        let padre_relativo = relativa.parent().unwrap_or_else(|| Path::new(""));
+        let padre = match preparar_padre_instalacion(&install, padre_relativo) {
+            Ok(padre) => padre,
+            Err(error) => {
                 limpiar(&copiados);
-                return Err(format!("No se pudo preparar {}: {error}", padre.display()));
+                return Err(error);
+            }
+        };
+        let Some(nombre) = relativa.file_name() else {
+            limpiar(&copiados);
+            return Err(format!(
+                "La ruta descargada no es un archivo: {}",
+                relativa.display()
+            ));
+        };
+        let destino = padre.join(añadir_sufijo(Path::new(nombre), NEW_SUFFIX));
+        match std::fs::symlink_metadata(&destino) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                if let Err(error) = std::fs::remove_file(&destino) {
+                    limpiar(&copiados);
+                    return Err(format!(
+                        "No se pudo retirar el temporal anterior {}: {error}",
+                        destino.display()
+                    ));
+                }
+            }
+            Ok(_) => {
+                limpiar(&copiados);
+                return Err(format!(
+                    "La ruta temporal no es un archivo seguro: {}",
+                    destino.display()
+                ));
+            }
+            Err(error) => {
+                limpiar(&copiados);
+                return Err(format!(
+                    "No se pudo inspeccionar {}: {error}",
+                    destino.display()
+                ));
             }
         }
-        if let Err(error) = std::fs::copy(root.join(relativa), &destino) {
+        if let Err(error) = copiar_archivo_nuevo(&root.join(relativa), &destino) {
             limpiar(&copiados);
             return Err(format!("No se pudo copiar {}: {error}", relativa.display()));
         }
@@ -329,29 +373,51 @@ pub fn apply(root: &Path, install: &Path, binary_name: &str) -> Result<(), Strin
         let destino = install.join(relativa);
         let nuevo = install.join(añadir_sufijo(relativa, NEW_SUFFIX));
         let mut apartado_real = None;
-        if destino.exists() {
-            let apartado = install.join(añadir_sufijo(relativa, OLD_SUFFIX));
-            // Un `.old` de una actualización anterior que no se pudo borrar
-            // bloquearía el renombrado: se intenta quitar y, si no se deja, se
-            // usa un nombre libre.
-            let _ = std::fs::remove_file(&apartado);
-            let apartado = if apartado.exists() {
-                install.join(añadir_sufijo(
-                    relativa,
-                    &format!(".{}{OLD_SUFFIX}", stamp()),
-                ))
-            } else {
-                apartado
-            };
-            if let Err(error) = std::fs::rename(&destino, &apartado) {
+        match std::fs::symlink_metadata(&destino) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 limpiar(&copiados);
                 let rollback = rollback_aplicados(&mut aplicados);
                 return Err(update_failure(
-                    format!("No se pudo apartar {}: {error}", relativa.display()),
+                    format!(
+                        "La ruta de instalación no es un archivo regular: {}",
+                        destino.display()
+                    ),
                     rollback,
                 ));
             }
-            apartado_real = Some(apartado);
+            Ok(_) => {
+                let apartado = install.join(añadir_sufijo(relativa, OLD_SUFFIX));
+                // Un `.old` de una actualización anterior que no se pudo borrar
+                // bloquearía el renombrado: se intenta quitar y, si no se deja, se
+                // usa un nombre libre.
+                let _ = std::fs::remove_file(&apartado);
+                let apartado = if apartado.exists() {
+                    install.join(añadir_sufijo(
+                        relativa,
+                        &format!(".{}{OLD_SUFFIX}", stamp()),
+                    ))
+                } else {
+                    apartado
+                };
+                if let Err(error) = std::fs::rename(&destino, &apartado) {
+                    limpiar(&copiados);
+                    let rollback = rollback_aplicados(&mut aplicados);
+                    return Err(update_failure(
+                        format!("No se pudo apartar {}: {error}", relativa.display()),
+                        rollback,
+                    ));
+                }
+                apartado_real = Some(apartado);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                limpiar(&copiados);
+                let rollback = rollback_aplicados(&mut aplicados);
+                return Err(update_failure(
+                    format!("No se pudo inspeccionar {}: {error}", destino.display()),
+                    rollback,
+                ));
+            }
         }
         if let Err(error) = std::fs::rename(&nuevo, &destino) {
             let mut rollback = rollback_aplicados(&mut aplicados);
@@ -375,6 +441,86 @@ pub fn apply(root: &Path, install: &Path, binary_name: &str) -> Result<(), Strin
         });
     }
     Ok(())
+}
+
+/// Recorre y crea las carpetas como entradas reales; no deja que la copia siga
+/// un enlace ya presente dentro de la instalación.
+fn preparar_padre_instalacion(install: &Path, relativa: &Path) -> Result<PathBuf, String> {
+    let mut actual = install.to_path_buf();
+    for componente in relativa.components() {
+        let std::path::Component::Normal(nombre) = componente else {
+            return Err(format!(
+                "La ruta del payload no es relativa: {}",
+                relativa.display()
+            ));
+        };
+        actual.push(nombre);
+        match std::fs::symlink_metadata(&actual) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(format!(
+                    "La carpeta de instalación no es segura: {}",
+                    actual.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&actual) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(format!("No se pudo preparar {}: {error}", actual.display()));
+                    }
+                }
+                let metadata = std::fs::symlink_metadata(&actual).map_err(|error| {
+                    format!("No se pudo inspeccionar {}: {error}", actual.display())
+                })?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(format!(
+                        "La carpeta de instalación no es segura: {}",
+                        actual.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "No se pudo inspeccionar {}: {error}",
+                    actual.display()
+                ));
+            }
+        }
+        let canonica = actual
+            .canonicalize()
+            .map_err(|error| format!("No se pudo resolver {}: {error}", actual.display()))?;
+        if !canonica.starts_with(install) {
+            return Err(format!(
+                "La carpeta de instalación sale de su raíz: {}",
+                actual.display()
+            ));
+        }
+        actual = canonica;
+    }
+    Ok(actual)
+}
+
+/// Crea el temporal con `create_new`: una carrera que plante un enlace entre
+/// la inspección y la copia no puede hacer que se siga.
+fn copiar_archivo_nuevo(origen: &Path, destino: &Path) -> std::io::Result<()> {
+    let mut entrada = std::fs::File::open(origen)?;
+    let permisos = entrada.metadata()?.permissions();
+    let mut salida = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destino)?;
+    let resultado = (|| {
+        std::io::copy(&mut entrada, &mut salida)?;
+        salida.set_permissions(permisos)?;
+        std::io::Write::flush(&mut salida)
+    })();
+    drop(salida);
+    if resultado.is_err() {
+        let _ = std::fs::remove_file(destino);
+    }
+    resultado.map(|_| ())
 }
 
 struct Aplicado {
@@ -443,23 +589,79 @@ fn limpiar(archivos: &[PathBuf]) {
 /// Lo que no se deje borrar se queda para el arranque siguiente: no es un error
 /// que merezca molestar a nadie.
 pub fn cleanup(install: &Path) -> usize {
-    let Ok(entradas) = std::fs::read_dir(install) else {
+    let Ok(install) = install.canonicalize() else {
+        return 0;
+    };
+    let mut archivos = vec![PathBuf::from(binary_name())];
+    if crate::platform::host().is_windows() {
+        archivos.extend(windows_runtime_files().into_iter().map(PathBuf::from));
+    }
+    archivos.sort();
+    archivos.dedup();
+    let borrados = cleanup_managed_backups(&install, &archivos);
+
+    // La carpeta de preparación tampoco tiene sentido conservarla: lo que había
+    // dentro ya está instalado.
+    let staging = install.join(install_dir::STAGING_DIR);
+    if let Ok(metadata) = std::fs::symlink_metadata(&staging) {
+        if metadata.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&staging);
+        } else if metadata.is_dir() {
+            let _ = std::fs::remove_dir_all(&staging);
+        } else {
+            let _ = std::fs::remove_file(&staging);
+        }
+    }
+    borrados
+}
+
+/// Limpia solo copias `.old` de rutas que pertenecen al paquete de LTerminal.
+/// No busca recursivamente ni borra archivos ajenos con un sufijo parecido; las
+/// carpetas intermedias se inspeccionan sin atravesar enlaces simbólicos.
+fn cleanup_managed_backups(install: &Path, managed_files: &[PathBuf]) -> usize {
+    let Ok(install) = install.canonicalize() else {
         return 0;
     };
     let mut borrados = 0;
-    for entrada in entradas.filter_map(Result::ok) {
-        let nombre = entrada.file_name();
-        let Some(nombre) = nombre.to_str() else {
+    for relativa in managed_files {
+        let Some(nombre) = relativa.file_name() else {
             continue;
         };
-        if nombre.ends_with(OLD_SUFFIX) && std::fs::remove_file(entrada.path()).is_ok() {
-            borrados += 1;
+        let padre_relativo = relativa.parent().unwrap_or_else(|| Path::new(""));
+        let Some(padre) = existing_install_parent(&install, padre_relativo) else {
+            continue;
+        };
+        let backup = padre.join(añadir_sufijo(Path::new(nombre), OLD_SUFFIX));
+        match std::fs::symlink_metadata(&backup) {
+            Ok(metadata)
+                if (metadata.file_type().is_symlink() || metadata.is_file())
+                    && std::fs::remove_file(&backup).is_ok() =>
+            {
+                borrados += 1;
+            }
+            _ => {}
         }
     }
-    // La carpeta de preparación tampoco tiene sentido conservarla: lo que había
-    // dentro ya está instalado.
-    let _ = std::fs::remove_dir_all(install.join(install_dir::STAGING_DIR));
     borrados
+}
+
+fn existing_install_parent(install: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut actual = install.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return None;
+        };
+        actual.push(name);
+        let metadata = std::fs::symlink_metadata(&actual).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return None;
+        }
+        actual = actual.canonicalize().ok()?;
+        if !actual.starts_with(install) {
+            return None;
+        }
+    }
+    Some(actual)
 }
 
 /// El nombre del ejecutable de esta plataforma.
@@ -646,6 +848,10 @@ mod tests {
         escribir(&staged.path().join("app.exe"), "nuevo");
         escribir(&staged.path().join("conpty.dll"), "dll-nueva");
         escribir(&install.path().join("app.exe"), "viejo");
+        escribir(
+            &install.path().join("app.exe.new"),
+            "temporal incompleto anterior",
+        );
         escribir(&install.path().join("conpty.dll"), "dll-vieja");
 
         apply(staged.path(), install.path(), "app.exe").unwrap();
@@ -659,6 +865,62 @@ mod tests {
             std::fs::read_to_string(install.path().join("app.exe.old")).unwrap(),
             "viejo"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_sigue_un_enlace_temporal_new_que_apunta_fuera_de_la_instalacion() {
+        use std::os::unix::fs::symlink;
+
+        let staged = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        escribir(&staged.path().join("app.exe"), "nuevo");
+        escribir(&install.path().join("app.exe"), "original");
+        escribir(&outside.path().join("objetivo"), "no tocar");
+        symlink(
+            outside.path().join("objetivo"),
+            install.path().join("app.exe.new"),
+        )
+        .unwrap();
+
+        assert!(apply(staged.path(), install.path(), "app.exe").is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("objetivo")).unwrap(),
+            "no tocar"
+        );
+        assert_eq!(
+            std::fs::read_to_string(install.path().join("app.exe")).unwrap(),
+            "original"
+        );
+        assert!(
+            std::fs::symlink_metadata(install.path().join("app.exe.new"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_copia_por_una_carpeta_de_instalacion_enlazada_hacia_fuera() {
+        use std::os::unix::fs::symlink;
+
+        let staged = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        escribir(&staged.path().join("app.exe"), "nuevo");
+        escribir(&staged.path().join("scripts/evil.txt"), "nuevo fuera");
+        escribir(&install.path().join("app.exe"), "original");
+        symlink(outside.path(), install.path().join("scripts")).unwrap();
+
+        assert!(apply(staged.path(), install.path(), "app.exe").is_err());
+        assert_eq!(
+            std::fs::read_to_string(install.path().join("app.exe")).unwrap(),
+            "original"
+        );
+        assert!(!outside.path().join("evil.txt.new").exists());
+        assert!(!outside.path().join("evil.txt").exists());
     }
 
     #[test]
@@ -716,8 +978,12 @@ mod tests {
     fn el_arranque_borra_lo_que_dejo_la_actualizacion_anterior() {
         let install = tempfile::tempdir().unwrap();
         escribir(&install.path().join("app.exe"), "actual");
-        escribir(&install.path().join("app.exe.old"), "anterior");
-        escribir(&install.path().join("conpty.dll.old"), "anterior");
+        let executable = PathBuf::from(binary_name());
+        let backup = install.path().join(añadir_sufijo(&executable, OLD_SUFFIX));
+        escribir(&backup, "anterior");
+        // Una ruta que no pertenece al paquete no se elimina por compartir el
+        // sufijo: la limpieza no debe barrer datos propios del usuario.
+        escribir(&install.path().join("archivo-del-usuario.old"), "conservar");
         escribir(
             &install
                 .path()
@@ -726,11 +992,58 @@ mod tests {
             "descargado",
         );
 
-        assert_eq!(cleanup(install.path()), 2);
-        assert!(!install.path().join("app.exe.old").exists());
+        assert_eq!(cleanup(install.path()), 1);
+        assert!(!backup.exists());
+        assert!(install.path().join("archivo-del-usuario.old").exists());
         assert!(!install.path().join(install_dir::STAGING_DIR).exists());
         // Y no se lleva por delante lo que está en uso.
         assert!(install.path().join("app.exe").is_file());
+    }
+
+    #[test]
+    fn la_limpieza_quita_respaldos_anidados_del_paquete_y_conserva_archivos_ajenos() {
+        let install = tempfile::tempdir().unwrap();
+        let managed = [
+            PathBuf::from("winslim-terminal.exe"),
+            PathBuf::from("scripts/operations/service-manager.ps1"),
+        ];
+        escribir(&install.path().join("winslim-terminal.exe.old"), "anterior");
+        escribir(
+            &install
+                .path()
+                .join("scripts/operations/service-manager.ps1.old"),
+            "anterior",
+        );
+        escribir(&install.path().join("scripts/mi-script.old"), "conservar");
+
+        assert_eq!(cleanup_managed_backups(install.path(), &managed), 2);
+        assert!(!install.path().join("winslim-terminal.exe.old").exists());
+        assert!(!install
+            .path()
+            .join("scripts/operations/service-manager.ps1.old")
+            .exists());
+        assert!(install.path().join("scripts/mi-script.old").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn la_limpieza_no_sigue_carpetas_enlazadas_fuera_de_la_instalacion() {
+        use std::os::unix::fs::symlink;
+
+        let install = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        escribir(
+            &outside.path().join("service-manager.ps1.old"),
+            "no eliminar",
+        );
+        symlink(outside.path(), install.path().join("scripts")).unwrap();
+        let managed = [PathBuf::from("scripts/service-manager.ps1")];
+
+        assert_eq!(cleanup_managed_backups(install.path(), &managed), 0);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("service-manager.ps1.old")).unwrap(),
+            "no eliminar"
+        );
     }
 
     #[test]

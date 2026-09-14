@@ -588,6 +588,12 @@ export interface UpdateStatus {
     error?: string;
 }
 
+/** Actualizaciones detectadas por el gestor nativo; solo informa, no instala. */
+export interface PackageUpdateStatus {
+    available: boolean;
+    manager?: string;
+}
+
 export interface UpdateProgress {
     stage: 'download' | 'extract' | 'complete';
     bytes: number;

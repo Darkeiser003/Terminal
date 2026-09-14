@@ -4,7 +4,7 @@
 
     import { onMount, tick } from "svelte";
     import type { UnlistenFn } from "@tauri-apps/api/event";
-    import type { UpdateStatus } from "./lib/types";
+    import type { PackageUpdateStatus, UpdateStatus } from "./lib/types";
 
     import * as api from "./lib/api";
     import { app } from "./lib/appState.svelte";
@@ -39,9 +39,9 @@
     // que la navegación respete el contrato de fábrica.
     let leftControlPressed = false;
     let projectsMounted = $state(false);
-    /** La versión publicada, cuando el backend encuentra una más nueva al
-     *  arrancar. Null mientras no haya nada que ofrecer. */
+    /** La versión publicada, cuando una comprobación autenticada la confirma. */
     let update = $state<UpdateStatus | null>(null);
+    let packageUpdates = $state<PackageUpdateStatus | null>(null);
     let updating = $state(false);
     let updateError = $state("");
     /** Inicio del cambio de shell por pestaña. Se consume al completar el
@@ -61,6 +61,56 @@
         // xterm recibe las flechas antes que un listener normal de la ventana.
         event.preventDefault();
         event.stopPropagation();
+    }
+
+    const DISMISSED_UPDATE_KEY = 'lterminal.dismissed-update-version';
+    const DISMISSED_PACKAGE_UPDATE_KEY = 'lterminal.dismissed-package-update';
+    const PACKAGE_UPDATE_REMINDER_MS = 24 * 60 * 60 * 1000;
+
+    function updateWasDismissed(version: string | undefined): boolean {
+        if (!version) return false;
+        try {
+            return localStorage.getItem(DISMISSED_UPDATE_KEY) === version;
+        } catch {
+            return false;
+        }
+    }
+
+    function dismissUpdate(): void {
+        if (update?.latestVersion) {
+            try {
+                localStorage.setItem(DISMISSED_UPDATE_KEY, update.latestVersion);
+            } catch {
+                // Si el WebView desactiva el almacenamiento, solo se descarta
+                // el aviso de esta sesión; nunca se bloquea la terminal.
+            }
+        }
+        update = null;
+    }
+
+    function packageUpdateWasDismissed(manager: string | undefined): boolean {
+        if (!manager) return false;
+        try {
+            const saved = JSON.parse(localStorage.getItem(DISMISSED_PACKAGE_UPDATE_KEY) ?? 'null') as
+                | { manager?: string; at?: number }
+                | null;
+            const age = Date.now() - (saved?.at ?? 0);
+            return saved?.manager === manager && age >= 0 && age < PACKAGE_UPDATE_REMINDER_MS;
+        } catch {
+            return false;
+        }
+    }
+
+    function dismissPackageUpdates(): void {
+        try {
+            localStorage.setItem(
+                DISMISSED_PACKAGE_UPDATE_KEY,
+                JSON.stringify({ manager: packageUpdates?.manager, at: Date.now() }),
+            );
+        } catch {
+            // La notificación no depende de que el WebView permita persistirla.
+        }
+        packageUpdates = null;
     }
 
     function invalidateTerminalOutput(tabId: string, preserveOrdering = false): Promise<void> {
@@ -491,10 +541,48 @@
                 app.noteSuggestion(event.tabId, event.suggestion),
             ),
 
-            api.onUpdateAvailable((status) => {
-                update = status;
-            }),
         ];
+
+        // Se consulta desde la interfaz y se espera el resultado de la promesa
+        // IPC. Antes el backend emitía un evento en paralelo durante el arranque;
+        // si terminaba antes de registrar este listener, el aviso se perdía.
+        const updateCheck = perf.start('update.check', { source: 'startup' });
+        void api.checkForUpdateOnStartup()
+            .then((status) => {
+                updateCheck(status.available ? 'available' : 'none', {
+                    latestVersion: status.latestVersion,
+                    canSelfUpdate: status.canSelfUpdate,
+                    reason: status.error ? 'unavailable' : undefined,
+                });
+                if (
+                    status.available
+                    && status.canSelfUpdate
+                    && !updateWasDismissed(status.latestVersion)
+                ) update = status;
+            })
+            .catch((cause) => {
+                updateCheck('error', { error: String(cause).slice(0, 300) });
+                void api.reportFrontendError({
+                    message: `No se pudo comprobar la actualización: ${String(cause).slice(0, 300)}`,
+                });
+            });
+
+        const packageUpdateCheck = perf.start('package-updates.check', { source: 'startup' });
+        void api.checkPackageUpdatesOnStartup()
+            .then((status) => {
+                packageUpdateCheck(status.available ? 'available' : 'none', {
+                    manager: status.manager,
+                });
+                if (status.available && !packageUpdateWasDismissed(status.manager)) {
+                    packageUpdates = status;
+                }
+            })
+            .catch((cause) => {
+                packageUpdateCheck('error', { error: String(cause).slice(0, 300) });
+                void api.reportFrontendError({
+                    message: `No se pudieron comprobar las actualizaciones de paquetes: ${String(cause).slice(0, 300)}`,
+                });
+            });
 
         perf.markOnce('frontend-mounted', 'frontend.mounted');
         const initialLoad = perf.start('app.initial-load');
@@ -657,6 +745,35 @@
         </div>
     {/if}
 
+    {#if packageUpdates?.available}
+        <div class="update" role="status" aria-live="polite">
+            <span>
+                {app
+                    .t(
+                        'update.packagesAvailable',
+                        'Hay actualizaciones disponibles para las aplicaciones gestionadas por {manager}.',
+                    )
+                    .replace('{manager}', packageUpdates.manager === 'winget' ? 'WinGet' : packageUpdates.manager ?? '')}
+            </span>
+            <div class="update-actions">
+                <button
+                    type="button"
+                    class="primary"
+                    onclick={() => {
+                        dismissPackageUpdates();
+                        panels.show('deps');
+                        void loadDeps();
+                    }}
+                >
+                    {app.t('toolbar.deps', 'Entorno y dependencias')}
+                </button>
+                <button type="button" onclick={dismissPackageUpdates}>
+                    {app.t('update.later', 'Ahora no')}
+                </button>
+            </div>
+        </div>
+    {/if}
+
     <!-- Aviso de versión nueva. Va abajo y no en un diálogo: encontrar una
          actualización no es motivo para interrumpir lo que se esté haciendo. -->
     {#if update}
@@ -707,7 +824,7 @@
                         ? app.t("update.installing", "Actualizando…")
                         : app.t("update.install", "Actualizar y reiniciar")}
                 </button>
-                <button type="button" onclick={() => (update = null)}>
+                <button type="button" disabled={updating} onclick={dismissUpdate}>
                     {app.t("update.later", "Ahora no")}
                 </button>
             </div>
@@ -845,6 +962,7 @@
        tema: es información, no una alarma. */
     .update {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
@@ -853,6 +971,12 @@
         background: var(--accent-soft);
         color: var(--text);
         font-size: 12px;
+    }
+
+    .update > span {
+        flex: 1 1 280px;
+        min-width: 0;
+        overflow-wrap: anywhere;
     }
 
     .update small {
@@ -871,6 +995,8 @@
     .update-actions {
         display: flex;
         flex: 0 0 auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
         gap: 6px;
     }
 

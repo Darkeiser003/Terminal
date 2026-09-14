@@ -17,13 +17,32 @@
 *.icns binary
 *.png binary
 *.jpg binary
+*.jpeg binary
+*.avif binary
+*.bmp binary
 *.gif binary
 *.webp binary
+*.pdf binary
 *.zip binary
 *.gz binary
+*.7z binary
+*.tar binary
+*.xz binary
+*.mp4 binary
+*.webm binary
+*.mov binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.wasm binary
 *.dll binary
 *.exe binary
 *.AppImage binary
+
+# No se filtran binarios actuales mediante Git LFS: los recursos runtime son
+# pequeños y las builds grandes se distribuyen como assets de GitHub Releases.
+# Activar LFS solo para un recurso fuente grande que realmente deba vivir en Git.
 
 # Estos dos los ejecuta el propio Windows; da igual el final de línea, pero se
 # dejan en LF como el resto para que el diff no se llene de ruido.

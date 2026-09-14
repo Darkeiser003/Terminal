@@ -5,6 +5,7 @@ import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 import { environmentProbe, safeEnvironmentMarker } from '../../scripts/e2e-environment-probes.mjs';
+import { containsExactHttpsUrl } from './terminal-url-matcher.mjs';
 
 // WebKitGTK puede intentar crear buffers GBM aunque la sesión gráfica de
 // pruebas esté disponible. Desactivarlo hace que el smoke use el compositor
@@ -2011,6 +2012,39 @@ async function resizeWindowAndAssertTransition(width, height, label) {
     await resizeWindow(width, height, { waitForBanner: false });
     let afterRect = beforeRect;
     let afterContent = beforeContent;
+
+    // En Hyprland, WebDriver puede aceptar /window/rect y devolver el mismo
+    // tamaño a la vez que deja la ventana flotante maximizada. Primero damos
+    // al camino normal tiempo para aplicarlo; solo si el rect nativo no cambia
+    // pedimos el mismo resize al compositor. El test sigue exigiendo que luego
+    // cambien rect, viewport y PTY: este fallback no tapa un fallo de la app.
+    let nativeResizeMethod = 'webdriver';
+    if (IS_HYPRLAND) {
+        try {
+            await waitUntil(async () => {
+                afterRect = await request(`/session/${sessionId}/window/rect`);
+                return resizeDimensionsChanged(beforeRect, afterRect);
+            }, 1200, `${label}: cambio del rect nativo por WebDriver`);
+        } catch {
+            const requested = {
+                width: Math.max(WINDOW_LIMITS.minWidth, Math.min(WINDOW_LIMITS.maxWidth, width)),
+                height: Math.max(WINDOW_LIMITS.minHeight, Math.min(WINDOW_LIMITS.maxHeight, height)),
+            };
+            const active = await hyprlandActiveWindow();
+            if (active?.floating !== true) {
+                throw new Error(`${label}: WebDriver no cambió el rectángulo y la ventana ya no es flotante en Hyprland`);
+            }
+            await execFile('hyprctl', [
+                'dispatch', 'resizeactive', 'exact', String(requested.width), String(requested.height),
+            ], { timeout: 3000 });
+            nativeResizeMethod = 'hyprland-resizeactive-fallback';
+            recordEvent('window-manager', {
+                action: 'resizeactive-fallback',
+                reason: 'webdriver-rect-unchanged',
+                requested,
+            });
+        }
+    }
     await waitUntil(async () => {
         afterRect = await request(`/session/${sessionId}/window/rect`);
         afterContent = await contentGeometry();
@@ -2047,6 +2081,7 @@ async function resizeWindowAndAssertTransition(width, height, label) {
             viewport: beforeContent.viewport,
             terminal: beforeContent.panes?.[0]?.terminal ?? null,
         },
+        nativeResizeMethod,
         after: {
             rect: { width: afterRect.width, height: afterRect.height },
             viewport: afterContent.viewport,
@@ -2208,13 +2243,12 @@ async function exerciseShellMatrix() {
             args: [],
         });
         if (sameEnvironment) {
-            const probe = probes.get(id);
             const readinessStartedAt = Date.now();
-            if (probe?.language) {
-                await waitUntil(async () => (await promptStates(1))[0] === 'true', 30000, `prompt del REPL ${id}`);
-            } else {
-                await waitForBannerPanes(1, 20000);
-            }
+            // La fase anterior puede haber desplazado el banner fuera del
+            // viewport con ayuda/créditos. Al reutilizar la shell no debe
+            // volver a exigirse que el banner siga visible: el prompt listo
+            // es la señal correcta para shell y REPL por igual.
+            await waitUntil(async () => (await promptStates(1))[0] === 'true', 30000, `prompt del entorno ${id}`);
             return { elapsedMs: Date.now() - readinessStartedAt };
         }
         const menuOptions = await findAll(`.env-menu [data-environment-id="${id}"]`);
@@ -2223,13 +2257,19 @@ async function exerciseShellMatrix() {
         if ((await attribute(option, 'aria-disabled')) === 'true') {
             throw new Error(`La shell ${id} dejó de estar disponible durante la matriz E2E`);
         }
-        const targetLabel = (await textOf(option)).trim().split(/\r?\n/)[0];
+        // No usar todo el `textContent` de la opción: los REPL añaden un
+        // botón de favorito con una estrella y la shell puede incluir una
+        // marca de selección. El botón superior muestra únicamente el nombre.
+        const targetLabel = (await textOf(await findWhenReady(
+            `.env-menu [data-environment-id="${id}"] .env-copy strong`,
+        ))).trim();
+        const normalizeLabel = (value) => value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
         await click(option);
         currentId = id;
         await waitUntil(async () => {
-            const currentButton = await findWhenReady('.env-select');
+            const currentButton = await findWhenReady('.env-select .env-current');
             return (await attribute(currentButton, 'disabled')) === null
-                && (await textOf(currentButton)).includes(targetLabel);
+                && normalizeLabel(await textOf(currentButton)) === normalizeLabel(targetLabel);
         }, 20000, `cambio a la shell ${id}`);
         await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: `const pane = document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)');
@@ -2240,7 +2280,7 @@ async function exerciseShellMatrix() {
         }), 35000, `handshake y entrada listos para ${id}`);
         const probe = probes.get(id);
         const readinessStartedAt = Date.now();
-        if (probe?.language) {
+        if (probe?.kind === 'repl') {
             await waitUntil(async () => (await promptStates(1))[0] === 'true', 30000, `prompt del REPL ${id}`);
         } else {
             await waitForBannerPanes(1, 20000);
@@ -2301,6 +2341,10 @@ async function exerciseShellMatrix() {
         }
     } catch (error) {
         primaryError = error;
+        // Preserve the failing shell's actual terminal before restoring the
+        // user's original environment; the post-restore screenshot otherwise
+        // hides the prompt/output that caused the matrix to fail.
+        await captureScreenshot(`shell-${currentId}-failure-before-restore`);
     }
 
     let restored = currentId === originalId;
@@ -3199,8 +3243,8 @@ try {
         const lines = creditLines(text);
         return creditHasOwnTitleRow(lines, 'Darkeiser003 ·')
             && !creditTitleLeakedIntoPrompt(lines, /Darkeiser003|desarrollador/i)
-            && text.includes('https://github.com/Darkeiser003')
-            && text.includes('https://github.com/Darkeiser003/Infraestructura-Web');
+            && containsExactHttpsUrl(text, 'https://github.com/Darkeiser003')
+            && containsExactHttpsUrl(text, 'https://github.com/Darkeiser003/Infraestructura-Web');
     }, 10000, 'easter-egg de Darkeiser003 (formato y enlaces)');
     await captureScreenshot('credito-darkeiser-formato');
     await sendTerminalLine('clear');
@@ -3210,11 +3254,10 @@ try {
         const snapshot = await activeTerminalRowSnapshot();
         const text = snapshot.rows.map((row) => row.text).join('\n');
         const lines = creditLines(text);
-        const normalized = text.replace(/\s+/g, '');
         return creditHasOwnTitleRow(lines, 'Christianlg97 ·')
             && !creditTitleLeakedIntoPrompt(lines, /Christianlg97|colaborador/i)
-            && normalized.includes('https://github.com/Christianlg97')
-            && normalized.includes('https://github.com/Christianlg97/WINSLIM_CENTER_STORE');
+            && containsExactHttpsUrl(text, 'https://github.com/Christianlg97')
+            && containsExactHttpsUrl(text, 'https://github.com/Christianlg97/WINSLIM_CENTER_STORE');
     }, 10000, 'easter-egg de Christianlg97 (formato y enlaces)');
     await captureScreenshot('credito-christian-formato');
     await resizeWindow(1100, 720, { waitForBanner: false });

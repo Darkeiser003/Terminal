@@ -33,6 +33,7 @@ const requiredFiles = [
     'scripts/verify-contracts.mjs',
     'scripts/verify-e2e-report.mjs',
     'scripts/test-e2e-report.mjs',
+    'scripts/test-e2e-url-matcher.mjs',
     'scripts/test-release-hash.mjs',
     'scripts/test-windows-cross-release.mjs',
     'scripts/package-windows-cross.mjs',
@@ -53,7 +54,7 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:release-hash', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:logic']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:e2e-url-matcher', 'test:release-hash', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:github-security', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
@@ -416,6 +417,8 @@ check('Smoke E2E exige redimensionado nativo en Windows y Linux',
         && smoke.includes("markPhase('redimensionado nativo multiplataforma')")
         && smoke.includes("recordEvent('native-window-resize'")
         && smoke.includes('ptyDimensionsChanged')
+        && smoke.includes('hyprland-resizeactive-fallback')
+        && smoke.includes("'resizeactive', 'exact'")
         && smoke.includes('window-resize-${process.platform}-${captureLabel}'));
 check('E2E completo arrastra el ratón, verifica el resaltado visible y conserva una captura',
     smoke.includes("markPhase('selección de texto mediante arrastre real')")
@@ -455,11 +458,29 @@ check('Smoke E2E prueba varias shells con comandos reales y restaura la shell in
         && smoke.includes('originalCaptureLabel')
         && smoke.includes('shell-matrix-${process.platform}-original-selected')
         && toolbar.includes('data-testid="environment-option"'));
+check('La matriz compara el nombre visible de la shell sin estrellas ni adornos del selector',
+    smoke.includes('.env-copy strong')
+        && smoke.includes('.env-select .env-current')
+        && smoke.includes('normalizeLabel'));
 check('Las sondas de entorno cubren todos los REPL del catálogo o explican un descarte seguro',
     packageJson.scripts?.['test:e2e-environment-probes'] === 'node scripts/test-e2e-environment-probes.mjs'
         && read('scripts/e2e-environment-probes.mjs').includes('serviceBackedRepls')
         && read('scripts/test-e2e-environment-probes.mjs').includes('allLanguageIds.length, 91')
         && e2eReportVerifier.includes('availableIds.some((id) => !accountedIds.includes(id))'));
+check('La matriz distingue shells REPL y reconoce sus prompts propios (Nushell y xonsh)',
+    read('scripts/e2e-environment-probes.mjs').includes('interactiveReplShellIds')
+        && smoke.includes("probe?.kind === 'repl'")
+        && read('src/components/TerminalPane.svelte').includes('interactiveReplPromptIsVisible')
+        && read('src/lib/terminal-prompt.ts').includes("environmentId !== 'nu' && environmentId !== 'xonsh'")
+        && read('scripts/test-frontend-logic.mjs').includes('prompt derecho')
+        && read('scripts/test-frontend-logic.mjs').includes('backend dumb sin prompt_toolkit'));
+check('La actualización de AppImage vuelve a habilitar ejecución en Linux',
+    read('src-tauri/src/updater/commands.rs').includes('make_appimage_executable')
+        && read('src-tauri/src/updater/commands.rs').includes('permissions.set_mode(0o755)')
+        && read('src-tauri/src/updater/commands.rs').includes('permisos_de_ejecucion_antes_de_instalarse'));
+check('Un fallo de la matriz de shells conserva captura antes de restaurar la original',
+    smoke.includes('failure-before-restore')
+        && smoke.indexOf('failure-before-restore') < smoke.indexOf('let restored = currentId === originalId'));
 check('El ancho adicional del PTY se limita a líneas lógicas del viewport actual',
     read('src/lib/terminal-columns.ts').includes('longestVisibleLogicalLineWidth')
         && read('src/components/TerminalPane.svelte').includes('longestVisibleLineWidth()')

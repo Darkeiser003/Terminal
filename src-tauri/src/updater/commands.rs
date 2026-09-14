@@ -11,14 +11,16 @@
 //! Proyectos.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use super::security;
+use super::{package_updates, security};
 use crate::install_dir;
+use crate::projects::github::{Asset, Release};
 use crate::self_update::{self, UpdateStatus, Version};
 use crate::state::AppState;
 
@@ -26,6 +28,34 @@ use crate::state::AppState;
 /// son decenas de megas: con disco lento y un antivirus mirando, un minuto es
 /// poco y diez son de sobra.
 const EXTRACT_TIMEOUT: Duration = Duration::from_secs(300);
+const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(15);
+const RELEASE_MANIFEST_MAX_BYTES: u64 = 1024 * 1024;
+const RELEASE_SIGNATURE_MAX_BYTES: u64 = 512;
+static UPDATE_INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
+static UPDATE_FILES_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_update_files() -> MutexGuard<'static, ()> {
+    UPDATE_FILES_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct UpdateInstallGuard;
+
+impl UpdateInstallGuard {
+    fn acquire() -> Option<Self> {
+        UPDATE_INSTALL_RUNNING
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for UpdateInstallGuard {
+    fn drop(&mut self) {
+        UPDATE_INSTALL_RUNNING.store(false, Ordering::Release);
+    }
+}
 
 fn client() -> &'static crate::github::GithubClient {
     crate::github::shared_client()
@@ -49,7 +79,165 @@ fn local_status(app: &AppHandle) -> UpdateStatus {
     }
 }
 
-/// Consulta la última release publicada y la compara con la que corre.
+/// Selecciona el paquete de esta plataforma y autentica el manifiesto que lo
+/// describe. La comprobación automática descarga solo los dos archivos pequeños
+/// de metadatos; el paquete se baja únicamente cuando la persona pulsa
+/// «Actualizar» y vuelve a pasar la verificación SHA-256 antes de instalarse.
+fn verified_release_manifest(release: &Release) -> Result<(&Asset, Vec<u8>), String> {
+    if release.prerelease || stable_release_core(&release.tag).is_none() {
+        return Err("La última publicación es una versión preliminar; no se ofrecerá como actualización estable.".into());
+    }
+    let names: Vec<&str> = release
+        .assets
+        .iter()
+        .map(|asset| asset.name.as_str())
+        .collect();
+    let name = self_update::asset_for_platform(&names).ok_or_else(|| {
+        format!(
+            "La release {} no trae ningún paquete para esta plataforma.",
+            release.tag
+        )
+    })?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .ok_or_else(|| "El adjunto elegido ya no está en la release.".to_string())?;
+    if !safe_asset_file_name(&asset.name) {
+        return Err("El nombre del paquete publicado no es un nombre de archivo seguro.".into());
+    }
+    if !asset_matches_release_version(&asset.name, &release.tag) {
+        return Err("El nombre del paquete no coincide con la versión de la release; no se ofrecerá por seguridad.".into());
+    }
+    let manifest_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS.txt")
+        .ok_or_else(|| {
+            "La release no publica SHA256SUMS.txt; por seguridad no se ofrecerá.".to_string()
+        })?;
+    let signature_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS.txt.sig")
+        .ok_or_else(|| {
+            "La release no publica la firma de SHA256SUMS.txt; por seguridad no se ofrecerá."
+                .to_string()
+        })?;
+
+    let manifest = crate::commands_projects::download_asset_bytes_limited(
+        &manifest_asset.download_url,
+        RELEASE_MANIFEST_MAX_BYTES,
+        RELEASE_METADATA_TIMEOUT,
+    )
+    .map_err(|error| format!("No se pudo descargar el manifiesto de checksums: {error}"))?;
+    let signature = crate::commands_projects::download_asset_bytes_limited(
+        &signature_asset.download_url,
+        RELEASE_SIGNATURE_MAX_BYTES,
+        RELEASE_METADATA_TIMEOUT,
+    )
+    .map_err(|error| format!("No se pudo descargar la firma de la release: {error}"))?;
+
+    security::verify_signature(&manifest, &signature)?;
+    security::manifest_checksum(&manifest, &asset.name)?;
+    Ok((asset, manifest))
+}
+
+/// Los nombres de adjuntos de la API de releases no se deben usar directamente
+/// como rutas. Se guardan bajo staging y un separador, nombre reservado o ADS
+/// de Windows podría escapar de esa carpeta o apuntar a otro flujo del archivo.
+fn safe_asset_file_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > 240
+        || name == "."
+        || name == ".."
+        || name.ends_with([' ', '.'])
+        || name.chars().any(|ch| {
+            ch.is_control() || matches!(ch, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+    {
+        return false;
+    }
+
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
+    });
+    !reserved
+}
+
+fn is_newer_release(release_tag: &str, current_version: &str) -> bool {
+    match (Version::parse(release_tag), Version::parse(current_version)) {
+        (Some(latest), Some(current)) => latest.is_newer_than(&current),
+        _ => false,
+    }
+}
+
+/// Devuelve `MAJOR.MINOR.PATCH` únicamente para tags SemVer estables. El flag
+/// `prerelease` de GitHub no basta por sí solo: una release mal etiquetada como
+/// estable tampoco debe ofrecer `1.2.3-beta` automáticamente.
+fn stable_release_core(tag: &str) -> Option<&str> {
+    let trimmed = tag.trim();
+    let tag = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    let (core, build) = tag.split_once('+').unwrap_or((tag, ""));
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+        })
+    {
+        return None;
+    }
+    if tag.contains('+')
+        && (build.is_empty()
+            || build.split('.').any(|part| {
+                part.is_empty()
+                    || !part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            }))
+    {
+        return None;
+    }
+    Some(core)
+}
+
+/// Evita que un tag nuevo con un adjunto firmado de otra versión provoque una
+/// oferta engañosa o una reinstalación/downgrade. Los nombres de nuestros
+/// artefactos contienen la versión entre guiones y luego extensión/arquitectura.
+fn asset_matches_release_version(asset_name: &str, release_tag: &str) -> bool {
+    let Some(core) = stable_release_core(release_tag) else {
+        return false;
+    };
+    if asset_name.to_ascii_lowercase().contains("-dev") {
+        return false;
+    }
+    asset_name.match_indices(core).any(|(start, _)| {
+        let before = asset_name.as_bytes().get(start.wrapping_sub(1)).copied();
+        let end = start + core.len();
+        let after = asset_name.as_bytes().get(end).copied();
+        let left_boundary = start == 0 || matches!(before, Some(b'-' | b'_'));
+        let right_boundary = after.is_none() || matches!(after, Some(b'.' | b'-' | b'_' | b'+'));
+        left_boundary && right_boundary
+    })
+}
+
+/// Consulta la última release, valida su firma y el SHA esperado para esta
+/// plataforma, y solo entonces la ofrece como actualización.
 ///
 /// Un fallo de red no es un error que merezca un aviso: se devuelve el estado
 /// local con el motivo dentro, y el frontend simplemente no ofrece nada.
@@ -58,6 +246,10 @@ pub fn check(app: &AppHandle) -> UpdateStatus {
     let Some(repo) = crate::github::default_catalog().self_repository else {
         return status;
     };
+    if !security::signing_key_configured() {
+        status.error = Some("Esta compilación no incluye una clave pública de actualizaciones; no se ofrecerá una release sin verificar.".into());
+        return status;
+    }
     let release = match client().latest_release(&repo) {
         Ok((Some(release), _)) => release,
         Ok((None, _)) => {
@@ -70,15 +262,20 @@ pub fn check(app: &AppHandle) -> UpdateStatus {
         }
     };
 
-    let actual = Version::parse(&status.current_version);
-    let publicada = Version::parse(&release.tag);
-    status.available = match (&publicada, &actual) {
-        (Some(nueva), Some(vieja)) => nueva.is_newer_than(vieja),
-        // Sin poder comparar no se ofrece nada: proponer una actualización que
-        // quizá sea la misma versión es peor que no proponer ninguna.
-        _ => false,
-    };
-    status.latest_version = Some(release.tag);
+    status.latest_version = Some(release.tag.clone());
+    if !is_newer_release(&release.tag, &status.current_version) {
+        return status;
+    }
+
+    if let Err(error) = verified_release_manifest(&release) {
+        log_warn!(
+            "La actualización publicada no pasó la verificación previa",
+            serde_json::json!({ "tag": &release.tag, "error": &error })
+        );
+        status.error = Some(error);
+        return status;
+    }
+    status.available = true;
     status
 }
 
@@ -89,6 +286,31 @@ pub async fn update_check(app: AppHandle) -> UpdateStatus {
     tauri::async_runtime::spawn_blocking(move || check(&app))
         .await
         .unwrap_or_else(|_| local_status(&fallback_app))
+}
+
+/// Comprobación automática: las copias de desarrollo no consultan la red ni
+/// muestran un aviso que no podrían instalar. El panel de Dependencias puede
+/// seguir usando `update_check` para informar de una release manualmente.
+#[tauri::command]
+pub async fn update_check_on_startup(app: AppHandle) -> UpdateStatus {
+    if install_dir::staging().is_none() || !security::signing_key_configured() {
+        return local_status(&app);
+    }
+    update_check(app).await
+}
+
+/// Consulta el gestor nativo de paquetes en segundo plano. Solo lista
+/// actualizaciones disponibles; el popup lleva al panel de dependencias, donde
+/// el comando de actualización queda visible y se ejecuta en una shell normal.
+#[tauri::command(async)]
+pub fn package_updates_check(
+    state: State<'_, Arc<AppState>>,
+) -> package_updates::PackageUpdateStatus {
+    let Some(manager) = package_updates::host_manager(state.inventory().pkg_manager.as_deref())
+    else {
+        return package_updates::PackageUpdateStatus::default();
+    };
+    package_updates::check(manager)
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -137,7 +359,7 @@ fn extract(archive: &Path, into: &Path) -> Result<(), String> {
     security::validate_tar_entries(archive)?;
     std::fs::create_dir_all(into).map_err(|error| error.to_string())?;
     let salida = crate::process::run_with_timeout(
-        "tar",
+        security::archive_tool(),
         &[
             "-xf",
             &archive.to_string_lossy(),
@@ -156,6 +378,26 @@ fn extract(archive: &Path, into: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// La descarga HTTP crea archivos con los permisos normales de datos; un
+/// AppImage debe conservar el bit de ejecución para poder abrirse tras el
+/// intercambio atómico. Se fija solo después de verificar su SHA firmado.
+fn make_appimage_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path)
+            .map_err(|error| format!("No se pudieron leer los permisos del AppImage: {error}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)
+            .map_err(|error| format!("No se pudo habilitar la ejecución del AppImage: {error}"))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// `update:install`
 ///
 /// Descarga la release, la deja junto a la instalación, la aplica y reinicia.
@@ -167,6 +409,12 @@ fn extract(archive: &Path, into: &Path) -> Result<(), String> {
 /// app, no el usuario.
 #[tauri::command(async)]
 pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> UpdateResult {
+    let Some(_update_guard) = UpdateInstallGuard::acquire() else {
+        return failed("Ya hay una actualización en curso.");
+    };
+    // La limpieza de restos de un arranque anterior no puede retirar un `.old`
+    // o un archivo de staging mientras se descarga, aplica o hace rollback.
+    let _files_guard = lock_update_files();
     let Some(staging) = install_dir::staging() else {
         return failed("Esta copia no se puede actualizar sola: es una compilación de desarrollo.");
     };
@@ -182,36 +430,34 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
         Ok((None, _)) => return failed("El repositorio todavía no ha publicado releases."),
         Err(error) => return failed(error.message),
     };
-    let nombres: Vec<&str> = release
-        .assets
-        .iter()
-        .map(|asset| asset.name.as_str())
-        .collect();
-    let Some(elegido) = self_update::asset_for_platform(&nombres) else {
-        return failed(format!(
-            "La release {} no trae ningún paquete para esta plataforma.",
-            release.tag
-        ));
-    };
-    let Some(asset) = release.assets.iter().find(|a| a.name == elegido) else {
-        return failed("El adjunto elegido ya no está en la release.");
-    };
-    let Some(checksum_asset) = release.assets.iter().find(|a| a.name == "SHA256SUMS.txt") else {
-        return failed("La release no publica SHA256SUMS.txt; por seguridad no se instalará.");
-    };
-    let Some(signature_asset) = release
-        .assets
-        .iter()
-        .find(|a| a.name == "SHA256SUMS.txt.sig")
-    else {
-        return failed(
-            "La release no publica la firma de SHA256SUMS.txt; por seguridad no se instalará.",
-        );
-    };
+    if !is_newer_release(&release.tag, &current_version(&app)) {
+        return failed("La release publicada no es más nueva que esta instalación.");
+    }
 
     // Se parte de cero: restos de un intento anterior podrían mezclarse con
     // esta descarga y acabar instalando una mitad de cada versión.
-    let _ = std::fs::remove_dir_all(&staging);
+    match std::fs::symlink_metadata(&staging) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return failed("La carpeta temporal de actualización no es un directorio seguro.");
+        }
+        Ok(_) => {
+            if let Err(error) = std::fs::remove_dir_all(&staging) {
+                return failed(format!(
+                    "No se pudo limpiar la actualización anterior: {error}"
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return failed(format!(
+                "No se pudo comprobar la carpeta temporal de actualización: {error}"
+            ))
+        }
+    }
+    let (asset, manifest) = match verified_release_manifest(&release) {
+        Ok(verified) => verified,
+        Err(error) => return failed(error),
+    };
     let descarga = staging.join(&asset.name);
     // Lo extraído va en su propia carpeta y no junto al archivo descargado: si
     // compartieran sitio, el `.zip` contaría como un archivo más de la versión
@@ -225,37 +471,6 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
             "destino": staging.to_string_lossy(),
         })
     );
-    let manifest_path = staging.join(&checksum_asset.name);
-    let signature_path = staging.join(&signature_asset.name);
-    if let Err(error) = crate::commands_projects::download_asset_to_with_progress(
-        &checksum_asset.download_url,
-        &manifest_path,
-        |_, _| {},
-    ) {
-        return failed(format!(
-            "No se pudo descargar el manifiesto de checksums: {error}"
-        ));
-    }
-    if let Err(error) = crate::commands_projects::download_asset_to_with_progress(
-        &signature_asset.download_url,
-        &signature_path,
-        |_, _| {},
-    ) {
-        return failed(format!(
-            "No se pudo descargar la firma de la release: {error}"
-        ));
-    }
-    let manifest = match std::fs::read(&manifest_path) {
-        Ok(value) => value,
-        Err(error) => return failed(format!("No se pudo leer SHA256SUMS.txt: {error}")),
-    };
-    let signature = match std::fs::read(&signature_path) {
-        Ok(value) => value,
-        Err(error) => return failed(format!("No se pudo leer la firma de la release: {error}")),
-    };
-    if let Err(error) = security::verify_signature(&manifest, &signature) {
-        return failed(error);
-    }
     let progress_app = app.clone();
     if let Err(error) = crate::commands_projects::download_asset_to_with_progress(
         &asset.download_url,
@@ -296,10 +511,15 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
     {
-        if let Err(error) = std::fs::create_dir_all(&extraido)
-            .and_then(|()| std::fs::rename(&descarga, extraido.join(&binario)))
-        {
+        if let Err(error) = std::fs::create_dir_all(&extraido) {
             return failed(format!("No se pudo preparar el AppImage: {error}"));
+        }
+        let appimage = extraido.join(&binario);
+        if let Err(error) = std::fs::rename(&descarga, &appimage) {
+            return failed(format!("No se pudo preparar el AppImage: {error}"));
+        }
+        if let Err(error) = make_appimage_executable(&appimage) {
+            return failed(error);
         }
         extraido
     } else {
@@ -339,13 +559,12 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
     app.restart();
 }
 
-/// Al arrancar: borrar lo que dejó una actualización anterior y, en segundo
-/// plano, mirar si hay una nueva.
-///
-/// La consulta va en su propio hilo porque habla con GitHub: en una red lenta
-/// bloquearía el arranque de la ventana, y avisar de una versión nueva no es
-/// tan urgente como abrir la terminal.
-pub fn on_startup(app: &AppHandle) {
+/// Al arrancar, borrar restos de una actualización anterior. La consulta de
+/// red se inicia desde la interfaz una vez montada, y su resultado vuelve por
+/// la promesa IPC; así no se pierde un evento emitido antes de que exista el
+/// listener del frontend.
+pub fn on_startup() {
+    let _files_guard = lock_update_files();
     if let Some(install) = install_dir::current() {
         let borrados = self_update::cleanup(&install);
         if borrados > 0 {
@@ -355,32 +574,26 @@ pub fn on_startup(app: &AppHandle) {
             );
         }
     }
-    if install_dir::staging().is_none() {
-        // Build de desarrollo: no tiene sentido ofrecer actualizarla.
-        return;
-    }
-    let app = app.clone();
-    std::thread::Builder::new()
-        .name("update-check".into())
-        .spawn(move || {
-            let status = check(&app);
-            if status.available {
-                log_info!(
-                    "Hay una versión más reciente publicada",
-                    serde_json::json!({
-                        "actual": status.current_version,
-                        "publicada": status.latest_version,
-                    })
-                );
-                let _ = app.emit("update-available", status);
-            }
-        })
-        .ok();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn el_appimage_descargado_recibe_permisos_de_ejecucion_antes_de_instalarse() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let appimage = dir.path().join("terminal.AppImage");
+        std::fs::write(&appimage, b"ELF fixture").unwrap();
+        std::fs::set_permissions(&appimage, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        make_appimage_executable(&appimage).unwrap();
+
+        assert_eq!(std::fs::metadata(appimage).unwrap().permissions().mode() & 0o777, 0o755);
+    }
 
     #[test]
     fn un_appimage_no_se_extrae_porque_es_un_archivo_suelto() {
@@ -390,5 +603,76 @@ mod tests {
         // No se llama a tar ni se crea nada: devuelve bien sin tocar el disco.
         assert!(extract(&appimage, &dir.path().join("salida")).is_ok());
         assert!(!dir.path().join("salida").exists());
+    }
+
+    #[test]
+    fn solo_considera_versiones_numericamente_mas_nuevas() {
+        assert!(is_newer_release("v1.10.0", "1.9.9"));
+        assert!(!is_newer_release("1.4.3", "1.4.3"));
+        assert!(!is_newer_release("1.4", "1.4.0"));
+        assert!(!is_newer_release("release", "1.4.0"));
+    }
+
+    #[test]
+    fn solo_ofrece_tags_estables_cuyo_adjunto_nombra_esa_version() {
+        assert_eq!(stable_release_core("v1.2.3"), Some("1.2.3"));
+        assert_eq!(stable_release_core("1.2.3+build.4"), Some("1.2.3"));
+        for invalid in ["1.2", "1.2.3-beta.1", "01.2.3", "1.2.3+", "release-1.2.3"] {
+            assert_eq!(
+                stable_release_core(invalid),
+                None,
+                "tag inesperado: {invalid}"
+            );
+        }
+        assert!(asset_matches_release_version(
+            "LTerminal-1.2.3-x86_64.AppImage",
+            "v1.2.3"
+        ));
+        assert!(asset_matches_release_version(
+            "WinSlimTerminal-Unpacked-1.2.3.zip",
+            "1.2.3"
+        ));
+        assert!(!asset_matches_release_version(
+            "WinSlimTerminal-Unpacked-1.2.2.zip",
+            "1.2.3"
+        ));
+        assert!(!asset_matches_release_version(
+            "LTerminal-1.2.30-x86_64.AppImage",
+            "1.2.3"
+        ));
+        assert!(!asset_matches_release_version(
+            "LTerminal-1.2.3-dev-x86_64.AppImage",
+            "1.2.3"
+        ));
+    }
+
+    #[test]
+    fn los_nombres_de_adjuntos_no_pueden_convertirse_en_rutas_o_flujos() {
+        for unsafe_name in [
+            "../LTerminal-1.2.3.AppImage",
+            "folder/LTerminal-1.2.3.AppImage",
+            r"folder\LTerminal-1.2.3.AppImage",
+            "LTerminal-1.2.3.AppImage:payload",
+            "CON.zip",
+            "lpt1.txt",
+            "LTerminal-1.2.3.AppImage.",
+            "LTerminal-1.2.3.AppImage ",
+        ] {
+            assert!(
+                !safe_asset_file_name(unsafe_name),
+                "nombre: {unsafe_name:?}"
+            );
+        }
+        assert!(safe_asset_file_name("LTerminal-1.2.3-x86_64.AppImage"));
+        assert!(safe_asset_file_name("WinSlimTerminal-Unpacked-1.2.3.zip"));
+        assert!(!safe_asset_file_name(&"a".repeat(241)));
+    }
+
+    #[test]
+    fn impide_dos_aplicaciones_concurrentes_sobre_la_misma_carpeta_temporal() {
+        let first = UpdateInstallGuard::acquire().expect("primera actualización");
+        assert!(UpdateInstallGuard::acquire().is_none());
+        drop(first);
+        assert!(UpdateInstallGuard::acquire().is_some());
     }
 }

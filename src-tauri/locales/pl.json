@@ -150,6 +150,7 @@
   "toolbar.settings": "Ustawienia",
   "toolbar.settingsTitle": "Dostosuj wygląd i zachowanie",
   "update.available": "Dostępna jest nowsza wersja: {version}.",
+  "update.packagesAvailable": "Dostępne są aktualizacje aplikacji zarządzanych przez {manager}.",
   "update.into": "Zostanie zainstalowany w {path}",
   "action.adb-authorize.label": "Uruchom ponownie ADB i zażądaj autoryzacji ponownie",
   "action.adb-authorize.shortLabel": "Uruchom ponownie i zażądaj autoryzacji",

@@ -150,6 +150,7 @@
   "toolbar.settings": "設定",
   "toolbar.settingsTitle": "外観と動作オプションをカスタマイズ",
   "update.available": "新しい版本があります: {version}。",
+  "update.packagesAvailable": "{manager} で管理されているアプリに更新があります。",
   "update.into": "{path} にインストールされます",
   "action.adb-authorize.label": "ADBを再起動し、承認を再要求",
   "action.adb-authorize.shortLabel": "再起動して承認要求",

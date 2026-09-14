@@ -850,7 +850,8 @@ impl TabManager {
         let app_for_exit = app.clone();
         let tab_for_exit = tab_id.to_string();
         let exe = env.exe.clone();
-        let args = env.args.clone();
+        let (args, powershell_bootstrap) =
+            crate::terminal::powershell::prepare_spawn_args(env.kind, &env.args);
         let cwd = spawn_dir.clone();
         log_info!(
             "Preparando pty",
@@ -859,6 +860,7 @@ impl TabManager {
                 "envId": env.id,
                 "exe": exe,
                 "args": args,
+                "powershellBootstrap": powershell_bootstrap,
                 "cwd": cwd.to_string_lossy(),
                 "sideloadedConpty": crate::pty::sideloaded_conpty().map(|path| path.to_string_lossy().to_string()),
             })
@@ -1001,6 +1003,8 @@ impl TabManager {
         generation: u64,
         session: anyhow::Result<PtySession>,
     ) -> bool {
+        let powershell_bootstrap =
+            crate::terminal::powershell::prepare_spawn_args(env.kind, &env.args).1;
         match session {
             Ok(session) => {
                 let mut registry = self.registry.lock();
@@ -1183,6 +1187,22 @@ impl TabManager {
                                     "rows": viewport.rows,
                                 })
                             );
+                        }
+                        if powershell_bootstrap {
+                            // El envoltorio de PowerShell espera una primera
+                            // línea incluso si no se pudo generar el script de
+                            // sesión. Dejar pasar la salida ya permite que el
+                            // prompt quede encolado detrás del banner cuando
+                            // el frontend aún no está listo.
+                            if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                                tab.initializing = false;
+                            }
+                            if !self.write(tab_id, "\r") {
+                                log_warn!(
+                                    "No se pudo liberar el prompt de PowerShell sin inicializador",
+                                    serde_json::json!({ "tabId": tab_id })
+                                );
+                            }
                         }
                         // Los REPL no reciben banner: su prompt es una línea
                         // de entrada viva.

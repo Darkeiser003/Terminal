@@ -4,6 +4,7 @@ pub mod aliases;
 pub mod console_ui;
 pub mod current_dir;
 pub mod internal_commands;
+pub mod powershell;
 pub mod pty;
 pub mod session_files;
 pub mod shell_paths;

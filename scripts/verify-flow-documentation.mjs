@@ -29,6 +29,8 @@ const api = read('src/lib/api.ts');
 const tabs = read('src-tauri/src/terminal/tabs.rs');
 const update = read('src-tauri/src/updater/commands.rs');
 const security = read('src-tauri/src/updater/security.rs');
+const updateUi = read('src/App.svelte');
+const packageUpdates = read('src-tauri/src/updater/package_updates.rs');
 const e2e = read('tests/e2e/smoke.mjs');
 
 check('La documentación técnica vive en README', ['## Arquitectura', '## Contrato IPC', '## Seguridad', '## Pruebas'].every(hasReadme));
@@ -41,7 +43,7 @@ check('README documenta alcance, evidencia y límites', ['Auditoría de release 
 for (const marker of ['migrate_local_data', 'frontend_ready', 'tabs.shutdown', 'generate_handler!']) {
     check(`El arranque real conserva ${marker}`, lib.includes(marker));
 }
-for (const marker of ['tauriInvoke', "listen<", "onUpdateAvailable", "onData"]) {
+for (const marker of ['tauriInvoke', "listen<", "checkForUpdateOnStartup", "onData"]) {
     check(`El puente frontend conserva ${marker}`, api.includes(marker));
 }
 for (const marker of ['spawn_pty', 'pty-data', 'pty-exit', 'generation']) {
@@ -55,6 +57,27 @@ const applyAt = position(update, 'self_update::apply');
 check('La actualización verifica firma antes del hash', signatureAt >= 0 && signatureAt < checksumAt);
 check('La actualización verifica hash antes del árbol', checksumAt >= 0 && checksumAt < treeAt);
 check('La actualización valida el árbol antes de aplicar', treeAt >= 0 && treeAt < applyAt);
+check('El popup propio solo aparece después de autenticar manifiesto y SHA declarado', (() => {
+    const checked = position(update, 'verified_release_manifest(&release)');
+    const offered = position(update, 'status.available = true');
+    return checked >= 0 && offered > checked
+        && update.includes('stable_release_core(&release.tag).is_none()')
+        && update.includes('asset_matches_release_version(&asset.name, &release.tag)');
+})());
+check('El aviso automático vuelve por IPC y no depende de un evento de arranque fugaz',
+    update.includes('update_check_on_startup') && updateUi.includes('checkForUpdateOnStartup()')
+        && !api.includes("'update-available'")
+        && /status\.available\s*&&\s*status\.canSelfUpdate/.test(updateUi));
+check('Las consultas de paquetes son solo lectura y tienen límite de tiempo',
+    packageUpdates.includes('CHECK_TIMEOUT') && packageUpdates.includes('run_with_timeout_env')
+        && packageUpdates.includes('query_command(manager)')
+        && packageUpdates.includes('fn cada_sonda_usa_su_comando_de_consulta_permitido')
+        && packageUpdates.includes('(\"apt\", \"apt-get\", &[\"-s\", \"upgrade\"])'));
+check('El aviso de paquetes lleva al panel, no actualiza en segundo plano',
+    updateUi.includes("panels.show('deps')") && updateUi.includes('checkPackageUpdatesOnStartup()'));
+check('Los avisos de actualización se adaptan al ancho y no se pueden descartar durante la instalación',
+    updateUi.includes('.update > span') && updateUi.includes('flex-wrap: wrap;')
+        && updateUi.includes('disabled={updating} onclick={dismissUpdate}'));
 check('La seguridad documenta Ed25519', security.includes('verify_signature') && readme.includes('Ed25519'));
 
 for (const marker of ['captureScreenshot', 'smokeReport.captures', 'E2E_CAPTURE_DIR', 'verify-e2e-report']) {

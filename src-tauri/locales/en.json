@@ -683,6 +683,7 @@
   "toolbar.settings": "Settings",
   "toolbar.settingsTitle": "Customise appearance and behaviour",
   "update.available": "A newer version is available: {version}.",
+  "update.packagesAvailable": "Updates are available for apps managed by {manager}.",
   "update.check": "Check for updates",
   "update.checking": "Checking the latest version…",
   "update.failed": "Could not update.",

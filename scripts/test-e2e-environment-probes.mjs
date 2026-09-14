@@ -39,10 +39,15 @@ for (const id of allLanguageIds) {
 assert.deepEqual(uncovered, [], 'cada REPL del catálogo debe tener una sonda o una omisión segura explícita');
 assert.equal(allLanguageIds.length, 91, 'el test debe detectar nuevas altas en las fuentes de entornos');
 
-for (const id of ['fish', 'bash', 'zsh', 'sh', 'pwsh', 'powershell', 'cmd', 'gitbash', 'nu', 'xonsh', 'elvish', 'wine-cmd']) {
+for (const id of ['fish', 'bash', 'zsh', 'sh', 'pwsh', 'powershell', 'cmd', 'gitbash', 'wine-cmd']) {
     assert.deepEqual(environmentProbe({ id }, 'LTERMINAL_SHELL_PROBE'), {
         kind: 'shell', language: null, command: 'echo LTERMINAL_SHELL_PROBE',
     }, `${id}: debe usar una sonda de shell inocua`);
+}
+for (const id of ['nu', 'xonsh', 'elvish']) {
+    assert.deepEqual(environmentProbe({ id }, 'LTERMINAL_SHELL_PROBE'), {
+        kind: 'repl', language: id, command: 'echo LTERMINAL_SHELL_PROBE',
+    }, `${id}: debe esperar el prompt de su REPL y no el banner POSIX`);
 }
 for (const [id, reasonPart] of [
     ['nsudo:admin', 'elevación'],

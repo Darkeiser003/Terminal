@@ -274,6 +274,8 @@ pub fn run() {
             commands_projects::projects_open_github,
             commands_projects::projects_run,
             commands_update::update_check,
+            commands_update::update_check_on_startup,
+            commands_update::package_updates_check,
             commands_update::update_install,
         ])
         .setup(move |app| {
@@ -324,10 +326,9 @@ pub fn run() {
             // se consulta GitHub. Ninguna de las dos cosas es necesaria para
             // abrir la primera terminal, así que queda fuera del hilo de setup
             // y empieza después de solicitar que se muestre la ventana.
-            let update_app = app.handle().clone();
             let _ = std::thread::Builder::new()
                 .name("update-startup".into())
-                .spawn(move || commands_update::on_startup(&update_app));
+                .spawn(commands_update::on_startup);
             Ok(())
         })
         .on_window_event(|window, event| {

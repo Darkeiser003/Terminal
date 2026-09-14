@@ -464,7 +464,14 @@ fn releases_folder_for(projects_folder: &str, repository: &Repository, tag: &str
 /// Igual que `download_asset`, con los textos en el idioma activo. La usa
 /// también la actualización de la propia app, que no tiene un traductor a mano.
 fn download_asset(url: &str, destination: &Path, t: &Translator) -> Result<u64, String> {
-    download_asset_with_progress(url, destination, t, |_, _| {})
+    download_asset_with_progress(
+        url,
+        destination,
+        t,
+        MAX_ASSET_BYTES,
+        std::time::Duration::from_secs(600),
+        |_, _| {},
+    )
 }
 
 pub(crate) fn download_asset_to_with_progress(
@@ -472,68 +479,73 @@ pub(crate) fn download_asset_to_with_progress(
     destination: &Path,
     progress: impl FnMut(u64, Option<u64>),
 ) -> Result<u64, String> {
-    download_asset_with_progress(url, destination, &translator(), progress)
+    download_asset_with_progress(
+        url,
+        destination,
+        &translator(),
+        MAX_ASSET_BYTES,
+        std::time::Duration::from_secs(600),
+        progress,
+    )
+}
+
+/// Descarga metadatos pequeños directamente en memoria, con un límite estricto
+/// y sin dejar temporales en el staging de la instalación.
+pub(crate) fn download_asset_bytes_limited(
+    url: &str,
+    max_bytes: u64,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    let t = translator();
+    let mut response = asset_response(url, &t, timeout)?;
+    let declared_size = response.content_length();
+    if declared_size.is_some_and(|size| size > max_bytes) {
+        return Err(t.t(
+            "release.tooBig",
+            "El archivo supera el tamaño máximo admitido.",
+        ));
+    }
+
+    let capacity = declared_size
+        .unwrap_or_default()
+        .min(max_bytes)
+        .min(usize::MAX as u64) as usize;
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        if bytes.len() as u64 + read as u64 > max_bytes {
+            return Err(t.t(
+                "release.tooBig",
+                "El archivo supera el tamaño máximo admitido.",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
 }
 
 fn download_asset_with_progress(
     url: &str,
     destination: &Path,
     t: &Translator,
+    max_bytes: u64,
+    timeout: std::time::Duration,
     mut progress: impl FnMut(u64, Option<u64>),
 ) -> Result<u64, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| error.to_string())?;
-
-    let mut current = url.to_string();
-    let mut response = None;
-    for _ in 0..=MAX_REDIRECTS {
-        if !github::is_allowed_asset_url(&current) {
-            return Err(t.t(
-                "release.badRedirect",
-                "La descarga intentó salir de los servidores de GitHub.",
-            ));
-        }
-        let attempt = client
-            .get(&current)
-            .send()
-            .map_err(|error| error.to_string())?;
-        if attempt.status().is_redirection() {
-            let next = attempt
-                .headers()
-                .get("location")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    t.t(
-                        "release.badRedirect",
-                        "La descarga intentó salir de los servidores de GitHub.",
-                    )
-                })?;
-            current = next;
-            continue;
-        }
-        response = Some(attempt);
-        break;
-    }
-    let Some(mut response) = response else {
+    let mut response = asset_response(url, t, timeout)?;
+    let declared_size = response.content_length();
+    if declared_size.is_some_and(|size| size > max_bytes) {
         return Err(t.t(
-            "release.badRedirect",
-            "La descarga intentó salir de los servidores de GitHub.",
-        ));
-    };
-    if !response.status().is_success() {
-        return Err(t.tp(
-            "release.httpError",
-            &[("status", response.status().as_u16().to_string())],
-            "GitHub respondió con el estado {status} al descargar.",
+            "release.tooBig",
+            "El archivo supera el tamaño máximo admitido.",
         ));
     }
-    let total = response
-        .content_length()
-        .filter(|total| *total <= MAX_ASSET_BYTES);
+    let total = declared_size;
     progress(0, total);
 
     if let Some(parent) = destination.parent() {
@@ -556,7 +568,7 @@ fn download_asset_with_progress(
             }
         };
         bytes += read as u64;
-        if bytes > MAX_ASSET_BYTES {
+        if bytes > max_bytes {
             drop(file);
             let _ = std::fs::remove_file(destination);
             return Err(t.t(
@@ -573,6 +585,61 @@ fn download_asset_with_progress(
         progress(bytes, total);
     }
     Ok(bytes)
+}
+
+/// Obtiene una respuesta de adjunto siguiendo solo los redireccionamientos
+/// permitidos de GitHub. Los dos tipos de descarga comparten este punto para
+/// que la ruta en memoria no relaje la política de hosts.
+fn asset_response(
+    url: &str,
+    t: &Translator,
+    timeout: std::time::Duration,
+) -> Result<reqwest::blocking::Response, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        if !github::is_allowed_asset_url(&current) {
+            return Err(t.t(
+                "release.badRedirect",
+                "La descarga intentó salir de los servidores de GitHub.",
+            ));
+        }
+        let attempt = client
+            .get(&current)
+            .send()
+            .map_err(|error| error.to_string())?;
+        if attempt.status().is_redirection() {
+            current = attempt
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    t.t(
+                        "release.badRedirect",
+                        "La descarga intentó salir de los servidores de GitHub.",
+                    )
+                })?;
+            continue;
+        }
+        if !attempt.status().is_success() {
+            return Err(t.tp(
+                "release.httpError",
+                &[("status", attempt.status().as_u16().to_string())],
+                "GitHub respondió con el estado {status} al descargar.",
+            ));
+        }
+        return Ok(attempt);
+    }
+    Err(t.t(
+        "release.badRedirect",
+        "La descarga intentó salir de los servidores de GitHub.",
+    ))
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

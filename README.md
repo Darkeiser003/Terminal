@@ -176,6 +176,16 @@ mantiene separado de los proyectos anclados: no aparece en la biblioteca ni se
 puede clonar desde el panel como proyecto. El porqué de cada paso está en
 `src-tauri/src/updater/self_update.rs`.
 
+La comprobación se inicia en segundo plano después de montar la interfaz. Si
+encuentra una release estable, el aviso inferior solo aparece tras autenticar
+con Ed25519 el manifiesto y confirmar que este declara el SHA-256 del artefacto
+de la plataforma. El paquete completo se descarga y vuelve a verificarse solo
+si se pulsa «Actualizar y reiniciar». También se consulta el gestor nativo de
+paquetes (WinGet en Windows; apt, dnf, pacman, zypper o apk en Linux); ese aviso
+solo informa y abre Entorno y dependencias. No instala aplicaciones en segundo
+plano. El gestor puede refrescar su propia caché durante la consulta, que tiene
+un timeout y nunca bloquea la interfaz.
+
 ## Entorno de desarrollo
 
 Desde una copia local del código:
@@ -514,17 +524,21 @@ su SHA-256 en `release/SHA256SUMS.txt`; `target/` sigue siendo solo la salida
 interna de Tauri/Cargo. `-NoInstaller` omite explícitamente ese artefacto. La
 build portable no genera instalador ni accesos directos.
 
-Si se configura actualización automática más adelante, el nombre del artefacto
-debe coincidir con `self_update::asset_for_platform`; de otro modo una release
-no tendrá un adjunto compatible.
+La comprobación automática solo ofrece una release estable que tenga un
+artefacto compatible con `self_update::asset_for_platform`, un manifiesto
+SHA-256 y su firma verificable. Antes de mostrar el aviso autentica el
+manifiesto y comprueba que contiene el hash del artefacto; al instalar vuelve a
+validar la firma y calcula el SHA-256 del paquete descargado.
 
 ### Seguridad de las releases
 
 Las actualizaciones exigen `SHA256SUMS.txt` y su firma detached
 `SHA256SUMS.txt.sig`. El binario se compila con
-`LTERMINAL_UPDATE_PUBLIC_KEY` (clave pública Ed25519 en hexadecimal) y verifica
-la firma antes de descargar, extraer o instalar el payload; después exige una
-coincidencia exacta de SHA-256. Una release oficial falla si no recibe
+`LTERMINAL_UPDATE_PUBLIC_KEY` (clave pública Ed25519 en hexadecimal); la
+comprobación automática verifica la firma y el hash declarado antes de mostrar
+el aviso, y la instalación vuelve a comprobar la firma, descarga el paquete y
+exige una coincidencia exacta de SHA-256 antes de extraer o aplicar el payload.
+Una release oficial falla si no recibe
 `LTERMINAL_SIGNING_PRIVATE_KEY` en el entorno de CI. La clave privada nunca se
 guarda en el repositorio.
 

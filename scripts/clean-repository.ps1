@@ -284,7 +284,7 @@ foreach ($sessionRoot in @(
     foreach ($session in Get-ChildItem -LiteralPath $sessionRoot -Directory -Force -ErrorAction SilentlyContinue) {
         if ($session.Name -notmatch '^\d+$') { continue }
         if ($activePids -contains [int]$session.Name) {
-            Write-Warn "Se conserva la sesión temporal activa: $($session.FullName)"
+            Write-Warning "Se conserva la sesión temporal activa: $($session.FullName)"
             continue
         }
         Add-ExternalTarget $session.FullName

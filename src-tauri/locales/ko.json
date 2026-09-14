@@ -150,6 +150,7 @@
   "toolbar.settings": "설정",
   "toolbar.settingsTitle": "외관 및 동작 옵션 맞춤 설정",
   "update.available": "새 버전이 있습니다: {version}.",
+  "update.packagesAvailable": "{manager}에서 관리하는 앱의 업데이트를 사용할 수 있습니다.",
   "update.into": "{path}에 설치됩니다",
   "action.adb-authorize.label": "ADB 재시작 및 권한 재요청",
   "action.adb-authorize.shortLabel": "재시작 후 권한 요청",

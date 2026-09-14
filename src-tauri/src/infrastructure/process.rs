@@ -69,8 +69,22 @@ pub fn hidden_command(program: &str) -> Command {
 /// `wsl.exe` esperando a un servicio, un `docker` sin daemon) no debe dejar la
 /// app bloqueada: pasado el plazo se mata y se devuelve `None`.
 pub fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Option<Output> {
+    run_with_timeout_env(program, args, timeout, &[])
+}
+
+/// Variante que aplica variables de entorno controladas antes de arrancar el
+/// proceso. Se usa para obtener salida estable de herramientas del sistema
+/// (por ejemplo, listados de paquetes en locale C) sin mutar el entorno global
+/// de LTerminal ni cambiar el comportamiento de los demás procesos.
+pub fn run_with_timeout_env(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    environment: &[(&str, &str)],
+) -> Option<Output> {
     let mut command = hidden_command(program);
     configure_process_tree(&mut command);
+    command.envs(environment.iter().copied());
     let mut child = command.args(args).spawn().ok()?;
 
     // `Child` no ofrece espera con plazo en la biblioteca estándar. Un sondeo

@@ -150,6 +150,7 @@
   "toolbar.settings": "الإعدادات",
   "toolbar.settingsTitle": "تخصيص المظهر والسلوك",
   "update.available": "يتوفر إصدار أحدث: {version}.",
+  "update.packagesAvailable": "تتوفر تحديثات للتطبيقات التي يديرها {manager}.",
   "update.into": "سيتم التثبيت في {path}",
   "action.adb-authorize.label": "إعادة تشغيل ADB وإعادة طلب التفويض",
   "action.adb-authorize.shortLabel": "إعادة التشغيل وطلب التفويض",

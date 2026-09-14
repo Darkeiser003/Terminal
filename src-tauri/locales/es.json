@@ -717,6 +717,7 @@
   "toolbar.settings": "Ajustes",
   "toolbar.settingsTitle": "Personaliza apariencia y comportamiento",
   "update.available": "Hay una versión más reciente: {version}.",
+  "update.packagesAvailable": "Hay actualizaciones disponibles para aplicaciones gestionadas por {manager}.",
   "update.check": "Buscar actualizaciones",
   "update.checking": "Comprobando si hay actualizaciones…",
   "update.failed": "No se pudo comprobar si hay actualizaciones.",

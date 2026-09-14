@@ -185,6 +185,8 @@ if (nativeResizes.length < 2
         || event.nativeChanged !== true
         || event.viewportChanged !== true
         || event.ptyChanged !== true
+        || !['webdriver', 'hyprland-resizeactive-fallback'].includes(event.nativeResizeMethod)
+        || (event.nativeResizeMethod === 'hyprland-resizeactive-fallback' && event.platform !== 'linux')
         || (nativePlatform && event.platform !== nativePlatform))) {
     throw new Error('El E2E no demostró dos redimensionados nativos con viewport y PTY sincronizados.');
 }

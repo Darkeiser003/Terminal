@@ -8,12 +8,18 @@ const localeFiles = fs.readdirSync(localesDir).filter((file) => file.endsWith('.
 const catalogs = Object.fromEntries(localeFiles.map((file) => [file, JSON.parse(fs.readFileSync(path.join(localesDir, file), 'utf8'))]));
 const spanish = catalogs['es.json'];
 const errors = [];
+const frontendFiles = [
+    ...fs.readdirSync(components)
+        .filter((name) => name.endsWith('.svelte'))
+        .map((name) => path.join(components, name)),
+    path.join(root, 'src', 'App.svelte'),
+];
 
 if (!spanish) errors.push('Falta src-tauri/locales/es.json');
 
 const usedKeys = new Set();
-for (const file of fs.readdirSync(components).filter((name) => name.endsWith('.svelte'))) {
-    const source = fs.readFileSync(path.join(components, file), 'utf8');
+for (const file of frontendFiles) {
+    const source = fs.readFileSync(file, 'utf8');
     for (const match of source.matchAll(/(?:app\.t|translated)\(\s*['"]([^'"]+)['"]/g)) usedKeys.add(match[1]);
 }
 
@@ -87,6 +93,7 @@ const placeholderContracts = {
     'terminal.quickActionsStatus': ['state'],
     'terminal.replMissing': ['name'],
     'terminal.helpFallback': ['topic'],
+    'update.packagesAvailable': ['manager'],
 };
 for (const [file, catalog] of Object.entries(catalogs)) {
     for (const [key, expected] of Object.entries(placeholderContracts)) {
@@ -111,6 +118,7 @@ const criticalLocalizedKeys = [
     'terminal.replMissing',
     'terminal.helpFallback',
     'terminal.internalCommands',
+    'update.packagesAvailable',
 ];
 for (const [file, catalog] of Object.entries(catalogs)) {
     if (file === 'es.json') continue;

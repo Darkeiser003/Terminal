@@ -150,6 +150,7 @@
   "toolbar.settings": "Настройки",
   "toolbar.settingsTitle": "Настроить внешний вид и поведение",
   "update.available": "Доступна более новая версия: {version}.",
+  "update.packagesAvailable": "Доступны обновления приложений, управляемых через {manager}.",
   "update.into": "Будет установлено в {path}",
   "action.adb-authorize.label": "Перезапустить ADB и запросить авторизацию снова",
   "action.adb-authorize.shortLabel": "Перезапустить и запросить авторизацию",
