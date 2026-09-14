@@ -445,13 +445,27 @@ check('Smoke E2E conserva capturas de la organización de Dependencias',
 check('Smoke E2E prueba varias shells con comandos reales y restaura la shell inicial',
     smoke.includes("markPhase('cambio de shell')")
         && smoke.includes('exerciseShellMatrix')
-        && smoke.includes('environment-shell-probe')
+        && smoke.includes('environment-probe')
+        && smoke.includes('environment-probe-skipped')
+        && smoke.includes('markerOccurrences >= 2')
         && smoke.includes('environment-shell-matrix')
         && smoke.includes('environment-switch-restore')
-        && smoke.includes("['fish', 'bash', 'zsh', 'sh', 'pwsh']")
+        && smoke.includes('availableOptions.map')
+        && smoke.includes('safeEnvironmentMarker')
         && smoke.includes('originalCaptureLabel')
         && smoke.includes('shell-matrix-${process.platform}-original-selected')
         && toolbar.includes('data-testid="environment-option"'));
+check('Las sondas de entorno cubren todos los REPL del catálogo o explican un descarte seguro',
+    packageJson.scripts?.['test:e2e-environment-probes'] === 'node scripts/test-e2e-environment-probes.mjs'
+        && read('scripts/e2e-environment-probes.mjs').includes('serviceBackedRepls')
+        && read('scripts/test-e2e-environment-probes.mjs').includes('allLanguageIds.length, 91')
+        && e2eReportVerifier.includes('availableIds.some((id) => !accountedIds.includes(id))'));
+check('El ancho adicional del PTY se limita a líneas lógicas del viewport actual',
+    read('src/lib/terminal-columns.ts').includes('longestVisibleLogicalLineWidth')
+        && read('src/components/TerminalPane.svelte').includes('longestVisibleLineWidth()')
+        && read('scripts/test-frontend-logic.mjs').includes('una línea antigua fuera de pantalla no fuerza columnas adicionales')
+        && smoke.includes("recordEvent('terminal-columns-reclaim'")
+        && e2eReportVerifier.includes("type === 'terminal-columns-reclaim'"));
 check('La matriz E2E detecta errores de sintaxis en el bootstrap de shells alternativas',
     smoke.includes('defining function based on alias')
         && smoke.includes('parse error near')

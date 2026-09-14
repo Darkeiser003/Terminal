@@ -54,37 +54,86 @@ if (!terminalOutputRepaint || terminalOutputRepaint.passed !== true
     || !(report.captures ?? []).some((capture) => capture?.label === terminalOutputRepaint.capture)) {
     throw new Error('El E2E no demostró el repintado de salida PTY sin resize/división y sin captura visual.');
 }
+const horizontalHelp = events.find((event) => event?.type === 'horizontal-help-geometry');
+if (!horizontalHelp || horizontalHelp.passed !== true
+    || !Number.isFinite(horizontalHelp.snapshot?.host?.clientWidth)
+    || !Number.isFinite(horizontalHelp.snapshot?.host?.scrollWidth)
+    || horizontalHelp.snapshot.host.scrollWidth <= horizontalHelp.snapshot.host.clientWidth
+    || horizontalHelp.snapshot.indicator?.opacity !== '1'
+    || horizontalHelp.horizontalWheelProbe?.lineMode?.defaultPrevented !== true
+    || horizontalHelp.horizontalWheelProbe?.pixelMode?.defaultPrevented !== true
+    || horizontalHelp.horizontalWheelProbe?.pageMode?.defaultPrevented !== true) {
+    throw new Error('El E2E no probó el scroll horizontal de la ayuda con las tres unidades de rueda.');
+}
+const widthReclaim = events.find((event) => event?.type === 'terminal-columns-reclaim');
+if (!widthReclaim || widthReclaim.passed !== true
+    || !Number.isFinite(widthReclaim.beforeCols) || !Number.isFinite(widthReclaim.visibleCols)
+    || !Number.isFinite(widthReclaim.afterCols) || !Number.isFinite(widthReclaim.hostWidth)
+    || !Number.isFinite(widthReclaim.hostScrollWidth)
+    || widthReclaim.beforeCols <= widthReclaim.visibleCols
+    || widthReclaim.afterCols > widthReclaim.visibleCols + 1
+    || widthReclaim.hostScrollWidth > widthReclaim.hostWidth + 2
+    || widthReclaim.historyRetained !== true
+    || widthReclaim.commands < 12) {
+    throw new Error('El E2E no demostró que el PTY recupere sus columnas visibles mientras conserva el scrollback.');
+}
 const shellMatrix = events.find((event) => event?.type === 'environment-shell-matrix');
-const availableAlternates = shellMatrix?.availableIds?.filter((id) => id !== shellMatrix.originalId) ?? [];
-const requiredShellAlternates = Math.min(2, availableAlternates.length);
-const shellProbes = events.filter((event) => event?.type === 'environment-shell-probe');
+const availableIds = Array.isArray(shellMatrix?.availableIds) ? shellMatrix.availableIds : [];
+const testedIds = Array.isArray(shellMatrix?.testedIds) ? shellMatrix.testedIds : [];
+const skipped = Array.isArray(shellMatrix?.skipped) ? shellMatrix.skipped : [];
+const availableAlternates = availableIds.filter((id) => id !== shellMatrix?.originalId);
+const environmentProbes = events.filter((event) => event?.type === 'environment-probe');
+const probeSkips = events.filter((event) => event?.type === 'environment-probe-skipped');
 const restoredOriginal = events.find((event) => event?.type === 'environment-switch-restore');
-const testedAlternates = shellMatrix?.testedAlternates ?? [];
-const successfulProbeIds = new Set(shellProbes
-    .filter((event) => event.passed === true && event.startupClean === true)
+const testedAlternates = Array.isArray(shellMatrix?.testedAlternates) ? shellMatrix.testedAlternates : [];
+const probeIds = environmentProbes.map((event) => event.id);
+const probeSkipIds = probeSkips.map((event) => event.id);
+const successfulProbeIds = new Set(environmentProbes
+    .filter((event) => event.passed === true && event.startupClean === true
+        && Number.isFinite(event.markerOccurrences) && event.markerOccurrences >= 2
+        && ['shell', 'repl'].includes(event.kind))
     .map((event) => event.id));
+const skippedIds = skipped.map((event) => event?.id);
+const accountedIds = [...testedIds, ...skippedIds];
+const computedAlternates = testedIds.filter((id) => id !== shellMatrix?.originalId);
 if (!shellMatrix || shellMatrix.passed !== true
     || !Array.isArray(shellMatrix.availableIds)
     || !shellMatrix.availableIds.includes(shellMatrix.originalId)
     || shellMatrix.restoredTo !== shellMatrix.originalId
     || shellMatrix.originalSource !== 'aria-selected/class'
-    || availableAlternates.length === 0
+    || availableIds.length === 0
+    || !Array.isArray(shellMatrix.testedIds)
+    || !Array.isArray(shellMatrix.skipped)
+    || testedIds.length + skipped.length !== availableIds.length
+    || new Set(availableIds).size !== availableIds.length
+    || new Set(testedIds).size !== testedIds.length
+    || new Set(probeIds).size !== probeIds.length
+    || new Set(skippedIds).size !== skippedIds.length
+    || new Set(probeSkipIds).size !== probeSkipIds.length
+    || new Set(accountedIds).size !== accountedIds.length
+    || accountedIds.some((id) => !availableIds.includes(id))
+    || availableIds.some((id) => !accountedIds.includes(id))
+    || skipped.some((entry) => typeof entry?.reason !== 'string' || !entry.reason.trim())
+    || probeSkips.length !== skipped.length
+    || skipped.some((entry) => !probeSkips.some((event) => event.id === entry.id && event.reason === entry.reason))
+    || testedIds.length !== environmentProbes.length
+    || testedIds.some((id) => !successfulProbeIds.has(id))
+    || testedIds.some((id) => skippedIds.includes(id))
     || new Set(testedAlternates).size !== testedAlternates.length
     || testedAlternates.some((id) => id === shellMatrix.originalId || !availableAlternates.includes(id))
-    || testedAlternates.length < requiredShellAlternates
-    || testedAlternates.filter((id) => successfulProbeIds.has(id)).length < requiredShellAlternates
-    || !Array.isArray(shellMatrix.testedIds)
-    || new Set(shellMatrix.testedIds).size !== shellMatrix.testedIds.length
-    || !shellMatrix.testedIds.includes(shellMatrix.originalId)
-    || testedAlternates.some((id) => !shellMatrix.testedIds.includes(id))
-    || !successfulProbeIds.has(shellMatrix.originalId)
+    || JSON.stringify(testedAlternates) !== JSON.stringify(computedAlternates)
+    || shellMatrix.probeCount !== environmentProbes.length
+    || (shellMatrix.shellProbeCount !== environmentProbes.filter((event) => event.kind === 'shell').length)
+    || (shellMatrix.replProbeCount !== environmentProbes.filter((event) => event.kind === 'repl').length)
+    || (environmentProbes.length === 0)
+    || (testedIds.includes(shellMatrix.originalId) && !successfulProbeIds.has(shellMatrix.originalId))
     || !restoredOriginal || restoredOriginal.passed !== true
     || restoredOriginal.to !== shellMatrix.originalId
     || (report.host?.platform === 'linux' && shellMatrix.availableIds.includes('fish')
         && !successfulProbeIds.has('fish'))
     || (report.host?.platform === 'linux' && shellMatrix.originalId === 'fish'
         && restoredOriginal.restoredFish !== true)) {
-    throw new Error('El E2E no probó hasta dos shells reales con PTY funcional ni restauró la shell original/Fish.');
+    throw new Error('El E2E no cubrió todos los shells/REPL detectados con una sonda PTY real, no justificó sus omisiones o no restauró el entorno original.');
 }
 for (const captureLabel of [shellMatrix.originalCaptureLabel, shellMatrix.captureLabel]) {
     if (!captureLabel || !(report.captures ?? []).some((capture) => capture?.label === captureLabel)) {

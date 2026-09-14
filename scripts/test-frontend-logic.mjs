@@ -20,6 +20,7 @@ async function importTypeScript(relative) {
 const localization = await importTypeScript('src/lib/localization.ts');
 const shortcuts = await importTypeScript('src/lib/shortcuts.ts');
 const terminalScroll = await importTypeScript('src/lib/terminal-scroll.ts');
+const terminalColumns = await importTypeScript('src/lib/terminal-columns.ts');
 const terminalReady = await importTypeScript('src/lib/terminal-ready.ts');
 const keyedQueue = await importTypeScript('src/lib/keyed-serial-queue.ts');
 const terminalRender = await importTypeScript('src/lib/terminal-render.ts');
@@ -33,6 +34,31 @@ assert.equal(terminalScroll.normalizeWheelDelta(3, 1, 18, 600), 54, 'la rueda en
 assert.equal(terminalScroll.normalizeWheelDelta(1, 2, 18, 600), 600, 'la rueda en páginas se convierte según el ancho visible');
 assert.equal(terminalScroll.normalizeWheelDelta(-2, 1, Number.NaN, 600), -32, 'una altura de línea no disponible usa el respaldo');
 assert.equal(terminalScroll.normalizeWheelDelta(Number.NaN, 0, 18, 600), 0, 'no propaga deltas no finitos');
+
+const columnRows = [
+    { columns: 900, isWrapped: false }, // scrollback anterior: no debe gobernar el PTY
+    { columns: 80, isWrapped: false },
+    { columns: 35, isWrapped: true },
+    { columns: 22, isWrapped: false },
+];
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 1, 1, (index) => columnRows[index]), 115,
+    'una continuación visible conserva el ancho completo de su línea lógica');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 3, 1, (index) => columnRows[index]), 22,
+    'una línea antigua fuera de pantalla no fuerza columnas adicionales');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 2, 1, (index) => columnRows[index]), 115,
+    'si el viewport empieza en una continuación se reconstruye desde el inicio');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 0, 4, (index) => columnRows[index]), 900,
+    'una línea larga visible sigue teniendo acceso al scroll horizontal');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 3, 8, (index) => columnRows[index]), 22,
+    'el rango visible se limita al número real de filas del buffer');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 1, 1, (index) => columnRows[index], 100), 100,
+    'la reconstrucción de líneas queda limitada por el máximo de seguridad');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(0, 0, 1, () => undefined), 0,
+    'un buffer vacío no genera dimensiones');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(Number.NaN, 0, 1, () => undefined), 0,
+    'una longitud no finita no rompe el cálculo del viewport');
+assert.equal(terminalColumns.longestVisibleLogicalLineWidth(1, 0, Number.NaN, () => ({ columns: 2, isWrapped: false })), 0,
+    'un rango visible no finito se trata como vacío');
 
 const renderFrames = [];
 const renderErrors = [];

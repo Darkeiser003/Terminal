@@ -16,6 +16,7 @@
     import * as perf from '../lib/performance';
     import { retryUntilReady } from '../lib/terminal-ready';
     import { normalizeWheelDelta } from '../lib/terminal-scroll';
+    import { longestVisibleLogicalLineWidth } from '../lib/terminal-columns';
     import { cursorInactiveStyle, cursorOptions, terminalFont, terminalFontWeight, terminalTheme } from '../lib/theme';
     import { registerTerminal, unregisterTerminal } from '../lib/terminalRegistry';
     import type { Environment, Preferences } from '../lib/types';
@@ -681,37 +682,38 @@
         return core?._renderService?.dimensions?.css?.cell?.width ?? 0;
     }
 
-    /** Devuelve el ancho de la línea lógica más larga del buffer.
+    /** Solo las líneas de la pantalla actual pueden pedir ancho adicional.
      *
-     * xterm conserva las continuaciones con `isWrapped`; sumarlas antes de
-     * redimensionar permite recuperar el ancho original de una salida que ya
-     * se había partido con la rejilla anterior.
+     * Las continuaciones visibles se reúnen para que Ayuda y salidas largas
+     * sigan desplazándose horizontalmente sin saltos. Ignorar el scrollback
+     * fuera del viewport evita que una línea antigua o un comando largo
+     * mantenga la PTY sobredimensionada y haga que programas nuevos calculen
+     * barras de progreso fuera de la ventana.
      */
-    function longestLogicalLineWidth(): number {
+    function longestVisibleLineWidth(): number {
         if (!term) return 0;
         const buffer = term.buffer.active;
         const cursorAbsoluteRow = buffer.baseY + buffer.cursorY;
-        let longest = 0;
-        let current = 0;
-        for (let row = 0; row < buffer.length; row += 1) {
-            const line = buffer.getLine(row);
-            let width = Math.min(
-                MAX_HORIZONTAL_COLS,
-                line?.translateToString(true).length ?? 0,
-            );
-            if (row === cursorAbsoluteRow) {
-                // `translateToString(true)` recorta los espacios finales. En
-                // una línea que solo contiene espacios la posición del cursor
-                // es, por tanto, el único dato que conserva el ancho real de
-                // la edición. Reservar una celda extra cuando llega al borde
-                // evita que el siguiente espacio provoque un salto de línea.
-                const cursorWidth = buffer.cursorX + (buffer.cursorX >= term.cols - 1 ? 2 : 1);
-                width = Math.max(width, cursorWidth);
-            }
-            current = line?.isWrapped ? Math.min(MAX_HORIZONTAL_COLS, current + width) : width;
-            longest = Math.max(longest, current);
-        }
-        return longest;
+        return longestVisibleLogicalLineWidth(
+            buffer.length,
+            buffer.viewportY,
+            term.rows,
+            (row) => {
+                const line = buffer.getLine(row);
+                let columns = Math.min(MAX_HORIZONTAL_COLS, line?.translateToString(true).length ?? 0);
+                if (row === cursorAbsoluteRow) {
+                    // `translateToString(true)` recorta los espacios finales. En
+                    // una línea que solo contiene espacios la posición del cursor
+                    // es, por tanto, el único dato que conserva el ancho real de
+                    // la edición. Reservar una celda extra cuando llega al borde
+                    // evita que el siguiente espacio provoque un salto de línea.
+                    const cursorWidth = buffer.cursorX + (buffer.cursorX >= term.cols - 1 ? 2 : 1);
+                    columns = Math.max(columns, cursorWidth);
+                }
+                return line ? { columns, isWrapped: line.isWrapped } : undefined;
+            },
+            MAX_HORIZONTAL_COLS,
+        );
     }
 
     function visibleLineNeedsHorizontalScroll(viewport: HTMLElement): boolean {
@@ -791,7 +793,7 @@
         const cellWidth = terminalCellWidth();
         if (!viewport || !cellWidth || !term) return false;
         const visibleCols = Math.max(1, Math.floor(viewport.clientWidth / cellWidth));
-        return longestLogicalLineWidth() > Math.max(visibleCols, term.cols);
+        return longestVisibleLineWidth() > Math.max(visibleCols, term.cols);
     }
 
     // WebView2 puede conservar una textura parcial de xterm justo después de
@@ -859,6 +861,7 @@
     function releaseInput(): void {
         if (destroyed || inputReady || environmentSwitchPending) return;
         inputReady = true;
+        exposeInputMirror('ready');
         if (inputReadyTimer) window.clearTimeout(inputReadyTimer);
         inputReadyTimer = undefined;
         if (queuedInput) {
@@ -979,6 +982,7 @@
             };
         }
         environmentSwitchPending = true;
+        if (host) host.dataset.environmentSwitchRequestId = String(detail.requestId);
         // La sonda de recuperación pertenece a la shell inicial. Si sobrevive
         // a un cambio de entorno, podría enviar Enter a la shell nueva antes
         // de que termine su inicializador.
@@ -1115,6 +1119,7 @@
     function exposeInputMirror(eventClass: string): void {
         if (!host) return;
         host.dataset.userEditing = String(userEditing);
+        host.dataset.inputReady = String(inputReady);
         host.dataset.inputMirrorState = mirroredLine === null ? 'unknown' : 'known';
         host.dataset.inputMirrorLength = mirroredLine === null ? '0' : String(mirroredLine.length);
         host.dataset.inputEventClass = eventClass;
@@ -1326,7 +1331,7 @@
                         dims.rows -= 1;
                     }
                 }
-                const longestLine = longestLogicalLineWidth();
+                const longestLine = longestVisibleLineWidth();
                 dims.cols = Math.min(
                     MAX_HORIZONTAL_COLS,
                     Math.max(dims.cols, longestLine, minimumCols),

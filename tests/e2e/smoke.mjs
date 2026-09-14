@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
+import { environmentProbe, safeEnvironmentMarker } from '../../scripts/e2e-environment-probes.mjs';
 
 // WebKitGTK puede intentar crear buffers GBM aunque la sesión gráfica de
 // pruebas esté disponible. Desactivarlo hace que el smoke use el compositor
@@ -979,6 +980,7 @@ async function terminalHorizontalSnapshot(cell) {
                     scrollWidth: host.scrollWidth,
                     overflow: host.dataset.horizontalOverflow || '',
                     cols: host.dataset.terminalCols || '',
+                    rows: host.dataset.terminalRows || '',
                 } : null,
                 indicator: indicator ? {
                     className: indicator.className,
@@ -2167,8 +2169,9 @@ async function exerciseShellMatrix() {
         args: [],
     });
     const options = selectorState?.options ?? [];
-    const availableIds = options.filter((option) => !option.disabled).map((option) => option.id);
-    const selectedOptions = options.filter((option) => option.selected);
+    const availableOptions = options.filter((option) => !option.disabled && option.id);
+    const availableIds = availableOptions.map((option) => option.id);
+    const selectedOptions = availableOptions.filter((option) => option.selected);
     const originalOption = selectedOptions.length === 1 ? selectedOptions[0] : null;
     const originalId = originalOption?.id;
     const originalSource = 'aria-selected/class';
@@ -2179,17 +2182,41 @@ async function exerciseShellMatrix() {
     await captureScreenshot(originalCaptureLabel);
     await closeEnvironmentMenu();
 
-    const preferredIds = process.platform === 'win32'
-        ? ['cmd', 'powershell', 'pwsh', 'gitbash']
-        : ['fish', 'bash', 'zsh', 'sh', 'pwsh'];
-    const targets = preferredIds
-        .filter((id) => availableIds.includes(id) && id !== originalId)
-        .slice(0, 2);
+    const probes = new Map(availableOptions.map((option) => [
+        option.id,
+        environmentProbe(option, safeEnvironmentMarker(option.id)),
+    ]));
+    const skipped = [];
+    for (const [id, probe] of probes) {
+        if (probe.kind !== 'skip') continue;
+        const skip = { id, kind: 'skip', reason: probe.reason };
+        skipped.push(skip);
+        recordEvent('environment-probe-skipped', skip);
+    }
+    const targets = availableOptions
+        .filter((option) => option.id !== originalId && probes.get(option.id)?.kind !== 'skip')
+        .map((option) => option.id);
     const testedIds = [];
+    const probeResults = [];
     let currentId = originalId;
     let primaryError = null;
 
-    const selectAndProbe = async (id) => {
+    const selectEnvironment = async (id) => {
+        const sameEnvironment = currentId === id;
+        const previousRequestId = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `return document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)')?.dataset.environmentSwitchRequestId ?? '';`,
+            args: [],
+        });
+        if (sameEnvironment) {
+            const probe = probes.get(id);
+            const readinessStartedAt = Date.now();
+            if (probe?.language) {
+                await waitUntil(async () => (await promptStates(1))[0] === 'true', 30000, `prompt del REPL ${id}`);
+            } else {
+                await waitForBannerPanes(1, 20000);
+            }
+            return { elapsedMs: Date.now() - readinessStartedAt };
+        }
         const menuOptions = await findAll(`.env-menu [data-environment-id="${id}"]`);
         if (menuOptions.length === 0) await click(await findWhenReady('.env-select'));
         const option = await findWhenReady(`.env-menu [data-environment-id="${id}"]`);
@@ -2197,7 +2224,6 @@ async function exerciseShellMatrix() {
             throw new Error(`La shell ${id} dejó de estar disponible durante la matriz E2E`);
         }
         const targetLabel = (await textOf(option)).trim().split(/\r?\n/)[0];
-        const startedAt = Date.now();
         await click(option);
         currentId = id;
         await waitUntil(async () => {
@@ -2205,35 +2231,74 @@ async function exerciseShellMatrix() {
             return (await attribute(currentButton, 'disabled')) === null
                 && (await textOf(currentButton)).includes(targetLabel);
         }, 20000, `cambio a la shell ${id}`);
-        const readiness = await waitForBannerPanes(1, 20000);
-        const startupRows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-        const startupText = await textOf(startupRows);
-        const initializationError = startupText.match(/(?:defining function based on alias|parse error near|syntax error near unexpected token)/i);
-        if (initializationError) {
-            await captureScreenshot(`shell-${id}-initialization-error`);
-            throw new Error(`La shell ${id} mostró un error al cargar el bootstrap: ${initializationError[0]}`);
+        await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const pane = document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)');
+                return Boolean(pane?.dataset.inputReady === 'true'
+                    && pane.dataset.environmentSwitchRequestId
+                    && pane.dataset.environmentSwitchRequestId !== arguments[0]);`,
+            args: [String(previousRequestId)],
+        }), 35000, `handshake y entrada listos para ${id}`);
+        const probe = probes.get(id);
+        const readinessStartedAt = Date.now();
+        if (probe?.language) {
+            await waitUntil(async () => (await promptStates(1))[0] === 'true', 30000, `prompt del REPL ${id}`);
+        } else {
+            await waitForBannerPanes(1, 20000);
         }
-        const marker = `LTERMINAL_SHELL_MATRIX_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
-        await sendTerminalLine(`echo ${marker}`);
+        const readiness = { elapsedMs: Date.now() - readinessStartedAt };
+        if (probe?.kind === 'shell') {
+            const startupRows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
+            const startupText = await textOf(startupRows);
+            const initializationError = startupText.match(/(?:defining function based on alias|parse error near|syntax error near unexpected token)/i);
+            if (initializationError) {
+                await captureScreenshot(`shell-${id}-initialization-error`);
+                throw new Error(`La shell ${id} mostró un error al cargar el bootstrap: ${initializationError[0]}`);
+            }
+        }
+        return readiness;
+    };
+
+    const selectAndProbe = async (id) => {
+        const startedAt = Date.now();
+        const readiness = await selectEnvironment(id);
+        const probe = probes.get(id);
+        if (!probe || probe.kind === 'skip') throw new Error(`No hay sonda ejecutable para ${id}`);
+        const marker = safeEnvironmentMarker(id);
+        await sendTerminalLine(probe.command);
+        let markerOccurrences = 0;
         await waitUntil(async () => {
             const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-            return (await textOf(rows)).includes(marker);
-        }, 10000, `salida PTY de la shell ${id}`);
+            const output = await textOf(rows);
+            markerOccurrences = output.split(marker).length - 1;
+            // La primera aparición puede ser solo el eco del código que se
+            // envió. La segunda demuestra que el proceso evaluó el comando y
+            // escribió el marcador en el PTY.
+            return markerOccurrences >= 2;
+        }, 15000, `salida evaluada por el PTY de ${id}`);
         const result = {
             id,
+            kind: probe.kind,
+            language: probe.language ?? null,
             marker,
+            markerOccurrences,
             bannerReadyMs: readiness.elapsedMs,
             totalMs: Date.now() - startedAt,
             startupClean: true,
             passed: true,
         };
         testedIds.push(id);
-        recordEvent('environment-shell-probe', result);
+        probeResults.push(result);
+        recordEvent('environment-probe', result);
         return result;
     };
 
     try {
-        for (const id of targets) await selectAndProbe(id);
+        if (probes.get(originalId)?.kind !== 'skip') {
+            await selectAndProbe(originalId);
+        }
+        for (const id of targets) {
+            await selectAndProbe(id);
+        }
     } catch (error) {
         primaryError = error;
     }
@@ -2242,7 +2307,7 @@ async function exerciseShellMatrix() {
     let restorationError = null;
     if (!restored) {
         try {
-            await selectAndProbe(originalId);
+            await selectEnvironment(originalId);
             restored = currentId === originalId;
         } catch (error) {
             restorationError = error;
@@ -2269,14 +2334,17 @@ async function exerciseShellMatrix() {
         availableIds,
         testedIds,
         testedAlternates,
+        skipped,
+        probeCount: probeResults.length,
+        shellProbeCount: probeResults.filter((probe) => probe.kind === 'shell').length,
+        replProbeCount: probeResults.filter((probe) => probe.kind === 'repl').length,
         restoredTo: originalId,
         originalSource,
         originalCaptureLabel,
         captureLabel,
         passed: true,
-        skipped: targets.length === 0,
     });
-    return { originalId, availableIds, testedIds, testedAlternates, restoredTo: originalId };
+    return { originalId, availableIds, testedIds, testedAlternates, skipped, restoredTo: originalId };
 }
 
 async function exerciseAdbRefreshWithoutLayout() {
@@ -2660,7 +2728,7 @@ try {
         smokeReport.focusedScenario = 'environment-shell-matrix';
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
-        process.stdout.write(`E2E enfocado OK: shells ${matrix.availableIds.join(', ')}; alternativas probadas ${matrix.testedAlternates.join(', ') || 'ninguna'}; restaurada ${matrix.restoredTo} (${Date.now() - smokeStartedAt} ms).\n`);
+        process.stdout.write(`E2E enfocado OK: entornos detectados ${matrix.availableIds.length}; sondas ejecutadas ${matrix.testedIds.length}; omisiones seguras ${matrix.skipped.length}; restaurado ${matrix.restoredTo} (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (adbRefreshOnly) {
         markPhase('salida progresiva ADB sin cambios de layout');
         const frames = await exerciseAdbRefreshWithoutLayout();
@@ -4166,6 +4234,57 @@ try {
         throw new Error(`Shift+rueda no desplazó horizontalmente la ayuda: ${JSON.stringify({ horizontalHelpSnapshot, horizontalWheelProbe })}`);
     }
     recordEvent('horizontal-help-geometry', { snapshot: horizontalHelpSnapshot, horizontalWheelProbe, passed: true });
+
+    const helpCols = Number(horizontalHelpSnapshot.host.cols);
+    const helpContentWidth = Math.max(
+        horizontalHelpSnapshot.screen?.rectWidth ?? 0,
+        horizontalHelpSnapshot.screen?.scrollWidth ?? 0,
+        horizontalHelpSnapshot.host.scrollWidth,
+    );
+    const cellWidth = helpContentWidth / Math.max(1, helpCols);
+    const visibleCols = Math.floor(horizontalHelpSnapshot.host.clientWidth / Math.max(1, cellWidth));
+    if (!Number.isFinite(helpCols) || helpCols <= visibleCols || visibleCols < 10) {
+        await captureScreenshot('scroll-horizontal-ancho-inicial-incoherente');
+        throw new Error(`La ayuda no produjo una rejilla horizontal medible: ${JSON.stringify({ helpCols, visibleCols, horizontalHelpSnapshot })}`);
+    }
+    const reclaimCommands = Math.min(64, Math.max(24, Number(horizontalHelpSnapshot.host.rows || 24) + 4));
+    const reclaimMarker = `LTERMINAL_WIDTH_RECLAIM_${Date.now().toString(36).toUpperCase()}`;
+    for (let index = 0; index < reclaimCommands; index += 1) {
+        await sendTerminalLine(`echo ${reclaimMarker}_${index}`, horizontalCell);
+    }
+    let finalWidthSnapshot = horizontalHelpSnapshot;
+    try {
+        await waitUntil(async () => {
+            finalWidthSnapshot = await terminalHorizontalSnapshot(horizontalCell);
+            const rows = await findAllWithin(horizontalCell, '.xterm-rows');
+            const visibleText = rows[0] ? await textOf(rows[0][elementKey]) : '';
+            return Number(finalWidthSnapshot.host?.cols) <= visibleCols + 1
+                && finalWidthSnapshot.host.scrollWidth <= finalWidthSnapshot.host.clientWidth + 2
+                && finalWidthSnapshot.host.overflow !== 'true'
+                && visibleText.includes(`${reclaimMarker}_${reclaimCommands - 1}`);
+        }, 20000, 'recuperación del ancho visible con la ayuda en el scrollback');
+    } catch (error) {
+        await captureScreenshot('scroll-horizontal-ancho-no-recuperado');
+        throw new Error(`El scrollback antiguo mantuvo el PTY más ancho que la ventana: ${JSON.stringify({ helpCols, visibleCols, finalWidthSnapshot })}`, { cause: error });
+    }
+    const historyHeight = finalWidthSnapshot.viewport?.scrollHeight ?? 0;
+    const historyViewportHeight = finalWidthSnapshot.viewport?.clientHeight ?? 0;
+    await captureScreenshot('scroll-horizontal-ancho-recuperado');
+    recordEvent('terminal-columns-reclaim', {
+        beforeCols: helpCols,
+        visibleCols,
+        afterCols: Number(finalWidthSnapshot.host.cols),
+        hostWidth: finalWidthSnapshot.host.clientWidth,
+        hostScrollWidth: finalWidthSnapshot.host.scrollWidth,
+        historyRetained: historyHeight > historyViewportHeight,
+        historyHeight,
+        historyViewportHeight,
+        commands: reclaimCommands,
+        passed: historyHeight > historyViewportHeight,
+    });
+    if (historyHeight <= historyViewportHeight) {
+        throw new Error(`La prueba de recuperación perdió el scrollback: ${JSON.stringify(finalWidthSnapshot.viewport)}`);
+    }
     await captureScreenshot('help-linea-larga-despues-dividir');
     // Volver al estado inicial deja la secuencia general determinista y evita
     // que esta comprobación añada un panel adicional al resto del smoke.

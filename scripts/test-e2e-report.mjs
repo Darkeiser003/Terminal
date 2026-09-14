@@ -40,10 +40,14 @@ const valid = {
         ...phases.map((name) => ({ type: 'phase', name })),
         { type: 'terminal-mouse-selection', passed: true, gesture: 'pointerDown → pointerMove while pressed → pointerUp' },
         { type: 'terminal-output-repaint', passed: true, trigger: 'pty-output-idle', refreshCount: 1, rowsRefreshed: 24, layoutUnchanged: true, marker: 'LTERMINAL_OUTPUT_REPAINT_FIXTURE', capture: 'pty-output-repaint-no-layout-event' },
-        { type: 'environment-shell-probe', id: 'bash', startupClean: true, passed: true },
-        { type: 'environment-shell-probe', id: 'zsh', startupClean: true, passed: true },
-        { type: 'environment-shell-probe', id: 'fish', startupClean: true, passed: true },
-        { type: 'environment-shell-matrix', originalId: 'fish', originalSource: 'aria-selected/class', availableIds: ['fish', 'bash', 'zsh'], testedIds: ['bash', 'zsh', 'fish'], testedAlternates: ['bash', 'zsh'], restoredTo: 'fish', originalCaptureLabel: 'shell-matrix-linux-original-selected', captureLabel: 'shell-matrix-linux-restored', passed: true },
+        { type: 'horizontal-help-geometry', passed: true, snapshot: { host: { clientWidth: 400, scrollWidth: 850 }, indicator: { opacity: '1' } }, horizontalWheelProbe: { lineMode: { defaultPrevented: true }, pixelMode: { defaultPrevented: true }, pageMode: { defaultPrevented: true } } },
+        { type: 'terminal-columns-reclaim', passed: true, beforeCols: 100, visibleCols: 50, afterCols: 50, hostWidth: 400, hostScrollWidth: 400, historyRetained: true, historyHeight: 800, historyViewportHeight: 400, commands: 24 },
+        { type: 'environment-probe', id: 'bash', kind: 'shell', markerOccurrences: 2, startupClean: true, passed: true },
+        { type: 'environment-probe', id: 'zsh', kind: 'shell', markerOccurrences: 2, startupClean: true, passed: true },
+        { type: 'environment-probe', id: 'fish', kind: 'shell', markerOccurrences: 2, startupClean: true, passed: true },
+        { type: 'environment-probe', id: 'lang:python', kind: 'repl', language: 'python', markerOccurrences: 2, startupClean: true, passed: true },
+        { type: 'environment-probe-skipped', id: 'lang:postgresql', kind: 'skip', reason: 'necesita un servicio externo y credenciales' },
+        { type: 'environment-shell-matrix', originalId: 'fish', originalSource: 'aria-selected/class', availableIds: ['fish', 'bash', 'zsh', 'lang:python', 'lang:postgresql'], testedIds: ['fish', 'bash', 'zsh', 'lang:python'], testedAlternates: ['bash', 'zsh', 'lang:python'], skipped: [{ id: 'lang:postgresql', kind: 'skip', reason: 'necesita un servicio externo y credenciales' }], probeCount: 4, shellProbeCount: 3, replProbeCount: 1, restoredTo: 'fish', originalCaptureLabel: 'shell-matrix-linux-original-selected', captureLabel: 'shell-matrix-linux-restored', passed: true },
         { type: 'environment-switch-restore', to: 'fish', restoredFish: true, passed: true },
         { type: 'preference', name: 'showQuickActions', value: false },
         { type: 'preference', name: 'showQuickActions', value: true },
@@ -97,16 +101,46 @@ try {
             ? { ...event, layoutUnchanged: false }
             : event),
     })).status, 0, 'el test de repintado debe fallar si necesita alterar el layout');
+    assert.notEqual((await run('missing-terminal-columns-reclaim', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'terminal-columns-reclaim'),
+    })).status, 0, 'el E2E completo debe exigir recuperación del ancho PTY sin vaciar el historial');
+    assert.notEqual((await run('terminal-columns-stuck-wide', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'terminal-columns-reclaim'
+            ? { ...event, afterCols: 100, hostScrollWidth: 850 }
+            : event),
+    })).status, 0, 'un PTY sobredimensionado tras desplazar la ayuda debe fallar');
     assert.notEqual((await run('missing-shell-matrix', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'environment-shell-matrix'),
     })).status, 0, 'la batería completa debe exigir varios PTY y restauración de shell');
     assert.notEqual((await run('shell-initialization-error', {
         ...valid,
-        events: valid.events.map((event) => event.type === 'environment-shell-probe' && event.id === 'zsh'
+        events: valid.events.map((event) => event.type === 'environment-probe' && event.id === 'zsh'
             ? { ...event, startupClean: false }
             : event),
     })).status, 0, 'un error de inicialización de una shell alternativa debe invalidar el E2E');
+    assert.notEqual((await run('echo-without-command-output', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'environment-probe' && event.id === 'zsh'
+            ? { ...event, markerOccurrences: 1 }
+            : event),
+    })).status, 0, 'el eco del comando sin salida evaluada no cuenta como sonda PTY');
+    assert.notEqual((await run('unaccounted-installed-environment', {
+        ...valid,
+        events: valid.events
+            .filter((event) => !(event.type === 'environment-probe' && event.id === 'zsh'))
+            .map((event) => event.type === 'environment-shell-matrix'
+                ? { ...event, testedIds: ['fish', 'bash', 'lang:python'], testedAlternates: ['bash', 'lang:python'], probeCount: 3, shellProbeCount: 2, replProbeCount: 1 }
+                : event),
+    })).status, 0, 'todo entorno habilitado debe probarse o tener una omisión segura explicada');
+    assert.notEqual((await run('skip-without-reason', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'environment-shell-matrix'
+            ? { ...event, skipped: [{ id: 'lang:postgresql', kind: 'skip', reason: '' }] }
+            : event),
+    })).status, 0, 'un entorno omitido requiere una razón visible en el informe');
     assert.notEqual((await run('shell-selected-state-inferred', {
         ...valid,
         events: valid.events.map((event) => event.type === 'environment-shell-matrix'

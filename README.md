@@ -264,7 +264,7 @@ directamente en la terminal.
 | `npm run test:cleaner` | Prueba los limpiadores Bash y PowerShell en proyectos temporales; verifica los enlaces, conserva `release/` y descargas externas genéricas, y elimina solo temporales identificados de LTerminal. |
 | `npm run test:version-restore` | Fuerza fallos de build y una copia de seguridad ausente; comprueba que no se anuncia éxito y que los cuatro manifiestos quedan byte a byte como estaban al terminar la prueba. |
 | `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o Acciones rápidas sin comprobar. |
-| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` prueba shells alternativas; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel. |
+| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` detecta y prueba todos los shells/REPL seguros disponibles; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run build:fast` | Atajo multiplataforma para `build` con `LTERMINAL_SKIP_CHECKS=1`; útil durante el desarrollo, no sustituye una release completa. |
@@ -300,12 +300,15 @@ E2E_BINARY="$PWD/release/dev/LTerminal-1.0.0-x86_64-dev.AppImage" \
 E2E_MOUSE_SELECTION_ONLY=1 npm run e2e
 ```
 
-Para probar los cambios de shell sin ejecutar el resto de la batería, se puede
-usar el mismo perfil temporal con `E2E_SHELL_MATRIX_ONLY=1 npm run e2e`. La
-prueba ejecuta `echo` en hasta dos shells alternativas disponibles, comprueba
-la salida del PTY, captura el menú con la shell realmente seleccionada, rechaza
-errores de sintaxis del inicializador y vuelve a la shell original (Fish
-habitualmente en Linux).
+Para probar shells y REPL sin ejecutar el resto de la batería, se puede usar el
+mismo perfil temporal con `E2E_SHELL_MATRIX_ONLY=1 npm run e2e`. La prueba
+descubre las opciones habilitadas en el selector y ejecuta una sonda inocua en
+cada shell/REPL con sonda segura disponible; exige ver el eco y el resultado
+evaluado en el PTY, registra las herramientas omitidas con su motivo, rechaza
+errores del inicializador y restaura el entorno original. No inicia servicios
+de bases de datos, contenedores, elevaciones ni dispositivos ADB reales.
+`npm run test:e2e-environment-probes` comprueba localmente que los 91 REPL
+declarados entre el código y el catálogo tienen una sonda o una omisión segura.
 
 Para comprobar el refresco de pantalla por el transporte ADB sin conectar un
 dispositivo, usa ese mismo perfil con `E2E_ADB_REFRESH_ONLY=1 npm run e2e`. El
