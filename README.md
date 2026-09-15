@@ -1085,7 +1085,15 @@ local si falta alguno de esos dos escáneres.
 CI ejecuta `npm audit`, `cargo audit` y `cargo deny`; Dependency Review compara
 los cambios de dependencias de cada PR con el aviso de vulnerabilidades y la
 política de licencias; OpenSSF Scorecard revisa semanalmente las prácticas de
-seguridad del repositorio. Los resultados SARIF se publican en Code Scanning.
+seguridad del repositorio. El workflow da al análisis permisos de lectura para
+consultar commits, issues, pull requests y checks; conserva el SARIF cinco días
+para diagnosticar fallos y publica los resultados en Code Scanning. Los avisos
+de `Code-Review`, `Branch-Protection` y `Maintained` dependen también de la
+actividad y de reglas configuradas en GitHub, no solo del workflow. La
+comprobación de binarios puede señalar los recursos ConPTY versionados, que son
+necesarios para que Windows abra una terminal; no deben eliminarse sin sustituir
+antes su suministro por una descarga verificable. `License` requiere que el
+autor elija y publique una licencia, algo que el escáner no puede decidir.
 Dependabot agrupa actualizaciones minor/patch por ecosistema y aplica un
 periodo explícito de siete días antes de las actualizaciones de versión; las
 versiones major quedan separadas para poder revisarlas antes de integrarlas.

@@ -10,6 +10,7 @@ const workflowSecurity = read('.github/workflows/workflow-security.yml');
 const dependencyReview = read('.github/workflows/dependency-review.yml');
 const scorecard = read('.github/workflows/scorecard.yml');
 const dependabot = read('.github/dependabot.yml');
+const linuxBuild = read('linux/build.sh');
 const attributes = read('.gitattributes');
 const ignore = read('.gitignore');
 const failures = [];
@@ -55,11 +56,16 @@ check(
         && dependencyReview.includes('allow-licenses:'),
 );
 check(
-    'OpenSSF Scorecard publica SARIF y resultados verificables con permisos explícitos',
+    'OpenSSF Scorecard publica SARIF/resultados, conserva evidencia y puede leer commits, checks y metadatos del repositorio',
     /ossf\/scorecard-action@[0-9a-f]{40}/.test(scorecard)
         && /github\/codeql-action\/upload-sarif@[0-9a-f]{40}/.test(scorecard)
+        && /actions\/upload-artifact@[0-9a-f]{40}/.test(scorecard)
         && scorecard.includes('publish_results: true')
         && scorecard.includes('id-token: write')
+        && scorecard.includes('issues: read')
+        && scorecard.includes('pull-requests: read')
+        && scorecard.includes('checks: read')
+        && scorecard.includes('retention-days: 5')
         && scorecard.includes('persist-credentials: false'),
 );
 check(
@@ -110,11 +116,17 @@ for (const workflow of workflows) {
 check(
     'Todas las acciones externas de todos los workflows están fijadas a un SHA completo y anotadas con su versión',
     actionReferences.length > 0 && actionReferences.every(({ reference, comment }) =>
-        /@[0-9a-f]{40}(?:\/[^\s#]+)?$/i.test(reference) && /#\s*(?:v\d|stable\s*@)/i.test(comment)),
+        /@[0-9a-f]{40}(?:\/[^\s#]+)?$/i.test(reference) && /#\s*(?:v?\d|stable\s*@)/i.test(comment)),
 );
 check(
     'Cada checkout desactiva la persistencia local de credenciales',
     checkoutSteps.length > 0 && checkoutSteps.every(({ block }) => /persist-credentials:\s*false\b/.test(block)),
+);
+check(
+    'La build Linux instala exclusivamente desde el lockfile y nunca degrada a npm install',
+    linuxBuild.includes('package-lock.json')
+        && /npm ci/.test(linuxBuild)
+        && !/\bnpm\s+install\b/.test(linuxBuild),
 );
 const releaseWorkflow = read('.github/workflows/release.yml');
 const releaseBuildJobs = releaseWorkflow.split(/\n  publish:\n/)[0] ?? '';

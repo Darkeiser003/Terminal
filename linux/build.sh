@@ -1512,11 +1512,11 @@ linux_native_dependencies_ready() {
 if dependencies_ready; then
     ok "Dependencias ya presentes; se conserva node_modules y se evita reinstalarlo"
 elif [ ! -f "$PROJECT_ROOT/package-lock.json" ]; then
-    warn "No hay package-lock.json; se usa npm install."
-    npm install
+    err "No hay package-lock.json; no se puede garantizar una instalación reproducible."
+    exit 1
 elif ! npm ci; then
-    warn "npm ci falló (lock desincronizado, red o binario nativo bloqueado). Se reintenta con npm install."
-    npm install
+    err "npm ci falló; se detiene la build sin resolver dependencias fuera del lockfile."
+    exit 1
 fi
 ok "Dependencias instaladas"
 if [ "$SKIP_CHECKS" -eq 0 ]; then
