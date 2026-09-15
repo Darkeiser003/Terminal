@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const required = [
-  "src-tauri/vendor/conpty/conpty.dll",
-  "src-tauri/vendor/conpty/OpenConsole.exe",
   "src-tauri/default_settings.toml",
   "src-tauri/config/technology-catalog.json",
   "src-tauri/resources/com.lterminal.terminal.metainfo.xml",
@@ -22,6 +20,21 @@ const required = [
   "scripts/operations/docker-manager.ps1",
   "scripts/operations/kubernetes-manager.ps1",
 ];
+
+const conptyPreparer = readFileSync(resolve(root, "scripts/prepare-conpty.mjs"), "utf8");
+for (const marker of [
+  "Microsoft.Windows.Console.ConPTY",
+  "1.24.260710001",
+  "build/native/runtimes/x64/OpenConsole.exe",
+  "runtimes/win-x64/native/conpty.dll",
+  "verifyNugetSha512",
+  "extractConptyAssets",
+  "assertPeX64",
+]) {
+  if (!conptyPreparer.includes(marker)) {
+    throw new Error(`La preparación verificable de ConPTY no declara ${marker}.`);
+  }
+}
 
 for (const relativePath of required) {
   const path = resolve(root, relativePath);
@@ -63,6 +76,9 @@ const baseConfig = JSON.parse(
 );
 const checkResourceMap = (configName, resourceMap) => {
   for (const source of Object.keys(resourceMap ?? {})) {
+    // Estos dos recursos son outputs verificados del preparador; no deben
+    // existir en un checkout limpio ni convertirse en blobs versionados.
+    if (["vendor/conpty/conpty.dll", "vendor/conpty/OpenConsole.exe"].includes(source)) continue;
     const sourcePath = resolve(root, "src-tauri", source);
     try {
       accessSync(sourcePath, constants.R_OK);
@@ -131,4 +147,4 @@ for (const marker of [
   }
 }
 
-console.log(`Recursos verificados: ConPTY, paquete Windows, valores de fábrica y ${technologies.length} tecnologías modulares.`);
+console.log(`Recursos verificados: preparación ConPTY, paquete Windows, valores de fábrica y ${technologies.length} tecnologías modulares.`);

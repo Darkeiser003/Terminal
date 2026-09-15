@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/Darkeiser003/Terminal/blob/main/SECURITY.md
+    about: Do not disclose exploitable details in a public issue.

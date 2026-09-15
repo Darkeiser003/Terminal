@@ -780,6 +780,8 @@ if [ "${LTERMINAL_TEST_EXIT_AFTER_VERSION:-0}" = "1" ]; then
 fi
 VERSION_OVERRIDE="$(node -p "require('./package.json').version")"
 ok "Versión $VERSION_OVERRIDE aplicada"
+step "Preparando recursos oficiales ConPTY"
+node "$PROJECT_ROOT/scripts/prepare-conpty.mjs" || fail "No se pudieron descargar/verificar los recursos ConPTY oficiales."
 ensure_mingw
 ensure_target
 

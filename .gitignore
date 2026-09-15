@@ -113,6 +113,15 @@ Icon
 # Rust / Tauri
 src-tauri/target/
 src-tauri/gen/
+src-tauri/crates/github-target/target/
+fuzz/target/
+fuzz/artifacts/
+# Recursos PE generados desde el paquete ConPTY oficial durante los builds.
+src-tauri/vendor/conpty/conpty.dll
+src-tauri/vendor/conpty/OpenConsole.exe
+src-tauri/vendor/conpty/.conpty-assets.json
+src-tauri/vendor/.conpty-staging-*/
+src-tauri/vendor/.conpty-backup-*/
 
 # Estado local de herramientas y editores
 .agents/

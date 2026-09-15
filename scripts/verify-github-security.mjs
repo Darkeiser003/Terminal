@@ -13,6 +13,14 @@ const dependabot = read('.github/dependabot.yml');
 const linuxBuild = read('linux/build.sh');
 const attributes = read('.gitattributes');
 const ignore = read('.gitignore');
+const license = read('LICENSE');
+const contributing = read('CONTRIBUTING.md');
+const securityPolicy = read('SECURITY.md');
+const bugTemplate = read('.github/ISSUE_TEMPLATE/bug_report.yml');
+const featureTemplate = read('.github/ISSUE_TEMPLATE/feature_request.yml');
+const issueConfig = read('.github/ISSUE_TEMPLATE/config.yml');
+const packageManifest = JSON.parse(read('package.json'));
+const cargoManifest = read('src-tauri/Cargo.toml');
 const failures = [];
 const workflowDirectory = resolve(root, '.github/workflows');
 const workflowFiles = readdirSync(workflowDirectory)
@@ -73,13 +81,41 @@ check(
     !existsSync(resolve(root, '.github/workflows/apisec-scan.yml')),
 );
 check(
-    'Dependabot agrupa solo minor/patch y deja major por separado para npm, Cargo y GitHub Actions',
-    (dependabot.match(/applies-to:\s*version-updates/g) ?? []).length === 6
-        && (dependabot.match(/- minor\n\s+- patch/g) ?? []).length === 6
+    'Dependabot agrupa solo minor/patch y controla npm, Cargo, GitHub Actions y la imagen del fuzzer',
+    (dependabot.match(/applies-to:\s*version-updates/g) ?? []).length === 7
+        && (dependabot.match(/- minor\n\s+- patch/g) ?? []).length === 7
         && dependabot.includes('frontend-runtime')
         && dependabot.includes('frontend-tooling')
         && dependabot.includes('tauri-ecosystem')
-        && dependabot.includes('actions-minor-patch'),
+        && dependabot.includes('actions-minor-patch')
+        && dependabot.includes('directory: /fuzz')
+        && dependabot.includes('fuzzing-minor-patch')
+        && dependabot.includes('package-ecosystem: docker')
+        && dependabot.includes('directory: /.clusterfuzzlite'),
+);
+check(
+    'Los grupos de Dependabot son hermanos de cooldown dentro de cada ecosistema (no quedan anidados ni inactivos)',
+    /^ {4}groups:\s*$/m.test(dependabot)
+        && !/^ {6}groups:\s*$/m.test(dependabot)
+        && /^ {6}actions-minor-patch:\s*\n {8}applies-to:\s*version-updates\s*$/m.test(dependabot)
+        && !/^ {6}default-days:\s*7\s*\n {6}groups:/m.test(dependabot),
+);
+check(
+    'La decisión MIT coincide en la licencia raíz y los manifiestos JavaScript y Rust',
+    license.startsWith('MIT License\n')
+        && packageManifest.license === 'MIT'
+        && /^(?:license\s*=\s*"MIT")$/m.test(cargoManifest),
+);
+check(
+    'La contribución, los reportes públicos y el canal privado de vulnerabilidades están documentados',
+    contributing.includes('pull request')
+        && contributing.includes('npm run check:local')
+        && contributing.includes('[SECURITY.md](SECURITY.md)')
+        && securityPolicy.replace(/\s+/g, ' ').toLowerCase().includes('reporte privado de vulnerabilidades')
+        && securityPolicy.includes('RUSTSEC-2024-0429')
+        && bugTemplate.includes('private reporting link')
+        && featureTemplate.includes('Suggested behavior')
+        && issueConfig.includes('/SECURITY.md'),
 );
 check(
     'Las reglas de Git conservan .github y no asignan filtros LFS indiscriminados',
@@ -166,7 +202,7 @@ check(
 const dependabotEntries = dependabot.split(/^\s*-\s+package-ecosystem:/m).slice(1);
 check(
     'Cada ecosistema de Dependabot tiene al menos 7 días de cooldown explícito',
-    dependabotEntries.length === 3 && dependabotEntries.every((entry) =>
+    dependabotEntries.length === 5 && dependabotEntries.every((entry) =>
         /^\s{4}cooldown:\s*\n\s{6}default-days:\s*(?:[7-9]|[1-9]\d+)\s*$/m.test(entry)),
 );
 

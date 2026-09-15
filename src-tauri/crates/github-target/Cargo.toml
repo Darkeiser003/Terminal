@@ -1,0 +1,13 @@
+[package]
+name = "github-target"
+version = "1.0.0"
+description = "Parser seguro de destinos públicos de GitHub para LTerminal"
+authors = ["Darkeiser003"]
+license = "MIT"
+publish = false
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "github_target"
+path = "src/lib.rs"

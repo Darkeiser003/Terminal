@@ -1,0 +1,18 @@
+[package]
+name = "lterminal-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+github-target = { path = "../src-tauri/crates/github-target", version = "1.0.0" }
+
+[[bin]]
+name = "github_target"
+path = "fuzz_targets/github_target.rs"
+test = false
+doc = false

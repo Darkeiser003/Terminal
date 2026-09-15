@@ -1114,6 +1114,10 @@ Write-Ok "Version a compilar: $version"
 # sección «conpty.dll» del README raíz para no duplicar documentación.
 Write-Step 'Comprobando conpty.dll'
 $conptyFiles = @('conpty.dll', 'OpenConsole.exe')
+$prepareConptyCode = Invoke-Native 'node' @('scripts/prepare-conpty.mjs') -CaptureOutput
+if ($prepareConptyCode -ne 0) {
+    throw "No se pudieron descargar/verificar los recursos ConPTY oficiales. $script:LastNativeOutput"
+}
 $missing = $conptyFiles | Where-Object { -not (Test-Path (Join-Path $VendorDir $_)) }
 if ($missing) {
     throw "Faltan en src-tauri\vendor\conpty: $($missing -join ', '). Sin ellos la app no abre ni una pestana."

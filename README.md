@@ -14,13 +14,15 @@ identificador y rutas de datos propias por plataforma (`src-tauri/src/config/ide
 
 Este README concentra la documentación técnica, el flujo de ejecución, los
 contratos de seguridad y la matriz de pruebas mantenida del repositorio.
+Para proponer cambios, consulta [CONTRIBUTING.md](CONTRIBUTING.md); los reportes
+de seguridad se reciben por el canal privado de [SECURITY.md](SECURITY.md).
 
 | | |
 |---|---|
 | Versión | 1.0.0 |
 | Plataformas | Windows 10/11 (x64), Linux (x64) |
 | Runtime | Tauri 2 · Rust 1.77+ · Node.js ≥ 22.12.0 (solo para compilar) |
-| Licencia | UNLICENSED (privado) |
+| Licencia | MIT |
 | Idiomas | Español, inglés, francés, alemán, italiano, portugués, rumano, ruso, ucraniano, polaco, chino, japonés, coreano, hindi y árabe |
 
 ## Índice
@@ -145,14 +147,18 @@ sea necesario.
 ### conpty.dll
 
 En Windows la app **necesita** `conpty.dll`, `OpenConsole.exe` y
-`WebView2Loader.dll` junto al ejecutable. Los dos primeros van vendorizados en
-`src-tauri/vendor/conpty/`; el tercero lo aporta la dependencia de WebView2 al
-compilar para Windows. El ConPTY del sistema falla en algunos Windows
+`WebView2Loader.dll` junto al ejecutable. Los dos recursos ConPTY se obtienen
+durante el build desde el paquete oficial de Microsoft
+`Microsoft.Windows.Console.ConPTY` (`1.24.260710001`), y se extraen solo tras
+verificar el SHA-512 publicado por NuGet, las rutas exactas del ZIP, sus CRC,
+los tamaños y la arquitectura PE x64. Se guardan en `src-tauri/vendor/conpty/`, una carpeta ignorada y
+generada; no se versionan binarios PE en el repositorio. El tercero lo aporta
+la dependencia de WebView2 al compilar para Windows. El ConPTY del sistema falla en algunos Windows
 recortados con `STATUS_DLL_INIT_FAILED`, y el error tarda más de dos minutos en
 aparecer: las pestañas se quedan en blanco sin decir por qué. `build.rs` copia
-ConPTY en cada compilación y `windows/build.ps1` aborta si falta cualquiera de
-los cuatro archivos. Esta misma sección documenta la razón y los archivos que
-se comprueban.
+ConPTY en cada compilación y los scripts de build descargan/preparan la pareja
+si no está presente o no coincide con la versión fijada. El instalador/portable
+incluye los recursos junto al ejecutable.
 
 ## Instalación para usar la aplicación
 
@@ -170,6 +176,10 @@ offline de WebView2 incluido y lo publican como
 para equipos recortados, instalaciones limpias o despliegues sin Internet.
 
 **Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
+
+La licencia del código fuente es MIT. Las dependencias y recursos de terceros
+conservan sus licencias originales; el instalador incluye
+`THIRD-PARTY-NOTICES.txt`.
 
 La aplicación consulta sus actualizaciones en su repositorio propio, que se
 mantiene separado de los proyectos anclados: no aparece en la biblioteca ni se
@@ -588,7 +598,7 @@ nativo.
 | Comprobación | Por qué está |
 |---|---|
 | Nada en marcha (puerto 1420, proceso de la app) | Windows no deja borrar un archivo en uso y `npm ci` empieza vaciando `node_modules`: con un servidor de desarrollo abierto falla con un `EPERM` sobre `esbuild.exe` que no dice cuál es la causa. |
-| `conpty.dll` presente en `vendor/` | Sin ella la app compila igual y luego no abre ni una pestaña. |
+| Recursos ConPTY oficiales verificados | El build los descarga si faltan y aborta si no puede verificar el paquete o la pareja DLL/host. |
 | WebKitGTK (Linux) | Su ausencia son cientos de líneas de error de enlazado a mitad de la compilación. |
 | Solo el artefacto esperado | Un `.deb` que se cuele acabaría publicado en una release sin que nadie lo haya probado. |
 | Comprobación de humo | Que compile no significa que arranque. |
@@ -1089,19 +1099,27 @@ seguridad del repositorio. El workflow da al análisis permisos de lectura para
 consultar commits, issues, pull requests y checks; conserva el SARIF cinco días
 para diagnosticar fallos y publica los resultados en Code Scanning. Los avisos
 de `Code-Review`, `Branch-Protection` y `Maintained` dependen también de la
-actividad y de reglas configuradas en GitHub, no solo del workflow. La
-comprobación de binarios puede señalar los recursos ConPTY versionados, que son
-necesarios para que Windows abra una terminal; no deben eliminarse sin sustituir
-antes su suministro por una descarga verificable. `License` requiere que el
-autor elija y publique una licencia, algo que el escáner no puede decidir.
+actividad y de reglas configuradas en GitHub, no solo del workflow. Los
+binarios ConPTY ya no se versionan: las builds obtienen la pareja desde el
+paquete de Microsoft fijado y verifican su SHA-512 de NuGet, los miembros ZIP y
+los CRC antes de instalarlos. `License` se publica como MIT y los notices de
+Microsoft se incluyen en los paquetes.
 Dependabot agrupa actualizaciones minor/patch por ecosistema y aplica un
 periodo explícito de siete días antes de las actualizaciones de versión; las
 versiones major quedan separadas para poder revisarlas antes de integrarlas.
 
-Scorecard también informa sobre la licencia y el distintivo OpenSSF Best
-Practices. Se mantienen pendientes por una razón deliberada: los manifiestos
-declaran `UNLICENSED`, y no se debe elegir una licencia ni afirmar un distintivo
-que el proyecto aún no haya obtenido automáticamente.
+El proyecto publica ahora la licencia MIT en `LICENSE` y en los metadatos de
+paquete. La evaluación OpenSSF Best Practices es una autoevaluación externa:
+no se marcará como aprobada ni se añadirá un distintivo hasta completar sus
+preguntas con evidencia. `Maintained` depende de actividad real sostenida y no
+se puede corregir con un cambio de configuración.
+
+El aviso de vulnerabilidad de `glib` requiere una actualización compatible de
+la pila GTK3/WebKit/Tauri: la versión usada por `webkit2gtk` aún pertenece al
+rango afectado y no se ocultará mediante una supresión de auditoría. Mientras
+el ecosistema no publique una ruta compatible corregida, CI debe seguir
+mostrando ese riesgo. El parser de destinos GitHub ya tiene tests y fuzzing
+continuo de ClusterFuzzLite.
 
 No se conserva el workflow de ejemplo de APIsec: apuntaba al proyecto de
 prueba `VAmPI`, mientras que LTerminal es una aplicación de escritorio y no

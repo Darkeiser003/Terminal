@@ -5,7 +5,7 @@
   "identifier": "com.winslim.terminal",
   "description": "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003",
   "author": "Darkeiser003",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "copyright": "Copyright © 2026 Darkeiser003",
   "shortDescription": "Terminal multipestaña y centro local de herramientas",
   "longDescription": "Terminal multipestaña con detección de entornos (cmd, PowerShell, WSL, Docker, ADB), lanzador de scripts, explorador de archivos y hub de proyectos de GitHub.",

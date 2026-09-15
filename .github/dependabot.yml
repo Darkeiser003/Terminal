@@ -46,6 +46,18 @@ updates:
         update-types:
           - minor
           - patch
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      fuzzing-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -60,3 +72,9 @@ updates:
         update-types:
           - minor
           - patch
+  - package-ecosystem: docker
+    directory: /.clusterfuzzlite
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

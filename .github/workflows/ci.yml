@@ -28,6 +28,7 @@ jobs:
       - run: npm audit --audit-level=high --ignore-scripts
       - run: npm run check:local
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
@@ -39,7 +40,9 @@ jobs:
           tool: cargo-deny
           fallback: none
       - run: cargo audit --file src-tauri/Cargo.lock
+      - run: cargo audit --file fuzz/Cargo.lock
       - run: cargo deny --manifest-path src-tauri/Cargo.toml check
+      - run: cargo deny --manifest-path fuzz/Cargo.toml check
 
   shell-policy:
     name: Shell y secretos

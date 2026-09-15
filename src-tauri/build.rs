@@ -22,14 +22,10 @@ fn copy_conpty_next_to_executable() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let manifest =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR falta"));
     let source = manifest.join("vendor").join("conpty");
-    let Some(profile_dir) = profile_dir() else {
-        println!(
-            "cargo:warning=No se pudo localizar la carpeta del ejecutable para copiar conpty.dll"
-        );
-        return;
-    };
+    let profile_dir = profile_dir().expect("No se pudo localizar el directorio de salida Windows");
     // `LoadLibrary` con ruta relativa mira en la carpeta del ejecutable. La app
     // queda en `target/<perfil>/`, pero los binarios de prueba cuelgan de
     // `target/<perfil>/deps/`, así que las dos necesitan su copia.
@@ -38,29 +34,25 @@ fn copy_conpty_next_to_executable() {
     for name in ["conpty.dll", "OpenConsole.exe"] {
         let from = source.join(name);
         println!("cargo:rerun-if-changed={}", from.display());
-        if !from.exists() {
-            println!(
-                "cargo:warning=Falta {}: las pestañas no arrancarán en Windows",
+        if !from.is_file() {
+            panic!(
+                "Falta {}. Ejecuta `node scripts/prepare-conpty.mjs` antes de compilar Windows.",
                 from.display()
             );
-            continue;
         }
         for target in &targets {
-            if !target.is_dir() {
-                continue;
-            }
+            std::fs::create_dir_all(target).unwrap_or_else(|error| {
+                panic!("No se pudo preparar {}: {error}", target.display())
+            });
             let to = target.join(name);
             // Sobrescribir un .dll ya cargado por otra instancia en marcha
             // falla; si el destino ya está y coincide, no hay nada que hacer.
             if same_contents(&from, &to) {
                 continue;
             }
-            if let Err(error) = std::fs::copy(&from, &to) {
-                println!(
-                    "cargo:warning=No se pudo copiar {name} a {}: {error}",
-                    target.display()
-                );
-            }
+            std::fs::copy(&from, &to).unwrap_or_else(|error| {
+                panic!("No se pudo copiar {name} a {}: {error}", target.display())
+            });
         }
     }
 }

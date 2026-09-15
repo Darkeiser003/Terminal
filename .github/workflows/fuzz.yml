@@ -1,0 +1,46 @@
+name: ClusterFuzzLite
+
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/src/projects/github.rs'
+      - 'src-tauri/crates/github-target/**'
+      - 'fuzz/**'
+      - '.clusterfuzzlite/**'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    - cron: '17 4 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz parser de destinos GitHub
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Obtener fuentes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compilar fuzzers Rust
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          sanitizer: address
+
+      - name: Ejecutar fuzzing
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: ${{ github.event_name == 'pull_request' && '120' || '600' }}
+          mode: ${{ github.event_name == 'pull_request' && 'code-change' || 'batch' }}
+          sanitizer: address
+          output-sarif: true

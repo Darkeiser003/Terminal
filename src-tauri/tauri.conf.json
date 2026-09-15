@@ -38,6 +38,7 @@
   "bundle": {
     "active": true,
     "resources": {
+      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
       "../scripts/containers/docker-manager.sh": "scripts/containers/docker-manager.sh",
       "../scripts/containers/kubernetes-manager.sh": "scripts/containers/kubernetes-manager.sh",
       "../scripts/operations/docker-manager.ps1": "scripts/operations/docker-manager.ps1",

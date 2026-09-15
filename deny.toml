@@ -1,6 +1,5 @@
-# Política reproducible de dependencias Rust. El paquete raíz sigue siendo
-# UNLICENSED; esta lista solo cubre las licencias de terceros que se pueden
-# incorporar al binario.
+# Política reproducible de licencias de dependencias Rust. La licencia del
+# proyecto se declara en Cargo.toml y en el archivo LICENSE de la raíz.
 
 [advisories]
 version = 2
@@ -36,6 +35,12 @@ allow = [
 
 [licenses.private]
 ignore = true
+
+# libfuzzer-sys is confined to the fuzz-only manifest/lockfile. Its upstream
+# expression additionally requires NCSA; don't allow that license globally.
+[[licenses.exceptions]]
+name = "libfuzzer-sys"
+allow = ["NCSA"]
 
 [sources]
 unknown-registry = "deny"

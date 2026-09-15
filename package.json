@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "WinSlim Terminal - terminal y hub de proyectos de Darkeiser003",
   "author": "Darkeiser003",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
@@ -27,9 +27,11 @@
     "test:host": "bash linux/exercise-host.sh",
     "check:version": "node scripts/verify-version.mjs",
     "check:assets": "node scripts/verify-runtime-assets.mjs",
+    "prepare:conpty": "node scripts/prepare-conpty.mjs",
     "check:architecture": "node scripts/verify-architecture.mjs",
     "check:build-scripts": "node scripts/verify-build-scripts.mjs",
     "check:github-security": "node scripts/verify-github-security.mjs --scan",
+    "check:fuzzing": "node scripts/verify-fuzzing.mjs && cargo fmt --manifest-path fuzz/Cargo.toml --check",
     "check:workspace": "node scripts/verify-workspace.mjs",
     "metadata:sync": "node scripts/sync-package-metadata.mjs",
     "check:metadata": "node scripts/sync-package-metadata.mjs --check",
@@ -45,6 +47,9 @@
     "test:windows-cross-release": "node scripts/test-windows-cross-release.mjs",
     "test:cleaner": "node scripts/test-clean-repository.mjs",
     "test:version-restore": "node scripts/test-version-restore.mjs",
+    "test:conpty-package": "node scripts/test-prepare-conpty.mjs",
+    "test:github-target": "cargo test --locked --manifest-path src-tauri/crates/github-target/Cargo.toml",
+    "fuzz:github-target": "cargo +nightly fuzz run --fuzz-dir fuzz github_target -- -max_total_time=60",
     "test:e2e-report": "node scripts/test-e2e-report.mjs",
     "test:e2e-url-matcher": "node scripts/test-e2e-url-matcher.mjs",
     "test:e2e-environment-probes": "node scripts/test-e2e-environment-probes.mjs",
@@ -55,8 +60,8 @@
     "check:test-surface": "node scripts/verify-test-surface.mjs",
     "check:logic": "node scripts/verify-logic-surface.mjs",
     "check:flows": "node scripts/verify-flow-documentation.mjs",
-    "check:local": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-publish && npm run test:release-manifest && npm run test:release-signature && npm run check:test-surface && npm run check:logic",
-    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-publish && npm run test:release-manifest && npm run test:release-signature && npm run check:test-surface && npm run check:logic && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
+    "check:local": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:fuzzing && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:conpty-package && npm run test:github-target && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-publish && npm run test:release-manifest && npm run test:release-signature && npm run check:test-surface && npm run check:logic",
+    "check": "npm run check:version && npm run check:assets && npm run check:architecture && npm run check:build-scripts && npm run check:github-security && npm run check:fuzzing && npm run check:workspace && npm run check:metadata && npm run check:docs && npm run check:flows && npm run check:encoding && npm run check:links && npm run check:install-sources && npm run check:winget && npm run check:i18n && npm run check:contracts && npm run test:frontend-logic && npm run test:build-menu && npm run test:windows-cross-release && npm run test:cleaner && npm run test:version-restore && npm run test:conpty-package && npm run test:github-target && npm run test:e2e-report && npm run test:e2e-url-matcher && npm run test:e2e-environment-probes && npm run test:release-hash && npm run test:release-publish && npm run test:release-manifest && npm run test:release-signature && npm run check:test-surface && npm run check:logic && svelte-check --tsconfig ./tsconfig.json && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=22.12.0"

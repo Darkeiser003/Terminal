@@ -1414,6 +1414,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "github-target"
+version = "1.0.0"
+
+[[package]]
 name = "glib"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5494,6 +5498,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dirs",
+ "github-target",
  "libc",
  "once_cell",
  "parking_lot",

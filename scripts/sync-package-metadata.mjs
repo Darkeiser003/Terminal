@@ -44,6 +44,7 @@ if (!Array.isArray(metadata.credits) || !metadata.credits.every((entry) => typeo
 }
 
 const packageJson = readJson("package.json");
+const packageLock = readJson("package-lock.json");
 const expectedPackage = {
   description: metadata.description,
   author: metadata.author,
@@ -84,6 +85,16 @@ const expectedCargo = [
 const mismatches = [];
 for (const [key, value] of Object.entries(expectedPackage)) {
   if (packageJson[key] !== value) mismatches.push(`package.json:${key}`);
+}
+if (packageLock.packages?.[""]?.license !== metadata.license) {
+  mismatches.push("package-lock.json:license");
+}
+if (metadata.license === "MIT" && !readFileSync(resolve(root, "LICENSE"), "utf8").startsWith("MIT License\n")) {
+  mismatches.push("LICENSE:SPDX MIT");
+}
+const appstream = readFileSync(resolve(root, "src-tauri/resources/com.lterminal.terminal.metainfo.xml"), "utf8");
+if (!appstream.includes(`<project_license>${metadata.license}</project_license>`)) {
+  mismatches.push("AppStream:project_license");
 }
 if (JSON.stringify(packageJson.repository) !== JSON.stringify(expectedRepository)) {
   mismatches.push("package.json:repository");
@@ -127,6 +138,10 @@ else delete packageJson.homepage;
 if (expectedBugs) packageJson.bugs = expectedBugs;
 else delete packageJson.bugs;
 writeJson("package.json", packageJson);
+if (packageLock.packages?.[""]) {
+  packageLock.packages[""].license = metadata.license;
+  writeJson("package-lock.json", packageLock);
+}
 Object.assign(tauri, {
   productName: expectedTauri.productName,
   mainBinaryName: expectedTauri.mainBinaryName,

@@ -15,6 +15,9 @@ use serde_json::Value;
 
 use crate::environments::{Environment, ShellKind, Transport};
 use crate::shell_paths::unix_path_for;
+pub use github_target::{
+    is_github_owner, is_github_repo_name, parse_full_name, parse_github_target, FullName, Target,
+};
 
 pub const GITHUB_ORIGIN: &str = "https://github.com";
 const GITHUB_API_ORIGIN: &str = "https://api.github.com";
@@ -22,102 +25,6 @@ const MAX_API_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const API_CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_CACHE_ENTRIES: usize = 128;
-
-// ---- Validación de nombres ----
-
-pub fn is_github_owner(value: &str) -> bool {
-    if value.is_empty() || value.len() > 39 {
-        return false;
-    }
-    let bytes = value.as_bytes();
-    // Ni empieza ni termina con guion, y solo alfanuméricos o guiones dentro.
-    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
-        return false;
-    }
-    value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
-
-pub fn is_github_repo_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 100
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FullName {
-    pub owner: String,
-    pub name: String,
-    pub full_name: String,
-}
-
-pub fn parse_full_name(value: &str) -> Option<FullName> {
-    let trimmed = value.trim();
-    let without_git = trimmed
-        .strip_suffix(".git")
-        .or_else(|| trimmed.strip_suffix(".GIT"))
-        .unwrap_or(trimmed);
-    let parts: Vec<&str> = without_git.split('/').collect();
-    if parts.len() != 2 || !is_github_owner(parts[0]) || !is_github_repo_name(parts[1]) {
-        return None;
-    }
-    Some(FullName {
-        owner: parts[0].to_string(),
-        name: parts[1].to_string(),
-        full_name: format!("{}/{}", parts[0], parts[1]),
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    Owner(String),
-    Repo(FullName),
-}
-
-/// Acepta un login, `owner/repo` o una URL web normal. Se rechazan SSH,
-/// `git://`, hosts alternativos, credenciales, puertos y segmentos adicionales.
-pub fn parse_github_target(raw: &str) -> Option<Target> {
-    let value = raw.trim();
-    if value.is_empty() || value.len() > 300 {
-        return None;
-    }
-    if is_github_owner(value) {
-        return Some(Target::Owner(value.to_string()));
-    }
-    if let Some(full) = parse_full_name(value) {
-        return Some(Target::Repo(full));
-    }
-
-    // Solo https://github.com, sin puerto ni credenciales.
-    let rest = value.strip_prefix("https://")?;
-    let (host, path) = match rest.split_once('/') {
-        Some((host, path)) => (host, path),
-        None => (rest, ""),
-    };
-    if !host.eq_ignore_ascii_case("github.com") {
-        return None;
-    }
-    // Un `@` indica credenciales, un `:` un puerto.
-    if host.contains('@') || host.contains(':') {
-        return None;
-    }
-    let segments: Vec<&str> = path
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .split('#')
-        .next()
-        .unwrap_or("")
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    match segments.len() {
-        1 if is_github_owner(segments[0]) => Some(Target::Owner(segments[0].to_string())),
-        2 => parse_full_name(&format!("{}/{}", segments[0], segments[1])).map(Target::Repo),
-        _ => None,
-    }
-}
 
 fn safe_text(value: Option<&str>, max_length: usize) -> String {
     value
@@ -1345,9 +1252,10 @@ mod tests {
     #[test]
     fn se_acepta_una_url_web_de_github() {
         assert_eq!(
-            parse_github_target("https://github.com/torvalds"),
+            parse_github_target("https://github.com/torvalds"), // link-check: ignore
             Some(Target::Owner("torvalds".into()))
         );
+        // link-check: ignore — URL fija de un fixture, no una dependencia de build.
         match parse_github_target("https://github.com/torvalds/linux").unwrap() {
             Target::Repo(repo) => assert_eq!(repo.full_name, "torvalds/linux"),
             other => panic!("se esperaba un repo: {other:?}"),
@@ -1359,11 +1267,11 @@ mod tests {
         for malo in [
             "git@github.com:torvalds/linux.git",
             "git://github.com/torvalds/linux",
-            "http://github.com/torvalds",
-            "https://gitlab.com/torvalds",
-            "https://github.com:8443/torvalds",
-            "https://user:pass@github.com/torvalds",
-            "https://github.com/torvalds/linux/tree/master",
+            "http://github.com/torvalds",       // link-check: ignore
+            "https://gitlab.com/torvalds",      // link-check: ignore
+            "https://github.com:8443/torvalds", // link-check: ignore
+            "https://user:pass@github.com/torvalds", // link-check: ignore
+            "https://github.com/torvalds/linux/tree/master", // link-check: ignore
             "",
         ] {
             assert_eq!(parse_github_target(malo), None, "{malo} debería rechazarse");
@@ -1380,7 +1288,7 @@ mod tests {
         });
         let profile = sanitize_profile(&raw).unwrap();
         assert_eq!(profile.login, "torvalds");
-        assert_eq!(profile.html_url, "https://github.com/torvalds");
+        assert_eq!(profile.html_url, "https://github.com/torvalds"); // link-check: ignore
         let value = serde_json::to_value(&profile).unwrap();
         assert!(value.get("secreto").is_none());
     }
@@ -1399,8 +1307,7 @@ mod tests {
             "clone_url": "git@malo:x.git"
         });
         let repo = sanitize_repository(&raw).unwrap();
-        assert_eq!(repo.html_url, "https://github.com/torvalds/linux");
-        // link-check: ignore — URL fija de un fixture, no una dependencia de build.
+        assert_eq!(repo.html_url, "https://github.com/torvalds/linux"); // link-check: ignore
         assert_eq!(repo.clone_url, "https://github.com/torvalds/linux.git"); // link-check: ignore
     }
 
