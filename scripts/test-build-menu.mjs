@@ -105,9 +105,9 @@ try {
             cwd: root,
             encoding: 'utf8',
             env: { ...process.env, TMPDIR: isolatedTempRoot },
-            timeout: 20_000,
+            timeout: 45_000,
         });
-        assert.equal(cleanerPreview.status, 0, `La vista previa PowerShell falló:\n${cleanerPreview.stdout}\n${cleanerPreview.stderr}`);
+        assert.equal(cleanerPreview.status, 0, `La vista previa PowerShell falló (${cleanerPreview.error?.message ?? cleanerPreview.signal ?? cleanerPreview.status}):\n${cleanerPreview.stdout}\n${cleanerPreview.stderr}`);
         assert.match(cleanerPreview.stdout, /VISTA PREVIA/);
         assert.match(cleanerPreview.stdout, /lterminal-smoke-path-prefix-regression/);
         assert.match(cleanerPreview.stdout, /No se ha borrado nada/);

@@ -1441,6 +1441,32 @@ async function rawTerminalTextWithin(cell) {
     return rows.length ? textOf(rows[0][elementKey]) : '';
 }
 
+async function dispatchTerminalWheel(cell, deltaY, repeat = 1) {
+    const result = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const screen = arguments[0].querySelector('.xterm-screen');
+            if (!screen) return null;
+            let prevented = 0;
+            for (let index = 0; index < arguments[2]; index += 1) {
+                const wheel = new WheelEvent('wheel', {
+                    bubbles: true,
+                    cancelable: true,
+                    deltaX: 0,
+                    deltaY: arguments[1],
+                    deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+                    shiftKey: false,
+                });
+                // xterm escucha la rueda en la superficie de pantalla; el
+                // viewport es una capa separada usada para el scrollbar.
+                screen.dispatchEvent(wheel);
+                if (wheel.defaultPrevented) prevented += 1;
+            }
+            return { dispatched: arguments[2], prevented };`,
+        args: [{ [elementKey]: cell }, deltaY, repeat],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    return result;
+}
+
 async function promptStates(expected) {
     const hosts = await findAll('.tab-pane:not(.hidden)[data-prompt-visible]');
     return Promise.all(hosts.slice(0, expected).map((host) => attribute(host[elementKey], 'data-prompt-visible')));
@@ -4532,10 +4558,14 @@ try {
         throw new Error(`La ayuda no produjo una rejilla horizontal medible: ${JSON.stringify({ helpCols, visibleCols, horizontalHelpSnapshot })}`);
     }
     const reclaimCommands = Math.min(64, Math.max(24, Number(horizontalHelpSnapshot.host.rows || 24) + 4));
-    const reclaimMarker = `LTERMINAL_WIDTH_RECLAIM_${Date.now().toString(36).toUpperCase()}`;
+    // WebDriver simula pulsaciones físicas, así que mayúsculas y símbolos que
+    // requieren Shift dependen del layout del host. En el fallo observado el
+    // eco devolvió el marcador en minúsculas y con guiones; limita esta sonda a
+    // caracteres ASCII sin modificadores para medir el PTY y no el teclado.
+    const reclaimMarker = `lterminal-width-reclaim-${Date.now().toString(36)}`;
     const reclaimOutputLines = Array.from(
         { length: reclaimCommands },
-        (_, index) => `${reclaimMarker}_${index}`,
+        (_, index) => `${reclaimMarker}-${index}`,
     );
     // Mantener cada orden corta: WebDriver/xterm puede perder caracteres al
     // inyectar una línea de cientos de caracteres. Esperar cada resultado
@@ -4569,25 +4599,71 @@ try {
         await captureScreenshot('scroll-horizontal-ancho-no-recuperado');
         throw new Error(`El PTY no recuperó el ancho visible después de desplazar la ayuda: ${JSON.stringify({ helpCols, visibleCols, reclaimMarkerVisible, finalWidthSnapshot })}`, { cause: error });
     }
-    const historyHeight = finalWidthSnapshot.viewport?.scrollHeight ?? 0;
-    const historyViewportHeight = finalWidthSnapshot.viewport?.clientHeight ?? 0;
     await captureScreenshot('scroll-horizontal-ancho-recuperado');
+    const oldestReclaimLine = reclaimOutputLines[0];
+    const newestReclaimLine = reclaimOutputLines.at(-1);
+    const scrollUp = { dispatched: 0, prevented: 0 };
+    let scrolledBackText = '';
+    let oldestOutputVisible = false;
+    // Encontrar la primera salida con incrementos pequeños evita saltar por
+    // encima de ella hasta el texto de ayuda anterior, que también vive en el
+    // scrollback y podría ocultar una pérdida parcial de líneas recientes.
+    for (let attempt = 0; attempt < reclaimOutputLines.length * 2 && !oldestOutputVisible; attempt += 1) {
+        const step = await dispatchTerminalWheel(horizontalCell, -120);
+        scrollUp.dispatched += step?.dispatched ?? 0;
+        scrollUp.prevented += step?.prevented ?? 0;
+        scrolledBackText = await rawTerminalTextWithin(horizontalCell);
+        oldestOutputVisible = probeOutputMarkerRows(
+            scrolledBackText,
+            `echo ${oldestReclaimLine}`,
+            oldestReclaimLine,
+        ).some((row) => row.markerAfterEchoRemoval);
+    }
+    if (!oldestOutputVisible) {
+        await captureScreenshot('scroll-horizontal-scrollback-no-historial');
+        throw new Error(`La rueda vertical no recuperó la salida antigua tras reducir el PTY: ${JSON.stringify({
+            scrollUp,
+            oldestReclaimLine,
+            tail: String(scrolledBackText ?? '').slice(-1200),
+        })}`);
+    }
+    await captureScreenshot('scroll-horizontal-scrollback-recuperado');
+    const scrollDown = { dispatched: 0, prevented: 0 };
+    let restoredText = '';
+    let newestOutputVisible = false;
+    for (let attempt = 0; attempt < reclaimOutputLines.length * 2 && !newestOutputVisible; attempt += 1) {
+        const step = await dispatchTerminalWheel(horizontalCell, 120);
+        scrollDown.dispatched += step?.dispatched ?? 0;
+        scrollDown.prevented += step?.prevented ?? 0;
+        restoredText = await rawTerminalTextWithin(horizontalCell);
+        newestOutputVisible = probeOutputMarkerRows(
+            restoredText,
+            `echo ${newestReclaimLine}`,
+            newestReclaimLine,
+        ).some((row) => row.markerAfterEchoRemoval);
+    }
+    if (!newestOutputVisible) {
+        await captureScreenshot('scroll-horizontal-scrollback-no-restaurado');
+        throw new Error(`La rueda vertical no devolvió la terminal al final del scrollback: ${JSON.stringify({
+            scrollDown,
+            newestReclaimLine,
+            tail: String(restoredText ?? '').slice(-1200),
+        })}`);
+    }
     recordEvent('terminal-columns-reclaim', {
         beforeCols: helpCols,
         visibleCols,
         afterCols: Number(finalWidthSnapshot.host.cols),
         hostWidth: finalWidthSnapshot.host.clientWidth,
         hostScrollWidth: finalWidthSnapshot.host.scrollWidth,
-        historyRetained: historyHeight > historyViewportHeight,
-        historyHeight,
-        historyViewportHeight,
         generatedLines: reclaimOutputLines.length,
         outputMarkerVisible: reclaimMarkerVisible,
-        passed: historyHeight > historyViewportHeight,
+        oldestOutputVisibleAfterWheelUp: oldestOutputVisible,
+        newestOutputVisibleAfterWheelDown: newestOutputVisible,
+        scrollUp,
+        scrollDown,
+        passed: true,
     });
-    if (historyHeight <= historyViewportHeight) {
-        throw new Error(`La prueba de recuperación perdió el scrollback: ${JSON.stringify(finalWidthSnapshot.viewport)}`);
-    }
     await captureScreenshot('help-linea-larga-despues-dividir');
     // Volver al estado inicial deja la secuencia general determinista y evita
     // que esta comprobación añada un panel adicional al resto del smoke.

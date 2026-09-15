@@ -42,7 +42,7 @@ const valid = {
         { type: 'terminal-mouse-selection', passed: true, gesture: 'pointerDown → pointerMove while pressed → pointerUp' },
         { type: 'terminal-output-repaint', passed: true, trigger: 'pty-output-idle', refreshCount: 1, rowsRefreshed: 24, layoutUnchanged: true, marker: 'LTERMINAL_OUTPUT_REPAINT_FIXTURE', capture: 'pty-output-repaint-no-layout-event' },
         { type: 'horizontal-help-geometry', passed: true, snapshot: { host: { clientWidth: 400, scrollWidth: 850 }, indicator: { opacity: '1' } }, horizontalWheelProbe: { lineMode: { defaultPrevented: true }, pixelMode: { defaultPrevented: true }, pageMode: { defaultPrevented: true } } },
-        { type: 'terminal-columns-reclaim', passed: true, beforeCols: 100, visibleCols: 50, afterCols: 50, hostWidth: 400, hostScrollWidth: 400, historyRetained: true, historyHeight: 800, historyViewportHeight: 400, generatedLines: 24, outputMarkerVisible: true },
+        { type: 'terminal-columns-reclaim', passed: true, beforeCols: 100, visibleCols: 50, afterCols: 50, hostWidth: 400, hostScrollWidth: 400, oldestOutputVisibleAfterWheelUp: true, newestOutputVisibleAfterWheelDown: true, scrollUp: { dispatched: 3, prevented: 3 }, scrollDown: { dispatched: 3, prevented: 3 }, generatedLines: 24, outputMarkerVisible: true },
         { type: 'environment-probe', id: 'bash', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
         { type: 'environment-probe', id: 'zsh', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
         { type: 'environment-probe', id: 'fish', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
@@ -56,8 +56,8 @@ const valid = {
         { type: 'dependencies', groups: 8, subgroups: 6, repeatedLoads: 3, platformGroup: 'Virtualización' },
         { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
         { type: 'split-terminal-columns-minimal', passed: true, panes: [
-            { cols: 48, visibleCols: 48, hostWidth: 400, hostScrollWidth: 400 },
-            { cols: 47, visibleCols: 47, hostWidth: 392, hostScrollWidth: 392 },
+            { cols: 64, visibleCols: 33, hostWidth: 231, hostScrollWidth: 448, overflow: 'true', longestVisibleRow: 64 },
+            { cols: 47, visibleCols: 47, hostWidth: 392, hostScrollWidth: 392, overflow: 'false', longestVisibleRow: 1 },
         ] },
         { type: 'responsive-minimum', passed: true, configured: { width: 481, height: 271 }, requested: { width: 512, height: 281 }, applied: { width: 513, height: 282 } },
         { type: 'native-window-resize', platform: 'linux', nativeResizeMethod: 'webdriver', passed: true, nativeChanged: true, viewportChanged: true, ptyChanged: true },
@@ -178,6 +178,18 @@ try {
             ? { ...event, afterCols: 100, hostScrollWidth: 850 }
             : event),
     })).status, 0, 'un PTY sobredimensionado tras desplazar la ayuda debe fallar');
+    assert.notEqual((await run('terminal-columns-lost-old-output', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'terminal-columns-reclaim'
+            ? { ...event, oldestOutputVisibleAfterWheelUp: false }
+            : event),
+    })).status, 0, 'el E2E debe fallar si la rueda no recupera la salida antigua del scrollback');
+    assert.notEqual((await run('terminal-columns-wheel-not-handled', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'terminal-columns-reclaim'
+            ? { ...event, scrollDown: { dispatched: 0, prevented: 0 } }
+            : event),
+    })).status, 0, 'el E2E debe fallar si no se observan eventos de rueda vertical gestionados por xterm');
     assert.notEqual((await run('missing-shell-matrix', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'environment-shell-matrix'),
@@ -243,9 +255,11 @@ try {
     assert.notEqual((await run('split-columns-overflow', {
         ...valid,
         events: valid.events.map((event) => event.type === 'split-terminal-columns-minimal'
-            ? { ...event, panes: event.panes.map((pane, index) => index === 0 ? { ...pane, cols: 80, hostScrollWidth: 900 } : pane) }
+            ? { ...event, panes: event.panes.map((pane, index) => index === 0
+                ? { ...pane, cols: 80, hostScrollWidth: 900, longestVisibleRow: 10 }
+                : pane) }
             : event),
-    })).status, 0, 'un panel con columnas y scrollWidth sobrantes debe invalidar el informe');
+    })).status, 0, 'un panel con overflow no justificado por contenido largo debe invalidar el informe');
     assert.notEqual((await run('missing-responsive-minimum', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'responsive-minimum'),

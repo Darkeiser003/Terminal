@@ -1924,8 +1924,9 @@ fi
 # No borres AppImage ni SHA256SUMS anteriores: una misma release puede incluir
 # varias arquitecturas, perfiles o plataformas. El manifiesto se actualiza de
 # forma incremental y solo sustituye la entrada del artefacto actual.
-cp "$APPIMAGE" "$RELEASE_DIR/$RELEASE_NAME"
-chmod +x "$RELEASE_DIR/$RELEASE_NAME"
+node "$PROJECT_ROOT/scripts/publish-release-artifact.mjs" \
+    --source "$APPIMAGE" \
+    --destination "$RELEASE_DIR/$RELEASE_NAME"
 
 RELEASE_HASH="$(sha256sum "$RELEASE_DIR/$RELEASE_NAME" | awk '{print $1}')"
 node "$PROJECT_ROOT/scripts/update-release-hash.mjs" \

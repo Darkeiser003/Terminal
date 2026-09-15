@@ -138,10 +138,15 @@ if (!widthReclaim || widthReclaim.passed !== true
     || widthReclaim.beforeCols <= widthReclaim.visibleCols
     || widthReclaim.afterCols > widthReclaim.visibleCols + 1
     || widthReclaim.hostScrollWidth > widthReclaim.hostWidth + 2
-    || widthReclaim.historyRetained !== true
+    || widthReclaim.oldestOutputVisibleAfterWheelUp !== true
+    || widthReclaim.newestOutputVisibleAfterWheelDown !== true
+    || !Number.isFinite(widthReclaim.scrollUp?.dispatched) || widthReclaim.scrollUp.dispatched < 1
+    || !Number.isFinite(widthReclaim.scrollUp?.prevented) || widthReclaim.scrollUp.prevented < 1
+    || !Number.isFinite(widthReclaim.scrollDown?.dispatched) || widthReclaim.scrollDown.dispatched < 1
+    || !Number.isFinite(widthReclaim.scrollDown?.prevented) || widthReclaim.scrollDown.prevented < 1
     || widthReclaim.generatedLines < 12
     || widthReclaim.outputMarkerVisible !== true) {
-    throw new Error('El E2E no demostró que el PTY recupere sus columnas visibles mientras conserva el scrollback.');
+    throw new Error('El E2E no demostró la recuperación de columnas y del scrollback mediante rueda vertical.');
 }
 const shellMatrix = events.find((event) => event?.type === 'environment-shell-matrix');
 const availableIds = Array.isArray(shellMatrix?.availableIds) ? shellMatrix.availableIds : [];
@@ -243,14 +248,25 @@ if (!minimumSplit || minimumSplit.passed !== true || minimumSplit.geometryValid 
 }
 
 const splitColumns = events.find((event) => event?.type === 'split-terminal-columns-minimal');
+const splitPaneHasUsableGeometry = (pane) => Number.isFinite(pane?.cols)
+    && Number.isFinite(pane?.visibleCols)
+    && Number.isFinite(pane?.hostWidth)
+    && Number.isFinite(pane?.hostScrollWidth)
+    && pane.hostWidth > 0
+    && pane.cols > 0
+    && pane.visibleCols > 0;
+const splitPaneFitsViewport = (pane) => pane.cols <= pane.visibleCols + 1
+    && pane.hostScrollWidth <= pane.hostWidth + 2;
+const splitPaneOverflowIsContentDriven = (pane) => pane.overflow === 'true'
+    && Number.isFinite(pane.longestVisibleRow)
+    && pane.cols > pane.visibleCols + 1
+    && pane.hostScrollWidth > pane.hostWidth + 2
+    && pane.longestVisibleRow > pane.visibleCols
+    && pane.cols <= pane.longestVisibleRow + 2;
 if (!splitColumns || splitColumns.passed !== true || splitColumns.panes?.length !== 2
-    || splitColumns.panes.some((pane) => !Number.isFinite(pane.cols)
-        || !Number.isFinite(pane.visibleCols)
-        || !Number.isFinite(pane.hostWidth)
-        || !Number.isFinite(pane.hostScrollWidth)
-        || pane.hostWidth <= 0
-        || pane.cols > pane.visibleCols + 1
-        || pane.hostScrollWidth > pane.hostWidth + 2)) {
+    || splitColumns.panes.some((pane) => !splitPaneHasUsableGeometry(pane)
+        || (!splitPaneFitsViewport(pane) && !splitPaneOverflowIsContentDriven(pane)))
+    || !splitColumns.panes.some(splitPaneFitsViewport)) {
     throw new Error('El E2E no demostró columnas mínimas y ausencia de espacio horizontal sobrante en ambos paneles divididos.');
 }
 

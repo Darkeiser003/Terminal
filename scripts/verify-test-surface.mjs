@@ -35,11 +35,13 @@ const requiredFiles = [
     'scripts/test-e2e-report.mjs',
     'scripts/test-e2e-url-matcher.mjs',
     'scripts/test-release-hash.mjs',
+    'scripts/test-release-publish.mjs',
     'scripts/test-release-manifest.mjs',
     'scripts/test-windows-cross-release.mjs',
     'scripts/package-windows-cross.mjs',
     'scripts/test-release-signature.mjs',
     'scripts/update-release-hash.mjs',
+    'scripts/publish-release-artifact.mjs',
     'scripts/create-release-manifest.mjs',
     'scripts/sign-release-manifest.mjs',
     'scripts/test-frontend-logic.mjs',
@@ -56,7 +58,7 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:e2e-url-matcher', 'test:release-hash', 'test:release-manifest', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:github-security', 'check:logic']) {
+for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:e2e-url-matcher', 'test:release-hash', 'test:release-publish', 'test:release-manifest', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:github-security', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
@@ -85,6 +87,7 @@ check('El validador acepta y verifica los informes E2E enfocados de matriz de sh
     read('scripts/verify-e2e-report.mjs').includes("report.focusedScenario === 'environment-shell-matrix'")
         && read('scripts/test-e2e-report.mjs').includes('focusedShellMatrix'));
 check('npm check prueba la actualización no destructiva de hashes', scripts.check.includes('test:release-hash') && read('scripts/test-release-hash.mjs').includes('se conservan las variantes'));
+check('npm check prueba el reemplazo atómico del AppImage en ejecución', scripts.check.includes('test:release-publish') && scripts['check:local'].includes('test:release-publish') && read('scripts/test-release-publish.mjs').includes('la instancia abierta conserva el inode previo') && read('scripts/publish-release-artifact.mjs').includes('await rename(temporaryPath, destinationPath)'));
 check('La publicación combina Linux y Windows en un manifiesto determinista antes de firmarlo', scripts.check.includes('test:release-manifest') && read('scripts/create-release-manifest.mjs').includes('SHA256SUMS.txt') && read('.github/workflows/release.yml').includes('needs: [linux, windows]'));
 check('npm check prueba firma Ed25519 y detecta alteraciones', scripts.check.includes('test:release-signature') && read('scripts/sign-release-manifest.mjs').includes('createPrivateKey') && read('src-tauri/src/updater/security.rs').includes('UnparsedPublicKey'));
 check('npm check incluye tests Rust', scripts.check.includes('cargo test'));

@@ -91,6 +91,12 @@ assert.equal(probeOutputContainsMarker(['echo LTERMINAL_PROBE', 'LTERMINAL_PROBE
     'las filas del DOM distinguen la salida del eco incluso cuando WebDriver aplana el texto total');
 assert.equal(probeOutputContainsMarker(['echo LTERMINAL_PROBE'], 'echo LTERMINAL_PROBE', 'LTERMINAL_PROBE'), false,
     'una fila del DOM que solo contiene el eco no cuenta como salida');
+const flattenedKeyboardSafeOutput = '~❯ echo lterminal-width-reclaim-mu1smj8g-0lterminal-width-reclaim-mu1smj8g-0~❯';
+assert.equal(probeOutputContainsMarker(
+    flattenedKeyboardSafeOutput,
+    'echo lterminal-width-reclaim-mu1smj8g-0',
+    'lterminal-width-reclaim-mu1smj8g-0',
+), true, 'el eco aplanado distingue el comando de la salida con marcador compatible con el layout');
 assert.deepEqual(probeOutputMarkerRows('echo LTERMINAL_PROBE\nLTERMINAL_PROBE', 'echo LTERMINAL_PROBE', 'LTERMINAL_PROBE').slice(-2), [
     { length: 20, containsMarker: true, commandEcho: true, markerAfterEchoRemoval: false },
     { length: 15, containsMarker: true, commandEcho: false, markerAfterEchoRemoval: true },

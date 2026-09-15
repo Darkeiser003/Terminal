@@ -818,12 +818,12 @@ fn banner_hardware() -> StaticHardware {
     }
 }
 
-// Los tests de integración del banner necesitan inspeccionar el sistema real
-// de forma determinista. El binario normal siempre usa el camino asíncrono y
-// no bloquea el primer frame.
+// El formato de discos se prueba con fixtures en `storage_rows`. No enumerar
+// los montajes del host por cada banner unitario: un volumen FUSE/SMB puede
+// bloquear la consulta, y las pruebas deben ser independientes del entorno.
 #[cfg(test)]
 fn cached_disks() -> Vec<DiskRow> {
-    read_disks()
+    Vec::new()
 }
 
 #[cfg(not(test))]
