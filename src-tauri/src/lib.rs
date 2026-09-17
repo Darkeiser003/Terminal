@@ -114,7 +114,9 @@ pub fn run() {
         })),
     );
     #[cfg(target_os = "windows")]
-    if !platform::webview2::ensure_runtime() {
+    if std::env::var("LTERMINAL_WINE_HEADLESS_SMOKE").as_deref() != Ok("1")
+        && !platform::webview2::ensure_runtime()
+    {
         log_error!(
             "WebView2 Runtime no está disponible; el portable necesita el runtime de Microsoft o su bootstrapper junto al ejecutable"
         );

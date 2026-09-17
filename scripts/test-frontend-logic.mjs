@@ -129,6 +129,12 @@ assert.equal(terminalColumns.requiredTerminalColumns(3000, 5000, 4000, 2048), 20
     'las dimensiones visibles, el contenido y la reserva se limitan al máximo');
 assert.equal(terminalColumns.requiredTerminalColumns(Number.NaN, Number.NaN, Number.NaN), 1,
     'valores no finitos producen un mínimo seguro y nunca dimensiones inválidas');
+assert.equal(terminalColumns.inputReservationColumns(0, 240), 6,
+    'una orden pegada no convierte toda su longitud en columnas de la PTY');
+assert.equal(terminalColumns.inputReservationColumns(106, 1), 109,
+    'la entrada junto al borde conserva un margen pequeño para el cursor');
+assert.equal(terminalColumns.inputReservationColumns(2046, 20, 4, 2048), 2048,
+    'la reserva de entrada respeta el máximo de seguridad');
 
 const cells = (values) => ({
     length: values.length,

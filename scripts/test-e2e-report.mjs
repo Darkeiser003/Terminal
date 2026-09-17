@@ -168,7 +168,7 @@ const focusedLTools = {
     events: [
         { type: 'phase', name: 'arranque de interfaz' },
         { type: 'phase', name: 'integración opcional de LTools' },
-        { type: 'ltools-integration', passed: true, binary: '/tmp/ltools', schema: 'ltools-actions-v1', catalogActions: 50, compatibleActions: 32, pickerActions: 32, selectedAction: 'audit.quick', selectedCount: 4, selectionPersisted: true },
+        { type: 'ltools-integration', passed: true, binary: '/tmp/ltools', schema: 'ltools-actions-v1', catalogActions: 50, compatibleActions: 32, pickerActions: 32, selectedAction: 'defaults.show', selectedCount: 4, selectionPersisted: true, selectionStorageVerified: true, executionCompleted: true, resultPromptVisible: true },
         { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
     ],
 };

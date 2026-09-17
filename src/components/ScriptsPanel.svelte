@@ -185,6 +185,10 @@
                 .slice(0, 4)
                 .map((action) => action.id);
         }
+        // También se guarda la selección inicial. De lo contrario los botones
+        // parecen configurados, pero desaparecen al reiniciar el WebView o al
+        // cambiar de perfil porque nunca llegaron a localStorage.
+        if (selectedLToolsIds.length > 0) saveLToolsSelection();
     }
 
     function saveLToolsSelection(): void {

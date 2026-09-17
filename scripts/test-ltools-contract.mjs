@@ -33,6 +33,7 @@ assert.match(api, /ltools_actions_list/);
 assert.match(api, /ltools_action_run/);
 assert.match(panel, /lterminal\.ltools\.quick-actions\.v1/);
 assert.match(panel, /loadLToolsSelection/);
+assert.match(panel, /if \(selectedLToolsIds\.length > 0\) saveLToolsSelection\(\)/);
 assert.match(panel, /runLToolsAction/);
 assert.match(panel, /Obtener LTools/);
 assert.match(panel, /installLTools/);
@@ -45,9 +46,13 @@ assert.match(panel, /data-testid="scripts-ltools-run"/);
 assert.ok(catalog.repositories.includes('Darkeiser003/Tools'));
 
 const liveE2e = read('scripts/test-ltools-e2e.mjs');
+const smokeE2e = read('tests/e2e/smoke.mjs');
 const reportVerifier = read('scripts/verify-e2e-report.mjs');
 assert.match(liveE2e, /E2E_LTOOLS_ONLY/);
 assert.match(liveE2e, /E2E_LTOOLS_INTEGRATION/);
+assert.match(smokeE2e, /executionCompleted/);
+assert.match(smokeE2e, /resultPromptVisible/);
+assert.match(smokeE2e, /selectionStorageVerified/);
 assert.match(reportVerifier, /ltools-catalog-integration/);
 
 // Permite probar el CLI real sin convertirlo en una dependencia obligatoria
@@ -55,9 +60,20 @@ assert.match(reportVerifier, /ltools-catalog-integration/);
 // sigue siendo reproducible cuando LTools aún no está instalado.
 const liveBinary = process.env.LTOOLS_TEST_BINARY;
 if (liveBinary && existsSync(liveBinary)) {
+    const liveEnvironment = {
+        ...process.env,
+        // La release Linux se distribuye como AppImage. En hosts de auditoría
+        // mínimos puede no estar cargado FUSE; el modo oficial de AppImage
+        // conserva la misma aplicación y evita confundir ese detalle del host
+        // con un fallo del contrato LTools.
+        ...(liveBinary.toLowerCase().endsWith('.appimage')
+            ? { APPIMAGE_EXTRACT_AND_RUN: '1' }
+            : {}),
+    };
     const result = spawnSync(liveBinary, ['actions', 'list', '--format', 'json'], {
         encoding: 'utf8',
         timeout: 7000,
+        env: liveEnvironment,
     });
     assert.equal(result.status, 0, result.stderr || 'El CLI de LTools terminó con error.');
     const live = JSON.parse(result.stdout);

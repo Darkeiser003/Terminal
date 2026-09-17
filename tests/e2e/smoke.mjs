@@ -897,17 +897,20 @@ async function exerciseExplorerDoubleClick() {
             return Boolean(await findExplorerEntryByName(nestedName));
         }, 10000, `carpeta temporal para el doble clic (${temporaryRoot})`);
         const nestedEntry = await findExplorerEntryByName(nestedName);
+        const beforeDoubleClickCapture = await captureScreenshot('explorer-double-click-before');
         await doubleClick(nestedEntry);
         await waitUntil(async () => (await explorerState()).path === nestedDirectory, 10000, 'entrada única tras doble clic de carpeta');
         const enteredPath = (await explorerState()).path;
         if (enteredPath !== nestedDirectory) {
             throw new Error(`El doble clic navegó a una ruta inesperada: ${enteredPath}`);
         }
+        const enteredCapture = await captureScreenshot('explorer-double-click-entered');
         const upButton = await findWhenReady('.explorer .toolbar button:first-child');
         await click(upButton);
         await waitUntil(async () => (await explorerState()).path === temporaryRoot, 10000, 'vuelta al directorio temporal');
         await click(await findWhenReady('.explorer .toolbar button:first-child'));
         await waitUntil(async () => (await explorerState()).path === originalPath, 10000, 'restauración de la ruta original tras el doble clic');
+        const restoredCapture = await captureScreenshot('explorer-double-click-restored');
         recordEvent('explorer-double-click', {
             skipped: false,
             temporaryRoot,
@@ -916,6 +919,9 @@ async function exerciseExplorerDoubleClick() {
             enteredOnce: true,
             restored: true,
             gesture: 'pointerMove → pointerDown → pointerUp × 2',
+            captures: [beforeDoubleClickCapture, enteredCapture, restoredCapture]
+                .filter(Boolean)
+                .map((path) => path.split(/[\\/]/).at(-1)),
             passed: true,
         });
     } finally {
@@ -3203,9 +3209,23 @@ async function exerciseLToolsIntegration() {
     const pickerIds = [];
     for (const label of labels) pickerIds.push(await attribute(label[elementKey], 'data-ltools-action-id'));
     const pickerIdSet = new Set(pickerIds.filter(Boolean));
-    const chosen = compatible.find((action) =>
-        pickerIdSet.has(action.id) && action.mutating === false && action.confirmation === 'none'
-    );
+    // Para probar la ejecución real sin convertir el smoke en una auditoría
+    // larga, se prefiere una acción segura de consulta sin argumentos. El
+    // criterio sigue siendo declarativo: si una versión futura de LTools no
+    // publica ese ejemplo, se usa cualquier acción marcada como rápida y,
+    // finalmente, la primera acción compatible del catálogo.
+    const chosen = [...compatible]
+        .filter((action) => pickerIdSet.has(action.id)
+            && action.mutating === false
+            && action.confirmation === 'none')
+        .sort((left, right) => {
+            const priority = (action) => action.id === 'defaults.show'
+                ? 0
+                : action.quick === true
+                    ? 1
+                    : (Array.isArray(action.args) && action.args.length === 0 ? 2 : 3);
+            return priority(left) - priority(right);
+        })[0];
     if (!chosen) throw new Error(`No se encontró una acción segura del JSON en el selector: ${JSON.stringify({ compatibleCount, pickerIds })}`);
 
     let runIds = [];
@@ -3232,8 +3252,26 @@ async function exerciseLToolsIntegration() {
         || !selectedAfterToggle.includes(chosen.id)) {
         throw new Error(`El selector de LTools no respetó sus límites o no fijó la acción elegida: ${JSON.stringify(selectedAfterToggle)}`);
     }
+    const selectionStored = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const prefix = 'lterminal.ltools.quick-actions.v1.';
+            return Object.keys(localStorage)
+                .filter((key) => key.startsWith(prefix))
+                .some((key) => {
+                    try {
+                        const ids = JSON.parse(localStorage.getItem(key) ?? 'null');
+                        return Array.isArray(ids) && ids.includes(arguments[0]);
+                    } catch {
+                        return false;
+                    }
+                });`,
+        args: [chosen.id],
+    });
+    if (selectionStored !== true) {
+        throw new Error(`El selector de LTools no persistió ${chosen.id} en localStorage.`);
+    }
     // Cerrar y volver a abrir demuestra que la selección vive en el perfil y
-    // no solo en el estado del componente mientras el selector está abierto.
+    // no solo en el estado del componente mientras el selector está abierto;
+    // la comprobación anterior confirma además la clave persistida real.
     await click(await findWhenReady('[role="dialog"] .panel-close'));
     await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca tras fijar LTools');
     await click(await findWhenReady('[data-testid="toolbar-library"]'));
@@ -3244,9 +3282,12 @@ async function exerciseLToolsIntegration() {
     await click(await findWhenReady(`[data-testid="scripts-ltools-run"][data-ltools-action-id="${chosen.id}"]`));
     await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca tras ejecutar LTools');
     await waitUntil(async () => {
-        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-        return (await textOf(rows)).includes(`actions run ${chosen.id}`);
-    }, 30000, `comando canónico de LTools ${chosen.id}`);
+        const snapshot = await activeTerminalRowSnapshot();
+        const text = snapshot.rows.map((row) => row.text).join('\n');
+        const commandIndex = text.lastIndexOf(`actions run ${chosen.id}`);
+        return commandIndex >= 0
+            && promptLooksVisible(text.slice(commandIndex + `actions run ${chosen.id}`.length));
+    }, 30000, `resultado y prompt tras LTools ${chosen.id}`);
     recordEvent('ltools-integration', {
         binary,
         schema: catalog.schema,
@@ -3256,6 +3297,9 @@ async function exerciseLToolsIntegration() {
         selectedAction: chosen.id,
         selectedCount: selectedAfterToggle.length,
         selectionPersisted: true,
+        selectionStorageVerified: true,
+        executionCompleted: true,
+        resultPromptVisible: true,
         catalogDiscoveryMs: live.durationMs,
         candidateAttempts: live.attempts,
         durationMs: Date.now() - startedAt,
@@ -4394,14 +4438,11 @@ try {
     await click(await findWhenReady('[data-testid="scripts-ltools"] > summary'));
     if ((await attribute(ltoolsSection, 'open')) !== 'true') throw new Error('No se pudo desplegar el catálogo de acciones de LTools');
     const ltoolsText = await textOf(ltoolsSection);
-    const ltoolsButtons = await findAll('[data-testid="scripts-ltools"] button');
-    let installControlVisible = false;
-    for (const button of ltoolsButtons) {
-        if (/Obtener LTools|Get LTools/i.test(await textOf(button))) {
-            installControlVisible = true;
-            break;
-        }
-    }
+    // El catálogo puede reemplazar sus botones cuando termina una sonda de
+    // disponibilidad. No conserves referencias WebDriver a esos nodos entre
+    // renders: leer el acordeón ya estabilizado evita el falso fallo
+    // «[object Object]» sin dejar de comprobar que la opción existe.
+    const installControlVisible = /Obtener LTools|Get LTools/i.test(ltoolsText);
     const ltoolsAvailable = (await findAll('[data-testid="scripts-ltools-meta"]')).length === 1;
     if (!ltoolsAvailable && !/LTools|WinSlim Tools/i.test(ltoolsText)) {
         throw new Error(`La Biblioteca no muestra el estado de LTools ni el control de instalación: ${JSON.stringify(ltoolsText)}`);

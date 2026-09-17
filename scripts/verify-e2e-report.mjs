@@ -121,6 +121,9 @@ if (report.focusedScenario === 'ltools-catalog-integration') {
         || typeof integration.selectedAction !== 'string' || !integration.selectedAction
         || !Number.isInteger(integration.selectedCount) || integration.selectedCount < 1 || integration.selectedCount > 8
         || integration.selectionPersisted !== true
+        || integration.selectionStorageVerified !== true
+        || integration.executionCompleted !== true
+        || integration.resultPromptVisible !== true
         || !Number.isFinite(integration.durationMs) || integration.durationMs < 0
         || !Number.isFinite(integration.catalogDiscoveryMs) || integration.catalogDiscoveryMs < 0
         || !Array.isArray(integration.candidateAttempts)

@@ -90,7 +90,6 @@ const placeholderContracts = {
     'terminal.bannerStatus': ['state'],
     'terminal.hiddenCount': ['count'],
     'terminal.bannerUpdated': ['state'],
-    'terminal.quickActionsStatus': ['state'],
     'terminal.replMissing': ['name'],
     'terminal.helpFallback': ['topic'],
     'update.packagesAvailable': ['manager'],

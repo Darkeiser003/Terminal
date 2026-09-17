@@ -345,11 +345,15 @@ La integración con LTools también se puede probar sin recompilar:
 
 ```bash
 E2E_BINARY="$PWD/releases/LTerminal-1.0.0-x86_64.AppImage" \
-LTOOLS_TEST_BINARY="$PWD/../Tools/rust/target/release/ltools" \
+LTOOLS_TEST_BINARY="$PWD/../Tools/release/ltools-1.0.0-linux-x86_64-cli.AppImage" \
 npm run test:e2e:ltools
 ```
 
 Esta prueba es optativa porque LTools no es una dependencia de LTerminal. La
+release Linux se puede probar aunque el equipo no tenga FUSE montado: el
+contrato establece automáticamente `APPIMAGE_EXTRACT_AND_RUN=1` al invocar el
+AppImage. En Windows, usa el ejecutable CLI equivalente de la carpeta
+`release/`.
 interfaz no mantiene una lista cerrada: vuelve a leer `ltools-actions-v1`,
 acepta los metadatos opcionales `label`, `shortLabel`, `description` y `quick`,
 y muestra automáticamente cualquier acción nueva que cumpla las reglas de

@@ -16,7 +16,7 @@
     import * as perf from '../lib/performance';
     import { retryUntilReady } from '../lib/terminal-ready';
     import { normalizeWheelDelta } from '../lib/terminal-scroll';
-    import { longestVisibleLogicalLineWidth, occupiedTerminalColumns, requiredTerminalColumns } from '../lib/terminal-columns';
+    import { inputReservationColumns, longestVisibleLogicalLineWidth, occupiedTerminalColumns, requiredTerminalColumns } from '../lib/terminal-columns';
     import {
         interactiveReplBannerSignalsReady,
         interactiveReplInputLine,
@@ -46,6 +46,11 @@
     let fitAddon: FitAddon | undefined;
     let observer: ResizeObserver | undefined;
     let mirroredLine: string | null = '';
+    // La línea que acaba de enviar el usuario puede quedar visible como eco
+    // envuelto mientras la orden ya está produciendo salida. No debe contarse
+    // como contenido horizontal: una orden larga se ajusta al viewport, pero
+    // una barra larga que imprime la orden sí debe poder pedir scroll.
+    let submittedCommand: string | null = null;
     // La shell puede aceptar teclas antes de que el banner inicial haya
     // terminado de llegar al xterm (sobre todo en pestañas creadas en segundo
     // plano). Retenerlas brevemente conserva la entrada del usuario y evita
@@ -231,7 +236,7 @@
             return;
         }
         term?.writeln(`\r\n${app.t('terminal.quickActionsStatus', 'Las acciones rápidas heredadas fueron sustituidas por las acciones fijadas de LTools.')}`);
-        term?.writeln(app.t('terminal.quickActionsUsage', 'Configúralas desde Biblioteca → Acciones fijadas de LTools.'));
+        term?.writeln(app.t('terminal.quickActionsMigration', 'Configúralas desde Biblioteca → Acciones fijadas de LTools.'));
     }
 
     function environmentMatches(environment: Environment, wanted: string): boolean {
@@ -601,7 +606,7 @@
                 // `ayuda` en Python, Node, Docker o ADB como si fuera código
                 // de esa shell.
                 term?.writeln(`\r\n${translated('terminal.helpFallback', 'Help{topic}: use :help from a terminal or consult the internal commands.', { topic: topic ? ` (${topic})` : '' })}`);
-                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :help [section]  :config/:settings  :reload  :shell [list|current|<name>]  :repl <name>  :panel <panel|close>  :explorer-here  :theme [list|<id>]  :font [list|<id>]  :language [list|<id>]  :terminal [list|<key> <value>]  :panes [1|2|3|4|cycle]  :banner [options]  :quick-actions [options]'));
+                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :help [section]  :config/:settings  :reload  :shell [list|current|<name>]  :repl <name>  :panel <panel|close>  :explorer-here  :theme [list|<id>]  :font [list|<id>]  :language [list|<id>]  :terminal [list|<key> <value>]  :panes [1|2|3|4|cycle]  :banner [options]  :quick-actions list'));
             }
         } else {
             term?.writeln(`\r\n${app.t('terminal.commandList', ':help  :config/:settings  :reload  :shell  :repl  :panel  :explorer-here  :theme  :font  :language  :terminal  :panes  :alias  :banner  :quick-actions')}`);
@@ -688,12 +693,50 @@
         const terminal = term;
         const buffer = terminal.buffer.active;
         const cursorAbsoluteRow = buffer.baseY + buffer.cursorY;
+        const ignoredInputLineStarts = new Set<number>();
+        const command = submittedCommand;
+        if (command) {
+            const visited = new Set<number>();
+            const firstRow = buffer.viewportY;
+            const lastRow = Math.min(buffer.length, firstRow + terminal.rows);
+            for (let row = firstRow; row < lastRow; row += 1) {
+                let lineStart = row;
+                while (lineStart > 0 && buffer.getLine(lineStart)?.isWrapped) lineStart -= 1;
+                if (visited.has(lineStart)) continue;
+                visited.add(lineStart);
+                let text = '';
+                for (let part = lineStart; part < lastRow; part += 1) {
+                    const line = buffer.getLine(part);
+                    text += line?.translateToString(true) ?? '';
+                    if (!buffer.getLine(part + 1)?.isWrapped) break;
+                }
+                // El eco suele llevar el prompt delante y xterm puede insertar
+                // una separación al replegar una palabra justo en el borde.
+                // Para órdenes largas exigimos principio y final: así no se
+                // descarta una salida que solo comparte un fragmento, pero sí
+                // se reconoce el eco aunque el renderer haya refluido la fila.
+                const normalizedText = text.replace(/\s+/gu, ' ');
+                const normalizedCommand = command.replace(/\s+/gu, ' ');
+                const isLongCommand = normalizedCommand.length >= 32;
+                const promptLike = /^(?:~|❯|➜|[$#]|PS\s|[A-Za-z]:[\\/])(?:\s|$)/u.test(normalizedText);
+                const commandMatches = isLongCommand
+                    ? normalizedText.includes(normalizedCommand.slice(0, 24))
+                        && normalizedText.includes(normalizedCommand.slice(-24))
+                    : normalizedText.includes(normalizedCommand);
+                if (commandMatches || (isLongCommand && promptLike)) ignoredInputLineStarts.add(lineStart);
+            }
+        }
         return longestVisibleLogicalLineWidth(
             buffer.length,
             buffer.viewportY,
             terminal.rows,
             (row) => {
                 const line = buffer.getLine(row);
+                let lineStart = row;
+                while (lineStart > 0 && buffer.getLine(lineStart)?.isWrapped) lineStart -= 1;
+                if (ignoredInputLineStarts.has(lineStart)) {
+                    return line ? { columns: 0, isWrapped: line.isWrapped } : undefined;
+                }
                 let columns = line
                     ? occupiedTerminalColumns(line, terminal.cols, MAX_HORIZONTAL_COLS)
                     : 0;
@@ -1637,7 +1680,12 @@
                     });
                 return;
             }
-            if (enterAt !== undefined) mirroredLine = '';
+            if (enterAt !== undefined) {
+                submittedCommand = candidate.trimStart().startsWith(':') || isDirectCreditAlias(candidate)
+                    ? null
+                    : candidate;
+                mirroredLine = '';
+            }
             else if (terminators.length > 1) mirroredLine = /[\r\n]$/.test(mirroredLineData) ? '' : null;
             else if (mirroredLineData === '\u007f' && mirroredLine !== null) mirroredLine = mirroredLine.slice(0, -1);
             else if (/^[\x20-\x7e]+$/.test(mirroredLineData) && mirroredLine !== null) mirroredLine += mirroredLineData;
@@ -1651,15 +1699,20 @@
                             ? 'ascii'
                             : controlEventClass(mirroredLineData),
             );
-            // Reservar columnas antes de entregar la tecla a la PTY evita que
-            // la shell alcance a ecoar el siguiente espacio con la anchura
-            // antigua. Es especialmente importante al pegar una línea larga:
-            // xterm puede ampliarse en este mismo frame y el backend recibe el
-            // resize antes de pintar el eco.
+            // Reservar unas pocas columnas antes de entregar la tecla a la PTY
+            // evita que la shell alcance a ecoar el siguiente espacio con la
+            // anchura antigua. No se reserva toda una línea pegada: su texto
+            // debe envolverse en el viewport, no ensanchar la rejilla hasta
+            // cientos de columnas.
             const printableInput = mirroredData.replace(/[\x00-\x1f\x7f]/g, '');
             if (printableInput) {
                 const cursorColumn = term?.buffer.active.cursorX ?? 0;
-                const requiredColumns = Math.min(MAX_HORIZONTAL_COLS, cursorColumn + printableInput.length + 2);
+                const requiredColumns = inputReservationColumns(
+                    cursorColumn,
+                    printableInput.length,
+                    4,
+                    MAX_HORIZONTAL_COLS,
+                );
                 if (requiredColumns > (term?.cols ?? 0)) fitAndReport(requiredColumns);
             }
             void api.sendInput(tabId, data);

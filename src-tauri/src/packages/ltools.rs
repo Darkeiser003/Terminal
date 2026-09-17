@@ -32,6 +32,7 @@ const MAX_ARGUMENTS: usize = 32;
 const MAX_ARGUMENT: usize = 512;
 const MAX_CATALOG_BYTES: usize = 512 * 1024;
 const MAX_VERSION_BYTES: usize = 160;
+const MAX_RELEASE_DIRECTORIES: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,6 +192,40 @@ fn add_directory_candidates(directory: &Path, output: &mut Vec<PathBuf>) {
     }
 }
 
+fn release_directory_name_is_safe(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && (name == "latest"
+            || name.starts_with('v')
+            || name.starts_with('V')
+            || name
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit()))
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_+".contains(character))
+}
+
+/// `projects_download_release` guarda cada adjunto en una carpeta cuyo nombre
+/// es el tag de la release. Solo se inspecciona el primer nivel de los dos
+/// almacenes conocidos y se limita el número de entradas; nunca se convierte
+/// el descubrimiento en un recorrido recursivo del HOME.
+fn versioned_release_directories(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .take(MAX_RELEASE_DIRECTORIES)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            (path.is_dir() && release_directory_name_is_safe(name)).then_some(path)
+        })
+        .collect()
+}
+
 fn discovery_directories() -> Vec<PathBuf> {
     let home = crate::paths::home_dir();
     let mut roots = Vec::new();
@@ -226,6 +261,14 @@ fn discovery_directories() -> Vec<PathBuf> {
     // encontrar el CLI sin exigir que copie archivos a mano a ~/.local/bin.
     add(crate::paths::documents_dir().join("LTerminal Projects/_releases/Darkeiser003/Tools"));
     add(crate::paths::documents_dir().join("WinSlim Projects/_releases/Darkeiser003/Tools"));
+    for release_root in [
+        crate::paths::documents_dir().join("LTerminal Projects/_releases/Darkeiser003/Tools"),
+        crate::paths::documents_dir().join("WinSlim Projects/_releases/Darkeiser003/Tools"),
+    ] {
+        for release_directory in versioned_release_directories(&release_root) {
+            add(release_directory);
+        }
+    }
     for directory in [
         dirs::download_dir(),
         dirs::desktop_dir(),
@@ -479,7 +522,7 @@ fn parse_actions(output: &[u8], executable: &str) -> Result<Vec<LToolsAction>, S
 }
 
 fn version_for(executable: &str) -> Option<String> {
-    crate::process::run_with_timeout(executable, &["--version"], Duration::from_secs(2))
+    run_ltools_command(executable, &["--version"], Duration::from_secs(2))
         .filter(|output| output.status.success())
         .and_then(|output| {
             let bytes = if output.stdout.is_empty() {
@@ -493,6 +536,27 @@ fn version_for(executable: &str) -> Option<String> {
         })
         .map(|value| value.lines().next().unwrap_or_default().trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn run_ltools_command(
+    executable: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    if Path::new(executable)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"))
+    {
+        // AppImage no siempre puede montar FUSE en equipos mínimos. Esta es
+        // la ruta oficial de extracción temporal y conserva el mismo CLI.
+        return crate::process::run_with_timeout_env(
+            executable,
+            args,
+            timeout,
+            &[("APPIMAGE_EXTRACT_AND_RUN", "1")],
+        );
+    }
+    crate::process::run_with_timeout(executable, args, timeout)
 }
 
 fn list_actions() -> LToolsActionList {
@@ -510,7 +574,7 @@ fn list_actions() -> LToolsActionList {
     let mut last_error = "LTools terminó con un error al consultar sus acciones.".to_string();
     for path in candidates {
         let executable = path.to_string_lossy().into_owned();
-        let Some(output) = crate::process::run_with_timeout(
+        let Some(output) = run_ltools_command(
             &executable,
             &["actions", "list", "--format", "json"],
             Duration::from_secs(5),
@@ -568,15 +632,28 @@ fn quote_for_shell(value: &str, kind: ShellKind) -> String {
 }
 
 fn command_for_action(action: &LToolsAction, executable: &str, kind: ShellKind) -> String {
-    std::iter::once(quote_for_shell(executable, kind))
-        .chain(
-            ["actions", "run"]
-                .into_iter()
-                .map(|argument| argument.to_string()),
+    let appimage_extract_prefix = if cfg!(unix)
+        && matches!(
+            kind,
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Sh
         )
-        .chain(std::iter::once(quote_for_shell(&action.id, kind)))
-        .collect::<Vec<_>>()
-        .join(" ")
+        && Path::new(executable)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"))
+    {
+        Some("APPIMAGE_EXTRACT_AND_RUN=1")
+    } else {
+        None
+    };
+
+    let mut parts = Vec::with_capacity(5);
+    if let Some(prefix) = appimage_extract_prefix {
+        parts.push(prefix.to_string());
+    }
+    parts.push(quote_for_shell(executable, kind));
+    parts.extend(["actions", "run"].into_iter().map(str::to_string));
+    parts.push(quote_for_shell(&action.id, kind));
+    parts.join(" ")
 }
 
 #[tauri::command(async)]
@@ -733,6 +810,36 @@ mod tests {
     }
 
     #[test]
+    fn ejecuta_appimage_sin_requerir_fuse_en_shell_posix() {
+        let action = &catalog(serde_json::json!({
+            "id":"defaults.show", "category":"defaults", "command":"defaults",
+            "args":[], "target":"none", "targetPolicy":"none",
+            "mutating":false, "confirmation":"none", "profile":"safe-default"
+        }))[0];
+        let expected_fish_command = if cfg!(unix) {
+            "APPIMAGE_EXTRACT_AND_RUN=1 '/opt/L Tools/ltools-1.0.0-linux-x86_64-cli.AppImage' actions run defaults.show"
+        } else {
+            "'/opt/L Tools/ltools-1.0.0-linux-x86_64-cli.AppImage' actions run defaults.show"
+        };
+        assert_eq!(
+            command_for_action(
+                action,
+                "/opt/L Tools/ltools-1.0.0-linux-x86_64-cli.AppImage",
+                ShellKind::Fish
+            ),
+            expected_fish_command
+        );
+        assert_eq!(
+            command_for_action(
+                action,
+                "C:\\Tools\\ltools-1.0.0-windows-x86_64-cli.exe",
+                ShellKind::Cmd
+            ),
+            "\"C:\\Tools\\ltools-1.0.0-windows-x86_64-cli.exe\" actions run defaults.show"
+        );
+    }
+
+    #[test]
     fn cita_rutas_con_espacios_sin_construir_un_shell_interno() {
         assert_eq!(
             quote_for_shell("/tmp/l tools/ltools", ShellKind::Bash),
@@ -792,5 +899,37 @@ mod tests {
         assert!(directories
             .iter()
             .all(|path| path.components().count() < 32));
+    }
+
+    #[test]
+    fn reconoce_el_directorio_de_tag_de_una_release_descargada() {
+        let root = std::env::temp_dir().join(format!(
+            "lterminal-ltools-release-discovery-{}",
+            std::process::id()
+        ));
+        let tagged = root.join("v1.0.0");
+        let unrelated = root.join("cache");
+        std::fs::create_dir_all(&tagged).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let found = versioned_release_directories(&root);
+        assert!(found.contains(&tagged));
+        assert!(!found.contains(&unrelated));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn acepta_tags_de_release_con_v_mayuscula() {
+        assert!(release_directory_name_is_safe("V1.0.0"));
+        assert!(!release_directory_name_is_safe("../outside"));
+    }
+
+    #[test]
+    fn solo_activa_extraccion_para_un_appimage() {
+        assert!(Path::new("ltools-1.0.0-linux-x86_64-cli.AppImage")
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage")));
+        assert!(!Path::new("ltools-1.0.0-windows-x86_64-cli.exe")
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage")));
     }
 }

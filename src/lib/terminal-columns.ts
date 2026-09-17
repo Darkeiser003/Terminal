@@ -35,6 +35,27 @@ export function requiredTerminalColumns(
 }
 
 /**
+ * Reserva solo unas pocas columnas cuando llega entrada nueva. Una línea
+ * pegada puede tener cientos de caracteres y debe envolverse dentro del
+ * viewport; usar toda su longitud como reserva convierte una orden larga en
+ * una rejilla horizontal permanente. El pequeño margen evita que el cursor
+ * alcance el borde entre dos eventos de teclado consecutivos.
+ */
+export function inputReservationColumns(
+    cursorColumn: number,
+    inputLength: number,
+    lookahead = 4,
+    maxColumns = 2048,
+): number {
+    const integer = (value: number, fallback: number) => Number.isFinite(value) ? Math.floor(value) : fallback;
+    const safeMaxColumns = Math.max(1, integer(maxColumns, 2048));
+    const safeCursorColumn = Math.max(0, Math.min(safeMaxColumns, integer(cursorColumn, 0)));
+    const safeInputLength = Math.max(0, integer(inputLength, 0));
+    const safeLookahead = Math.max(0, integer(lookahead, 4));
+    return Math.min(safeMaxColumns, safeCursorColumn + Math.min(safeInputLength, safeLookahead) + 2);
+}
+
+/**
  * Devuelve las columnas ocupadas por el contenido visible de una fila.
  * `String.length` cuenta unidades UTF-16, no celdas de terminal: por ejemplo,
  * un carácter CJK ocupa dos columnas aunque su longitud sea uno. Se ignoran
