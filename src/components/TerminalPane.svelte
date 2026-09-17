@@ -155,7 +155,7 @@
         // un `@` opcional y ninguna palabra adicional. Mantener esta pequeña
         // preselección aquí evita enviar el alias a la shell antes de que el
         // IPC pueda confirmarlo.
-        return /^@?(?:darkeiser003|christianlg97)$/i.test(line.trim());
+        return /^@?darkeiser003$/i.test(line.trim());
     }
 
     async function configureBanner(argument?: string): Promise<void> {
@@ -222,30 +222,16 @@
     async function configureQuickActions(argument?: string): Promise<void> {
         const tokens = (argument ?? 'list').trim().split(/\s+/).filter(Boolean);
         if (tokens.length > 1) {
-            term?.writeln(`\r\n${app.t('terminal.quickActionsUsage', 'Usage: :quick-actions on|off|toggle|list')}`);
+            term?.writeln(`\r\n${app.t('terminal.quickActionsUsage', 'Uso heredado: :quick-actions list')}`);
             return;
         }
         const action = (tokens[0] ?? 'list').toLowerCase();
-        const current = app.preferences?.showQuickActions ?? true;
-        if (action === 'list') {
-            const state = current ? app.t('terminal.visible', 'visible') : app.t('terminal.hidden', 'hidden');
-            term?.writeln(`\r\n${translated('terminal.quickActionsStatus', 'Quick actions: {state}', { state })}`);
-            term?.writeln(app.t('terminal.quickActionsUsage', 'Usage: :quick-actions on|off|toggle|list'));
+        if (action !== 'list') {
+            term?.writeln(`\r\n${app.t('terminal.quickActionsUsage', 'Uso heredado: :quick-actions list')}`);
             return;
         }
-
-        let next: boolean;
-        if (['on', 'show', 'mostrar', 'enable', 'enabled'].includes(action)) next = true;
-        else if (['off', 'hide', 'ocultar', 'disable', 'disabled'].includes(action)) next = false;
-        else if (['toggle', 'alternar'].includes(action)) next = !current;
-        else {
-            term?.writeln(`\r\n${app.t('terminal.quickActionsUsage', 'Usage: :quick-actions on|off|toggle|list')}`);
-            return;
-        }
-
-        await app.savePreferences({ showQuickActions: next });
-        const state = next ? app.t('terminal.visible', 'visible') : app.t('terminal.hidden', 'hidden');
-        term?.writeln(`\r\n${translated('terminal.quickActionsStatus', 'Quick actions: {state}', { state })}.`);
+        term?.writeln(`\r\n${app.t('terminal.quickActionsStatus', 'Las acciones rápidas heredadas fueron sustituidas por las acciones fijadas de LTools.')}`);
+        term?.writeln(app.t('terminal.quickActionsUsage', 'Configúralas desde Biblioteca → Acciones fijadas de LTools.'));
     }
 
     function environmentMatches(environment: Environment, wanted: string): boolean {
@@ -585,13 +571,15 @@
             await configurePanes(command.argument);
         } else if (command.action === 'openDirectory') {
             await openCurrentDirectory();
-        } else if (command.action === 'darkeiser003' || command.action === 'christianlg97') {
+        } else if (command.action === 'darkeiser003') {
             // Los créditos se generan en el mismo archivo de ayuda que usa la
             // shell. Ejecutarlos por el PTY, en vez de escribir directamente
             // en xterm, mantiene sincronizados el cursor real, el historial y
             // el prompt; además recoge el idioma actualizado al regenerarse
             // los archivos de sesión.
-            await api.sendInput(tabId, 'ayuda creditos\r');
+            // Usar la sección específica evita desplazar el título fuera del
+            // viewport y mantiene el crédito del desarrollador aislado.
+            await api.sendInput(tabId, `ayuda ${command.action}\r`);
             shellPrintsPrompt = true;
         } else if (command.action === 'help' || command.action === 'alias') {
             const topic = command.action === 'alias' ? 'alias' : command.argument;

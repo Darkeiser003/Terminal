@@ -757,6 +757,24 @@ pub fn projects_download_release(
             return DownloadResult::failed(error);
         }
     };
+    // GitHub almacena el adjunto como bytes y no conserva necesariamente el
+    // bit ejecutable. Las AppImage descargadas desde Biblioteca deben poder
+    // abrirse con doble clic y también ser detectables por integraciones como
+    // LTools; se corrige solo este formato y nunca permisos de archivos
+    // arbitrarios del usuario.
+    #[cfg(unix)]
+    if destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"))
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(&destination) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(permissions.mode() | 0o111);
+            let _ = std::fs::set_permissions(&destination, permissions);
+        }
+    }
     log_info!(
         "Adjunto descargado",
         serde_json::json!({ "asset": asset.name, "bytes": bytes })
@@ -1162,13 +1180,16 @@ mod tests {
         assert_eq!(catalog.fixed_profiles, vec!["Darkeiser003"]);
         assert_eq!(catalog.developers, vec!["Darkeiser003"]);
         assert!(catalog.project_leads.is_empty());
-        assert!(catalog.repositories.is_empty());
+        assert_eq!(catalog.repositories, vec!["Darkeiser003/Tools"]);
     }
 
     #[test]
-    fn el_repositorio_de_actualizacion_no_se_convierte_en_un_anclado_visible() {
+    fn el_repositorio_de_actualizacion_no_se_convierte_en_un_anclado_visible_y_tools_si() {
         let catalog = github::default_catalog();
-        assert!(catalog.repositories.is_empty());
+        assert_eq!(catalog.repositories, vec!["Darkeiser003/Tools"]);
+        assert!(!catalog
+            .repositories
+            .contains(&"Darkeiser003/Terminal".to_string()));
         assert!(crate::install_dir::is_self_repository(
             "Darkeiser003/Terminal"
         ));
@@ -1211,7 +1232,7 @@ mod tests {
         let catalog = github::default_catalog();
         assert!(catalog.owners.is_empty());
         assert_eq!(catalog.fixed_profiles, vec!["Darkeiser003"]);
-        assert!(catalog.repositories.is_empty());
+        assert_eq!(catalog.repositories, vec!["Darkeiser003/Tools"]);
         assert_eq!(catalog.developers, vec!["Darkeiser003"]);
         assert!(catalog.project_leads.is_empty());
         assert_eq!(

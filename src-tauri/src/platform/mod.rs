@@ -28,6 +28,8 @@ pub use linux::{probe_virtualization, run_wsl};
 #[cfg(windows)]
 pub use windows::nsudo_path;
 #[cfg(windows)]
+pub use windows::webview2;
+#[cfg(windows)]
 pub use windows::{open_directory, open_path};
 #[cfg(windows)]
 pub use windows::{probe_virtualization, run_wsl};

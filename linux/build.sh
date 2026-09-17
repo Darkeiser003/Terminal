@@ -1152,26 +1152,13 @@ if ! command -v "$APPIMAGETOOL" >/dev/null 2>&1; then
 else
     ok "appimagetool presente"
 fi
-
-# appimagetool puede traer su propio runtime AppImage, pero las versiones
-# recientes intentan descargarlo de GitHub si no se les pasa explícitamente.
-# Eso hace que una build offline falle al final, después de haber compilado
-# todo. Reutilizamos el runtime embebido en el propio appimagetool y lo
-# guardamos en caché; también se admite una ruta explícita para CI o mirrors.
+# Resolvemos el runtime type2 explícitamente para no depender de descargas
+# tardías dentro de appimagetool, cuando la compilación ya está terminada.
 case "$(uname -m)" in
     x86_64|amd64) APPIMAGE_ARCH="x86_64" ;;
     aarch64|arm64) APPIMAGE_ARCH="aarch64" ;;
     *) APPIMAGE_ARCH="$(uname -m)" ;;
 esac
-# El plugin AppImage de linuxdeploy usa Zstandard en sus versiones actuales.
-# Se puede sobrescribir para un toolchain antiguo que soporte otra compresión.
-# El plugin de Tauri/linuxdeploy actual solo genera Zstandard con el
-# mksquashfs que trae integrado. El appimagetool antiguo que suele estar en el
-# PATH puede no entender Zstandard; aun así, XZ no es compatible con el runtime
-# AppImage extraído que usan el smoke y los entornos sin FUSE. La compresión
-# final se mantiene en Zstandard con la herramienta moderna y usa gzip (zlib)
-# con la antigua, salvo que el usuario la fuerce explícitamente.
-APPIMAGE_COMP="${LTERMINAL_APPIMAGE_COMP:-zstd}"
 # El appimagetool que distribuye Tauri es moderno y trae el mksquashfs que
 # necesita. Preferirlo evita que una versión antigua del PATH intente montar
 # su propio AppImage (fallando sin FUSE) o rechace Zstandard.
@@ -1180,12 +1167,21 @@ BUNDLED_APPIMAGE_BIN_DIR="$(dirname "$BUNDLED_APPIMAGETOOL")"
 if [ -x "$BUNDLED_APPIMAGETOOL" ] && [ -x "$BUNDLED_APPIMAGE_BIN_DIR/mksquashfs" ]; then
     APPIMAGETOOL="$BUNDLED_APPIMAGETOOL"
     export PATH="$BUNDLED_APPIMAGE_BIN_DIR:$PATH"
-    APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-zstd}"
+    APPIMAGE_POST_COMP_DEFAULT="zstd"
     ok "appimagetool moderno de Tauri seleccionado"
 else
-    APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-gzip}"
+    APPIMAGE_POST_COMP_DEFAULT="gzip"
 fi
 APPIMAGE_RUNTIME_FILE="${LTERMINAL_APPIMAGE_RUNTIME:-}"
+# linuxdeploy >= 368 bundles a mksquashfs that only supports Zstandard.
+# Keep that intermediate bundle format fixed; the final appimagetool pass may
+# still use gzip on older tooling if explicitly selected or as its default.
+APPIMAGE_COMP="${LTERMINAL_APPIMAGE_COMP:-zstd}"
+APPIMAGE_POST_COMP="${LTERMINAL_APPIMAGE_POST_COMP:-$APPIMAGE_POST_COMP_DEFAULT}"
+if [ "$APPIMAGE_COMP" != "zstd" ]; then
+    err "El plugin AppImage de linuxdeploy requiere LTERMINAL_APPIMAGE_COMP=zstd; se recibió '$APPIMAGE_COMP'."
+    exit 1
+fi
 if [ -n "$APPIMAGE_RUNTIME_FILE" ]; then
     if [ ! -f "$APPIMAGE_RUNTIME_FILE" ] || [ ! -s "$APPIMAGE_RUNTIME_FILE" ]; then
         err "LTERMINAL_APPIMAGE_RUNTIME no apunta a un runtime válido: $APPIMAGE_RUNTIME_FILE"
@@ -1202,16 +1198,13 @@ else
             APPIMAGE_CACHE_DIR=""
         fi
     fi
-    APPIMAGE_RUNTIME_CACHE="${APPIMAGE_CACHE_DIR:+$APPIMAGE_CACHE_DIR/runtime-$APPIMAGE_ARCH-$APPIMAGE_COMP}"
+    APPIMAGE_RUNTIME_CACHE="${APPIMAGE_CACHE_DIR:+$APPIMAGE_CACHE_DIR/runtime-$APPIMAGE_ARCH-zstd}"
     if [ -n "$APPIMAGE_RUNTIME_CACHE" ] && [ -s "$APPIMAGE_RUNTIME_CACHE" ]; then
         APPIMAGE_RUNTIME_FILE="$APPIMAGE_RUNTIME_CACHE"
-        ok "Runtime AppImage reutilizado desde caché"
+        ok "Runtime AppImage Zstandard reutilizado desde caché"
     else
-        # El runtime embebido en algunas versiones antiguas de appimagetool no
-        # entiende Zstandard. Primero se intenta el runtime oficial actual,
-        # que es pequeño y se conserva para las siguientes builds.
         RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-$APPIMAGE_ARCH"
-        RUNTIME_DOWNLOAD_TARGET="${APPIMAGE_RUNTIME_CACHE:-${TMPDIR:-/tmp}/lterminal-appimage-runtime-$APPIMAGE_ARCH-$APPIMAGE_COMP}"
+        RUNTIME_DOWNLOAD_TARGET="${APPIMAGE_RUNTIME_CACHE:-${TMPDIR:-/tmp}/lterminal-appimage-runtime-$APPIMAGE_ARCH-zstd}"
         RUNTIME_DOWNLOAD_TMP="$RUNTIME_DOWNLOAD_TARGET.tmp.$$"
         if command -v curl >/dev/null 2>&1 && \
             curl -L --fail --silent --show-error --retry 2 --connect-timeout 8 --max-time 60 \
@@ -1227,31 +1220,10 @@ else
         else
             rm -f "$RUNTIME_DOWNLOAD_TMP"
         fi
-    fi
-    if [ -z "$APPIMAGE_RUNTIME_FILE" ]; then
-        if [ "$APPIMAGE_COMP" = "zstd" ]; then
+        if [ -z "$APPIMAGE_RUNTIME_FILE" ]; then
             err "No hay un runtime AppImage moderno disponible para la compresión Zstandard."
             echo "    Con red se descarga automáticamente; sin red, usa LTERMINAL_APPIMAGE_RUNTIME=/ruta/runtime-$APPIMAGE_ARCH." >&2
             exit 1
-        fi
-        APPIMAGETOOL_BIN="$(command -v "$APPIMAGETOOL" 2>/dev/null || true)"
-        RUNTIME_OFFSET=""
-        if [ -n "$APPIMAGETOOL_BIN" ] && [ -x "$APPIMAGETOOL_BIN" ]; then
-            RUNTIME_OFFSET="$(APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL_BIN" --appimage-offset 2>/dev/null || true)"
-        fi
-        if [[ "$RUNTIME_OFFSET" =~ ^[0-9]+$ ]] && [ "$RUNTIME_OFFSET" -ge 65536 ]; then
-            RUNTIME_TMP="${APPIMAGE_RUNTIME_CACHE:+$APPIMAGE_RUNTIME_CACHE.tmp.$$}"
-            if [ -n "$RUNTIME_TMP" ] && \
-                dd if="$APPIMAGETOOL_BIN" of="$RUNTIME_TMP" bs=1 count="$RUNTIME_OFFSET" status=none && \
-                chmod +x "$RUNTIME_TMP" && mv -f "$RUNTIME_TMP" "$APPIMAGE_RUNTIME_CACHE"; then
-                APPIMAGE_RUNTIME_FILE="$APPIMAGE_RUNTIME_CACHE"
-                ok "Runtime AppImage extraído del appimagetool y guardado en caché"
-            else
-                [ -z "$RUNTIME_TMP" ] || rm -f "$RUNTIME_TMP"
-                warn "No se pudo extraer el runtime embebido de appimagetool; se intentará el mecanismo remoto."
-            fi
-        else
-            warn "appimagetool no expone un runtime local; se intentará descargarlo si no hay caché."
         fi
     fi
 fi
@@ -1619,9 +1591,8 @@ if [ -n "${APPIMAGE_RUNTIME_FILE:-}" ]; then
 else
     unset LDAI_RUNTIME_FILE
 fi
-# El runtime AppImage moderno se usa durante la pasada de linuxdeploy, que
-# necesita Zstandard. El repaquetado final puede usar XZ para seguir siendo
-# compatible con un appimagetool antiguo instalado en el PATH.
+# Mantener idéntica compresión en la pasada de Tauri y el empaquetado final
+# evita generar un AppDir intermedio incompatible con el runtime seleccionado.
 export APPIMAGE_COMP
 export LDAI_COMP="$APPIMAGE_COMP"
 # Tauri's bundled AppImage plugin only recognizes product-style metadata
@@ -1683,6 +1654,13 @@ APPDIR="$BUNDLE_DIR/LTerminal.AppDir"
 GTK_HOOK="$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
 if [ ! -f "$GTK_HOOK" ]; then
     err "El AppDir no contiene el hook GTK esperado: $GTK_HOOK"
+    exit 1
+fi
+# linuxdeploy fija GDK_BACKEND=x11. En sesiones Wayland sin un XWayland
+# accesible GTK aborta antes de crear ventana; elegir Wayland cuando su socket
+# existe mantiene el doble clic funcional y conserva X11 como fallback.
+if ! node "$PROJECT_ROOT/scripts/patch-appimage-gtk-hook.mjs" "$GTK_HOOK"; then
+    err "No se pudo adaptar el hook GTK del AppImage."
     exit 1
 fi
 # linuxdeploy puede copiar el módulo TLS de GIO junto con su propia pila
@@ -1819,27 +1797,32 @@ fi
 # comprobar, y eso no es un fallo de la build: se avisa y se sigue.
 step "Comprobación de humo"
 
-# Un AppImage se monta con FUSE 2, que las distribuciones recientes ya no
-# instalan de serie. Sin él no arranca ni el «hola mundo», y el error
-# ("dlopen(): error loading libfuse.so.2") parece un fallo de la app cuando no
-# lo es. El propio runtime sabe descomprimirse en /tmp y ejecutarse desde ahí:
-# es lo mismo que hace `--appimage-extract-and-run`.
-if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1; then
-    warn "No hay FUSE instalado: el AppImage se comprobará mediante extracción temporal."
-    warn "Quien lo descargue necesitará FUSE 2, o lanzarlo con --appimage-extract-and-run."
+# Un AppImage necesita tanto su helper FUSE como el dispositivo del kernel.
+# Un contenedor puede tener fusermount instalado y aun así no exponer /dev/fuse;
+# comprobar solo el ejecutable daba un falso positivo y ocultaba que el smoke
+# usaba extracción en vez del montaje normal que hace el doble clic.
+if [[ ! -c /dev/fuse ]]; then
+    warn "El entorno no expone /dev/fuse: el smoke usará extracción temporal; no valida el doble clic con montaje FUSE."
+    warn "En el sistema destino, FUSE debe estar habilitado, o se debe usar APPIMAGE_EXTRACT_AND_RUN=1."
+    export APPIMAGE_EXTRACT_AND_RUN=1
+elif ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1; then
+    warn "Existe /dev/fuse pero falta fusermount: el smoke usará extracción temporal."
+    warn "En el sistema destino, instala el helper FUSE o usa APPIMAGE_EXTRACT_AND_RUN=1."
     export APPIMAGE_EXTRACT_AND_RUN=1
 fi
 
 # Esta comprobación no requiere servidor gráfico y verifica primero que el
-# runtime AppImage es legible. Debe ejecutarse DESPUÉS de activar el modo de
+# runtime AppImage es legible. Comprueba su offset en vez de --appimage-version,
+# que runtimes clásicos válidos no implementan. Debe ejecutarse DESPUÉS de activar el modo de
 # extracción: en CI, WSL y escritorios donde FUSE no está disponible, el
 # runtime sigue siendo perfectamente válido y puede comprobarse sin montar.
-if ! APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
-    "$APPIMAGE" --appimage-version >/dev/null 2>&1; then
+APPIMAGE_RUNTIME_OFFSET="$(APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
+    "$APPIMAGE" --appimage-offset 2>/dev/null || true)"
+if ! [[ "$APPIMAGE_RUNTIME_OFFSET" =~ ^[0-9]+$ ]] || [ "$APPIMAGE_RUNTIME_OFFSET" -lt 65536 ]; then
     err "El runtime del AppImage no responde; no se publicará un artefacto dañado."
     exit 1
 fi
-ok "Runtime AppImage verificable"
+ok "Runtime AppImage verificable (payload en byte $APPIMAGE_RUNTIME_OFFSET)"
 
 if ! graphical_session_available; then
     warn "La sesión gráfica no es accesible desde esta shell: no se ejecuta el smoke visual. El AppImage sí se generó."
@@ -1912,7 +1895,11 @@ fi
 # con el .AppImage que no mencione otra plataforma).
 step "Publicando la release y su huella"
 # NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build.
-RELEASE_DIR="$PROJECT_ROOT/release"
+RELEASE_ROOT="${LTERMINAL_RELEASE_DIR:-$PROJECT_ROOT/release}"
+if [[ "$RELEASE_ROOT" != /* ]]; then
+    RELEASE_ROOT="$PROJECT_ROOT/$RELEASE_ROOT"
+fi
+RELEASE_DIR="$RELEASE_ROOT"
 mkdir -p "$RELEASE_DIR"
 if [ "$FAST_BUILD" -eq 1 ]; then
     RELEASE_DIR="$RELEASE_DIR/dev"
@@ -2021,6 +2008,7 @@ fi
 if [ "$CROSS_WINDOWS" -eq 1 ]; then
     step "Pruebas cruzadas Windows mediante MinGW y Wine"
     cross_args=(--full-tests --wine-repeats 3 --non-interactive)
+    [ "$CLEAN" -eq 1 ] && cross_args+=(--clean)
     [ "$FAST_BUILD" -eq 1 ] && cross_args+=(--fast)
     [ "$SKIP_CHECKS" -eq 1 ] && cross_args+=(--skip-checks)
     [ "$ALLOW_OFFLINE_CHECKS" -eq 1 ] && cross_args+=(--allow-offline-checks)

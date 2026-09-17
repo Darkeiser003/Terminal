@@ -1,4 +1,5 @@
 mod path;
+pub mod webview2;
 
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -6,7 +7,7 @@ use std::process::Command;
 
 use super::traits::{HostPlatform, PathPlatform, ProcessPlatform};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct WindowsPlatform;
 

@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const NUGET_PACKAGE = 'Microsoft.Windows.Console.ConPTY';
 export const NUGET_VERSION = '1.24.260710001';
+// link-check: ignore — NuGet flat-container root is an API prefix; the concrete pinned package URL is fetched and SHA-512 checked during the build.
 export const NUGET_BASE = 'https://api.nuget.org/v3-flatcontainer';
 // SHA-512 published in NuGet's immutable package metadata for this exact
 // version. Pin locally instead of trusting a checksum fetched beside the file.

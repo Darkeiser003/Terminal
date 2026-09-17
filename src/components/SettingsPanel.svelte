@@ -998,7 +998,6 @@
                     <label class="check"><input data-testid="settings-show-dependencies" type="checkbox" bind:checked={draft.showDependenciesPanel} /><span><strong>{app.t("toolbar.deps", "Entorno y dependencias")}</strong></span></label>
                     <label class="check"><input data-testid="settings-show-projects" type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong></span></label>
                     <label class="check"><input data-testid="settings-show-library" type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong></span></label>
-                    <label class="check"><input data-testid="settings-show-quick-actions" type="checkbox" bind:checked={draft.showQuickActions} /><span><strong>{app.t("settings.showQuickActions", "Acciones rápidas")}</strong><small>{app.t("settings.showQuickActionsHint", "Muestra el submenú de acciones rápidas en la Biblioteca.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-explorer" type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong></span></label>
                     <div class="heading">
                         <strong>{app.t("settings.interfaceModules", "Interfaz modular")}</strong>

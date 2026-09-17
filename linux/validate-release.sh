@@ -2,8 +2,13 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APPIMAGE="${1:-$(find "$ROOT/release" -maxdepth 1 -name 'LTerminal-*.AppImage' -print -quit)}"
-LOG="$HOME/.config/lterminal/logs/main.log"
+if [ "$#" -gt 0 ]; then
+    APPIMAGE="$1"
+else
+    APPIMAGE="$(find "$ROOT/release" "$ROOT/releases" -maxdepth 1 -type f -name 'LTerminal-*.AppImage' -print -quit 2>/dev/null || true)"
+fi
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+LOG="$CONFIG_HOME/lterminal/logs/main.log"
 TOKEN="release-$$-$(date +%s)"
 OUTPUT="$(mktemp "${TMPDIR:-/tmp}/lterminal-release-validation.XXXXXX")"
 PID=""

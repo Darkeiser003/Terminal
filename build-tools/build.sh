@@ -75,6 +75,8 @@ run_linux_build() {
     local args=(--no-run --non-interactive)
     if [[ "$mode" == "fast" ]]; then
         args+=(--fast --no-extended-tests --skip-checks)
+    elif [[ "$mode" == "without-tests" ]]; then
+        args+=(--no-extended-tests)
     fi
     if ! ask_yes_no '¿Permitir instalar automáticamente dependencias del sistema si faltan?'; then
         args+=(--no-install)
@@ -87,6 +89,8 @@ run_windows_cross_build() {
     local args=(--non-interactive)
     if [[ "$mode" == "fast" ]]; then
         args+=(--fast --skip-checks)
+    elif [[ "$mode" == "without-tests" ]]; then
+        args+=(--no-extended-tests)
     elif [[ "$mode" == "wine-tests" ]]; then
         args+=(--full-tests --wine-repeats 3)
     fi
@@ -104,6 +108,7 @@ development_menu() {
         printf '  3. Ejecutar la app de escritorio en desarrollo\n'
         printf '  4. Compilar solo el frontend\n'
         printf '  5. Compilar solo el frontend (rápido)\n'
+        printf '  6. Generar el preview web funcional (sin Tauri)\n'
         printf '  0. Volver\n'
         read -r -p 'Elige una opción: ' choice || return
         case "$choice" in
@@ -112,6 +117,7 @@ development_menu() {
             3) run_action 'Iniciando la aplicación Tauri en desarrollo' npm start ;;
             4) run_action 'Compilando únicamente el frontend' npm run build ;;
             5) run_action 'Compilando únicamente el frontend en modo rápido' npm run build:fast ;;
+            6) run_action 'Generando el preview web funcional en dist-preview/' npm run build:preview ;;
             0) return ;;
             *) printf 'Opción no válida.\n' ;;
         esac
@@ -129,6 +135,9 @@ build_menu() {
         printf '  6. Compilar y probar Windows con la suite Rust bajo Wine\n'
         printf '  7. Generar AppImage y validar también Windows bajo Wine\n'
         printf '  8. Compilar frontend y backend juntos sin empaquetar\n'
+        printf '  9. Generar AppImage sin pruebas ampliadas (smoke básico)\n'
+        printf ' 10. Generar Windows sin pruebas ampliadas\n'
+        printf ' 11. Generar Linux y Windows sin pruebas ampliadas\n'
         printf '  0. Volver\n'
         read -r -p 'Elige una opción: ' choice || return
         case "$choice" in
@@ -155,6 +164,15 @@ build_menu() {
                 run_action 'Generando AppImage y validando Windows de forma cruzada con Wine' bash linux/build.sh "${args[@]}"
                 ;;
             8) run_action 'Compilando frontend y aplicación de escritorio Linux sin empaquetar' npm run tauri -- build --config src-tauri/tauri.linux.conf.json --no-bundle ;;
+            9) run_linux_build without-tests ;;
+            10) run_windows_cross_build without-tests ;;
+            11)
+                local args=(--no-run --non-interactive --no-extended-tests --cross-windows)
+                if ! ask_yes_no '¿Permitir instalar automáticamente dependencias Linux/MinGW/Wine si faltan?'; then
+                    args+=(--no-install)
+                fi
+                run_action 'Generando Linux y Windows sin pruebas ampliadas' bash linux/build.sh "${args[@]}"
+                ;;
             0) return ;;
             *) printf 'Opción no válida.\n' ;;
         esac

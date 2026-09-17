@@ -23,6 +23,7 @@ export default defineConfig({
     // Tauri fija el motor: WebView2 (Chromium) en Windows y WebKitGTK en
     // Linux. No hace falta transpilar para navegadores antiguos.
     build: {
+        outDir: process.env.VITE_OUT_DIR || 'dist',
         target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
         minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,
         sourcemap: !!process.env.TAURI_ENV_DEBUG,

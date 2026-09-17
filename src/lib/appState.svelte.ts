@@ -106,6 +106,7 @@ class AppStore {
         // seguir la plataforma: LTerminal en Linux y WinSlim Terminal en
         // Windows.
         if (typeof document !== 'undefined') document.title = info.name;
+        await this.syncWindowDecorations(prefs.preferences);
         this.applyPayload(prefs);
         // El tamaño inicial es una preferencia de arranque, no una orden que
         // deba reaplicarse cada vez que se guarda otro ajuste.
@@ -455,6 +456,7 @@ class AppStore {
             const bannerChanged = before.showSystemBanner !== after.showSystemBanner
                 || before.bannerHiddenItems !== after.bannerHiddenItems
                 || before.fastfetchColor !== after.fastfetchColor;
+            await this.syncWindowDecorations(after, before);
             this.applyPayload(payload);
             if (typeof window !== 'undefined') {
                 window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged } }));
@@ -469,11 +471,34 @@ class AppStore {
         return operation;
     }
 
+    /** El marco nativo también forma parte del modo limpio; aplicarlo antes
+     *  de revelar el estado nuevo evita un frame con la cabecera visible. */
+    private async syncWindowDecorations(
+        preferences: Preferences,
+        previous?: Preferences | null,
+    ): Promise<void> {
+        // En un arranque normal ya están activas las decoraciones declaradas
+        // por Tauri; solo hay que tocarlas si el modo limpio está guardado.
+        if (previous
+            ? previous.terminalOnlyMode === preferences.terminalOnlyMode
+            : !preferences.terminalOnlyMode) return;
+        try {
+            await api.setWindowDecorations(!preferences.terminalOnlyMode);
+        } catch (error) {
+            // La preferencia y la terminal siguen funcionando aunque algún
+            // compositor no permita cambiar las decoraciones dinámicamente.
+            console.debug('[AppStore] no se pudo actualizar el marco de ventana', error);
+        }
+    }
+
     /** Vuelve a los valores de fábrica. El backend es quien decide cuáles son:
      *  aquí no hay una segunda copia que se pudiera desincronizar. */
     async resetPreferences(): Promise<void> {
         const operation = this.preferencesSaveQueue.then(async () => {
-            this.applyPayload(await api.resetPreferences());
+            const before = this.preferences;
+            const payload = await api.resetPreferences();
+            await this.syncWindowDecorations(payload.preferences, before);
+            this.applyPayload(payload);
             if (typeof window !== 'undefined') {
                 window.dispatchEvent(new CustomEvent('winslim:banner-settings-changed', { detail: { bannerChanged: true } }));
             }
@@ -491,7 +516,10 @@ class AppStore {
     async reloadPreferences(): Promise<void> {
         const request = ++this.preferencesReloadRequest;
         const payload = await api.getPreferences();
-        if (request === this.preferencesReloadRequest) this.applyPayload(payload);
+        if (request === this.preferencesReloadRequest) {
+            await this.syncWindowDecorations(payload.preferences, this.preferences);
+            this.applyPayload(payload);
+        }
     }
 
     private applyPayload(payload: PreferencesPayload): void {

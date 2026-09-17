@@ -3,6 +3,7 @@ node_modules/
 # Staging temporal que usa linux/build.sh al apartar dependencias Windows.
 /.node_modules.windows.*
 /dist/
+/releases/
 /release/
 
 # Cachés y temporales de los empaquetadores (Vite, Svelte, Tauri/Cargo).

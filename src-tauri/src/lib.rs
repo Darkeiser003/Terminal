@@ -32,7 +32,7 @@ pub use explorer::{files as file_explorer, recycle, viewers as file_viewers};
 pub use infrastructure::{path_env, process};
 pub use packages::{
     actions as install_actions, aliases as package_aliases, command_not_found,
-    commands as commands_install,
+    commands as commands_install, ltools,
 };
 pub use projects::{commands as commands_projects, github};
 pub use system::{info as system_info, virtualization};
@@ -113,6 +113,12 @@ pub fn run() {
             "migrationMs": migration_ms,
         })),
     );
+    #[cfg(target_os = "windows")]
+    if !platform::webview2::ensure_runtime() {
+        log_error!(
+            "WebView2 Runtime no está disponible; el portable necesita el runtime de Microsoft o su bootstrapper junto al ejecutable"
+        );
+    }
     if platform::host().is_windows() && conpty.is_none() {
         // Sin ella la app arranca igual, pero en un Windows recortado las
         // pestañas se quedarán en blanco varios minutos antes de fallar. Ver
@@ -263,6 +269,8 @@ pub fn run() {
             commands_install::install_list,
             commands_install::install_refresh,
             commands_install::install_run,
+            ltools::ltools_actions_list,
+            ltools::ltools_action_run,
             commands_projects::projects_state_get,
             commands_projects::projects_downloaded,
             commands_projects::projects_cd,

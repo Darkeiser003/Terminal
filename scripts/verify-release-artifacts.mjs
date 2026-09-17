@@ -53,6 +53,13 @@ const isPe64 = (data) => {
     return machine === 0x8664 && magic === 0x20b;
 };
 
+const isPeWindows = (data) => {
+    if (data.length < 0x40 || data.toString('ascii', 0, 2) !== 'MZ') return false;
+    const peOffset = data.readUInt32LE(0x3c);
+    if (peOffset + 6 > data.length || data.toString('ascii', peOffset, peOffset + 4) !== 'PE\0\0') return false;
+    return [0x014c, 0x8664, 0xaa64].includes(data.readUInt16LE(peOffset + 4));
+};
+
 if (linuxPath) {
     const artifact = file(linuxPath, 'AppImage Linux');
     check('AppImage Linux es ELF', artifact.data.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])), artifact.absolute);
@@ -80,6 +87,17 @@ if (windowsPath) {
         const runtimeFile = file(resolve(runtimeDir, runtime), `Runtime Windows ${runtime}`);
         check(`Runtime Windows ${runtime} es PE x64`, isPe64(runtimeFile.data), runtimeFile.absolute);
         check(`Runtime Windows ${runtime} no está vacío`, runtimeFile.size >= 16 * 1024, `${runtimeFile.size} bytes`);
+    }
+    // El bootstrapper es opcional para conservar un portable mínimo, pero si
+    // se distribuye debe ser un PE válido y no un archivo descargado a medias.
+    const webview2Bootstrapper = resolve(runtimeDir, 'MicrosoftEdgeWebView2Setup.exe');
+    if (statExists(webview2Bootstrapper)) {
+        const installer = file(webview2Bootstrapper, 'Bootstrapper WebView2');
+        // El bootstrapper evergreen oficial es PE32, aunque instala el
+        // runtime adecuado para el Windows destino; no debe confundirse con
+        // los binarios x64 de la aplicación y ConPTY.
+        check('Bootstrapper WebView2 es PE Windows', isPeWindows(installer.data), installer.absolute);
+        check('Bootstrapper WebView2 no está vacío', installer.size >= 100 * 1024, `${installer.size} bytes`);
     }
     const baseConfig = JSON.parse(
         readFileSync(resolve(projectRoot, 'src-tauri/tauri.conf.json'), 'utf8')

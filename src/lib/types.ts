@@ -213,7 +213,7 @@ export interface WindowsIntegrationStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003' | 'christianlg97';
+    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003';
     argument?: string;
 }
 
@@ -572,6 +572,43 @@ export interface InstallRunResult {
      *  desde un REPL se busca o se abre una shell de verdad. */
     tabId?: string;
     created: boolean;
+}
+
+/** Acción declarativa publicada por LTools. `args` es argv, nunca una cadena
+ * que LTerminal deba dividir o interpretar como shell. */
+export interface LToolsAction {
+    id: string;
+    label: string;
+    shortLabel: string | null;
+    group: string;
+    description: string;
+    command: string;
+    executable: string;
+    args: string[];
+    aliases: string[];
+    shell: string;
+    workingDirectory: string;
+    terminal: boolean;
+    interactive: boolean;
+    requiresAdmin: boolean;
+    confirmation: string;
+    safe: boolean;
+    supports: string[];
+    target: string;
+    targetPolicy: string;
+    mutating: boolean;
+    profile: string;
+    requirementsAvailable: boolean;
+    /** Preferencia opcional del catálogo para proponer este botón. */
+    quick: boolean;
+}
+
+export interface LToolsActionList {
+    available: boolean;
+    executable?: string;
+    version?: string;
+    actions: LToolsAction[];
+    error?: string;
 }
 
 // ---- Actualización de la propia aplicación ----

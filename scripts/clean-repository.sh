@@ -10,6 +10,7 @@ fi
 script_dir="$(cd -- "$script_dir" && pwd -P)"
 project_root="$(cd -- "$script_dir/.." && pwd -P)"
 release_root="$project_root/release"
+releases_root="$project_root/releases"
 temp_root="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)"
 config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
 cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
@@ -21,7 +22,7 @@ case "${1:-}" in
   -h|--help)
     printf '%s\n' 'Uso: scripts/clean-repository.sh [--apply]'
     printf '%s\n' 'Sin --apply solo muestra las rutas; con --apply borra salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas.'
-    printf '%s\n' 'release/ y la configuración de usuario se conservan.'
+    printf '%s\n' 'release/, releases/ y la configuración de usuario se conservan.'
     exit 0
     ;;
   *)
@@ -45,8 +46,8 @@ assert_project_target() {
     *) printf 'Ruta fuera del repositorio: %s\n' "$path" >&2; return 1 ;;
   esac
   case "$path" in
-    "$release_root"|"$release_root"/*)
-      printf 'Ruta protegida (release/): %s\n' "$path" >&2
+    "$release_root"|"$release_root"/*|"$releases_root"|"$releases_root"/*)
+      printf 'Ruta protegida (release/ o releases/): %s\n' "$path" >&2
       return 1
       ;;
   esac
@@ -147,7 +148,7 @@ shopt -u nullglob
 
 is_generated_directory() {
   local path="$1"
-  [[ "$path" == "$release_root" ]] && return 0
+  [[ "$path" == "$release_root" || "$path" == "$releases_root" ]] && return 0
   local target
   for target in "${directory_targets[@]}"; do
     [[ "$path" == "$target" ]] && return 0
@@ -178,7 +179,7 @@ shopt -u globstar nullglob
 
 # Rastros con nombres propios de builds/smoke/E2E, logs de build y cachés
 # privadas de LTerminal fuera del repositorio. No se toca la configuración de
-# usuario ni la caché global de Tauri; release/ queda siempre fuera.
+# usuario ni la caché global de Tauri; release/ y releases/ quedan siempre fuera.
 external_targets=()
 add_external_target() {
   local target="$1"
@@ -308,4 +309,4 @@ if (( ${#failed_targets[@]} > 0 )); then
   printf 'Limpieza incompleta: %d ruta(s) sigue(n) bloqueada(s).\n' "${#failed_targets[@]}" >&2
   exit 1
 fi
-printf 'Limpieza terminada: %d directorio(s), %d Markdown y %d rastro(s) externo(s) eliminados. release/ se conservó.\n' "${#directory_targets[@]}" "${#markdown_targets[@]}" "${#external_targets[@]}"
+printf 'Limpieza terminada: %d directorio(s), %d Markdown y %d rastro(s) externo(s) eliminados. release/ y releases/ se conservaron.\n' "${#directory_targets[@]}" "${#markdown_targets[@]}" "${#external_targets[@]}"

@@ -17,6 +17,7 @@ const phases = [
     'proyectos',
     'entorno y dependencias',
     'pestañas, división y redimensionado',
+    'salidas progresivas de actualización',
     'repetición de acciones y fastfetch',
 ];
 const valid = {
@@ -35,12 +36,19 @@ const valid = {
         { label: 'shell-matrix-linux-original-selected', path: 'shell-menu.png' },
         { label: 'shell-matrix-linux-restored', path: 'shell-matrix.png' },
         { label: 'pty-output-repaint-no-layout-event', path: 'pty-output-repaint.png' },
+        { label: 'progress-update-layout', path: 'progress-update.png' },
+        { label: 'progress-upgrade-layout', path: 'progress-upgrade.png' },
+        { label: 'progress-clean-layout', path: 'progress-clean.png' },
     ],
     events: [
         ...phases.map((name) => ({ type: 'phase', name })),
         { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
         { type: 'terminal-mouse-selection', passed: true, gesture: 'pointerDown → pointerMove while pressed → pointerUp' },
         { type: 'terminal-output-repaint', passed: true, trigger: 'pty-output-idle', refreshCount: 1, rowsRefreshed: 24, layoutUnchanged: true, marker: 'LTERMINAL_OUTPUT_REPAINT_FIXTURE', capture: 'pty-output-repaint-no-layout-event' },
+        { type: 'progress-output-layout', passed: true, simulation: 'download/update/upgrade with carriage-return output', baseline: { host: { clientWidth: 400, cols: 50 } }, scenarios: [
+            { id: 'update', passed: true, commandDurationMs: 25, maxVisibleRowLength: 48, host: { clientWidth: 400, scrollWidth: 400, overflow: 'false', cols: 50 } },
+            { id: 'upgrade', passed: true, commandDurationMs: 30, maxVisibleRowLength: 190, host: { clientWidth: 400, scrollWidth: 1200, overflow: 'true', cols: 190 } },
+        ], cleanup: { reclaimed: true, durationMs: 20 }, durationMs: 80 },
         { type: 'horizontal-help-geometry', passed: true, snapshot: { host: { clientWidth: 400, scrollWidth: 850 }, indicator: { opacity: '1' } }, horizontalWheelProbe: { lineMode: { defaultPrevented: true }, pixelMode: { defaultPrevented: true }, pageMode: { defaultPrevented: true } } },
         { type: 'terminal-columns-reclaim', passed: true, beforeCols: 100, visibleCols: 50, afterCols: 50, hostWidth: 400, hostScrollWidth: 400, oldestOutputVisibleAfterWheelUp: true, newestOutputVisibleAfterWheelDown: true, scrollUp: { dispatched: 3, prevented: 3 }, scrollDown: { dispatched: 3, prevented: 3 }, generatedLines: 24, outputMarkerVisible: true },
         { type: 'environment-probe', id: 'bash', kind: 'shell', markerOutputDetected: true, terminalFocusMethod: 'native-click', startupClean: true, passed: true },
@@ -50,8 +58,8 @@ const valid = {
         { type: 'environment-probe-skipped', id: 'lang:postgresql', kind: 'skip', reason: 'necesita un servicio externo y credenciales' },
         { type: 'environment-shell-matrix', originalId: 'fish', originalSource: 'aria-selected/class', availableIds: ['fish', 'bash', 'zsh', 'lang:python', 'lang:postgresql'], testedIds: ['fish', 'bash', 'zsh', 'lang:python'], testedAlternates: ['bash', 'zsh', 'lang:python'], skipped: [{ id: 'lang:postgresql', kind: 'skip', reason: 'necesita un servicio externo y credenciales' }], probeCount: 4, shellProbeCount: 3, replProbeCount: 1, restoredTo: 'fish', originalCaptureLabel: 'shell-matrix-linux-original-selected', captureLabel: 'shell-matrix-linux-restored', passed: true },
         { type: 'environment-switch-restore', to: 'fish', restoredFish: true, passed: true },
-        { type: 'preference', name: 'showQuickActions', value: false },
-        { type: 'preference', name: 'showQuickActions', value: true },
+        { type: 'ltools-ui-source', legacySelectorCount: 0, ltoolsSectionCount: 1, available: false, installControlVisible: true, initiallyClosed: true, passed: true },
+        { type: 'legacy-quick-actions-compat', command: ':quick-actions list', migratedTo: 'ltools', mutatesPreferences: false, passed: true },
         { type: 'context-menu', actions: ['cut', 'delete'] },
         { type: 'dependencies', groups: 8, subgroups: 6, repeatedLoads: 3, platformGroup: 'Virtualización' },
         { type: 'multi-pane-minimum', passed: true, geometryValid: true, paneCount: 2, panes: [{}, {}] },
@@ -65,12 +73,65 @@ const valid = {
         { type: 'tab-isolation', passed: true, tabs: 3 },
         { type: 'rapid-tab-replace', passed: true, isolated: true, closedTabId: 'tab-1', createdTabId: 'tab-2' },
         { type: 'explorer-cwd-layout', passed: true, cwdFollowed: true, layout: { pathHeight: 18, gap: 0, ordered: true } },
+        { type: 'explorer-double-click', skipped: false, environmentId: 'fish', enteredPath: '/tmp/lterminal-e2e-double-click/nested', expectedPath: '/tmp/lterminal-e2e-double-click/nested', enteredOnce: true, restored: true, gesture: 'pointerMove → pointerDown → pointerUp × 2', passed: true },
         { type: 'keyboard-shortcuts', passed: true, newTab: true, nextTab: true, cyclePanes: true, explorerToggle: true },
         { type: 'shell-startup-performance', passed: true, samples: 4, maxMs: 740, limitMs: 2500 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
         { type: 'banner-ready', promptsVisible: true, preview: ['WinSlim Terminal 1.0.0\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
     ],
 };
+
+function addTimingFixture(report) {
+    const events = report.events;
+    const probes = events.filter((event) => event.type === 'environment-probe');
+    for (const event of probes) {
+        event.durationMs ??= 120;
+        event.bannerReadyMs ??= 40;
+    }
+    const matrix = events.find((event) => event.type === 'environment-shell-matrix');
+    if (matrix) {
+        matrix.shellTimings = probes.map((event) => ({
+            id: event.id,
+            kind: event.kind,
+            durationMs: event.durationMs,
+            readinessMs: event.bannerReadyMs,
+            passed: true,
+        }));
+    }
+    const integration = events.find((event) => event.type === 'ltools-integration');
+    if (integration) {
+        integration.durationMs ??= 120;
+        integration.catalogDiscoveryMs ??= 40;
+        integration.candidateAttempts ??= [{ candidate: integration.binary, durationMs: 40, accepted: true }];
+    }
+    report.timings = {
+        schemaVersion: 1,
+        totalMs: report.durationMs,
+        phases: report.phases,
+        shells: probes.map((event) => ({
+            id: event.id,
+            kind: event.kind,
+            language: event.language ?? null,
+            durationMs: event.durationMs,
+            readinessMs: event.bannerReadyMs,
+            passed: true,
+        })),
+        operations: events
+            .filter((event) => Number.isFinite(event.durationMs))
+            .map((event) => ({ type: event.type, label: event.id ?? null, durationMs: event.durationMs, passed: event.passed ?? null })),
+        timeline: events.map((event, index) => ({
+            type: event.type,
+            label: event.id ?? event.name ?? null,
+            elapsedMs: (index + 1) * 10,
+            sincePreviousMs: 10,
+            durationMs: Number.isFinite(event.durationMs) ? event.durationMs : null,
+            passed: event.passed ?? null,
+        })),
+    };
+    return report;
+}
+
+addTimingFixture(valid);
 const directory = await mkdtemp(join(tmpdir(), 'lterminal-e2e-report-test-'));
 const verifier = resolve('scripts/verify-e2e-report.mjs');
 
@@ -95,10 +156,67 @@ const focusedShellMatrix = {
         || event.type === 'e2e-process-cleanup'
         || (event.type === 'phase' && ['arranque de interfaz', 'cambio de shell'].includes(event.name))),
 };
+const focusedLTools = {
+    ...valid,
+    focusedScenario: 'ltools-catalog-integration',
+    phases: [
+        { name: 'driver', durationMs: 10 },
+        { name: 'arranque de interfaz', durationMs: 10 },
+        { name: 'integración opcional de LTools', durationMs: 10 },
+    ],
+    captures: [{ label: 'ltools-catalogo-y-selector', path: 'ltools.png' }],
+    events: [
+        { type: 'phase', name: 'arranque de interfaz' },
+        { type: 'phase', name: 'integración opcional de LTools' },
+        { type: 'ltools-integration', passed: true, binary: '/tmp/ltools', schema: 'ltools-actions-v1', catalogActions: 50, compatibleActions: 32, pickerActions: 32, selectedAction: 'audit.quick', selectedCount: 4, selectionPersisted: true },
+        { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
+    ],
+};
+const focusedProgress = {
+    ...valid,
+    focusedScenario: 'progress-output-layout',
+    phases: [
+        { name: 'driver', durationMs: 10 },
+        { name: 'arranque de interfaz', durationMs: 10 },
+        { name: 'salidas progresivas de actualización', durationMs: 10 },
+    ],
+    captures: [
+        { label: 'progress-update-layout', path: 'progress-update.png' },
+        { label: 'progress-upgrade-layout', path: 'progress-upgrade.png' },
+        { label: 'progress-clean-layout', path: 'progress-clean.png' },
+    ],
+    events: [
+        { type: 'phase', name: 'arranque de interfaz' },
+        { type: 'phase', name: 'salidas progresivas de actualización' },
+        { type: 'progress-output-layout', passed: true, durationMs: 80, scenarios: [
+            { id: 'update', passed: true, commandDurationMs: 25, maxVisibleRowLength: 48, host: { clientWidth: 400, scrollWidth: 400, overflow: 'false', cols: 50 } },
+            { id: 'upgrade', passed: true, commandDurationMs: 30, maxVisibleRowLength: 190, host: { clientWidth: 400, scrollWidth: 1200, overflow: 'true', cols: 190 } },
+        ], cleanup: { reclaimed: true, durationMs: 20 } },
+        { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
+    ],
+};
+
+addTimingFixture(focusedShellMatrix);
+addTimingFixture(focusedLTools);
+addTimingFixture(focusedProgress);
 
 try {
     assert.equal((await run('valid', valid)).status, 0, 'un informe completo debe pasar');
-    const withForthProbe = (expectedResultDetected, startupHintVisible = true) => ({
+    assert.notEqual((await run('missing-timing-report', {
+        ...valid,
+        timings: undefined,
+    })).status, 0, 'el informe debe rechazar una ejecución sin desglose temporal');
+    assert.notEqual((await run('timing-timeline-incomplete', {
+        ...valid,
+        timings: { ...valid.timings, timeline: valid.timings.timeline.slice(1) },
+    })).status, 0, 'el informe debe rechazar una línea temporal incompleta');
+    assert.notEqual((await run('negative-shell-timing', {
+        ...valid,
+        events: valid.events.map((event) => event.type === 'environment-probe' && event.id === 'zsh'
+            ? { ...event, durationMs: -1 }
+            : event),
+    })).status, 0, 'el informe debe rechazar una duración negativa de shell');
+    const withForthProbe = (expectedResultDetected, startupHintVisible = true) => addTimingFixture({
         ...valid,
         captures: [...valid.captures, { label: 'shell-lang-forth-startup-help', path: 'forth-startup.png' }],
         events: valid.events.map((event) => event.type === 'environment-shell-matrix'
@@ -134,6 +252,14 @@ try {
         'Forth no debe pasar si la ayuda de arranque no queda visible antes de escribir');
     assert.equal((await run('focused-shell-matrix', focusedShellMatrix)).status, 0,
         'un informe enfocado debe validar la cobertura/restauración de su matriz sin exigir las fases ajenas');
+    assert.equal((await run('focused-ltools', focusedLTools)).status, 0,
+        'un informe enfocado debe validar el catálogo y la ejecución opcional de LTools');
+    assert.equal((await run('focused-progress', focusedProgress)).status, 0,
+        'un informe enfocado debe validar las barras de actualización y la recuperación del ancho');
+    assert.notEqual((await run('focused-ltools-without-event', {
+        ...focusedLTools,
+        events: focusedLTools.events.filter((event) => event.type !== 'ltools-integration'),
+    })).status, 0, 'la E2E de LTools no debe pasar sin su evidencia de integración');
     assert.notEqual((await run('focused-shell-matrix-without-restore', {
         ...focusedShellMatrix,
         events: focusedShellMatrix.events.filter((event) => event.type !== 'environment-switch-restore'),
@@ -158,10 +284,18 @@ try {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'terminal-mouse-selection'),
     })).status, 0, 'la batería completa debe rechazar una sesión sin arrastre real del ratón');
+    assert.notEqual((await run('missing-explorer-double-click', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'explorer-double-click'),
+    })).status, 0, 'la batería completa debe rechazar una sesión sin doble clic real del Explorador');
     assert.notEqual((await run('missing-terminal-output-repaint', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'terminal-output-repaint'),
     })).status, 0, 'el informe completo debe rechazar un smoke sin regresión del repintado PTY');
+    assert.notEqual((await run('missing-progress-layout', {
+        ...valid,
+        events: valid.events.filter((event) => event.type !== 'progress-output-layout'),
+    })).status, 0, 'el informe completo debe rechazar un smoke sin escenarios de barras de actualización');
     assert.notEqual((await run('terminal-output-repaint-layout-changed', {
         ...valid,
         events: valid.events.map((event) => event.type === 'terminal-output-repaint'
@@ -232,10 +366,10 @@ try {
             ? { ...event, originalSource: 'toolbar-label' }
             : event),
     })).status, 0, 'la shell original debe identificarse por su estado seleccionado real, no solo por la etiqueta');
-    assert.notEqual((await run('missing-state', {
+    assert.notEqual((await run('missing-ltools-ui-contract', {
         ...valid,
-        events: valid.events.filter((event) => event.value !== false),
-    })).status, 0, 'falta el estado oculto de Acciones rápidas');
+        events: valid.events.filter((event) => event.type !== 'ltools-ui-source'),
+    })).status, 0, 'falta la evidencia de que LTools sustituye al menú heredado');
     assert.notEqual((await run('missing-context-menu', {
         ...valid,
         events: valid.events.filter((event) => event.type !== 'context-menu'),

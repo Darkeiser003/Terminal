@@ -23,7 +23,10 @@ function Get-NormalizedDirectoryPath {
 
 $ProjectRoot = Get-NormalizedDirectoryPath (Split-Path -Parent $PSScriptRoot)
 $RootPrefix = $ProjectRoot + [IO.Path]::DirectorySeparatorChar
-$ReleaseRoot = Get-NormalizedDirectoryPath (Join-Path $ProjectRoot 'release')
+$ReleaseRoots = @(
+    (Get-NormalizedDirectoryPath (Join-Path $ProjectRoot 'release')),
+    (Get-NormalizedDirectoryPath (Join-Path $ProjectRoot 'releases'))
+)
 $TempRoot = Get-NormalizedDirectoryPath ([IO.Path]::GetTempPath())
 $appDataPath = [Environment]::GetFolderPath('ApplicationData')
 if ([string]::IsNullOrWhiteSpace($appDataPath)) {
@@ -39,7 +42,7 @@ $LocalAppDataRoot = Get-NormalizedDirectoryPath $localAppDataPath
 if ($Help) {
     Write-Host 'Uso: powershell -ExecutionPolicy Bypass -File scripts\clean-repository.ps1 [-Apply]' -ForegroundColor Cyan
     Write-Host 'Sin -Apply solo muestra las rutas.'
-    Write-Host 'Con -Apply elimina salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas; release\ se conserva.'
+    Write-Host 'Con -Apply elimina salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas; release\ y releases\ se conservan.'
     exit 0
 }
 
@@ -142,8 +145,11 @@ $skippedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer
 foreach ($directory in $directoryTargets) {
     [void]$skippedDirectories.Add($directory)
 }
-# release/ se conserva completo, incluida cualquier documentación empaquetada.
-[void]$skippedDirectories.Add($ReleaseRoot)
+# Ambas carpetas de distribución se conservan completas, incluida cualquier
+# documentación o artefacto empaquetado.
+foreach ($releaseRoot in $ReleaseRoots) {
+    [void]$skippedDirectories.Add($releaseRoot)
+}
 
 # Solo se eliminan informes Markdown con nombres de salida conocidos. La
 # documentación del proyecto puede vivir en cualquier subdirectorio sin que el
@@ -358,10 +364,12 @@ function Remove-CleanupDirectory {
 
     try {
         $safeTarget = Assert-ProjectPath $Target
-        $releasePrefix = $ReleaseRoot + [IO.Path]::DirectorySeparatorChar
-        if ($safeTarget.Equals($ReleaseRoot, [StringComparison]::OrdinalIgnoreCase) -or
-            $safeTarget.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "La ruta está protegida porque pertenece a release/: $safeTarget"
+        foreach ($releaseRoot in $ReleaseRoots) {
+            $releasePrefix = $releaseRoot + [IO.Path]::DirectorySeparatorChar
+            if ($safeTarget.Equals($releaseRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                $safeTarget.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "La ruta está protegida porque pertenece a release/ o releases/: $safeTarget"
+            }
         }
         Remove-DirectoryTreeSafely $safeTarget
     } catch {
@@ -426,4 +434,4 @@ foreach ($target in $externalTargets) {
 if ($failedTargets.Count -gt 0) {
     throw "Limpieza incompleta: $($failedTargets.Count) ruta(s) sigue(n) bloqueada(s)."
 }
-Write-Host ('Limpieza terminada: {0} directorio(s), {1} Markdown y {2} rastro(s) externo(s) eliminados. release/ se conservó.' -f $directoryTargets.Count, $markdownTargets.Count, $externalTargets.Count) -ForegroundColor Green
+Write-Host ('Limpieza terminada: {0} directorio(s), {1} Markdown y {2} rastro(s) externo(s) eliminados. release/ y releases/ se conservaron.' -f $directoryTargets.Count, $markdownTargets.Count, $externalTargets.Count) -ForegroundColor Green

@@ -562,8 +562,8 @@ run_wine_smoke() {
     fi
 
     local prefix smoke_dir wine_log app_log app_log_win code webview_key smoke_token headless_smoke
-    local wine_xvfb_args wine_xvfb_mode
-    local -a wine_command smoke_env
+    local wine_xvfb_args wine_xvfb_mode wine_gui_capture_dir wine_gui_capture wine_process_log
+    local -a wine_command smoke_env wine_gui_prefix
     local runner_dir proton_compat proton_client
     headless_smoke=0
     [ "${LTERMINAL_WINE_GUI_SMOKE:-0}" = "1" ] || headless_smoke=1
@@ -629,22 +629,27 @@ run_wine_smoke() {
 
     if [ "$runner" = "wine" ] && [ "$headless_smoke" -eq 0 ]; then
         wine_command=(wine)
-        # Si ya hay un display, dejar la ventana visible para inspección. Xvfb
-        # se reserva para CI/sesiones sin display o cuando se solicita de forma
-        # explícita; aislar la ventana no corrige el compositor WebView2 de Wine.
+        # No basta con que DISPLAY esté definido: shells de escritorio/editor
+        # pueden heredar un socket muerto. Se prueba xdpyinfo y, si no responde,
+        # se usa Xvfb como hace la E2E GUI de Tools.
         wine_xvfb_mode="${LTERMINAL_WINE_XVFB:-auto}"
         case "$wine_xvfb_mode" in
             auto|0|1) ;;
             *) fail "LTERMINAL_WINE_XVFB debe ser auto, 0 o 1." ;;
         esac
-        if { [ "$wine_xvfb_mode" = "1" ] || \
-             { [ "$wine_xvfb_mode" = "auto" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; }; } \
-            && command -v xvfb-run >/dev/null 2>&1; then
+        wine_gui_prefix=()
+        if [ "$wine_xvfb_mode" = "1" ] || \
+            { [ "$wine_xvfb_mode" = "auto" ] && \
+              { [ -z "${DISPLAY:-}" ] || ! command -v xdpyinfo >/dev/null 2>&1 || ! timeout 5 xdpyinfo >/dev/null 2>&1; }; }; then
+            command -v xvfb-run >/dev/null 2>&1 || fail "La prueba GUI requiere xvfb-run porque el display heredado no está disponible."
+            command -v xdpyinfo >/dev/null 2>&1 || fail "La prueba GUI requiere xdpyinfo para validar el display aislado."
             wine_xvfb_args="${LTERMINAL_WINE_XVFB_ARGS:--screen 0 1280x800x24 -nolisten tcp}"
-            wine_command=(xvfb-run -a -s "$wine_xvfb_args" wine)
-            warn "Wine usará Xvfb; no se mostrará una ventana en el escritorio actual."
-        elif [ "$wine_xvfb_mode" = "1" ]; then
-            warn "Se solicitó Xvfb pero falta xvfb-run; se usará el display disponible."
+            timeout 10 xvfb-run -a -s "$wine_xvfb_args" xdpyinfo >/dev/null 2>&1 || \
+                fail "Xvfb está instalado, pero no pudo iniciar un display aislado para la prueba GUI."
+            wine_gui_prefix=(xvfb-run -a -s "$wine_xvfb_args" env -u WAYLAND_DISPLAY)
+            warn "Wine usará un Xvfb validado; se ignoran DISPLAY/Wayland heredados para aislar la ventana."
+        elif [ -z "${DISPLAY:-}" ] || ! command -v xdpyinfo >/dev/null 2>&1 || ! timeout 5 xdpyinfo >/dev/null 2>&1; then
+            fail "No hay un display X accesible para el smoke GUI; instala xvfb-run o fija LTERMINAL_WINE_XVFB=1."
         fi
     fi
 
@@ -653,7 +658,7 @@ run_wine_smoke() {
     if [ "$headless_smoke" -eq 1 ]; then
         warn "Smoke headless Wine: ejecutará echo por stdin, validará el marcador recibido por stdout/stderr y el código de salida. No valida GUI ni ConPTY."
     else
-        warn "Smoke GUI Wine: valida el frontend, PTY y cierre. La superficie de WebView2 puede seguir negra; no es una prueba visual de Windows nativo."
+        warn "Smoke GUI Wine: exigirá ventana visible, frontend/PTY preparados y captura con contenido; no sustituye Windows nativo ni ConPTY real."
     fi
     # Wine no implementa CreatePseudoConsole con la fidelidad necesaria para
     # portable-pty. La app activa un backend temporal de pipes solo en esta
@@ -680,6 +685,23 @@ run_wine_smoke() {
             LTERMINAL_LOG_FILE="$app_log_win" \
             WINEPREFIX="$prefix" WINEDEBUG=-all timeout --foreground 60s \
             wine "Z:${EXE//\//\\}" >"$wine_log" 2>&1
+    elif [ "$runner" = "wine" ]; then
+        for gui_tool in xdotool import identify; do
+            command -v "$gui_tool" >/dev/null 2>&1 || fail "El smoke GUI visual requiere $gui_tool."
+        done
+        wine_gui_capture_dir="${LTERMINAL_WINE_GUI_CAPTURE_DIR:-$smoke_dir/gui-captures}"
+        mkdir -p -- "$wine_gui_capture_dir"
+        wine_gui_capture="$wine_gui_capture_dir/lterminal-windows-wine.png"
+        wine_process_log="$smoke_dir/wine-process.log"
+        rm -f -- "$wine_gui_capture"
+        LTERMINAL_SMOKE_TOKEN="$smoke_token" \
+            LTERMINAL_SMOKE_AUTO_EXIT=1 \
+            LTERMINAL_TEST_UNDER_WINE=1 \
+            LTERMINAL_WINE_SMOKE=1 \
+            LTERMINAL_LOG_FILE="$app_log_win" \
+            WINEPREFIX="$prefix" WINEDEBUG=-all timeout --foreground 75s \
+            "${wine_gui_prefix[@]}" bash "$PROJECT_ROOT/scripts/wine-gui-smoke.sh" \
+            "Z:${EXE//\//\\}" "$wine_gui_capture" "$app_log" "$wine_process_log" >"$wine_log" 2>&1
     else
         LTERMINAL_SMOKE_TOKEN="$smoke_token" \
             LTERMINAL_SMOKE_AUTO_EXIT=1 \
@@ -716,6 +738,13 @@ run_wine_smoke() {
         rm -rf "$runner_dir"
         ok "Smoke headless Wine bajo $runner: comando, salida capturada y cierre validados; GUI/ConPTY no probados."
         return
+    fi
+    if [ "$runner" = "wine" ]; then
+        grep -Fq 'WINE_GUI_CAPTURE_OK=' "$wine_log" || {
+            sed 's/^/      /' "$wine_log" >&2 || true
+            fail "El smoke GUI bajo Wine no dejó una captura visual validada: $wine_gui_capture"
+        }
+        ok "Ventana WebView2 visible y con contenido; captura: $wine_gui_capture"
     fi
     if ! grep -Eiq 'WebView2Loader(\.dll)?' "$wine_log"; then
         sed 's/^/      /' "$wine_log" >&2 || true
@@ -841,13 +870,21 @@ done
 # base, no de una copia paralela que pueda olvidar el siguiente script integrado.
 while IFS=$'\t' read -r source destination; do
     [ -n "$source" ] && [ -n "$destination" ] || continue
-    case "$source" in
-        ../scripts/*) resource="${source#../}" ;;
+    # Tauri resuelve los orígenes relativos desde src-tauri. Normalizar primero
+    # permite, por ejemplo, ../THIRD-PARTY-NOTICES.txt (que vive en la raíz)
+    # sin aceptar escapes reales del proyecto ni confiar en prefijos textuales.
+    resource_source="$(realpath -e -- "$TAURI_DIR/$source")" || fail "Falta el recurso declarado por Tauri: $source"
+    case "$resource_source" in
+        "$PROJECT_ROOT"/*) resource="${resource_source#"$PROJECT_ROOT"/}" ;;
         *) fail "El recurso Windows del manifiesto sale de la carpeta del proyecto: $source" ;;
     esac
-    [ -f "$PROJECT_ROOT/$resource" ] || fail "Falta el recurso empaquetable $resource."
+    [ -f "$resource_source" ] || fail "El recurso empaquetable no es un archivo: $resource_source"
+    case "$destination" in
+        ""|/*|..|../*|*/../*|*/..) fail "Destino de recurso Windows no válido: $destination" ;;
+        *'\'*) fail "El destino de recurso Windows debe usar rutas relativas: $destination" ;;
+    esac
     mkdir -p "$RELEASE_DIR/$(dirname "$destination")"
-    cp "$PROJECT_ROOT/$resource" "$RELEASE_DIR/$destination"
+    cp "$resource_source" "$RELEASE_DIR/$destination"
 done < <(node -e 'const fs=require("fs"); const resources=require("./src-tauri/tauri.conf.json").bundle?.resources ?? {}; for (const [source,destination] of Object.entries(resources)) process.stdout.write(`${source}\t${destination}\n`);')
 if command -v file >/dev/null 2>&1; then
     file "$EXE" | grep -Eq 'PE32\+.*x86-64' || fail "$EXE no parece un ejecutable Windows x64."
@@ -870,19 +907,43 @@ if [ "$RUN_WINE" -eq 1 ]; then
     done
 fi
 
-step "Publicando carpeta portable Windows en release/"
+step "Publicando carpeta portable Windows"
 package_args=(
     --source "$RELEASE_DIR"
     --project "$PROJECT_ROOT"
-    --release "$PROJECT_ROOT/release"
+    --release "${LTERMINAL_RELEASE_DIR:-$PROJECT_ROOT/release}"
     --version "$VERSION_OVERRIDE"
 )
 if [ "$FAST_BUILD" -eq 1 ]; then
     package_args+=(--fast)
 fi
+# La copia portable puede auto-instalar WebView2 si se distribuye el
+# bootstrapper junto al ejecutable. `auto` solo usa una caché existente para no
+# convertir una build offline en una descarga inesperada; `1` lo descarga y
+# `0` conserva el portable mínimo/documentado.
+include_webview2_bootstrapper="${LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER:-auto}"
+case "$include_webview2_bootstrapper" in
+    0) ;;
+    auto|1)
+        webview2_portable_installer="${LTERMINAL_WEBVIEW2_INSTALLER:-$WEBVIEW2_CACHE_ROOT/MicrosoftEdgeWebview2Setup.exe}"
+        if [ ! -s "$webview2_portable_installer" ] && [ "$include_webview2_bootstrapper" = 1 ]; then
+            webview2_portable_installer="$(download_webview2_installer)"
+        fi
+        if [ -s "$webview2_portable_installer" ]; then
+            package_args+=(--webview2-installer "$webview2_portable_installer")
+            ok "Bootstrapper WebView2 preparado para el portable"
+        else
+            warn "No se incluirá bootstrapper WebView2; usa LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER=1 para descargarlo."
+        fi
+        ;;
+    *) fail "LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER debe ser 0, auto o 1." ;;
+esac
 node "$PROJECT_ROOT/scripts/package-windows-cross.mjs" "${package_args[@]}"
 
-release_out="$PROJECT_ROOT/release"
+release_out="${LTERMINAL_RELEASE_DIR:-$PROJECT_ROOT/release}"
+if [[ "$release_out" != /* ]]; then
+    release_out="$PROJECT_ROOT/$release_out"
+fi
 release_suffix=""
 if [ "$FAST_BUILD" -eq 1 ]; then
     release_out="$release_out/dev"

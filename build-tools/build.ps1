@@ -86,6 +86,14 @@ function Invoke-LinuxBuild([bool]$Fast) {
     Invoke-MenuAction 'Generando el AppImage Linux' 'bash' $arguments
 }
 
+function Invoke-LinuxBuildWithoutExtendedTests {
+    $arguments = @('linux/build.sh', '--no-run', '--non-interactive', '--no-extended-tests')
+    if (-not (Confirm-MenuAction '¿Permitir instalar automáticamente dependencias del sistema si faltan?')) {
+        $arguments += '--no-install'
+    }
+    Invoke-MenuAction 'Generando el AppImage Linux sin pruebas ampliadas' 'bash' $arguments
+}
+
 function Invoke-WindowsCrossBuild([bool]$Fast) {
     $arguments = @('linux/build-windows.sh', '--non-interactive')
     if ($Fast) { $arguments += @('--fast', '--skip-checks') }
@@ -93,6 +101,14 @@ function Invoke-WindowsCrossBuild([bool]$Fast) {
         $arguments += '--no-install'
     }
     Invoke-MenuAction 'Generando la aplicación portable Windows (GNU x64)' 'bash' $arguments
+}
+
+function Invoke-WindowsCrossBuildWithoutExtendedTests {
+    $arguments = @('linux/build-windows.sh', '--non-interactive', '--no-extended-tests')
+    if (-not (Confirm-MenuAction '¿Permitir instalar automáticamente MinGW/Wine si faltan?')) {
+        $arguments += '--no-install'
+    }
+    Invoke-MenuAction 'Generando Windows sin pruebas ampliadas' 'bash' $arguments
 }
 
 function Invoke-WindowsWineTests {
@@ -119,6 +135,7 @@ function Show-DevelopmentMenu {
         Write-Host '  3. Ejecutar la app de escritorio en desarrollo'
         Write-Host '  4. Compilar solo el frontend'
         Write-Host '  5. Compilar solo el frontend (rápido)'
+        Write-Host '  6. Generar el preview web funcional (sin Tauri)'
         Write-Host '  0. Volver'
         $choice = Read-MenuChoice 'Elige una opción'
         switch ($choice) {
@@ -127,6 +144,7 @@ function Show-DevelopmentMenu {
             '3' { Invoke-MenuAction 'Iniciando la aplicación Tauri en desarrollo' 'npm' @('start') }
             '4' { Invoke-MenuAction 'Compilando únicamente el frontend' 'npm' @('run', 'build') }
             '5' { Invoke-MenuAction 'Compilando únicamente el frontend en modo rápido' 'npm' @('run', 'build:fast') }
+            '6' { Invoke-MenuAction 'Generando el preview web funcional en dist-preview/' 'npm' @('run', 'build:preview') }
             '0' { return }
             default { Write-Host 'Opción no válida.' }
         }
@@ -156,6 +174,8 @@ function Show-BuildMenu {
             Write-Host '  4. Generar aplicación portable Windows (rápida)'
             Write-Host '  5. Generar release Windows y validar también Linux en WSL'
             Write-Host '  6. Compilar frontend y backend juntos sin empaquetar'
+            Write-Host '  7. Generar release Linux sin pruebas ampliadas'
+            Write-Host '  8. Generar Windows sin pruebas ampliadas'
         } else {
             Write-Host '  2. Generar AppImage Linux (release completa)'
             Write-Host '  3. Generar AppImage Linux (iteración rápida)'
@@ -164,6 +184,7 @@ function Show-BuildMenu {
             Write-Host '  6. Compilar y probar Windows con la suite Rust bajo Wine'
             Write-Host '  7. Generar AppImage y validar también Windows bajo Wine'
             Write-Host '  8. Compilar frontend y backend juntos sin empaquetar'
+            Write-Host '  9. Generar Linux y Windows sin pruebas ampliadas'
         }
         Write-Host '  0. Volver'
         $choice = Read-MenuChoice 'Elige una opción'
@@ -175,6 +196,8 @@ function Show-BuildMenu {
         }
         if ($choice -eq '6' -and -not $script:OnWindows) { Invoke-WindowsWineTests; continue }
         if ($choice -eq '7' -and -not $script:OnWindows) { Invoke-LinuxAndWindowsBuild; continue }
+        if ($choice -eq '7' -and $script:OnWindows) { Invoke-LinuxBuildWithoutExtendedTests; continue }
+        if ($choice -eq '8' -and $script:OnWindows) { Invoke-WindowsCrossBuildWithoutExtendedTests; continue }
         if ($choice -eq '8' -and -not $script:OnWindows) {
             $tauriConfig = 'src-tauri/tauri.linux.conf.json'
             Invoke-MenuAction 'Compilando frontend y aplicación de escritorio Linux sin empaquetar' 'npm' @('run', 'tauri', '--', 'build', '--config', $tauriConfig, '--no-bundle')
@@ -214,6 +237,13 @@ function Show-BuildMenu {
                 '5' { Invoke-WindowsCrossBuild $true }
                 '6' { Invoke-WindowsWineTests }
                 '7' { Invoke-LinuxAndWindowsBuild }
+                '9' {
+                    $arguments = @('linux/build.sh', '--no-run', '--non-interactive', '--no-extended-tests', '--cross-windows')
+                    if (-not (Confirm-MenuAction '¿Permitir instalar automáticamente dependencias Linux/MinGW/Wine si faltan?')) {
+                        $arguments += '--no-install'
+                    }
+                    Invoke-MenuAction 'Generando Linux y Windows sin pruebas ampliadas' 'bash' $arguments
+                }
                 default { Write-Host 'Opción no válida.' }
             }
         }

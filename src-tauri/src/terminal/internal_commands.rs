@@ -1,5 +1,5 @@
 //! Parser estricto de comandos de la aplicación. No interpreta sintaxis de la
-//! shell: acepta líneas completas con `:` y los dos alias públicos de créditos.
+//! shell: acepta líneas completas con `:` y el alias público del desarrollador.
 
 use serde::Serialize;
 
@@ -12,9 +12,9 @@ pub struct InternalCommand {
 
 pub fn parse(line: &str) -> Option<InternalCommand> {
     let trimmed = line.trim();
-    // Los comandos de control de la aplicación empiezan por `:`. Los dos
-    // créditos de autoría son la excepción deliberada: funcionan como
-    // easter-eggs escribiendo el alias directamente (también con `@`).
+    // Los comandos de control de la aplicación empiezan por `:`. El crédito
+    // del desarrollador es la única excepción deliberada: funciona como
+    // easter-egg escribiendo el alias directamente (también con `@`).
     // Al exigir una línea completa no secuestramos comandos reales de la shell
     // que simplemente contengan esos nombres como parte de una orden.
     let prefixed = trimmed.starts_with(':');
@@ -27,7 +27,7 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         .to_ascii_lowercase();
     let argument = parts.collect::<Vec<_>>().join(" ");
     let argument = (!argument.is_empty()).then_some(argument);
-    if !prefixed && !matches!(name.as_str(), "darkeiser003" | "christianlg97") {
+    if !prefixed && name != "darkeiser003" {
         return None;
     }
     let action = match name.as_str() {
@@ -51,7 +51,6 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "openhere" => "openDirectory",
         "reveal-here" => "openDirectory",
         "darkeiser003" if argument.is_none() => "darkeiser003",
-        "christianlg97" if argument.is_none() => "christianlg97",
         _ => return None,
     };
     if action == "openDirectory" && argument.is_some() {
@@ -116,24 +115,20 @@ mod tests {
     }
 
     #[test]
-    fn reconoce_los_creditos_como_easter_eggs_sin_distinguir_mayusculas_ni_arroba() {
+    fn reconoce_el_credito_del_desarrollador_sin_distinguir_mayusculas_ni_arroba() {
         for (input, expected) in [
             ("Darkeiser003", "darkeiser003"),
             ("darkeiser003", "darkeiser003"),
             ("@darkeiser003", "darkeiser003"),
             ("@Darkeiser003", "darkeiser003"),
-            ("Christianlg97", "christianlg97"),
-            ("christianlg97", "christianlg97"),
-            ("@christianlg97", "christianlg97"),
-            ("@Christianlg97", "christianlg97"),
-            ("@CHRISTIANLG97", "christianlg97"),
             (":darkeiser003", "darkeiser003"),
-            (":christianlg97", "christianlg97"),
         ] {
             assert_eq!(parse(input).unwrap().action, expected, "entrada: {input}");
         }
         assert!(parse("@darkeiser003 extra").is_none());
         assert!(parse("@@darkeiser003").is_none());
+        assert!(parse("christianlg97").is_none());
+        assert!(parse(":christianlg97").is_none());
         assert!(parse("echo darkeiser003").is_none());
     }
 }

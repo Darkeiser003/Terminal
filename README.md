@@ -122,12 +122,15 @@ El backend temporal de pipes se activa solo con `LTERMINAL_TEST_UNDER_WINE=1`,
 porque Wine no implementa `CreatePseudoConsole` con fidelidad suficiente.
 `LTERMINAL_WINE_GUI_SMOKE=1` activa, como diagnóstico opcional, el smoke GUI:
 localiza/instala WebView2 en `WINE_SMOKE_PREFIX`, `WINEPREFIX`, `~/.wine`, Lutris
-o Steam. Usa el display actual si existe, para que la ventana se pueda ver;
-`LTERMINAL_WINE_XVFB=1` fuerza un Xvfb privado y `=0` lo desactiva. La prueba
-comprueba que WebView2 monta el frontend, crea la sesión y cierra limpiamente,
-pero no puede asegurar que Wine presente los píxeles: puede mostrar una ventana
-negra aunque el frontend y los comandos funcionen. La instalación automática
-del Runtime GUI se puede desactivar con `LTERMINAL_WINE_WEBVIEW2_AUTO_INSTALL=0`.
+o Steam. `LTERMINAL_WINE_XVFB=auto` (predeterminado) primero comprueba que el
+display heredado responde a `xdpyinfo` y, si está roto o ausente, usa un Xvfb
+privado. `=1` fuerza Xvfb y `=0` exige el display actual. El smoke busca la
+ventana visible, espera a que WebView2 y el PTY estén preparados y guarda una
+captura; falla si la imagen sigue negra o vacía. Esto valida la presentación
+bajo Wine, no sustituye una prueba nativa de Windows ni demuestra ConPTY real.
+La captura puede guardarse fuera de temporales mediante
+`LTERMINAL_WINE_GUI_CAPTURE_DIR`. La instalación automática del Runtime GUI se
+puede desactivar con `LTERMINAL_WINE_WEBVIEW2_AUTO_INSTALL=0`.
 
 Cada E2E de Windows crea además un perfil WebView2 temporal y exclusivo, que
 EdgeDriver recibe mediante `webviewOptions`. Algunas combinaciones de WebView2
@@ -163,11 +166,15 @@ incluye los recursos junto al ejecutable.
 ## Instalación para usar la aplicación
 
 **Windows portable.** Se distribuye como carpeta desempaquetada: se descomprime
-donde se quiera y se ejecuta `winslim-terminal.exe`. No instala WebView2, no
-toca el registro y no crea accesos directos. Los binarios y la carpeta
-`scripts/` tienen que ir juntos: además de `winslim-terminal.exe`,
-`conpty.dll`, `OpenConsole.exe` y `WebView2Loader.dll`, esa carpeta contiene
-los gestores integrados que muestra la Biblioteca.
+donde se quiera y se ejecuta `winslim-terminal.exe`. La build cruzada incluye,
+cuando dispone del bootstrapper de Microsoft, `MicrosoftEdgeWebView2Setup.exe`:
+si falta WebView2, la aplicación lo instala en silencio antes de crear la
+ventana. No crea accesos directos. Los binarios y la carpeta `scripts/` tienen
+que ir juntos: además de `winslim-terminal.exe`, `conpty.dll`, `OpenConsole.exe`
+y `WebView2Loader.dll`, esa carpeta contiene los gestores integrados que
+muestra la Biblioteca. Para una build portable mínima se puede usar
+`LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER=0`; en ese caso el runtime debe estar
+instalado previamente.
 
 **Windows instalable.** La release completa (`npm run dist:win`) y su alias
 explícito `npm run dist:win:installer` generan un NSIS con el instalador
@@ -227,7 +234,7 @@ usando o no se puede comprobar su actividad. No se borran temporales genéricos
 de otras aplicaciones. El builder Windows guarda los instaladores temporales en
 `winslim-terminal-build-*`, que elimina al terminar o el limpiador recoge si el
 proceso se interrumpe. También retiran logs de build en AppData y cachés privadas
-de LTerminal. `release/` y todo su contenido están protegidos y nunca se borran.
+de LTerminal. `release/`, `releases/` y todo su contenido están protegidos y nunca se borran.
 Por seguridad, la vista previa es el comportamiento predeterminado; el borrado
 requiere una opción explícita.
 
@@ -281,10 +288,12 @@ directamente en la terminal.
 | `npm run check:i18n` | Comprueba la paridad de los 15 catálogos, textos visibles, marcadores dinámicos y fugas de idioma en búsquedas y comandos internos. |
 | `npm run check:contracts` | Cruza las preferencias Rust/TOML/TypeScript, los comandos internos Rust/Svelte y los recursos nativos Linux/Windows. |
 | `npm run test:frontend-logic` | Ejecuta la lógica pura de idioma, identidad, scroll de terminal y los 20 atajos sin necesitar una ventana. |
+| `npm run test:ltools-contract` | Comprueba el contrato `ltools-actions-v1`, la validación de plataforma y la integración opcional de LTools; con `LTOOLS_TEST_BINARY` también prueba el CLI real. |
+| `npm run test:e2e:ltools` | Ejecuta, contra un binario ya compilado, la E2E optativa de LTools: descubre el catálogo JSON real, abre el selector, fija una acción segura, cierra/reabre la Biblioteca para probar persistencia y verifica el comando canónico. Requiere `E2E_BINARY` y un CLI LTools en `PATH` o `LTOOLS_TEST_BINARY`. |
 | `npm run test:cleaner` | Prueba los limpiadores Bash y PowerShell en proyectos temporales; verifica los enlaces, conserva `release/` y descargas externas genéricas, y elimina solo temporales identificados de LTerminal. |
 | `npm run test:version-restore` | Fuerza fallos de build y una copia de seguridad ausente; comprueba que no se anuncia éxito y que los cuatro manifiestos quedan byte a byte como estaban al terminar la prueba. |
-| `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o Acciones rápidas sin comprobar. |
-| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` detecta y prueba todos los shells/REPL seguros disponibles; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel. |
+| `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o una Biblioteca sin el contrato único de LTools. |
+| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` detecta y prueba todos los shells/REPL seguros disponibles; `E2E_PROGRESS_LAYOUT_ONLY=1` simula barras de `update`/`upgrade`, mide el overflow y verifica que el ancho se recupera; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run build:fast` | Atajo multiplataforma para `build` con `LTERMINAL_SKIP_CHECKS=1`; útil durante el desarrollo, no sustituye una release completa. |
@@ -330,6 +339,37 @@ de bases de datos, contenedores, elevaciones ni dispositivos ADB reales.
 `npm run test:e2e-environment-probes` comprueba localmente que los 89 REPL
 declarados entre el código y el catálogo tienen una sonda o una omisión segura.
 
+La integración con LTools también se puede probar sin recompilar:
+
+```bash
+E2E_BINARY="$PWD/releases/LTerminal-1.0.0-x86_64.AppImage" \
+LTOOLS_TEST_BINARY="$PWD/../Tools/rust/target/release/ltools" \
+npm run test:e2e:ltools
+```
+
+Esta prueba es optativa porque LTools no es una dependencia de LTerminal. La
+interfaz no mantiene una lista cerrada: vuelve a leer `ltools-actions-v1`,
+acepta los metadatos opcionales `label`, `shortLabel`, `description` y `quick`,
+y muestra automáticamente cualquier acción nueva que cumpla las reglas de
+seguridad. El usuario puede fijar hasta ocho botones; las acciones nuevas no
+rompen la selección guardada y aparecen en **Configurar…**. Las acciones que
+requieren un objetivo siguen fuera de esos botones hasta que exista una
+interfaz explícita para pedirlo.
+
+Para revisar exclusivamente el espacio horizontal que ocupan las salidas de
+instaladores y actualizadores, reutiliza una build existente:
+
+```bash
+E2E_BINARY="$PWD/releases/LTerminal-1.0.0-x86_64.AppImage" \
+E2E_PROGRESS_LAYOUT_ONLY=1 npm run e2e
+```
+
+Este escenario no instala ni actualiza nada. Genera una barra corta de
+`update`, una barra larga de `upgrade` con retorno de carro, toma capturas de
+ambas y limpia después la pantalla. El informe falla si la barra corta crea
+overflow, si la larga no lo crea solo por su contenido, o si la terminal no
+recupera sus columnas mínimas al terminar.
+
 Para comprobar el refresco de pantalla por el transporte ADB sin conectar un
 dispositivo, usa ese mismo perfil con `E2E_ADB_REFRESH_ONLY=1 npm run e2e`. El
 smoke antepone un `adb` simulado y aislado al `PATH`, selecciona su dispositivo,
@@ -368,7 +408,8 @@ rápido, ejecutar la batería E2E sobre un ejecutable que ya exista, compilar
 Windows con la suite Rust bajo Wine y previsualizar la limpieza antes de
 aplicarla. En Linux pregunta antes de instalar dependencias del sistema; en
 Windows avisa antes de iniciar el builder, que puede preparar Node.js, Rust o
-herramientas de Visual Studio si faltan. `release/` se conserva al limpiar.
+herramientas de Visual Studio si faltan. `release/` y `releases/` se conservan
+al limpiar.
 
 La firma de commits Git es independiente de la compilación y de la firma
 Ed25519 de las releases. No se solicita al buildear. Para activar la firma SSH
@@ -494,6 +535,10 @@ proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
 Cada script comprueba los requisitos, instala dependencias, pasa `npm run check`,
 compila, monta el artefacto, hace una comprobación de humo (abre la app y mira
 que no se cierre sola) y publica la release con su SHA-256 en `release/`.
+Por defecto los builders publican ahí. `LTERMINAL_RELEASE_DIR` permite elegir
+otra carpeta; las rutas relativas se resuelven desde la raíz del proyecto. Por
+ejemplo, `LTERMINAL_RELEASE_DIR="$PWD/releases"` publica las builds Linux y
+Windows cruzada en `releases/` sin tocar la carpeta histórica `release/`.
 El manifiesto `SHA256SUMS.txt` se actualiza por artefacto y de forma atómica:
 conserva los hashes de las demás arquitecturas, plataformas y perfiles de la
 misma versión, y solo sustituye la entrada del archivo que se acaba de generar.
@@ -583,8 +628,9 @@ un prefijo privado. También admite `WINE_SMOKE_PREFIX` para fijar uno concreto 
 `LTERMINAL_WINE_RUNNER=proton` junto con `LTERMINAL_PROTON=/ruta/al/proton`.
 En Linux, Wine 11 y Proton 11 están instrumentados y aislados. El smoke headless
 confirma entrada, salida y cierre del backend temporal de pipes; no equivale a
-probar ConPTY. El GUI smoke no activa EdgeDriver/CDP y verifica el handshake
-JavaScript/PTY, pero no certifica la imagen visible. WineHQ recoge un reporte de
+probar ConPTY. El GUI smoke de Wine prueba una ventana/captura visible y el
+handshake JavaScript/PTY, pero no activa EdgeDriver/CDP ni certifica Windows
+nativo. WineHQ recoge un reporte de
 ventanas WebView2 negras/blancas que relaciona el síntoma con D3D11 y
 DirectComposition ([WineHQ 59370](https://bugs.winehq.org/show_bug.cgi?id=59370),
 cerrado como duplicado de [WineHQ 58921](https://bugs.winehq.org/show_bug.cgi?id=58921));
@@ -1206,7 +1252,7 @@ distinguen mayúsculas de minúsculas.
 | `:panes 1\|2\|3\|4` / `:panes cycle` | Fija o rota el número de terminales visibles en la rejilla. `:layout` y `:grid` son equivalentes. |
 | `:explorer-here` | Abre el gestor de archivos del sistema en la ruta actual de la terminal en Windows o Linux. `:open-here` y `:reveal-here` son equivalentes. |
 | `:banner list` / `:banner hide|show|toggle <campo>` / `:banner preset compact\|full` | Consulta o cambia los campos del fastfetch. Los campos son `system`, `host`, `kernel`, `environment`, `motherboard`, `cpu`, `gpu`, `memory`, `storage`, `uptime` y `datetime`. |
-| `:quick-actions list` / `on` / `off` / `toggle` | Consulta o cambia la visibilidad de las acciones rápidas de Biblioteca. |
+| `:quick-actions list` | Comando heredado: informa de que las acciones fijadas se gestionan desde el catálogo de LTools. `on`, `off` y `toggle` ya no cambian la interfaz. |
 
 Los parámetros de `:terminal` usan valores sencillos: colores `#rrggbb`,
 booleanos `on/off`, cursor `block|underline|bar|beam|underline-thick`, peso
@@ -1254,12 +1300,9 @@ En una línea propia de la terminal, `Darkeiser003`, `darkeiser003`,
 `@darkeiser003` y `@Darkeiser003` muestran una presentación del desarrollo,
 el perfil público y los proyectos [WinSlim Terminal](https://github.com/Darkeiser003/Terminal)
 y [Infraestructura-Web](https://github.com/Darkeiser003/Infraestructura-Web).
-Del mismo modo, `christianlg97` y `@christianlg97` muestran un agradecimiento
-por la colaboración y enlazan el [perfil de Christianlg97](https://github.com/Christianlg97),
-[WinSlim Center Store](https://github.com/Christianlg97/WINSLIM_CENTER_STORE) y
-[WinSlim Update](https://github.com/Christianlg97/WinSlim-Update). Se aceptan
-también las formas con `:` por coherencia con los comandos internos; no se
-interceptan órdenes que contengan esos nombres como parte de otra línea.
+El crédito de colaboradores no se expone como comando ni como easter egg: se
+mantiene únicamente en `Ajustes › Información`. No se interceptan órdenes que
+contengan nombres de personas como parte de otra línea.
 
 ---
 
@@ -1387,11 +1430,46 @@ carpeta o el filtro de tipos actual no los incluya; los que ya no existen se
 retiran automáticamente. Así las herramientas de uso diario siguen a un clic
 sin convertir la Biblioteca en un segundo explorador.
 
-Las **Operaciones rápidas** de la Biblioteca se pueden ocultar desde Ajustes
-(`Acciones rápidas`) o desde cualquier terminal con `:quick-actions off`; se
-recuperan con `:quick-actions on` y también admiten `toggle` y `list`. La opción
-queda activada de fábrica y solo oculta el submenú: los scripts integrados
-siguen disponibles en la Biblioteca.
+Las antiguas **Operaciones rápidas** basadas en nombres de scripts ya no se
+muestran como un segundo menú. Los scripts siguen disponibles individualmente
+en la Biblioteca y el comando heredado `:quick-actions` solo muestra una ayuda
+de migración; no modifica preferencias ni oculta controles.
+
+### Acciones de LTools
+
+Si encuentra `ltools-cli`, `ltools`, `winslim-tools`, una AppImage/EXE versionada
+de Tools o su variante Windows en el `PATH`, en las carpetas de instalación
+convencionales (`~/.local/bin`, `~/.local/share/ltools`) o en el checkout/release
+local de `Darkeiser003/Tools`, la Biblioteca muestra un único apartado de
+**Acciones fijadas de LTools**. También admite `LTOOLS_PATH` para una instalación en
+otra ubicación. Solo inspecciona carpetas candidatas y nombres conocidos; no
+recorre el HOME completo ni ejecuta archivos encontrados sin validar su
+catálogo.
+Lee el catálogo versionado `ltools-actions-v1` mediante
+`actions list --format json`; el CLI publica `id`, `category`, `command`,
+`args`, `target`, `mutating`, `profile`, confirmación y alias. También puede
+publicar `label`, `shortLabel`, `description` y `quick`; son metadatos de
+presentación opcionales, con fallback seguro si faltan o no son válidos. No
+duplica nombres ni separa cadenas de comandos a mano. El usuario puede elegir
+hasta ocho acciones sin objetivo obligatorio por plataforma y la selección se
+guarda por perfil y sistema. Las acciones nuevas compatibles aparecen sin
+modificar LTerminal; las que tienen un objetivo (disco, servicio, usuario,
+etc.), una shell distinta o argumentos no compatibles se excluyen del panel de
+botones seguros para no inventar parámetros; las que modifican el sistema piden
+confirmación. La E2E optativa comprueba también
+que la selección sobrevive a cerrar y reabrir la Biblioteca.
+
+Al pulsar una acción, LTerminal vuelve a consultar el catálogo, valida el ID y
+escribe `ltools actions run <id>` con argumentos separados en una shell visible.
+No ejecuta comandos arbitrarios recibidos desde la interfaz ni oculta la salida.
+Si LTools no está instalado, **Obtener LTools** consulta la última release
+estable de `Darkeiser003/Tools`, elige el paquete CLI de la plataforma, lo
+descarga mediante los hosts permitidos y deja la AppImage ejecutable cuando
+corresponde. Después vuelve a escanear las rutas locales. Si GitHub todavía no
+ha publicado ninguna release o no hay un paquete compatible, abre el repositorio
+para que la instalación manual sea explícita; mientras tanto, la Biblioteca
+mantiene visible el estado y el botón de obtención para que el usuario sepa qué
+falta, sin ejecutar descargas silenciosas.
 
 El filtro de tipos se adapta al sistema. En Linux aparecen primero
 SH/Bash/Zsh, Fish y paquetes Linux, que son los tres valores de fábrica; en
@@ -1638,6 +1716,13 @@ con las métricas agrupadas por operación: repeticiones, mínimo, máximo y
 media. Así se puede distinguir, por ejemplo, cuánto tardó en aparecer la
 ventana, cuánto tardó el banner de una pestaña concreta y cuánto tardó una
 descarga o un panel, sin mezclarlo con la duración total de las pruebas.
+El informe incluye además `timings`: `phases` desglosa cada fase, `shells`
+registra la carga y la sonda de cada shell/REPL, `operations` conserva las
+acciones con duración explícita y `timeline` anota todos los eventos con su
+tiempo acumulado (`elapsedMs`) y el tiempo desde el punto de control anterior
+(`sincePreviousMs`). La salida del smoke muestra el mismo resumen mientras
+termina, por lo que una shell lenta o una operación concreta se puede localizar
+sin esperar a analizar el JSON.
 
 El smoke espera eventos reales de WebDriver, del compositor y del repintado
 del banner, sin repetir comandos de shell después de cada resize. Esto reduce
@@ -1727,9 +1812,9 @@ varios tamaños de ventana. También ejecuta los atajos globales de nueva pesta�
 navegación entre pestañas, división y explorador, conservando capturas antes y
 después. Repite refrescos de entornos, clics de
 división y aperturas de paneles para detectar carreras y estados residuales.
-El informe JSON se vuelve a validar al terminar y debe contener trece fases,
+El informe JSON se vuelve a validar al terminar y debe contener catorce fases,
 incluido el arrastre real de ratón y la matriz de shells con comandos en PTY y
-restauración de la shell inicial, los dos estados de `:quick-actions` y evidencias de menú contextual,
+restauración de la shell inicial, las salidas simuladas de actualización y evidencias de menú contextual,
 grupos/submenús de dependencias y la matriz responsive con dos paneles y el
 explorador visible y oculto. Una ventana que solo arranca y se cierra ya no
 puede contarse como E2E superado.

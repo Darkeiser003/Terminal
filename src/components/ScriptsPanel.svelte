@@ -15,7 +15,7 @@
     import { app } from '../lib/appState.svelte';
     import { compareLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
-    import type { ScriptEntry, ScriptsPanel as PanelData } from '../lib/types';
+    import type { LToolsAction, LToolsActionList, ScriptEntry, ScriptsPanel as PanelData } from '../lib/types';
     import Panel from './Panel.svelte';
 
     let data = $state<PanelData | null>(null);
@@ -32,9 +32,11 @@
     let argsFor = $state('');
     let args = $state('');
     let running = $state('');
-    let operationArgsFor = $state('');
-    let operationArgs = $state('');
-    let windowsAppPath = $state('');
+    let ltools = $state<LToolsActionList | null>(null);
+    let ltoolsLoading = $state(false);
+    let ltoolsConfiguring = $state(false);
+    let ltoolsRunning = $state('');
+    let selectedLToolsIds = $state<string[]>([]);
     let loadSerial = 0;
     let scheduledLoad: ReturnType<typeof setTimeout> | undefined;
     /** Categorías amplias que ya están presentes en `data`. Los subtipos se
@@ -150,17 +152,81 @@
         return FILTER_LEAVES.filter((filter) => defaults.has(filter.scan)).map((filter) => filter.id);
     }
 
-    type OperationAction = { label: string; args: string; title: string };
-    type OperationKind = 'docker' | 'kubernetes' | 'ssh' | 'services' | 'network' | 'adb';
-    type OperationTool = {
-        script: ScriptEntry;
-        kind: OperationKind;
-        label: string;
-        mark: string;
-        actions: OperationAction[];
-    };
-
     const NIVELES = [0, 1, 2, 3, 4, 5, 6, 8, 10];
+    const LTOOLS_SELECTION_KEY = 'lterminal.ltools.quick-actions.v1';
+    const MAX_PINNED_LTOOLS_ACTIONS = 8;
+    const DEFAULT_LTOOLS_ACTIONS = ['audit.quick', 'packages.inventory', 'clean.preview', 'defaults.show'];
+
+    function ltoolsSelectionKey(): string {
+        return `${LTOOLS_SELECTION_KEY}.${app.appInfo?.platform ?? 'unknown'}`;
+    }
+
+    function loadLToolsSelection(actions: LToolsAction[]): void {
+        let saved: unknown;
+        try {
+            saved = JSON.parse(localStorage.getItem(ltoolsSelectionKey()) ?? 'null');
+        } catch {
+            saved = null;
+        }
+        const savedIds = Array.isArray(saved)
+            ? saved.filter((id): id is string => typeof id === 'string')
+            : DEFAULT_LTOOLS_ACTIONS;
+        const knownIds = new Set(actions.filter((action) => action.requirementsAvailable).map((action) => action.id));
+        selectedLToolsIds = [...new Set(savedIds)].filter((id) => knownIds.has(id)).slice(0, MAX_PINNED_LTOOLS_ACTIONS);
+        if (selectedLToolsIds.length === 0) {
+            const available = actions.filter((action) => action.safe && action.requirementsAvailable);
+            const preferredIds = new Set([
+                ...available.filter((action) => action.quick).map((action) => action.id),
+                ...DEFAULT_LTOOLS_ACTIONS,
+            ]);
+            selectedLToolsIds = available
+                .filter((action) => preferredIds.has(action.id))
+                .concat(available.filter((action) => !preferredIds.has(action.id)))
+                .slice(0, 4)
+                .map((action) => action.id);
+        }
+    }
+
+    function saveLToolsSelection(): void {
+        try {
+            localStorage.setItem(ltoolsSelectionKey(), JSON.stringify(selectedLToolsIds));
+        } catch {
+            // El catálogo sigue funcionando si el perfil no permite storage.
+        }
+    }
+
+    function toggleLToolsAction(id: string, checked: boolean): void {
+        if (checked) {
+            if (selectedLToolsIds.includes(id) || selectedLToolsIds.length >= MAX_PINNED_LTOOLS_ACTIONS) return;
+            selectedLToolsIds = [...selectedLToolsIds, id];
+        } else {
+            selectedLToolsIds = selectedLToolsIds.filter((value) => value !== id);
+        }
+        saveLToolsSelection();
+    }
+
+    async function loadLToolsActions(): Promise<void> {
+        ltoolsLoading = true;
+        try {
+            const next = await api.listLToolsActions();
+            ltools = next;
+            if (next.available && next.actions.length) loadLToolsSelection(next.actions);
+        } catch (cause) {
+            ltools = {
+                available: false,
+                actions: [],
+                error: String(cause)
+            };
+        } finally {
+            ltoolsLoading = false;
+        }
+    }
+
+    const availableLToolsActions = $derived((ltools?.actions ?? []).filter((action) => action.requirementsAvailable));
+    const selectedLToolsActions = $derived.by(() => {
+        const actions = new Map((ltools?.actions ?? []).map((action) => [action.id, action]));
+        return selectedLToolsIds.map((id) => actions.get(id)).filter((action): action is LToolsAction => Boolean(action));
+    });
 
     function scanCategoriesForSelection(filterIds: string[]): string[] {
         return [...new Set(
@@ -192,6 +258,7 @@
         const serial = ++loadSerial;
         loading = true;
         statusError = false;
+        if (mode === 'library' && (!ltools || modeChanged)) void loadLToolsActions();
         try {
             const requestedCategories = selected === null
                 ? undefined
@@ -321,124 +388,117 @@
 
     const visible = $derived((data?.scripts ?? []).filter(typeMatches).filter(matches));
 
-    /** Los gestores incluidos por LTerminal conservan su CLI normal, pero se
-     *  reconocen para ofrecer las consultas habituales sin memorizar flags.
-     *  Las acciones destructivas se dejan en el modo avanzado del propio
-     *  script, donde siguen pasando por su confirmación. */
-    const operationTools = $derived.by((): OperationTool[] => {
-        // Las operaciones rápidas pertenecen a la Biblioteca: en «Ruta
-        // actual» se muestran los scripts encontrados, no utilidades globales
-        // repetidas. Así cada pestaña conserva un único lugar para Docker y
-        // Kubernetes.
-        if (mode !== 'library') return [];
-        const tools: OperationTool[] = [];
-        const seen = new Set<string>();
-        for (const script of [...visible, ...(data?.pinned ?? [])]) {
-            if (seen.has(script.path) || !script.runnable) continue;
-            if (script.name === 'docker-manager.sh' || script.name === 'docker-manager.ps1') {
-                tools.push({
-                    script,
-                    kind: 'docker',
-                    label: app.t('scripts.operation.docker', 'Docker Compose'),
-                    mark: 'D',
-                    actions: [
-                        { label: app.t('scripts.operation.status', 'Resumen'), args: 'status', title: app.t('scripts.operation.dockerStatus', 'Ver el estado global de Docker') },
-                        { label: app.t('scripts.operation.containers', 'Contenedores'), args: 'containers', title: app.t('scripts.operation.dockerContainers', 'Listar todos los contenedores') },
-                        { label: app.t('scripts.operation.images', 'Imágenes'), args: 'images', title: app.t('scripts.operation.dockerImages', 'Listar imágenes locales') },
-                        { label: app.t('scripts.operation.stats', 'Recursos'), args: 'stats', title: app.t('scripts.operation.dockerStats', 'Ver consumo de recursos') }
-                    ]
-                });
-                seen.add(script.path);
-            } else if (script.name === 'kubernetes-manager.sh' || script.name === 'kubernetes-manager.ps1') {
-                tools.push({
-                    script,
-                    kind: 'kubernetes',
-                    label: app.t('scripts.operation.kubernetes', 'Kubernetes'),
-                    mark: 'K',
-                    actions: [
-                        { label: app.t('scripts.operation.pods', 'Pods'), args: 'status', title: app.t('scripts.operation.kubernetesStatus', 'Ver pods del namespace default') },
-                        { label: app.t('scripts.operation.contexts', 'Contextos'), args: 'contexts', title: app.t('scripts.operation.contextsTitle', 'Listar contextos de Kubernetes') },
-                        { label: app.t('scripts.operation.namespaces', 'Namespaces'), args: 'namespaces', title: app.t('scripts.operation.namespacesTitle', 'Listar namespaces de Kubernetes') }
-                    ]
-                });
-                seen.add(script.path);
-            } else if (script.name === 'ssh-manager.sh' || script.name === 'ssh-manager.ps1') {
-                tools.push({
-                    script,
-                    kind: 'ssh',
-                    label: app.t('scripts.operation.ssh', 'SSH y acceso remoto'),
-                    mark: 'S',
-                    actions: [
-                        { label: app.t('scripts.operation.connect', 'Conectar'), args: 'connect', title: app.t('scripts.operation.connectTitle', 'Conectar a un host SSH guardado o introducir uno nuevo') },
-                        { label: app.t('scripts.operation.hosts', 'Hosts'), args: 'hosts', title: app.t('scripts.operation.hostsTitle', 'Listar los hosts guardados en la configuración SSH') },
-                        { label: app.t('scripts.operation.network', 'IPs / VPN'), args: 'network', title: app.t('scripts.operation.networkTitle', 'Ver IPs, Tailscale, WireGuard y conexiones activas') }
-                    ]
-                });
-                seen.add(script.path);
-            } else if (script.name === 'service-manager.sh' || script.name === 'service-manager.ps1') {
-                tools.push({
-                    script,
-                    kind: 'services',
-                    label: app.t('scripts.operation.services', 'Servicios'),
-                    mark: '⚙',
-                    actions: [
-                        { label: app.t('scripts.operation.status', 'Estado'), args: 'status', title: app.t('scripts.operation.serviceStatusTitle', 'Ver servicios activos y fallidos') },
-                        { label: app.t('scripts.operation.restart', 'Reiniciar'), args: 'restart', title: app.t('scripts.operation.serviceRestartTitle', 'Elegir y reiniciar un servicio') },
-                        { label: app.t('scripts.operation.logs', 'Logs'), args: 'logs', title: app.t('scripts.operation.serviceLogsTitle', 'Ver los últimos logs o eventos del servicio') }
-                    ]
-                });
-                seen.add(script.path);
-            } else if (script.name === 'network-manager.sh' || script.name === 'network-manager.ps1') {
-                tools.push({
-                    script,
-                    kind: 'network',
-                    label: app.t('scripts.operation.networkGroup', 'Red y VPN'),
-                    mark: 'N',
-                    actions: [
-                        { label: app.t('scripts.operation.interfaces', 'Interfaces'), args: 'interfaces', title: app.t('scripts.operation.interfacesTitle', 'Ver interfaces, direcciones y rutas') },
-                        { label: app.t('scripts.operation.vpn', 'VPN'), args: 'vpn', title: app.t('scripts.operation.vpnTitle', 'Consultar Tailscale, WireGuard, OpenVPN y VPN del sistema') }
-                    ]
-                });
-                seen.add(script.path);
-            } else if (script.name === 'adb-manager.sh' || script.name === 'adb-manager.ps1') {
-                tools.push({
-                    script,
-                    kind: 'adb',
-                    label: app.t('scripts.operation.adb', 'Android · ADB'),
-                    mark: 'A',
-                    actions: [
-                        { label: app.t('scripts.operation.devices', 'Dispositivos'), args: 'devices', title: app.t('scripts.operation.devicesTitle', 'Listar dispositivos y emuladores ADB') },
-                        { label: app.t('scripts.operation.restartAdb', 'Reiniciar ADB'), args: 'restart', title: app.t('scripts.operation.restartAdbTitle', 'Reiniciar el servidor ADB y volver a detectar dispositivos') },
-                        { label: app.t('scripts.operation.shell', 'Shell'), args: 'shell', title: app.t('scripts.operation.shellTitle', 'Abrir una shell en el dispositivo elegido') }
-                    ]
-                });
-                seen.add(script.path);
-            }
-        }
-        return tools;
-    });
-
-    const windowsCompatibilityQuickAction = $derived(
-        app.appInfo?.platform === 'linux' && app.environments.some((environment) => environment.id === 'wine-cmd')
-    );
-
-    async function runWindowsApplication(): Promise<void> {
+    async function runLToolsAction(action: LToolsAction): Promise<void> {
         const tabId = app.activeTabId;
-        const path = windowsAppPath.replace(/[\r\n]/g, '').trim();
-        if (!tabId || !path || running) return;
-        const quotedPath = `'${path.replaceAll("'", "'\\''")}'`;
-        const command = /\.msi$/i.test(path)
-            ? `wine msiexec /i ${quotedPath}`
-            : `wine start /unix ${quotedPath}`;
-        running = '__windows-compatibility__';
+        if (!tabId || running || ltoolsRunning) return;
+        if (!action.requirementsAvailable) return;
+        if (action.mutating || action.confirmation !== 'none') {
+            const details = `${action.label}\n\n${action.description}\n\n${app.t('scripts.ltools.confirm', 'Esta acción puede cambiar el sistema. ¿Quieres continuar?')}`;
+            if (!window.confirm(details)) return;
+        }
+        ltoolsRunning = action.id;
         statusError = false;
         try {
-            await api.sendInput(tabId, `${command}\r`);
+            const result = await api.runLToolsAction(tabId, action.id);
+            if (!result.ok) {
+                statusError = true;
+                status = result.error ?? app.t('scripts.ltools.runFailed', 'No se pudo ejecutar la acción de LTools.');
+                return;
+            }
+            panels.close();
+            if (result.tabId) await app.adoptTab(result.tabId, false);
         } catch (cause) {
             statusError = true;
             status = String(cause);
         } finally {
-            running = '';
+            ltoolsRunning = '';
+        }
+    }
+
+    async function openLToolsProject(): Promise<void> {
+        try {
+            const error = await api.openInGithub('Darkeiser003/Tools');
+            if (error) {
+                statusError = true;
+                status = error;
+            }
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
+    function ltoolsReleaseAsset(assets: { name: string }[]): { name: string } | null {
+        const platform = app.appInfo?.platform === 'windows' ? 'windows' : 'linux';
+        const names = assets.map((asset) => ({ asset, name: asset.name.toLowerCase() }));
+        const preferred = platform === 'windows'
+            ? [
+                  (name: string) => name.includes('-windows-') && name.includes('-cli.exe'),
+                  (name: string) => name.includes('-windows-') && name.endsWith('.exe'),
+                  (name: string) => name.includes('-windows-') && name.endsWith('.zip')
+              ]
+            : [
+                  (name: string) => name.includes('-linux-') && name.includes('-cli.appimage'),
+                  (name: string) => name.includes('-linux-') && name.endsWith('.appimage'),
+                  (name: string) => name.includes('-linux-') && name.endsWith('.tar.gz')
+              ];
+        for (const matches of preferred) {
+            const found = names.find(({ name }) => matches(name));
+            if (found) return found.asset;
+        }
+        return null;
+    }
+
+    async function installLTools(): Promise<void> {
+        if (ltoolsLoading) return;
+        ltoolsLoading = true;
+        statusError = false;
+        status = '';
+        try {
+            // Primero se registra el repositorio mediante una consulta oficial
+            // en la lista blanca de esta sesión; la descarga posterior solo
+            // acepta la release que se acaba de consultar y un adjunto
+            // compatible con la plataforma.
+            const project = await api.lookupProject('Darkeiser003/Tools');
+            if (!project.ok || !project.target || !project.repositories?.some((repository) => repository.fullName === 'Darkeiser003/Tools')) {
+                statusError = true;
+                status = project.error ?? 'No se pudo localizar el repositorio oficial de LTools.';
+                return;
+            }
+            const result = await api.getLatestRelease('Darkeiser003/Tools');
+            if (!result.ok) {
+                statusError = true;
+                status = result.error ?? 'No se pudo consultar la release de LTools.';
+                return;
+            }
+            if (!result.release) {
+                status = 'LTools todavía no tiene una release publicada en GitHub.';
+                await openLToolsProject();
+                return;
+            }
+            const asset = ltoolsReleaseAsset(result.release.assets);
+            if (!asset || !app.activeTabId) {
+                statusError = true;
+                status = 'La release no contiene un paquete de LTools compatible con este sistema.';
+                return;
+            }
+            const downloaded = await api.downloadRelease(
+                app.activeTabId,
+                'Darkeiser003/Tools',
+                asset.name
+            );
+            if (!downloaded.ok) {
+                statusError = true;
+                status = downloaded.error ?? 'No se pudo descargar LTools.';
+                return;
+            }
+            status = `LTools descargado en ${downloaded.path ?? 'la carpeta de proyectos'}.`;
+            await loadLToolsActions();
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        } finally {
+            ltoolsLoading = false;
         }
     }
 
@@ -478,14 +538,6 @@
         }
     }
 
-    function operationPlaceholder(kind: OperationKind): string {
-        if (kind === 'docker') return app.t('scripts.operation.dockerPlaceholder', 'Ej.: logs --follow nginx · compose up --build');
-        if (kind === 'kubernetes') return app.t('scripts.operation.kubernetesPlaceholder', 'Ej.: -n staging logs --follow api-abc123');
-        if (kind === 'ssh') return app.t('scripts.operation.sshPlaceholder', 'Ej.: connect usuario@servidor · hosts · network');
-        if (kind === 'services') return app.t('scripts.operation.servicesPlaceholder', 'Ej.: status · restart docker.service · logs ssh.service');
-        if (kind === 'network') return app.t('scripts.operation.networkPlaceholder', 'Ej.: interfaces · vpn');
-        return app.t('scripts.operation.adbPlaceholder', 'Ej.: devices · restart · shell');
-    }
     // Acceso rápido es global: no desaparece al cambiar de ámbito ni al
     // desactivar el tipo de archivo con el que se guardó. La búsqueda de texto
     // sí se aplica, porque es una petición explícita del usuario.
@@ -774,85 +826,76 @@
         </details>
     {/if}
 
-    {#if mode === 'library' && (app.preferences?.showQuickActions ?? true) && (operationTools.length || windowsCompatibilityQuickAction)}
-        <details class="operations" aria-label={app.t('scripts.operations', 'Operaciones rápidas')} ontoggle={onDetailsToggle}>
+    {#if mode === 'library'}
+        <details class="operations ltools-operations" data-testid="scripts-ltools" aria-label={app.t('scripts.ltools.title', 'Acciones fijadas de LTools')} ontoggle={onDetailsToggle}>
             <summary class="operations-title">
-                <span>{app.t('scripts.operations', 'Operaciones rápidas')}</span>
-                <small>{app.t('scripts.operationsNote', 'Consultas y acciones frecuentes; el comando se mostrará en la terminal.')}</small>
+                <span>{app.t('scripts.ltools.title', 'Acciones fijadas de LTools')}</span>
+                <small>{app.t('scripts.ltools.note', 'Las acciones se descubren desde el catálogo de LTools / WinSlim Tools y se ejecutan en una shell visible.')}</small>
                 <span class="operations-chevron" aria-hidden="true">⌄</span>
             </summary>
-            {#if windowsCompatibilityQuickAction}
-                <div class="operation-tool">
-                    <span class="operation-name">
-                        <span class="operation-mark">W</span>
-                        {app.t('scripts.operation.windows', 'Aplicaciones Windows')}
-                    </span>
-                    <div class="operation-actions windows-operation">
-                        <input
-                            type="text"
-                            bind:value={windowsAppPath}
-                            placeholder={app.t('scripts.operation.windowsPlaceholder', 'Ej.: /ruta/Aplicacion.exe o instalador.msi')}
-                            title={app.t('scripts.operation.windowsTitle', 'Ruta de un EXE o MSI que se abrirá con Wine')}
-                            disabled={running !== '' || !app.activeTabId}
-                        />
-                        <button
-                            type="button"
-                            class="run-direct"
-                            title={app.t('scripts.operation.windowsRunTitle', 'Abrir la aplicación con Wine sin cambiar tu shell')}
-                            disabled={!windowsAppPath.trim() || running !== '' || !app.activeTabId}
-                            onclick={() => void runWindowsApplication()}
-                        >{app.t('scripts.operation.windowsRun', 'Ejecutar con Wine')}</button>
-                    </div>
+            {#if ltoolsLoading}
+                <div class="ltools-empty">{app.t('scripts.ltools.detecting', 'Detectando LTools…')}</div>
+            {:else if ltools?.error}
+                <div class="ltools-empty ltools-error">
+                    <span>{ltools.error}</span>
+                    <button type="button" onclick={() => void loadLToolsActions()}>{app.t('scripts.refresh', 'Reintentar')}</button>
+                    <button type="button" class="run-direct" onclick={() => void installLTools()}>{app.t('scripts.ltools.get', 'Obtener LTools')}</button>
                 </div>
-            {/if}
-            {#each operationTools as tool (tool.script.path)}
-                <div class="operation-tool">
-                    <span class="operation-name">
-                        <span class="operation-mark">{tool.mark}</span>
-                        {tool.label}
-                    </span>
-                    <div class="operation-actions">
-                        {#each tool.actions as action (action.args)}
+            {:else if !ltools?.available}
+                <div class="ltools-empty">
+                    <span>{app.t('scripts.ltools.notInstalled', 'LTools no está instalado en este equipo.')}</span>
+                    <button type="button" class="run-direct" onclick={() => void installLTools()}>
+                        {app.t('scripts.ltools.get', 'Obtener LTools')}
+                    </button>
+                </div>
+            {:else}
+                <div class="ltools-meta" data-testid="scripts-ltools-meta">
+                    <span>{ltools.version ?? app.t('scripts.ltools.detected', 'CLI detectada')}</span>
+                    <span>{availableLToolsActions.length} {app.t('scripts.ltools.available', 'disponibles')}</span>
+                </div>
+                {#if selectedLToolsActions.length}
+                    <div class="operation-actions ltools-actions">
+                        {#each selectedLToolsActions as action (action.id)}
                             <button
                                 type="button"
-                                title={action.title}
-                                disabled={running !== '' || !app.activeTabId}
-                                onclick={() => run(tool.script, false, action.args)}
-                            >{action.label}</button>
+                                data-testid="scripts-ltools-run"
+                                data-ltools-action-id={action.id}
+                                title={action.description}
+                                disabled={running !== '' || ltoolsRunning !== '' || !app.activeTabId || !action.requirementsAvailable}
+                                onclick={() => void runLToolsAction(action)}
+                            >{action.shortLabel ?? action.label}</button>
                         {/each}
-                        <button
-                            type="button"
-                            class="run-direct"
-                            title={app.t('scripts.operation.runMenuTitle', 'Ejecutar sin argumentos y abrir el menú interno del script')}
-                            disabled={running !== '' || !app.activeTabId}
-                            onclick={() => run(tool.script, false, '')}
-                        >{app.t('scripts.run', 'Ejecutar')}</button>
-                        <button
-                            type="button"
-                            class="advanced"
-                            title={app.t('scripts.operation.advancedTitle', 'Abrir argumentos para usar todas las acciones del gestor')}
-                            onclick={() => {
-                                operationArgsFor = operationArgsFor === tool.script.path ? '' : tool.script.path;
-                                operationArgs = '';
-                            }}
-                        >{app.t('scripts.operation.advanced', 'Avanzado…')}</button>
                     </div>
-                    {#if operationArgsFor === tool.script.path}
-                        <div class="operation-advanced">
-                            <input
-                                type="text"
-                                bind:value={operationArgs}
-                                placeholder={operationPlaceholder(tool.kind)}
-                            />
-                            <button
-                                type="button"
-                                disabled={!operationArgs.trim() || running !== '' || !app.activeTabId}
-                                onclick={() => run(tool.script, false, operationArgs)}
-                            >{app.t('scripts.run', 'Ejecutar')}</button>
-                        </div>
-                    {/if}
+                {:else}
+                    <div class="ltools-empty">{app.t('scripts.ltools.noSelected', 'No hay acciones seleccionadas. Abre la configuración para elegirlas.')}</div>
+                {/if}
+                <div class="ltools-controls">
+                    <button type="button" class="advanced" data-testid="scripts-ltools-configure" onclick={() => (ltoolsConfiguring = !ltoolsConfiguring)}>
+                        {ltoolsConfiguring ? app.t('common.close', 'Cerrar') : app.t('scripts.ltools.configure', 'Configurar…')}
+                    </button>
+                    <button type="button" onclick={() => void loadLToolsActions()} disabled={ltoolsLoading}>
+                        {app.t('scripts.refresh', 'Actualizar')}
+                    </button>
                 </div>
-            {/each}
+                {#if ltoolsConfiguring}
+                    <div class="ltools-picker" aria-label={app.t('scripts.ltools.choose', 'Elegir acciones fijadas de LTools')}>
+                        {#each ltools.actions as action (action.id)}
+                            <label class="ltools-action" data-testid="scripts-ltools-action" data-ltools-action-id={action.id} class:unavailable={!action.requirementsAvailable} title={action.description}>
+                                <input
+                                    type="checkbox"
+                                    checked={selectedLToolsIds.includes(action.id)}
+                                    disabled={!action.requirementsAvailable && !selectedLToolsIds.includes(action.id)}
+                                    onchange={(event) => toggleLToolsAction(action.id, (event.currentTarget as HTMLInputElement).checked)}
+                                />
+                                <span>
+                                    <strong>{action.label}</strong>
+                                    <small>{action.group} · {action.requirementsAvailable ? action.description : app.t('scripts.ltools.missing', 'Falta una dependencia')}</small>
+                                </span>
+                            </label>
+                        {/each}
+                    </div>
+                {/if}
+            {/if}
         </details>
     {/if}
 
@@ -1268,6 +1311,7 @@
 
     .operations-title small {
         overflow: hidden;
+        min-width: 0;
         color: var(--muted);
         font-size: 9px;
         font-weight: 400;
@@ -1275,37 +1319,142 @@
         white-space: nowrap;
     }
 
-    .operation-tool {
-        display: grid;
-        grid-template-columns: minmax(105px, auto) 1fr;
+    .ltools-meta,
+    .ltools-controls {
+        display: flex;
         align-items: center;
-        gap: 7px;
-        padding: 7px 8px;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 5px 8px;
+        color: var(--muted);
+        font-size: 9px;
     }
 
-    .operation-tool + .operation-tool {
+    .ltools-actions {
+        justify-content: flex-start;
+        padding: 4px 8px 7px;
+    }
+
+    .ltools-empty {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 8px;
+        color: var(--muted);
+        font-size: 10px;
+    }
+
+    .ltools-empty span {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .ltools-error {
+        color: var(--warning);
+    }
+
+    .ltools-controls {
+        justify-content: flex-end;
         border-top: 1px solid var(--border);
     }
 
-    .operation-name {
-        display: flex;
-        align-items: center;
-        gap: 5px;
+    .ltools-controls button,
+    .ltools-empty button {
+        flex: 0 0 auto;
+        padding: 3px 6px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface-alt);
         color: var(--text);
-        font-size: 10px;
-        font-weight: 600;
+        font: inherit;
+        font-size: 9px;
+        cursor: pointer;
     }
 
-    .operation-mark {
+    .ltools-controls button.advanced,
+    .ltools-empty button.run-direct {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .ltools-picker {
         display: grid;
-        width: 17px;
-        height: 17px;
-        place-items: center;
+        grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+        max-height: 230px;
+        gap: 1px;
+        overflow: auto;
+        padding: 5px 8px 8px;
+        border-top: 1px solid var(--border);
+    }
+
+    .ltools-action {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 5px;
+        border: 1px solid transparent;
         border-radius: 4px;
-        background: var(--accent);
-        color: var(--surface);
-        font-size: 9px;
-        font-weight: 800;
+        cursor: pointer;
+    }
+
+    .ltools-action:hover {
+        border-color: var(--border);
+        background: var(--surface-hover);
+    }
+
+    .ltools-action input {
+        flex: 0 0 auto;
+        margin: 2px 0 0;
+    }
+
+    .ltools-action span {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .ltools-action strong,
+    .ltools-action small {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .ltools-action strong {
+        color: var(--text);
+        font-size: 10px;
+    }
+
+    .ltools-action small {
+        color: var(--muted);
+        font-size: 8px;
+    }
+
+    .ltools-action.unavailable {
+        opacity: 0.55;
+    }
+
+    @container (max-width: 420px) {
+        .ltools-actions {
+            display: grid;
+            grid-template-columns: 1fr;
+        }
+
+        .ltools-actions button {
+            min-width: 0;
+        }
+
+        .ltools-controls {
+            flex-wrap: wrap;
+            justify-content: stretch;
+        }
+
+        .ltools-controls button {
+            flex: 1 1 120px;
+        }
     }
 
     .operation-actions {
@@ -1328,71 +1477,6 @@
 
     .operation-actions button:hover:not(:disabled) {
         border-color: var(--accent);
-    }
-
-    .operation-actions button.advanced {
-        color: var(--accent);
-    }
-
-    .operation-actions button.run-direct {
-        border-color: var(--accent);
-        color: var(--accent);
-        font-weight: 700;
-    }
-
-    .windows-operation input {
-        min-width: 0;
-        flex: 1 1 180px;
-        padding: 3px 6px;
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        background: var(--surface-alt);
-        color: var(--text);
-        font: inherit;
-        font-size: 9px;
-    }
-
-    .operation-advanced {
-        display: grid;
-        grid-column: 1 / -1;
-        grid-template-columns: minmax(120px, 1fr) auto auto auto;
-        gap: 4px;
-        padding-top: 2px;
-    }
-
-    .operation-advanced input,
-    .operation-advanced button {
-        min-width: 0;
-        padding: 4px 6px;
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        background: var(--surface-alt);
-        color: var(--text);
-        font: inherit;
-        font-size: 9px;
-    }
-
-    .operation-advanced button {
-        cursor: pointer;
-    }
-
-    @container (max-width: 420px) {
-        .operation-tool {
-            grid-template-columns: 1fr;
-        }
-
-        .operation-actions {
-            justify-content: flex-start;
-        }
-
-        .operation-advanced {
-            grid-column: 1;
-            grid-template-columns: 1fr auto;
-        }
-
-        .operation-advanced input {
-            grid-column: 1 / -1;
-        }
     }
 
     .group {

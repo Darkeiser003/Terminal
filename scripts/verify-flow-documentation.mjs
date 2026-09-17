@@ -37,7 +37,7 @@ check('La documentación técnica vive en README', ['## Arquitectura', '## Contr
 check('README documenta el arranque y el ciclo PTY', ['orden de arranque', 'ciclo de vida de una pestaña', 'primera PTY'].every(hasReadme));
 check('README documenta las capas y dominios del proyecto', ['src-tauri/src/', 'src/', 'scripts/', 'terminal/', 'updater/'].every(hasReadme));
 check('README documenta Linux/Wine/Windows', ['Linux', 'Wine', 'Windows'].every(hasReadme));
-check('README documenta la matriz de pruebas y la evidencia', ['trece fases', 'capturas', 'informe JSON'].every(hasReadme));
+check('README documenta la matriz de pruebas y la evidencia', ['catorce fases', 'capturas', 'informe JSON'].every(hasReadme));
 check('README documenta alcance, evidencia y límites', ['Auditoría de release y comportamiento observable', 'límites de confianza', 'no se declara aprobado'].every(hasReadme));
 
 for (const marker of ['migrate_local_data', 'frontend_ready', 'tabs.shutdown', 'generate_handler!']) {

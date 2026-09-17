@@ -27,6 +27,7 @@ import type {
     GitRunResult,
     InstallList,
     InstallRunResult,
+    LToolsActionList,
     InternalCommand,
     Inventory,
     Listing,
@@ -138,6 +139,11 @@ export async function setWindowMaximized(maximized: boolean): Promise<void> {
     const window = getCurrentWindow();
     if (maximized) await window.maximize();
     else await window.unmaximize();
+}
+
+/** Oculta o restaura el marco nativo de la ventana para el modo terminal limpio. */
+export async function setWindowDecorations(visible: boolean): Promise<void> {
+    await getCurrentWindow().setDecorations(visible);
 }
 
 // ---- pty ----
@@ -376,6 +382,14 @@ export const refreshInstallActions = () => invokeLogged<InstallList>('install_re
  *  entero en la pestaña, y el usuario puede cancelarlo con Ctrl+C. */
 export const runInstallAction = (tabId: string, actionId: string) =>
     invokeLogged<InstallRunResult>('install_run', { tabId, actionId });
+
+/** Lee el catálogo ltools-actions-v1 del CLI instalado, sin instalar ni
+ * ejecutar nada. Si no existe, devuelve `available: false`. */
+export const listLToolsActions = () => invokeLogged<LToolsActionList>('ltools_actions_list');
+
+/** Revalida el catálogo y escribe la acción elegida en una shell visible. */
+export const runLToolsAction = (tabId: string, actionId: string) =>
+    invokeLogged<InstallRunResult>('ltools_action_run', { tabId, actionId });
 
 // ---- Actualización de la propia aplicación ----
 

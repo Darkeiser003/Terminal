@@ -460,10 +460,11 @@ pub enum HelpTopic {
     Plugins,
     Support,
     Credits,
+    DarkeiserCredit,
 }
 
 impl HelpTopic {
-    pub const SECTIONS: [Self; 9] = [
+    pub const SECTIONS: [Self; 10] = [
         Self::Packages,
         Self::Session,
         Self::Internal,
@@ -473,6 +474,7 @@ impl HelpTopic {
         Self::Plugins,
         Self::Support,
         Self::Credits,
+        Self::DarkeiserCredit,
     ];
 
     pub const fn file_key(self) -> &'static str {
@@ -487,6 +489,7 @@ impl HelpTopic {
             Self::Plugins => "plugins",
             Self::Support => "soporte",
             Self::Credits => "creditos",
+            Self::DarkeiserCredit => "darkeiser003",
         }
     }
 
@@ -502,6 +505,7 @@ impl HelpTopic {
             Self::Plugins => "plugins",
             Self::Support => "soporte",
             Self::Credits => "creditos",
+            Self::DarkeiserCredit => "credito de Darkeiser003",
         }
     }
 
@@ -526,6 +530,7 @@ impl HelpTopic {
                 Some(Self::Support)
             }
             "credito" | "creditos" | "credits" | "autor" | "autores" => Some(Self::Credits),
+            "darkeiser003" => Some(Self::DarkeiserCredit),
             _ => None,
         }
     }
@@ -692,6 +697,7 @@ fn help_topic_names(topic: HelpTopic) -> &'static [&'static str] {
             "shells",
         ],
         HelpTopic::Credits => &["credito", "creditos", "credits", "autor", "autores"],
+        HelpTopic::DarkeiserCredit => &["darkeiser003"],
         HelpTopic::General => &["general", "inicio", "todo", "all", "help", "ayuda"],
     }
 }
@@ -752,7 +758,9 @@ pub fn build_help_topic_text(
     if topic == HelpTopic::General || topic == HelpTopic::Credits {
         render_credits(&mut lines, t);
     }
-
+    if topic == HelpTopic::DarkeiserCredit {
+        render_credit(&mut lines, t, CreditKind::Darkeiser);
+    }
     lines.push(format!("{HELP_SECTION_COLOR}Uso de esta ayuda{HELP_RESET}"));
     lines.push(String::new());
     lines.push(help_row("ayuda", "ayuda completa"));
@@ -1045,7 +1053,21 @@ fn render_support(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
     lines.push(String::new());
 }
 
+#[derive(Clone, Copy)]
+enum CreditKind {
+    Darkeiser,
+}
+
 fn render_credits(lines: &mut Vec<String>, t: &Translator) {
+    render_credit(lines, t, CreditKind::Darkeiser);
+    lines.push(
+        "    Linux se presenta como LTerminal; Windows se presenta como WinSlim Terminal."
+            .to_string(),
+    );
+    lines.push(String::new());
+}
+
+fn render_credit(lines: &mut Vec<String>, t: &Translator, kind: CreditKind) {
     section(lines, "Créditos");
     const DARK: &[(&str, &str)] = &[
         ("darkeiserProfile", "https://github.com/Darkeiser003"),
@@ -1058,42 +1080,20 @@ fn render_credits(lines: &mut Vec<String>, t: &Translator) {
             "https://github.com/Darkeiser003/Infraestructura-Web",
         ),
     ];
-    const CHRISTIAN: &[(&str, &str)] = &[
-        ("christianProfile", "https://github.com/Christianlg97"),
-        (
-            "winslimStore",
-            "https://github.com/Christianlg97/WINSLIM_CENTER_STORE",
-        ),
-        (
-            "winslimUpdate",
-            "https://github.com/Christianlg97/WinSlim-Update",
-        ),
-    ];
     let dark_params: Vec<(&str, String)> = DARK
         .iter()
         .map(|(name, value)| (*name, (*value).to_string()))
         .collect();
-    let christian_params: Vec<(&str, String)> = CHRISTIAN
-        .iter()
-        .map(|(name, value)| (*name, (*value).to_string()))
-        .collect();
-    let dark = t.tp(
-        "terminal.creditDarkeiser",
-        &dark_params,
-        "Darkeiser003 · desarrollador de WinSlim Terminal\nGracias por visitar este proyecto. Puedes seguir el desarrollo, abrir incidencias y conocer las novedades en:\nPerfil: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfraestructura-Web: {cloudProject}",
-    );
-    let christian = t.tp(
-        "terminal.creditChristian",
-        &christian_params,
-        "Christianlg97 · colaborador de WinSlim Terminal\nGracias por tu cooperación en este y otros proyectos, y por compartir tus conocimientos, tiempo y recursos, especialmente sobre Windows.\nWinSlim es una versión de Windows optimizada, con herramientas propias, personalización, automatización y utilidades de sistema:\nPerfil: {christianProfile}\nWinSlim Center Store: {winslimStore}\nWinSlim Update: {winslimUpdate}",
-    );
-    for line in dark.lines().chain(christian.lines()) {
+    let text = match kind {
+        CreditKind::Darkeiser => t.tp(
+            "terminal.creditDarkeiser",
+            &dark_params,
+            "Darkeiser003 · desarrollador de WinSlim Terminal\nGracias por visitar este proyecto. Puedes seguir el desarrollo, abrir incidencias y conocer las novedades en:\nPerfil: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfraestructura-Web: {cloudProject}",
+        ),
+    };
+    for line in text.lines() {
         lines.push(format!("    {line}"));
     }
-    lines.push(
-        "    Linux se presenta como LTerminal; Windows se presenta como WinSlim Terminal."
-            .to_string(),
-    );
     lines.push(String::new());
 }
 
@@ -1988,7 +1988,7 @@ mod tests {
         assert!(script
             .help_topics
             .as_ref()
-            .is_some_and(|topics| topics.len() == 9));
+            .is_some_and(|topics| topics.len() == 10));
         assert!(script
             .help_runner
             .as_ref()
@@ -2030,7 +2030,33 @@ mod tests {
             HelpTopic::from_argument(Some("help")),
             Some(HelpTopic::General)
         );
+        assert_eq!(
+            HelpTopic::from_argument(Some("darkeiser003")),
+            Some(HelpTopic::DarkeiserCredit)
+        );
+        assert_eq!(HelpTopic::from_argument(Some("christianlg97")), None);
         assert_eq!(HelpTopic::from_argument(Some("frameworks")), None);
+    }
+
+    #[test]
+    fn los_creditos_directos_no_mezclan_las_personas() {
+        let opciones = HelpOptions {
+            app_name: "App",
+            env_label: "bash",
+            manager_label: None,
+            has_nsudo: false,
+            script_names: &[],
+        };
+        let dark = build_help_topic_text(
+            &Translator::default(),
+            &opciones,
+            HelpTopic::DarkeiserCredit,
+        );
+        assert!(dark.contains("Darkeiser003"));
+        assert!(!dark.contains("Christianlg97"));
+        let all = build_help_topic_text(&Translator::default(), &opciones, HelpTopic::Credits);
+        assert!(all.contains("Darkeiser003"));
+        assert!(!all.contains("Christianlg97"));
     }
 
     #[test]

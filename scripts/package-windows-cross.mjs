@@ -22,13 +22,14 @@ function argument(name) {
 }
 
 function usage() {
-    console.error('Uso: node scripts/package-windows-cross.mjs --source RUTA --project RUTA --release RUTA --version X.Y.Z [--fast]');
+    console.error('Uso: node scripts/package-windows-cross.mjs --source RUTA --project RUTA --release RUTA --version X.Y.Z [--fast] [--webview2-installer RUTA]');
 }
 
 const sourceDir = argument('--source');
 const projectRoot = argument('--project');
 const releaseRoot = argument('--release');
 const version = argument('--version');
+const webview2Installer = argument('--webview2-installer') || process.env.LTERMINAL_WEBVIEW2_INSTALLER;
 const fast = process.argv.includes('--fast');
 if (!sourceDir || !projectRoot || !releaseRoot || !version) {
     usage();
@@ -57,6 +58,13 @@ const payload = [
     'OpenConsole.exe',
     'WebView2Loader.dll',
 ];
+if (webview2Installer) {
+    const installerStat = await stat(resolve(webview2Installer)).catch(() => null);
+    if (!installerStat?.isFile() || installerStat.size < 100_000) {
+        throw new Error(`El bootstrapper WebView2 no es un archivo válido: ${webview2Installer}`);
+    }
+    payload.push('MicrosoftEdgeWebView2Setup.exe');
+}
 
 function isWithin(parent, target) {
     const rel = relative(parent, target);
@@ -78,7 +86,9 @@ if (resourceFiles.length === 0) {
 }
 
 for (const name of payload) {
-    const path = join(source, name);
+    const path = name === 'MicrosoftEdgeWebView2Setup.exe'
+        ? resolve(webview2Installer)
+        : join(source, name);
     if (!(await stat(path).catch(() => null))?.isFile()) {
         throw new Error(`Falta el archivo runtime requerido para Windows: ${path}`);
     }
@@ -143,7 +153,12 @@ async function restorePrevious() {
 
 try {
     await mkdir(stagedPortable, { recursive: true });
-    for (const name of payload) await copyFile(join(source, name), join(stagedPortable, name));
+    for (const name of payload) {
+        const sourcePath = name === 'MicrosoftEdgeWebView2Setup.exe'
+            ? resolve(webview2Installer)
+            : join(source, name);
+        await copyFile(sourcePath, join(stagedPortable, name));
+    }
     for (const file of resourceFiles) {
         const target = join(stagedPortable, file.destination);
         await mkdir(dirname(target), { recursive: true });
@@ -192,6 +207,7 @@ try {
     console.log(`SHA256: ${digest}`);
     console.log(`Manifiesto: ${manifestPath}`);
     console.log(`Archivos runtime: ${payload.length}; recursos: ${resourceFiles.length}`);
+    if (webview2Installer) console.log('Bootstrapper WebView2: incluido en el portable');
 } catch (error) {
     await restorePrevious().catch((restoreError) => {
         preserveTemporaryRoot = true;

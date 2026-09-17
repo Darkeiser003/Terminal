@@ -6,7 +6,7 @@
     NSIS con WebView2 offline incluido; la descripción mantenida está en README.md.
 
     Requisitos: Node.js >= 22.12 y el toolchain de Rust (rustup/cargo). La
-    carpeta desempaquetada necesita WebView2 ya instalado; el instalador
+    carpeta desempaquetada incluye el bootstrapper si se prepara; el instalador
     offline lo instala en el equipo destino.
 #>
 
@@ -1263,6 +1263,36 @@ function Ensure-WebView2Loader {
     return $target
 }
 
+function Find-PortableWebView2Bootstrapper {
+    $mode = if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER)) {
+        'auto'
+    } else {
+        $env:LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER
+    }
+    if ($mode -eq '0') { return $null }
+    if ($mode -notin @('auto', '1')) {
+        throw 'LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER debe ser 0, auto o 1.'
+    }
+
+    $candidate = $env:LTERMINAL_WEBVIEW2_INSTALLER
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        New-Item -ItemType Directory -Force -Path $script:BuildTempDir | Out-Null
+        $candidate = Join-Path $script:BuildTempDir 'MicrosoftEdgeWebview2Setup.exe'
+    }
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -and $mode -eq '1') {
+        Write-Host '    Descargando bootstrapper WebView2 para el portable...' -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $candidate -UseBasicParsing
+    }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $size = (Get-Item -LiteralPath $candidate).Length
+        if ($size -ge 100KB) { return (Get-Item -LiteralPath $candidate).FullName }
+        if ($mode -eq '1') { throw "El bootstrapper WebView2 descargado parece incompleto ($size bytes)." }
+    }
+    if ($mode -eq '1') { throw "No se pudo preparar el bootstrapper WebView2: $candidate" }
+    Write-Warn 'No se incluirá bootstrapper WebView2 en el portable; usa LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER=1 para descargarlo.'
+    return $null
+}
+
 if ($Installer) {
     # Tauri/tauri-build solo copia automáticamente WebView2Loader para GNU; en
     # MSVC queda dentro de build\\webview2-com-sys-*\\out\\x64. Primero se hace
@@ -1337,6 +1367,11 @@ New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 Ensure-WebView2Loader | Out-Null
 
 $payload = @('winslim-terminal.exe') + $conptyFiles + @('WebView2Loader.dll')
+$portableWebView2Bootstrapper = Find-PortableWebView2Bootstrapper
+if ($portableWebView2Bootstrapper) {
+    Copy-Item -LiteralPath $portableWebView2Bootstrapper -Destination (Join-Path $ReleaseDir 'MicrosoftEdgeWebView2Setup.exe') -Force
+    $payload += 'MicrosoftEdgeWebView2Setup.exe'
+}
 foreach ($file in $payload) {
     $source = Join-Path $ReleaseDir $file
     if (-not (Test-Path $source)) {
@@ -1708,7 +1743,13 @@ if ($runExtendedTests) {
 # el adjunto de la release (ver self_update::asset_for_platform, que se queda
 # con el .zip que no mencione otra plataforma).
 Write-Step 'Comprimiendo la release y calculando su huella'
-$releaseOut = Join-Path $ProjectRoot 'release'
+$releaseRoot = $env:LTERMINAL_RELEASE_DIR
+if ([string]::IsNullOrWhiteSpace($releaseRoot)) {
+    $releaseRoot = Join-Path $ProjectRoot 'release'
+} elseif (-not [IO.Path]::IsPathRooted($releaseRoot)) {
+    $releaseRoot = Join-Path $ProjectRoot $releaseRoot
+}
+$releaseOut = [IO.Path]::GetFullPath($releaseRoot)
 if ($Fast) {
     $releaseOut = Join-Path $releaseOut 'dev'
 }
@@ -1736,8 +1777,8 @@ Write-Ok "SHA256: $hash"
 # Cargo, pero el instalador también es un artefacto publicable. Se copia con
 # un nombre estable junto al ZIP para que no haya que buscarlo en target/ ni
 # se confunda con una build anterior. La fuente se conserva: Tauri puede
-# reutilizarla durante builds posteriores y release/ es el único directorio de
-# distribución que debe compartir o probar una persona.
+# reutilizarla durante builds posteriores y el destino de distribución se
+# controla con LTERMINAL_RELEASE_DIR (por defecto, release/).
 if ($Installer) {
     if ($null -eq $installerPath -or -not (Test-Path -LiteralPath $installerPath.FullName -PathType Leaf)) {
         throw 'La build indicó que generó NSIS, pero no queda ningún instalador para publicar.'

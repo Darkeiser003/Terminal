@@ -56,7 +56,6 @@ const VISIBILITY_CONTROLS = {
     dependencies: 'settings-show-dependencies',
     projects: 'settings-show-projects',
     library: 'settings-show-library',
-    quickActions: 'settings-show-quick-actions',
     explorer: 'settings-show-explorer',
 };
 // El smoke espera señales observables, no pausas largas. Estos valores se
@@ -108,6 +107,10 @@ let sessionCreationFinished = false;
 // delante del PATH. Así prueba el descubrimiento real y el transporte PTY sin
 // depender de un móvil/emulador ni tocar la instalación del usuario.
 const adbRefreshOnly = process.env.E2E_ADB_REFRESH_ONLY === '1';
+const ltoolsIntegration = process.env.E2E_LTOOLS_INTEGRATION === '1';
+const ltoolsOnly = process.env.E2E_LTOOLS_ONLY === '1';
+const progressLayoutOnly = process.env.E2E_PROGRESS_LAYOUT_ONLY === '1';
+const LTOOLS_MAX_PINNED = 8;
 let fakeAdbDirectory = null;
 if (adbRefreshOnly) {
     if (process.platform === 'win32') {
@@ -199,6 +202,7 @@ let sessionId;
 let panelVisibilityInitial = null;
 const smokeStartedAt = Date.now();
 const phaseTimings = [];
+let lastEventAt = smokeStartedAt;
 let phaseStartedAt = smokeStartedAt;
 let phaseName = 'driver';
 const smokeReportPath = process.env.LTERMINAL_SMOKE_REPORT
@@ -222,6 +226,7 @@ const smokeReport = {
     },
     limits: { ...WINDOW_LIMITS, ratio: 0.25 },
     phases: phaseTimings,
+    timings: null,
     events: [],
     captures: [],
     performance: {
@@ -234,18 +239,73 @@ const smokeReport = {
         captureScreenshots,
         captureDirectory: captureScreenshots ? captureDirectory : null,
         shellStartupLimitMs: SHELL_STARTUP_LIMIT_MS,
+        ltoolsIntegration,
+        ltoolsOnly,
+        progressLayoutOnly,
     },
     status: 'running',
     reportPath: smokeReportPath,
 };
 
 function recordEvent(type, data = {}) {
+    const now = Date.now();
+    const sincePreviousMs = Math.max(0, now - lastEventAt);
+    lastEventAt = now;
     smokeReport.events.push({
-        at: new Date().toISOString(),
-        elapsedMs: Date.now() - smokeStartedAt,
+        at: new Date(now).toISOString(),
+        elapsedMs: now - smokeStartedAt,
+        sincePreviousMs,
         type,
         ...data,
     });
+}
+
+function buildTimingReport() {
+    const labelFor = (event) => event.label
+        ?? event.id
+        ?? event.name
+        ?? event.panel
+        ?? event.submenu
+        ?? event.action
+        ?? event.marker
+        ?? event.capture
+        ?? null;
+    const timeline = smokeReport.events.map((event) => ({
+        type: event.type,
+        label: labelFor(event),
+        elapsedMs: event.elapsedMs,
+        sincePreviousMs: event.sincePreviousMs,
+        durationMs: Number.isFinite(event.durationMs) ? event.durationMs : null,
+        passed: event.passed ?? null,
+    }));
+    const shells = smokeReport.events
+        .filter((event) => event.type === 'environment-probe')
+        .map((event) => ({
+            id: event.id,
+            kind: event.kind,
+            language: event.language ?? null,
+            durationMs: event.durationMs ?? event.totalMs ?? null,
+            readinessMs: event.bannerReadyMs ?? null,
+            passed: event.passed === true,
+        }));
+    const operations = smokeReport.events
+        .filter((event) => event.type !== 'phase'
+            && event.type !== 'screenshot'
+            && Number.isFinite(event.durationMs))
+        .map((event) => ({
+            type: event.type,
+            label: labelFor(event),
+            durationMs: event.durationMs,
+            passed: event.passed ?? null,
+        }));
+    return {
+        schemaVersion: 1,
+        totalMs: smokeReport.durationMs,
+        phases: phaseTimings,
+        shells,
+        operations,
+        timeline,
+    };
 }
 
 function markPhase(nextName) {
@@ -306,7 +366,10 @@ async function captureScreenshot(label) {
 }
 
 async function verifyCompactSettingsFooterLayout() {
-    await click(await findWhenReady('[data-testid="settings-tab-appearance"]'));
+    // Comportamiento contiene el formulario más largo y es el caso que
+    // realmente puede quedar oculto bajo el pie sticky. Apariencia suele
+    // caber completa en una ventana grande y no prueba el contrato de scroll.
+    await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
     await resizeWindow(800, 600, { waitForBanner: false });
     const layout = await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `const dialog = document.querySelector('[role="dialog"]');
@@ -330,10 +393,13 @@ async function verifyCompactSettingsFooterLayout() {
                 hasDialog: true,
                 hasScroller: true,
                 hasFooter: true,
+                viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio },
+                scroller: { clientHeight: scroller.clientHeight, scrollHeight: scroller.scrollHeight },
                 scrollTop: scroller.scrollTop,
                 maxScroll: scroller.scrollHeight - scroller.clientHeight,
                 contentBottom: contentRect.bottom,
                 footerTop: footerRect.top,
+                formBottom: form.getBoundingClientRect().bottom,
                 reservedPadding: getComputedStyle(form).paddingBottom,
             };`,
         args: [],
@@ -558,18 +624,6 @@ async function pointerClickInView(element) {
     }
 }
 
-async function assertQuickActionsPreference(expected) {
-    await click(await findWhenReady('[data-testid="toolbar-settings"]'));
-    await findWhenReady('[role="dialog"]');
-    await click(await findWhenReady('[data-testid="settings-tab-behavior"]'));
-    await waitUntil(async () => {
-        const input = await findWhenReady('[data-testid="settings-show-quick-actions"]');
-        return Boolean(await property(input, 'checked')) === expected;
-    }, 10000, `preferencia de Acciones rápidas=${expected}`);
-    await click(await findWhenReady('[role="dialog"] .panel-close'));
-    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Ajustes tras comprobar Acciones rápidas');
-}
-
 async function attribute(element, name) {
     return request(`/session/${sessionId}/element/${element}/attribute/${name}`);
 }
@@ -746,6 +800,129 @@ async function click(element) {
     await request(`/session/${sessionId}/element/${element}/click`, 'POST', {});
 }
 
+/** Reproduce el doble clic de un ratón sobre el nodo real, no dos llamadas
+ *  DOM a `.click()`. Las dos pulsaciones pasan por el protocolo WebDriver y
+ *  permiten detectar si el primer clic desmonta el elemento antes de que el
+ *  segundo llegue a su destino. */
+async function doubleClick(element) {
+    await request(`/session/${sessionId}/actions`, 'POST', {
+        actions: [{
+            type: 'pointer',
+            id: 'mouse-double-click',
+            parameters: { pointerType: 'mouse' },
+            actions: [
+                { type: 'pointerMove', origin: { [elementKey]: element }, x: 4, y: 4 },
+                { type: 'pointerDown', button: 0 },
+                { type: 'pointerUp', button: 0 },
+                { type: 'pointerDown', button: 0 },
+                { type: 'pointerUp', button: 0 },
+            ],
+        }],
+    });
+}
+
+/** Comprueba la interacción específica del Explorador que antes no tenía
+ *  cobertura E2E: un doble clic real sobre una carpeta no debe saltar dos
+ *  niveles ni reutilizar el nodo que Svelte acaba de desmontar. */
+async function exerciseExplorerDoubleClick() {
+    const explorerState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const root = document.querySelector('.explorer');
+            const path = root?.querySelector('.path');
+            return {
+                path: path?.textContent?.trim() ?? '',
+                entries: [...(root?.querySelectorAll('.entry') ?? [])].map((entry) => ({
+                    text: entry.textContent?.trim() ?? '',
+                    name: entry.querySelector('.name')?.textContent?.trim() ?? '',
+                    className: entry.className ?? '',
+                })),
+            };`,
+        args: [],
+    });
+    const originalPath = (await explorerState()).path;
+    if (!originalPath) throw new Error('No se pudo obtener la ruta del Explorador antes del doble clic');
+    const findExplorerEntryByName = async (name) => {
+        const result = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const expected = arguments[0];
+                const entry = [...document.querySelectorAll('.explorer .entry')]
+                    .find((item) => item.querySelector('.name')?.textContent?.trim() === expected);
+                return entry ?? null;`,
+            args: [name],
+        });
+        return result?.[elementKey] ?? null;
+    };
+    const temporaryName = `lterminal-e2e-double-click-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const temporaryRoot = join(originalPath, temporaryName);
+    const nestedDirectory = join(temporaryRoot, 'nested');
+    try {
+        // Crear los directorios desde el propio Explorador mantiene la prueba
+        // dentro del mismo backend y evita diferencias de namespace/permisos
+        // entre Node, Tauri, Wine o un runner aislado.
+        const createDirectory = async (name) => {
+            await click(await findWhenReady('.explorer .actions button:first-child'));
+            const input = await findWhenReady('.explorer form.inline input[type="text"]');
+            const valueResult = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `const input = arguments[0];
+                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                    if (!setter) return { ok: false, reason: 'no-setter' };
+                    setter.call(input, arguments[1]);
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    return { ok: input.value === arguments[1], value: input.value };`,
+                args: [{ [elementKey]: input }, name],
+            });
+            if (!valueResult?.ok) throw new Error(`No se pudo introducir el nombre ${name}: ${JSON.stringify(valueResult)}`);
+            await click(await findWhenReady('.explorer form.inline button[type="submit"]'));
+            try {
+                await waitUntil(async () => {
+                    return Boolean(await findExplorerEntryByName(name));
+                }, 10000, `creación de carpeta del Explorador (${name})`);
+            } catch (cause) {
+                throw new Error(`${cause.message}: ${JSON.stringify(await explorerState())}`);
+            }
+        };
+        await createDirectory(temporaryName);
+        await waitUntil(async () => {
+            return Boolean(await findExplorerEntryByName(temporaryName));
+        }, 10000, `carpeta temporal para preparar el doble clic (${temporaryRoot})`);
+        const temporaryEntry = await findExplorerEntryByName(temporaryName);
+        await click(temporaryEntry);
+        try {
+            await waitUntil(async () => (await explorerState()).path === temporaryRoot, 10000, 'entrada en la carpeta temporal');
+        } catch (cause) {
+            throw new Error(`${cause.message}: ${JSON.stringify(await explorerState())}`);
+        }
+        const nestedName = 'nested';
+        await createDirectory(nestedName);
+        await waitUntil(async () => {
+            return Boolean(await findExplorerEntryByName(nestedName));
+        }, 10000, `carpeta temporal para el doble clic (${temporaryRoot})`);
+        const nestedEntry = await findExplorerEntryByName(nestedName);
+        await doubleClick(nestedEntry);
+        await waitUntil(async () => (await explorerState()).path === nestedDirectory, 10000, 'entrada única tras doble clic de carpeta');
+        const enteredPath = (await explorerState()).path;
+        if (enteredPath !== nestedDirectory) {
+            throw new Error(`El doble clic navegó a una ruta inesperada: ${enteredPath}`);
+        }
+        const upButton = await findWhenReady('.explorer .toolbar button:first-child');
+        await click(upButton);
+        await waitUntil(async () => (await explorerState()).path === temporaryRoot, 10000, 'vuelta al directorio temporal');
+        await click(await findWhenReady('.explorer .toolbar button:first-child'));
+        await waitUntil(async () => (await explorerState()).path === originalPath, 10000, 'restauración de la ruta original tras el doble clic');
+        recordEvent('explorer-double-click', {
+            skipped: false,
+            temporaryRoot,
+            enteredPath,
+            expectedPath: nestedDirectory,
+            enteredOnce: true,
+            restored: true,
+            gesture: 'pointerMove → pointerDown → pointerUp × 2',
+            passed: true,
+        });
+    } finally {
+        await rm(temporaryRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+}
+
 /** Reproduce dos intenciones humanas consecutivas sin dejar que WebDriver
  * conserve una referencia a un nodo que Svelte puede actualizar entre ambas.
  * Los dos `click()` atraviesan los manejadores reales de la interfaz; solo se
@@ -880,6 +1057,22 @@ async function exerciseWindowManagerStates() {
         recordEvent('window-manager', { action: 'fullscreen-restore-fallback' });
     }
     recordEvent('window-manager', { action: 'fullscreen-off', floating: restored?.floating ?? null, fullscreen: false });
+
+    // Hyprland puede salir de fullscreen dejando la ventana acoplada aunque
+    // estuviera flotante antes de entrar. El endpoint WebDriver no puede
+    // cambiar el tamaño de una ventana acoplada: preparar de nuevo el estado
+    // flotante aquí hace que el resize posterior mida la ventana nativa real,
+    // y no el rectángulo ficticio que devuelve WebDriver mientras el layout
+    // sigue gobernado por el compositor.
+    if (restored?.floating !== true) {
+        await prepareWindowManagerForResize();
+        const prepared = await hyprlandActiveWindow();
+        recordEvent('window-manager', {
+            action: 'resize-preparation-after-fullscreen',
+            floating: prepared?.floating ?? null,
+            fullscreen: prepared?.fullscreen ?? null,
+        });
+    }
 
     if (restored?.floating === true) {
         await sendWindowShortcut(['\uE03D', ' ']);
@@ -1089,6 +1282,148 @@ async function terminalHorizontalSnapshot(cell) {
             };`,
         args: [{ [elementKey]: cell }],
     });
+}
+
+/**
+ * Simula la salida de un instalador sin ejecutar ningún gestor de paquetes.
+ * Las actualizaciones reales suelen pintar varias fases sobre la misma fila
+ * usando `\r`; la barra larga se genera dentro de la shell para que el propio
+ * comando no sea la línea que provoque el desbordamiento.
+ */
+function progressCommand(label, marker, barLength) {
+    const safeLabel = label.replace(/[^A-Z0-9_-]/g, '_');
+    const dots = '.'.repeat(Math.min(24, barLength));
+    if (process.platform === 'win32') {
+        const bar = '#'.repeat(barLength);
+        return `cmd /d /s /c "echo LTERMINAL_PROGRESS_${safeLabel} 0% [${dots}] & echo LTERMINAL_PROGRESS_${safeLabel} 50% [${dots}] & echo LTERMINAL_PROGRESS_${safeLabel} 100% [${bar}] & echo ${marker}"`;
+    }
+    if (barLength <= 32) {
+        const bar = '#'.repeat(barLength);
+        return `printf '%s\\r%s\\r%s\\n%s\\n' 'LTERMINAL_PROGRESS_${safeLabel} 0% [${dots}]' 'LTERMINAL_PROGRESS_${safeLabel} 50% [${dots}]' 'LTERMINAL_PROGRESS_${safeLabel} 100% [${bar}]' '${marker}'`;
+    }
+    return `printf '%s\\r%s\\r%s' 'LTERMINAL_PROGRESS_${safeLabel} 0%' 'LTERMINAL_PROGRESS_${safeLabel} 50%' 'LTERMINAL_PROGRESS_${safeLabel} 100% ['; printf '%*s' ${barLength} '' | tr ' ' '#'; printf ']\\n${marker}\\n'`;
+}
+
+function progressClearCommand(marker) {
+    return process.platform === 'win32'
+        ? `cmd /d /s /c "cls & echo ${marker}"`
+        : `clear; printf '%s\\n' '${marker}'`;
+}
+
+async function waitForProgressMarker(marker, description) {
+    await waitUntil(async () => {
+        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
+        const text = await textOf(rows);
+        const index = text.lastIndexOf(marker);
+        return index >= 0 && promptLooksVisible(text.slice(index + marker.length));
+    }, 15000, description);
+}
+
+async function exerciseProgressOutputLayout() {
+    const startedAt = Date.now();
+    // Esta geometría deja margen para una barra corta y obliga a que la larga
+    // solicite solo las columnas que ocupa su contenido.
+    await resizeWindow(900, 620, { waitForBanner: false });
+    const resetMarker = `LTERMINAL_PROGRESS_RESET_${Date.now()}`;
+    await sendTerminalLine(progressClearCommand(resetMarker));
+    await waitForProgressMarker(resetMarker, 'limpieza previa de la prueba de progreso');
+    const cell = await findWhenReady('.cell:not(.hidden)');
+    // El cambio de ventana puede llegar después del marcador de la shell:
+    // esperar a que xterm recupere el ancho del viewport evita medir las
+    // columnas de la fase anterior como si fueran espacio reservado por
+    // `update`.
+    await waitUntil(async () => {
+        const snapshot = await terminalHorizontalSnapshot(cell);
+        const host = snapshot.host;
+        const screen = snapshot.screen;
+        const cols = Number(host?.cols ?? 0);
+        const cellWidth = Number(screen?.rectWidth ?? 0) / Math.max(1, cols);
+        const visibleCols = Math.floor(Number(host?.clientWidth ?? 0) / Math.max(1, cellWidth));
+        return Boolean(host && screen)
+            && host.clientWidth > 0
+            && host.overflow !== 'true'
+            && host.scrollWidth <= host.clientWidth + 2
+            && cols > 0
+            && cols <= visibleCols + 1;
+    }, 15000, 'recuperación del ancho mínimo tras cambiar la ventana');
+    const baseline = await terminalHorizontalSnapshot(cell);
+    if (!baseline.host || baseline.host.clientWidth <= 0) {
+        throw new Error(`No se pudo medir el host de terminal antes de la prueba de progreso: ${JSON.stringify(baseline)}`);
+    }
+
+    const visibleColumns = Math.max(1, Number(baseline.host.cols) || 80);
+    const longBarLength = Math.max(160, visibleColumns + 40);
+    const scenarios = [
+        { id: 'update', barLength: 24, expectedMinimum: 60 },
+        { id: 'upgrade', barLength: longBarLength, expectedMinimum: visibleColumns + 30 },
+    ];
+    const results = [];
+    for (const scenario of scenarios) {
+        const marker = `LTERMINAL_PROGRESS_${scenario.id.toUpperCase()}_DONE_${Date.now()}`;
+        const command = progressCommand(scenario.id, marker, scenario.barLength);
+        const commandStartedAt = Date.now();
+        await sendTerminalLine(command);
+        await waitForProgressMarker(marker, `salida simulada de ${scenario.id}`);
+        const snapshot = await terminalHorizontalSnapshot(cell);
+        const host = snapshot.host;
+        const maxVisibleRowLength = Math.max(0, ...(snapshot.visibleRowLengths ?? []));
+        const expectedLineLength = scenario.id === 'upgrade'
+            ? `LTERMINAL_PROGRESS_UPGRADE 100% [${'#'.repeat(scenario.barLength)}]`.length
+            : `LTERMINAL_PROGRESS_UPDATE 100% [${'#'.repeat(scenario.barLength)}]`.length;
+        if (!host) throw new Error(`La terminal no expuso geometría para ${scenario.id}`);
+        const contentDriven = scenario.id === 'upgrade'
+            ? host.overflow === 'true'
+                && host.scrollWidth > host.clientWidth + 2
+                && Number(host.cols) >= expectedLineLength - 4
+                && Number(host.cols) <= expectedLineLength + 8
+                && maxVisibleRowLength >= scenario.expectedMinimum
+            : host.overflow !== 'true'
+                && host.scrollWidth <= host.clientWidth + 2
+                && Number(host.cols) <= Number(baseline.host.cols) + 4
+                && maxVisibleRowLength >= scenario.expectedMinimum;
+        const capture = await captureScreenshot(`progress-${scenario.id}-layout`);
+        results.push({
+            id: scenario.id,
+            barLength: scenario.barLength,
+            expectedLineLength,
+            maxVisibleRowLength,
+            host,
+            commandDurationMs: Date.now() - commandStartedAt,
+            capture,
+            contentDriven,
+            passed: contentDriven,
+        });
+        if (!contentDriven) {
+            throw new Error(`La salida simulada de ${scenario.id} no respetó el ancho mínimo/contenido: ${JSON.stringify(results.at(-1))}`);
+        }
+    }
+
+    const cleanupMarker = `LTERMINAL_PROGRESS_CLEAN_${Date.now()}`;
+    const cleanupStartedAt = Date.now();
+    await sendTerminalLine(progressClearCommand(cleanupMarker));
+    await waitForProgressMarker(cleanupMarker, 'limpieza de la barra de progreso');
+    const cleaned = await terminalHorizontalSnapshot(cell);
+    const cleanupHost = cleaned.host;
+    const reclaimed = Boolean(cleanupHost)
+        && cleanupHost.overflow !== 'true'
+        && cleanupHost.scrollWidth <= cleanupHost.clientWidth + 2
+        && Number(cleanupHost.cols) <= Number(baseline.host.cols) + 4;
+    const cleanupCapture = await captureScreenshot('progress-clean-layout');
+    if (!reclaimed) {
+        throw new Error(`La terminal no recuperó su ancho tras limpiar la barra: ${JSON.stringify({ baseline, cleaned })}`);
+    }
+    const durationMs = Date.now() - startedAt;
+    recordEvent('progress-output-layout', {
+        simulation: 'download/update/upgrade with carriage-return output',
+        baseline,
+        scenarios: results,
+        cleanup: { host: cleanupHost, durationMs: Date.now() - cleanupStartedAt, capture: cleanupCapture, reclaimed },
+        captures: [...results.map((result) => result.capture), cleanupCapture].filter(Boolean),
+        durationMs,
+        passed: true,
+    });
+    process.stdout.write(`E2E progreso: update=${results[0].commandDurationMs}ms, upgrade=${results[1].commandDurationMs}ms, limpieza=${Date.now() - cleanupStartedAt}ms, ancho recuperado, OK\n`);
+    return { scenarios: results, cleanup: { reclaimed }, durationMs };
 }
 
 // Una línea larga de :help debe conservar todos sus caracteres cuando xterm
@@ -2187,9 +2522,22 @@ async function resizeWindowAndAssertTransition(width, height, label) {
                 width: Math.max(WINDOW_LIMITS.minWidth, Math.min(WINDOW_LIMITS.maxWidth, width)),
                 height: Math.max(WINDOW_LIMITS.minHeight, Math.min(WINDOW_LIMITS.maxHeight, height)),
             };
-            const active = await hyprlandActiveWindow();
+            let active = await hyprlandActiveWindow();
             if (active?.floating !== true) {
-                throw new Error(`${label}: WebDriver no cambió el rectángulo y la ventana ya no es flotante en Hyprland`);
+                // El estado puede volver a tiled entre el último atajo de la
+                // fase anterior y esta petición. Reaplicar el dispatcher a
+                // la dirección concreta evita depender de que la ventana
+                // siga siendo la activa durante el cambio de layout.
+                if (!active?.address) {
+                    throw new Error(`${label}: WebDriver no cambió el rectángulo y Hyprland no dio la dirección de la ventana activa`);
+                }
+                await execFile('hyprctl', [
+                    'dispatch', 'togglefloating', `address:${active.address}`,
+                ], { timeout: 3000 });
+                active = await waitForHyprlandState(
+                    (state) => state?.address === active.address && state?.floating === true,
+                    `${label}: ventana flotante para resize`,
+                );
             }
             await execFile('hyprctl', [
                 'dispatch', 'resizeactive', 'exact', String(requested.width), String(requested.height),
@@ -2520,6 +2868,7 @@ async function exerciseShellMatrix() {
         } catch (error) {
             throw new Error(`${error.message}; filasPTY=${JSON.stringify(outputRowSummary)}`, { cause: error });
         }
+        const durationMs = Date.now() - startedAt;
         const result = {
             id,
             kind: probe.kind,
@@ -2533,13 +2882,15 @@ async function exerciseShellMatrix() {
             ...(id === 'lang:forth' ? { startupHintVisible, startupHintCapture } : {}),
             terminalFocusMethod,
             bannerReadyMs: readiness.elapsedMs,
-            totalMs: Date.now() - startedAt,
+            durationMs,
+            totalMs: durationMs,
             startupClean: true,
             passed: true,
         };
         testedIds.push(id);
         probeResults.push(result);
         recordEvent('environment-probe', result);
+        process.stdout.write(`E2E shell/REPL ${id}: carga=${result.bannerReadyMs}ms, prueba=${result.durationMs}ms, OK\n`);
         return result;
     };
 
@@ -2597,6 +2948,13 @@ async function exerciseShellMatrix() {
         originalSource,
         originalCaptureLabel,
         captureLabel,
+        shellTimings: probeResults.map((probe) => ({
+            id: probe.id,
+            kind: probe.kind,
+            durationMs: probe.durationMs,
+            readinessMs: probe.bannerReadyMs,
+            passed: probe.passed,
+        })),
         passed: true,
     });
     return { originalId, availableIds, testedIds, testedAlternates, skipped, restoredTo: originalId };
@@ -2775,6 +3133,138 @@ async function assertCurrentLog() {
     process.stdout.write(`E2E log OK: sesión=${session}, errores=0, métricas=${performanceEvents.length}, archivo=${path}\n`);
 }
 
+async function readLToolsCatalogForE2E() {
+    const startedAt = Date.now();
+    const attempts = [];
+    const candidates = [
+        process.env.LTOOLS_TEST_BINARY,
+        ...(process.platform === 'win32'
+            ? ['ltools-cli.exe', 'ltools.exe', 'winslim-tools.exe', 'ltools-cli', 'ltools', 'winslim-tools']
+            : ['ltools-cli', 'ltools', 'winslim-tools', 'ltools-cli.exe', 'ltools.exe', 'winslim-tools.exe']),
+    ].filter((candidate, index, list) => candidate && list.indexOf(candidate) === index);
+    for (const candidate of candidates) {
+        const candidateStartedAt = Date.now();
+        try {
+            const result = await execFile(candidate, ['actions', 'list', '--format', 'json'], {
+                encoding: 'utf8',
+                timeout: 7000,
+                maxBuffer: 1024 * 1024,
+            });
+            const catalog = JSON.parse(result.stdout);
+            if (catalog?.schema === 'ltools-actions-v1' && Array.isArray(catalog.actions)) {
+                attempts.push({ candidate, durationMs: Date.now() - candidateStartedAt, accepted: true });
+                return { binary: candidate, catalog, attempts, durationMs: Date.now() - startedAt };
+            }
+            attempts.push({ candidate, durationMs: Date.now() - candidateStartedAt, accepted: false, reason: 'contrato-invalido' });
+        } catch {
+            attempts.push({ candidate, durationMs: Date.now() - candidateStartedAt, accepted: false, reason: 'no-disponible' });
+            // Se prueban las variantes restantes; la E2E estricta informa al
+            // final si no hay un CLI instalado o si ninguno publica el contrato.
+        }
+    }
+    return { binary: null, catalog: null, attempts, durationMs: Date.now() - startedAt };
+}
+
+/**
+ * E2E optativa para el contrato real LTools. No conoce una lista de acciones:
+ * descubre el JSON, abre el selector, elige una acción segura publicada por
+ * el CLI y comprueba que la interfaz escribe el ID canónico en una terminal.
+ */
+async function exerciseLToolsIntegration() {
+    const startedAt = Date.now();
+    const live = await readLToolsCatalogForE2E();
+    if (!live?.catalog) throw new Error('E2E LTools solicitada, pero no se encontró un CLI que publique ltools-actions-v1.');
+    const { binary, catalog } = live;
+    const compatible = catalog.actions.filter((action) =>
+        action?.target === 'none' && action?.targetPolicy === 'none' && typeof action.id === 'string'
+    );
+    if (!compatible.length) throw new Error('El catálogo real de LTools no publica acciones sin objetivo para esta plataforma.');
+
+    for (const dialog of await findAll('[role="dialog"]')) {
+        await click(await findWhenReady('[role="dialog"] .panel-close'));
+    }
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de paneles antes de LTools');
+    await click(await findWhenReady('[data-testid="toolbar-library"]'));
+    const library = await findWhenReady('[role="dialog"]');
+    const section = await findWhenReady('[data-testid="scripts-ltools"]');
+    await click(await findWhenReady('[data-testid="scripts-ltools"] > summary'));
+    await waitUntil(async () => (await attribute(section, 'open')) === 'true', 5000, 'apertura del apartado LTools');
+
+    const meta = await textOf(await findWhenReady('[data-testid="scripts-ltools-meta"]'));
+    const availableCount = Number(meta.match(/(\d+)\s+disponibles/i)?.[1]);
+    const compatibleCount = compatible.length;
+    if (!Number.isInteger(availableCount) || availableCount < 1 || availableCount > compatibleCount) {
+        throw new Error(`La Biblioteca no refleja el catálogo compatible de LTools: ${JSON.stringify({ meta, availableCount, compatibleCount })}`);
+    }
+
+    await click(await findWhenReady('[data-testid="scripts-ltools-configure"]'));
+    const picker = await findWhenReady('[aria-label*="Elegir acciones"]');
+    const labels = await findAllWithin(picker, '[data-testid="scripts-ltools-action"]');
+    const pickerIds = [];
+    for (const label of labels) pickerIds.push(await attribute(label[elementKey], 'data-ltools-action-id'));
+    const pickerIdSet = new Set(pickerIds.filter(Boolean));
+    const chosen = compatible.find((action) =>
+        pickerIdSet.has(action.id) && action.mutating === false && action.confirmation === 'none'
+    );
+    if (!chosen) throw new Error(`No se encontró una acción segura del JSON en el selector: ${JSON.stringify({ compatibleCount, pickerIds })}`);
+
+    let runIds = [];
+    for (const button of await findAll('[data-testid="scripts-ltools-run"]')) {
+        runIds.push(await attribute(button[elementKey], 'data-ltools-action-id'));
+    }
+    if (!runIds.includes(chosen.id)) {
+        const selectedIds = runIds.filter(Boolean);
+        if (selectedIds.length >= LTOOLS_MAX_PINNED) {
+            const removeInput = await findWhenReady(`[data-testid="scripts-ltools-action"][data-ltools-action-id="${selectedIds[0]}"] input`);
+            await clickInView(removeInput);
+        }
+        const input = await findWhenReady(`[data-testid="scripts-ltools-action"][data-ltools-action-id="${chosen.id}"] input`);
+        if (!(await property(input, 'checked'))) await clickInView(input);
+        await findWhenReady(`[data-testid="scripts-ltools-run"][data-ltools-action-id="${chosen.id}"]`);
+    }
+    const selectedAfterToggle = [];
+    for (const button of await findAll('[data-testid="scripts-ltools-run"]')) {
+        const id = await attribute(button[elementKey], 'data-ltools-action-id');
+        if (id) selectedAfterToggle.push(id);
+    }
+    if (new Set(selectedAfterToggle).size !== selectedAfterToggle.length
+        || selectedAfterToggle.length > LTOOLS_MAX_PINNED
+        || !selectedAfterToggle.includes(chosen.id)) {
+        throw new Error(`El selector de LTools no respetó sus límites o no fijó la acción elegida: ${JSON.stringify(selectedAfterToggle)}`);
+    }
+    // Cerrar y volver a abrir demuestra que la selección vive en el perfil y
+    // no solo en el estado del componente mientras el selector está abierto.
+    await click(await findWhenReady('[role="dialog"] .panel-close'));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca tras fijar LTools');
+    await click(await findWhenReady('[data-testid="toolbar-library"]'));
+    const reopenedLTools = await findWhenReady('[data-testid="scripts-ltools"]');
+    if ((await attribute(reopenedLTools, 'open')) !== 'true') await click(await findWhenReady('[data-testid="scripts-ltools"] > summary'));
+    await findWhenReady(`[data-testid="scripts-ltools-run"][data-ltools-action-id="${chosen.id}"]`);
+    await captureScreenshot('ltools-catalogo-y-selector');
+    await click(await findWhenReady(`[data-testid="scripts-ltools-run"][data-ltools-action-id="${chosen.id}"]`));
+    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca tras ejecutar LTools');
+    await waitUntil(async () => {
+        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
+        return (await textOf(rows)).includes(`actions run ${chosen.id}`);
+    }, 30000, `comando canónico de LTools ${chosen.id}`);
+    recordEvent('ltools-integration', {
+        binary,
+        schema: catalog.schema,
+        catalogActions: catalog.actions.length,
+        compatibleActions: compatibleCount,
+        pickerActions: pickerIds.length,
+        selectedAction: chosen.id,
+        selectedCount: selectedAfterToggle.length,
+        selectionPersisted: true,
+        catalogDiscoveryMs: live.durationMs,
+        candidateAttempts: live.attempts,
+        durationMs: Date.now() - startedAt,
+        passed: true,
+    });
+    process.stdout.write(`E2E LTools: descubrimiento=${live.durationMs}ms, integración=${Date.now() - startedAt}ms, acción=${chosen.id}, OK\n`);
+    return { binary, catalogActions: catalog.actions.length, compatibleActions: compatibleCount, selectedAction: chosen.id, durationMs: Date.now() - startedAt };
+}
+
 try {
     await waitForDriver();
     const tauriOptions = { application };
@@ -2825,6 +3315,16 @@ try {
         smokeReport.focusedScenario = 'settings-footer-800x600';
         smokeReport.status = 'passed';
         process.stdout.write(`E2E enfocado OK: pie de Ajustes visible a 800x600 (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_EXPLORER_DOUBLE_CLICK_ONLY === '1') {
+        markPhase('doble clic real del Explorador');
+        await setExplorerVisible(true);
+        await exerciseExplorerDoubleClick();
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'explorer-double-click';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E enfocado OK: doble clic real del Explorador (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (process.env.E2E_MOUSE_SELECTION_ONLY === '1') {
         markPhase('selección de texto mediante arrastre real');
         await resizeWindow(1280, 820, { waitForBanner: false });
@@ -2984,6 +3484,24 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write(`E2E enfocado OK: entornos detectados ${matrix.availableIds.length}; sondas ejecutadas ${matrix.testedIds.length}; omisiones seguras ${matrix.skipped.length}; restaurado ${matrix.restoredTo} (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (ltoolsOnly) {
+        markPhase('integración opcional de LTools');
+        const integration = await exerciseLToolsIntegration();
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'ltools-catalog-integration';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E enfocado OK: LTools descubrió ${integration.catalogActions} acciones, ${integration.compatibleActions} compatibles y ejecutó ${integration.selectedAction} (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (progressLayoutOnly) {
+        markPhase('salidas progresivas de actualización');
+        const progress = await exerciseProgressOutputLayout();
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'progress-output-layout';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E enfocado OK: barras simuladas de update/upgrade y recuperación de ancho (${progress.durationMs} ms).\n`);
     } else if (adbRefreshOnly) {
         markPhase('salida progresiva ADB sin cambios de layout');
         const frames = await exerciseAdbRefreshWithoutLayout();
@@ -3391,6 +3909,8 @@ try {
         capture: 'pty-output-repaint-no-layout-event',
         capturePath: repaintCapture,
     });
+    markPhase('salidas progresivas de actualización');
+    await exerciseProgressOutputLayout();
     await sendTerminalLine(':help');
     await sendTerminalLine(':alias');
     await sendTerminalLine(':banner');
@@ -3515,18 +4035,18 @@ try {
     }, 10000, 'easter-egg de Darkeiser003 (formato y enlaces)');
     await captureScreenshot('credito-darkeiser-formato');
     await sendTerminalLine('clear');
-    await waitUntil(async () => snapshotPromptVisible(await activeTerminalRowSnapshot()), 10000, 'prompt tras limpiar antes de Christianlg97');
-    await sendTerminalLine('CHRISTIANLG97');
+    await waitUntil(async () => snapshotPromptVisible(await activeTerminalRowSnapshot()), 10000, 'prompt tras limpiar antes de alias de colaborador');
+    await sendTerminalLine('christianlg97');
     await waitUntil(async () => {
         const snapshot = await activeTerminalRowSnapshot();
         const text = snapshot.rows.map((row) => row.text).join('\n');
         const lines = creditLines(text);
-        return creditHasOwnTitleRow(lines, 'Christianlg97 ·')
-            && !creditTitleLeakedIntoPrompt(lines, /Christianlg97|colaborador/i)
-            && containsExactHttpsUrl(text, 'https://github.com/Christianlg97')
-            && containsExactHttpsUrl(text, 'https://github.com/Christianlg97/WINSLIM_CENTER_STORE');
-    }, 10000, 'easter-egg de Christianlg97 (formato y enlaces)');
-    await captureScreenshot('credito-christian-formato');
+        // El nombre puede aparecer como eco de la orden o como error de la
+        // shell; lo que no puede aparecer es una fila de crédito ni sus URLs.
+        return snapshotPromptVisible(snapshot)
+            && !creditHasOwnTitleRow(lines, 'Christianlg97 ·')
+            && !containsExactHttpsUrl(text, 'https://github.com/Christianlg97');
+    }, 10000, 'alias de colaborador no expuesto como easter-egg');
     await resizeWindow(1100, 720, { waitForBanner: false });
     // Tras los créditos la shell debe seguir utilizable: el siguiente comando
     // no puede escribirse en la fila antigua ni dejar el prompt oculto.
@@ -3544,8 +4064,9 @@ try {
     }, 10000, 'prompt utilizable después de los créditos');
     await captureScreenshot('credito-prompt-utilizable');
     recordEvent('author-easter-eggs', {
-        aliases: ['Darkeiser003', 'darkeiser003', '@darkeiser003', '@Darkeiser003', 'christianlg97', '@christianlg97'],
-        captures: ['credito-darkeiser-formato', 'credito-christian-formato', 'credito-prompt-utilizable'],
+        aliases: ['Darkeiser003', 'darkeiser003', '@darkeiser003', '@Darkeiser003'],
+        rejectedAliases: ['christianlg97', ':christianlg97', '@christianlg97'],
+        captures: ['credito-darkeiser-formato', 'credito-prompt-utilizable'],
         layout: 'title-row-without-prompt-fragment-and-usable-prompt',
         passed: true,
     });
@@ -3836,40 +4357,25 @@ try {
     await click(terminal);
 
     markPhase('biblioteca y operaciones');
-    // El comando interno debe cambiar la preferencia que consume la
-    // Biblioteca. Se comprueban ambos estados; no basta con reconocer la
-    // cadena ni con tener una casilla que nunca afecte a la interfaz.
-    const quickActionsMirrorBefore = await request(`/session/${sessionId}/execute/sync`, 'POST', {
-        script: 'return { ...document.querySelector(".cell:not(.hidden) .tab-pane")?.dataset };',
-        args: [],
-    });
-    await sendTerminalLine(':quick-actions off');
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    const quickActionsOffOutput = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
-    const quickActionsMirrorAfter = await request(`/session/${sessionId}/execute/sync`, 'POST', {
-        script: 'return { ...document.querySelector(".cell:not(.hidden) .tab-pane")?.dataset };',
-        args: [],
-    });
-    recordEvent('internal-command-output', {
-        command: ':quick-actions off',
-        mirrorBefore: quickActionsMirrorBefore,
-        mirrorAfter: quickActionsMirrorAfter,
-        preview: quickActionsOffOutput.slice(-1200),
-    });
-    await assertQuickActionsPreference(false);
-    recordEvent('preference', { name: 'showQuickActions', value: false, source: 'internal-command' });
-    await click(await findWhenReady('[data-testid="toolbar-library"]'));
-    await findWhenReady('[role="dialog"] .types');
-    if ((await findAll('[role="dialog"] .operations')).length !== 0) {
-        throw new Error(':quick-actions off no ocultó Operaciones rápidas');
+    // LTools es la única fuente de acciones fijables. Los scripts heredados
+    // siguen pudiendo ejecutarse desde los resultados, pero no deben crear un
+    // segundo menú de operaciones ni depender de showQuickActions.
+    await sendTerminalLine(':quick-actions list');
+    await waitUntil(async () => {
+        const output = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+        return /LTools|Biblioteca|Library/i.test(output.slice(-1200));
+    }, 10000, 'ayuda del comando heredado de acciones rápidas');
+    const legacyQuickActionsOutput = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
+    if (!/LTools|Biblioteca|Library/i.test(legacyQuickActionsOutput.slice(-1200))) {
+        throw new Error('El comando heredado no ofrece la migración a LTools');
     }
-    await click(await findWhenReady('[role="dialog"] .panel-close'));
-    await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca sin acciones rápidas');
-    await sendTerminalLine(':quick-actions on');
-    await assertQuickActionsPreference(true);
-    recordEvent('preference', { name: 'showQuickActions', value: true, source: 'internal-command' });
-    // La primera apertura tiene que respetar la configuración cerrada por
-    // defecto. Se abre y se vuelve a cerrar para probar el evento real.
+    recordEvent('legacy-quick-actions-compat', {
+        command: ':quick-actions list',
+        migratedTo: 'ltools',
+        mutatesPreferences: false,
+        preview: legacyQuickActionsOutput.slice(-1200),
+        passed: true,
+    });
     await click(await findWhenReady('[data-testid="toolbar-library"]'));
     const libraryDialog = await findWhenReady('[role="dialog"]');
     const libraryIdentity = await textOf(libraryDialog);
@@ -3880,16 +4386,34 @@ try {
     } else if (!/LTerminal/i.test(libraryIdentity) || /WinSlim Terminal/i.test(libraryIdentity)) {
         throw new Error(`La Biblioteca Linux mezcla la identidad Windows: ${JSON.stringify(libraryIdentity.slice(0, 240))}`);
     }
-    const operations = await findWhenReady('.operations');
-    if ((await attribute(operations, 'open')) !== null) {
-        throw new Error('Operaciones rápidas aparece abierta por defecto');
+    if ((await findAll('[data-testid="scripts-quick-operations"]')).length !== 0) {
+        throw new Error('La Biblioteca todavía muestra el menú heredado de Operaciones rápidas');
     }
-    await click(await findWhenReady('.operations > summary'));
-    if ((await attribute(operations, 'open')) !== 'true') throw new Error('No se pudo desplegar Operaciones rápidas');
-    const operationText = await textOf(operations);
-    if (!/SSH|Red|VPN|Servicios|Network/i.test(operationText)) {
-        throw new Error('No aparecen las operaciones rápidas de red/servicios: ' + JSON.stringify(operationText));
+    const ltoolsSection = await findWhenReady('[data-testid="scripts-ltools"]');
+    const ltoolsWasClosed = (await attribute(ltoolsSection, 'open')) === null;
+    await click(await findWhenReady('[data-testid="scripts-ltools"] > summary'));
+    if ((await attribute(ltoolsSection, 'open')) !== 'true') throw new Error('No se pudo desplegar el catálogo de acciones de LTools');
+    const ltoolsText = await textOf(ltoolsSection);
+    const ltoolsButtons = await findAll('[data-testid="scripts-ltools"] button');
+    let installControlVisible = false;
+    for (const button of ltoolsButtons) {
+        if (/Obtener LTools|Get LTools/i.test(await textOf(button))) {
+            installControlVisible = true;
+            break;
+        }
     }
+    const ltoolsAvailable = (await findAll('[data-testid="scripts-ltools-meta"]')).length === 1;
+    if (!ltoolsAvailable && !/LTools|WinSlim Tools/i.test(ltoolsText)) {
+        throw new Error(`La Biblioteca no muestra el estado de LTools ni el control de instalación: ${JSON.stringify(ltoolsText)}`);
+    }
+    recordEvent('ltools-ui-source', {
+        legacySelectorCount: (await findAll('[data-testid="scripts-quick-operations"]')).length,
+        ltoolsSectionCount: (await findAll('[data-testid="scripts-ltools"]')).length,
+        available: ltoolsAvailable,
+        installControlVisible,
+        initiallyClosed: ltoolsWasClosed,
+        passed: true,
+    });
     const types = await findWhenReady('.types');
     if ((await attribute(types, 'open')) !== null) throw new Error('Tipos de archivo aparece abierto por defecto');
     await click(await findWhenReady('.types > summary'));
@@ -3906,12 +4430,17 @@ try {
     const libraryModes = await findAll('[role="dialog"] .modes [role="tab"]');
     if (libraryModes.length !== 2) throw new Error(`La Biblioteca no muestra sus dos ámbitos: ${libraryModes.length}`);
     await click(libraryModes[1][elementKey]);
-    await waitUntil(async () => (await findAll('[role="dialog"] .operations')).length === 0, 5000, 'retirada de operaciones rápidas en Ruta actual');
-    if ((await findAll('[role="dialog"] .operations')).length !== 0) {
-        throw new Error('Ruta actual todavía muestra Operaciones rápidas');
+    await waitUntil(async () => (await findAll('[role="dialog"] [data-testid="scripts-ltools"]')).length === 0, 5000, 'ocultación de LTools en Ruta actual');
+    if ((await findAll('[role="dialog"] [data-testid="scripts-ltools"]')).length !== 0) {
+        throw new Error('Ruta actual muestra acciones globales de LTools');
     }
     await click(libraryModes[0][elementKey]);
-    await findWhenReady('[role="dialog"] .operations');
+    await findWhenReady('[role="dialog"] [data-testid="scripts-ltools"]');
+
+    if (ltoolsIntegration) {
+        markPhase('integración opcional de LTools');
+        await exerciseLToolsIntegration();
+    }
 
     markPhase('explorador y menú contextual');
     // El explorador debe conservar el menú contextual y sus acciones, aunque
@@ -3984,6 +4513,8 @@ try {
         cwdFollowed,
         passed: true,
     });
+
+    await exerciseExplorerDoubleClick();
 
     const entry = (await findAll('.explorer .entry'))[0]?.[elementKey];
     if (!entry) throw new Error('El explorador no mostró ninguna entrada para probar el menú contextual');
@@ -4562,7 +5093,11 @@ try {
     // requieren Shift dependen del layout del host. En el fallo observado el
     // eco devolvió el marcador en minúsculas y con guiones; limita esta sonda a
     // caracteres ASCII sin modificadores para medir el PTY y no el teclado.
-    const reclaimMarker = `lterminal-width-reclaim-${Date.now().toString(36)}`;
+    // Mantener la sonda por debajo del ancho visible evita que el propio
+    // comando de prueba mantenga el PTY ensanchado cuando la ayuda ya pasó al
+    // scrollback. La unicidad sigue siendo suficiente para no confundir una
+    // salida anterior.
+    const reclaimMarker = `r-${Date.now().toString(36)}`;
     const reclaimOutputLines = Array.from(
         { length: reclaimCommands },
         (_, index) => `${reclaimMarker}-${index}`,
@@ -4822,8 +5357,10 @@ try {
     for (const [explorerLabel, explorerVisible] of [['sin-explorador', false], ['con-explorador', true]]) {
         await setExplorerVisible(explorerVisible);
         const matrixResults = [];
+        const matrixDetails = [];
         const observedMatrixSizes = new Set();
         for (const [label, widthRatio, heightRatio] of proportions) {
+            const caseStartedAt = Date.now();
             const requestedWidth = Math.max(matrixMinimumWidth, Math.round(matrixBaseWidth * widthRatio));
             const requestedHeight = Math.max(matrixMinimumHeight, Math.round(matrixBaseHeight * heightRatio));
             const actual = await resizeWindow(requestedWidth, requestedHeight, { waitForBanner: false });
@@ -4847,13 +5384,30 @@ try {
                 .slice(0, stablePaneCount)
                 .map((pane) => `${pane.cell.width}x${pane.cell.height}`)
                 .join('|');
-            matrixResults.push(`${label}=${actual.width}x${actual.height}->${paneSize}/${bannerElapsedMs ?? '-'}ms`);
+            const durationMs = Date.now() - caseStartedAt;
+            matrixResults.push(`${label}=${actual.width}x${actual.height}->${paneSize}/${bannerElapsedMs ?? '-'}ms (${durationMs}ms)`);
+            matrixDetails.push({
+                label,
+                requested: { width: requestedWidth, height: requestedHeight },
+                actual: { width: actual.width, height: actual.height },
+                paneSize,
+                bannerReadyMs: bannerElapsedMs,
+                durationMs,
+                passed: true,
+            });
         }
         const requiredDistinctSizes = Math.min(4, expectedMatrixSizes.size);
         if (observedMatrixSizes.size < requiredDistinctSizes) {
             throw new Error(`El driver no aplicó suficientes tamaños (${explorerLabel}): ${[...observedMatrixSizes].join(', ')}; esperados al menos ${requiredDistinctSizes}`);
         }
         process.stdout.write(`E2E matriz ${explorerLabel} OK: ${matrixResults.join(', ')}\n`);
+        recordEvent('responsive-matrix-state', {
+            explorerLabel,
+            explorerVisible,
+            cases: matrixDetails,
+            durationMs: matrixDetails.reduce((total, item) => total + item.durationMs, 0),
+            passed: true,
+        });
     }
     recordEvent('responsive-matrix', {
         panes: stablePaneCount,
@@ -4877,15 +5431,15 @@ try {
     for (let attempt = 0; attempt < 3; attempt += 1) {
         await click(await findWhenReady('[data-testid="toolbar-library"]'));
         const library = await findWhenReady('[role="dialog"]');
-        const quickAccess = await findWhenReady('.operations', 5000);
-        await click(await findWhenReady('.operations > summary'));
-        if ((await attribute(quickAccess, 'open')) !== 'true') {
-            throw new Error(`Acceso rápido no se abrió en la repetición ${attempt + 1}`);
+        const ltoolsAccess = await findWhenReady('[data-testid="scripts-ltools"]', 5000);
+        await click(await findWhenReady('[data-testid="scripts-ltools"] > summary'));
+        if ((await attribute(ltoolsAccess, 'open')) !== 'true') {
+            throw new Error(`Acciones de LTools no se abrieron en la repetición ${attempt + 1}`);
         }
-        recordEvent('submenu', { panel: 'library', submenu: 'operations', open: true, attempt: attempt + 1 });
+        recordEvent('submenu', { panel: 'library', submenu: 'ltools', open: true, attempt: attempt + 1 });
         await click(await findWhenReady('[role="dialog"] .panel-close'));
         await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Biblioteca');
-        recordEvent('submenu', { panel: 'library', submenu: 'operations', open: false, attempt: attempt + 1 });
+        recordEvent('submenu', { panel: 'library', submenu: 'ltools', open: false, attempt: attempt + 1 });
         if (!library) throw new Error('Biblioteca no devolvió un diálogo válido');
     }
     // Redimensionar repetidamente y volver a invocar sysinfo comprueba que el
@@ -4949,7 +5503,6 @@ try {
     smokeReport.status = 'passed';
     smokeReport.logValidated = true;
     process.stdout.write(`E2E OK: ventana, terminal, paneles, menús y redimensionado (${Date.now() - smokeStartedAt} ms).\n`);
-    process.stdout.write(`E2E tiempos: ${phaseTimings.map((item) => `${item.name}=${item.durationMs}ms`).join(', ')}\n`);
     }
 } catch (error) {
     smokeReport.status = 'failed';
@@ -4984,6 +5537,16 @@ try {
     smokeReport.finishedAt = new Date().toISOString();
     smokeReport.durationMs = Date.now() - smokeStartedAt;
     smokeReport.phases = phaseTimings;
+    smokeReport.timings = buildTimingReport();
+    process.stdout.write(`E2E tiempos por fase: ${phaseTimings.map((item) => `${item.name}=${item.durationMs}ms`).join(', ')}\n`);
+    const shellTimings = smokeReport.timings.shells;
+    if (shellTimings.length > 0) {
+        process.stdout.write(`E2E tiempos por shell/REPL: ${shellTimings.map((item) => `${item.id}=carga:${item.readinessMs ?? '-'}ms/prueba:${item.durationMs ?? '-'}ms`).join(', ')}\n`);
+    }
+    if (smokeReport.timings.operations.length > 0) {
+        process.stdout.write(`E2E tiempos por operación: ${smokeReport.timings.operations.map((item) => `${item.type}${item.label ? `(${item.label})` : ''}=${item.durationMs}ms`).join(', ')}\n`);
+    }
+    process.stdout.write(`E2E línea temporal: ${smokeReport.timings.timeline.length} eventos; el informe conserva elapsedMs, sincePreviousMs y duración explícita cuando existe.\n`);
     if (ownsWebViewUserDataFolder && smokeReport.status === 'passed') {
         await rm(webviewUserDataFolder, {
             recursive: true,

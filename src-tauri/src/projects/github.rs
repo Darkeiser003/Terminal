@@ -1206,7 +1206,7 @@ mod tests {
         let windows = normalize_catalog(&raw, "win32");
         assert!(windows.owners.is_empty());
         assert_eq!(windows.fixed_profiles, vec!["Darkeiser003"]);
-        assert!(windows.repositories.is_empty());
+        assert_eq!(windows.repositories, vec!["Darkeiser003/Tools"]);
         assert_eq!(windows.developers, vec!["Darkeiser003"]);
         assert!(windows.project_leads.is_empty());
         assert_eq!(
@@ -1218,7 +1218,11 @@ mod tests {
             let otro = normalize_catalog(&raw, plataforma);
             assert!(otro.owners.is_empty(), "{plataforma}");
             assert_eq!(otro.fixed_profiles, vec!["Darkeiser003"], "{plataforma}");
-            assert!(otro.repositories.is_empty(), "{plataforma}");
+            assert_eq!(
+                otro.repositories,
+                vec!["Darkeiser003/Tools"],
+                "{plataforma}"
+            );
             assert_eq!(otro.developers, vec!["Darkeiser003"], "{plataforma}");
             assert!(otro.project_leads.is_empty(), "{plataforma}");
             assert_eq!(

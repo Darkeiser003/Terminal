@@ -26,6 +26,10 @@ const requiredFiles = [
     'windows/build.ps1',
     'build-tools/build.sh',
     'build-tools/build.ps1',
+    'src/PreviewApp.svelte',
+    'scripts/build-preview.mjs',
+    'scripts/preview.mjs',
+    'scripts/test-preview.mjs',
     'scripts/verify-i18n.mjs',
     'scripts/verify-runtime-assets.mjs',
     'scripts/verify-build-scripts.mjs',
@@ -45,6 +49,7 @@ const requiredFiles = [
     'scripts/create-release-manifest.mjs',
     'scripts/sign-release-manifest.mjs',
     'scripts/test-frontend-logic.mjs',
+    'scripts/test-ltools-e2e.mjs',
     'scripts/verify-test-surface.mjs',
     'scripts/verify-release-artifacts.mjs',
     'scripts/verify-flow-documentation.mjs'
@@ -58,7 +63,7 @@ for (const file of requiredFiles) {
     }
 }
 
-for (const name of ['check', 'build', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:e2e-url-matcher', 'test:release-hash', 'test:release-publish', 'test:release-manifest', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:github-security', 'check:logic']) {
+for (const name of ['check', 'build', 'build:preview', 'preview', 'e2e', 'e2e:build', 'dist:win:linux', 'dist:win:linux:fast', 'dist:linux:fast', 'check:i18n', 'check:contracts', 'test:frontend-logic', 'test:preview', 'test:build-menu', 'test:windows-cross-release', 'test:e2e-report', 'test:e2e-url-matcher', 'test:e2e:ltools', 'test:release-hash', 'test:release-publish', 'test:release-manifest', 'test:release-signature', 'check:docs', 'check:flows', 'check:encoding', 'check:metadata', 'check:architecture', 'check:build-scripts', 'check:github-security', 'check:logic']) {
     check(`package.json contiene el script ${name}`, typeof scripts[name] === 'string' && scripts[name].length > 0);
 }
 check('npm check incluye la verificación de la superficie de tests', scripts.check.includes('check:test-surface'));
@@ -125,8 +130,7 @@ check('Panel store declara explorer', panels.includes("'explorer'"));
 check('App monta el explorador', app.includes('<ExplorerSidebar />'));
 check('Panel común implementa cierre, Escape y foco', ['panels.close()', "event.key === 'Escape'", 'previousFocus'].every((marker) => read('src/components/Panel.svelte').includes(marker)));
 check('Panel común implementa acordeón exclusivo en los paneles', read('src/components/DependenciesPanel.svelte').includes('exclusiveAccordionGroups'));
-check('Biblioteca conserva ejecución directa sin argumentos', read('src/components/ScriptsPanel.svelte').includes('scripts.operation.runMenuTitle'));
-check('Biblioteca conserva ejecución Windows mediante Wine', read('src/components/ScriptsPanel.svelte').includes('runWindowsApplication'));
+check('Biblioteca conserva ejecución directa de scripts', read('src/components/ScriptsPanel.svelte').includes('onclick={() => run(script, false)}'));
 check('Biblioteca etiqueta los scripts integrados según la plataforma', (() => {
     const panelCommands = read('src-tauri/src/app/panel_commands.rs');
     return panelCommands.includes('bundled_source_label(is_windows)')
@@ -137,21 +141,49 @@ check('La ayuda PowerShell no arrastra la marca Linux', (() => {
     const aliases = read('src-tauri/src/terminal/aliases.rs');
     return aliases.includes('Show-TerminalHelp') && !aliases.includes('Show-LTerminalHelp');
 })());
-check('Acciones rápidas se pueden mostrar u ocultar y nacen visibles', (() => {
+check('LTools es la única fuente de acciones fijadas en la Biblioteca', (() => {
     const scriptsPanel = read('src/components/ScriptsPanel.svelte');
     const settings = read('src/components/SettingsPanel.svelte');
-    const defaults = read('src-tauri/default_settings.toml');
-    return defaults.includes('showQuickActions = true')
-        && scriptsPanel.includes('app.preferences?.showQuickActions ?? true')
-        && settings.includes('settings-show-quick-actions');
+    return scriptsPanel.includes('data-testid="scripts-ltools"')
+        && !scriptsPanel.includes('data-testid="scripts-quick-operations"')
+        && !scriptsPanel.includes('app.preferences?.showQuickActions')
+        && !settings.includes('settings-show-quick-actions');
 })());
-check('El comando interno de acciones rápidas persiste su estado', (() => {
+check('LTools se integra desde un catálogo JSON extensible y con límites seguros', (() => {
+    const backend = read('src-tauri/src/packages/ltools.rs');
+    const types = read('src/lib/types.ts');
+    const panel = read('src/components/ScriptsPanel.svelte');
+    const smoke = read('tests/e2e/smoke.mjs');
+    const report = read('scripts/verify-e2e-report.mjs');
+    return backend.includes('quick: bool')
+        && backend.includes('optional_safe_text')
+        && backend.includes('MAX_ARGUMENTS')
+        && backend.includes('discovery_directories')
+        && backend.includes('LTOOLS_PATH')
+        && types.includes('quick: boolean')
+        && panel.includes('MAX_PINNED_LTOOLS_ACTIONS')
+        && panel.includes('action.quick')
+        && panel.includes('data-testid="scripts-ltools"')
+        && panel.includes('data-testid="scripts-ltools-action"')
+        && panel.includes('installLTools')
+        && panel.includes("lookupProject('Darkeiser003/Tools')")
+        && panel.includes('ltoolsReleaseAsset')
+        && smoke.includes('exerciseLToolsIntegration')
+        && smoke.includes('E2E_LTOOLS_ONLY')
+        && smoke.includes('actions run ${chosen.id}')
+        && smoke.includes('legacySelectorCount')
+        && smoke.includes('installControlVisible')
+        && report.includes("focusedScenario === 'ltools-catalog-integration'")
+        && read('scripts/test-ltools-e2e.mjs').includes('E2E_LTOOLS_INTEGRATION');
+})());
+check('El comando antiguo de acciones rápidas queda como compatibilidad sin mutar preferencias', (() => {
     const parser = read('src-tauri/src/terminal/internal_commands.rs');
     const terminal = read('src/components/TerminalPane.svelte');
     return parser.includes('quick-actions')
         && parser.includes('quickActions')
         && terminal.includes('configureQuickActions')
-        && terminal.includes('showQuickActions');
+        && terminal.includes('Uso heredado')
+        && !terminal.includes('savePreferences({ showQuickActions: next })');
 })());
 check('Biblioteca conserva Acceso rápido global y traducido', ['scripts.quickAccess', 'const pinned = $derived((data?.pinned ?? []).filter(matches))'].every((marker) => read('src/components/ScriptsPanel.svelte').includes(marker)));
 check('Explorador contiene copiar, cortar, eliminar y pegar', ['explorer.copy', 'explorer.cut', 'explorer.trash', 'explorer.paste'].every((marker) => read('src/components/ExplorerSidebar.svelte').includes(marker)));
@@ -175,6 +207,9 @@ check('El E2E reproduce cierre rápido de pestaña y sincronización real del ex
     return smoke.includes("recordEvent('rapid-tab-replace'")
         && smoke.includes('createTabAndCloseImmediately(rapidOldId)')
         && smoke.includes("recordEvent('explorer-cwd-layout'")
+        && smoke.includes("recordEvent('explorer-double-click'")
+        && smoke.includes("gesture: 'pointerMove → pointerDown → pointerUp × 2'")
+        && smoke.includes('async function doubleClick(element)')
         && smoke.includes("await sendTerminalLine('cd /tmp')")
         && smoke.includes('pathHeight > 32');
 })());
@@ -220,11 +255,15 @@ check('E2E comprueba los dos estados del fastfetch automático de clear', (() =>
         && defaults.includes('clearReprintBanner = true')
         && preferences.includes('clear_reprint_banner');
 })());
-check('E2E comprueba ambos estados de Acciones rápidas y restaura la visibilidad', (() => {
+check('E2E comprueba que LTools sustituye las acciones heredadas', (() => {
     const smoke = read('tests/e2e/smoke.mjs');
-    return smoke.includes(":quick-actions off")
-        && smoke.includes(":quick-actions on")
-        && smoke.includes('no ocultó Operaciones rápidas')
+    const report = read('scripts/verify-e2e-report.mjs');
+    return smoke.includes(':quick-actions list')
+        && smoke.includes('legacySelectorCount')
+        && smoke.includes('legacy-quick-actions-compat')
+        && smoke.includes('ocultación de LTools en Ruta actual')
+        && report.includes("event?.type === 'ltools-ui-source'")
+        && report.includes("event?.type === 'legacy-quick-actions-compat'")
         && smoke.includes('panelVisibilityInitial');
 })());
 check('E2E cierra Ajustes antes de interactuar con la interfaz inferior', read('tests/e2e/smoke.mjs').includes('Ajustes es modal: cerrarlo siempre'));
@@ -558,7 +597,21 @@ check('Smoke E2E reproduce ADB con dispositivo falso y valida varios repintados 
 check('Smoke E2E valida una respuesta real de la shell', smoke.includes('LTERMINAL_E2E_COMMAND_OK') && smoke.includes('xterm-rows'));
 check('Smoke E2E prueba refrescos consecutivos de entornos', smoke.includes('refresh-environments') && smoke.includes('for (let attempt') && smoke.includes('fin de refrescos concurrentes'));
 check('Smoke E2E prueba clics concurrentes de división', smoke.includes('burstCount') && smoke.includes('crearon demasiados paneles'));
-check('Smoke E2E registra tiempos por fase y métricas de aplicación', smoke.includes('phaseTimings') && smoke.includes('E2E tiempos') && smoke.includes('performance'));
+check('Smoke E2E registra tiempos por fase, shell, operación y métricas de aplicación',
+    smoke.includes('phaseTimings')
+        && smoke.includes('buildTimingReport')
+        && smoke.includes('sincePreviousMs')
+        && smoke.includes('E2E tiempos por shell/REPL')
+        && smoke.includes('performance'));
+check('Smoke E2E simula update/upgrade, mide el overflow y comprueba recuperar el ancho',
+    smoke.includes('E2E_PROGRESS_LAYOUT_ONLY')
+        && smoke.includes('exerciseProgressOutputLayout')
+        && smoke.includes('progressCommand')
+        && smoke.includes('progress-output-layout')
+        && smoke.includes('progress-${scenario.id}-layout')
+        && smoke.includes('const reclaimed =')
+        && e2eReportVerifier.includes("type === 'progress-output-layout'")
+        && read('scripts/test-e2e-report.mjs').includes('missing-progress-layout'));
 check('E2E valida los límites sobre el viewport y separa la decoración nativa',
     smoke.includes('const measuredWidth = viewport?.width ?? rect?.width')
     && smoke.includes('nativeFrameWidth > 64')
@@ -579,6 +632,7 @@ check('Windows conserva la ventana automática y habilita CDP solo durante E2E e
     && smoke.includes("process.env.LTERMINAL_E2E_WEBDRIVER ??= '1'"));
 check('El informe E2E exige todas las fases funcionales en Linux y Windows', [
     'comandos internos y shell',
+    'salidas progresivas de actualización',
     'biblioteca y operaciones',
     'entorno y dependencias',
     'pestañas, división y redimensionado',
