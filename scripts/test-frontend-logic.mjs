@@ -296,10 +296,13 @@ assert(terminalPane.includes('function isDirectCreditAlias(line: string): boolea
     'TerminalPane debe preseleccionar los easter-eggs sin `:`');
 assert(terminalPane.includes("candidate.trimStart().startsWith(':') || isDirectCreditAlias(candidate)"),
     'Las líneas de crédito deben interceptarse antes de enviarse a la shell');
-assert(terminalPane.includes("ayuda creditos")
+assert(terminalPane.includes("command.action === 'darkeiser003'")
+    && terminalPane.includes('ayuda ${command.action}')
+    && aliases.includes('HelpTopic::Credits')
     && aliases.includes('terminal.creditDarkeiser')
-    && aliases.includes('terminal.creditChristian'),
-    'Los easter-eggs deben ejecutarse por la ayuda localizada del PTY');
+    && !aliases.includes('terminal.creditChristian')
+    && !terminalPane.includes('christianlg97'),
+    'El crédito por comando debe quedar limitado al desarrollador; Christian solo aparece en Ajustes');
 const fitAndReportStart = terminalPane.indexOf('function fitAndReport()');
 const paneResizeBlock = terminalPane.slice(fitAndReportStart);
 assert(terminalPane.includes('term.open(terminalHost)')

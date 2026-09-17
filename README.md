@@ -296,6 +296,8 @@ directamente en la terminal.
 | `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` detecta y prueba todos los shells/REPL seguros disponibles; `E2E_PROGRESS_LAYOUT_ONLY=1` simula barras de `update`/`upgrade`, mide el overflow y verifica que el ancho se recupera; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
+| `npm run build:preview` | Genera un frontend navegable en `dist-preview/` con un backend simulado; no usa Tauri, no abre PTY y no modifica el equipo. |
+| `npm run preview` | Sirve `dist-preview/` en `http://127.0.0.1:4173`; si no existe, lo genera automáticamente. Es el preview web funcional, separado de `dist/`. |
 | `npm run build:fast` | Atajo multiplataforma para `build` con `LTERMINAL_SKIP_CHECKS=1`; útil durante el desarrollo, no sustituye una release completa. |
 | `npm run dist:win` | Ejecuta la release completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera EXE, carpeta desempaquetada, ZIP e instalador NSIS offline. |
 | `npm run dist:win:fast` | Build de desarrollo rápida de Windows: usa compilación incremental, omite LTO y conserva símbolos; ejecuta solo el smoke mínimo y salta las comprobaciones previas. No es una release. |
@@ -402,14 +404,17 @@ powershell -ExecutionPolicy Bypass -File build-tools/build.ps1
 ```
 
 El menú organiza las tareas por resultado: desarrollo y preview, compilación,
-pruebas/smoke sin recompilar y limpieza. Permite compilar solo frontend o
-backend, generar la release Linux, compilar Windows desde Linux, elegir el modo
-rápido, ejecutar la batería E2E sobre un ejecutable que ya exista, compilar
-Windows con la suite Rust bajo Wine y previsualizar la limpieza antes de
-aplicarla. En Linux pregunta antes de instalar dependencias del sistema; en
-Windows avisa antes de iniciar el builder, que puede preparar Node.js, Rust o
-herramientas de Visual Studio si faltan. `release/` y `releases/` se conservan
-al limpiar.
+pruebas/smoke sin recompilar y limpieza. Permite compilar frontend, backend,
+Linux y Windows de forma individual, combinar frontend/backend o las dos
+plataformas, elegir release completa, rápida o sin pruebas ampliadas, ejecutar
+la E2E sobre un ejecutable ya existente y levantar el preview web funcional sin
+Tauri. Este último usa `dist-preview/`, muestra una terminal simulada con
+pestañas y comandos de demostración (`help`, `update`, `upgrade`, `clear`) y no
+debe confundirse con una validación del backend real. En Linux pregunta antes
+de instalar dependencias del sistema; en Windows avisa antes de iniciar el
+builder, que puede preparar Node.js, Rust o herramientas de Visual Studio si
+faltan. `release/` y `releases/` se conservan al limpiar; `dist-preview/` es
+salida temporal ignorada.
 
 La firma de commits Git es independiente de la compilación y de la firma
 Ed25519 de las releases. No se solicita al buildear. Para activar la firma SSH

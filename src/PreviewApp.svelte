@@ -61,7 +61,7 @@
         </div>
         <form class="prompt" onsubmit={(event) => { event.preventDefault(); submit(); }}>
             <span>demo@lterminal:~$</span>
-            <input bind:value={command} aria-label="Comando de preview" autocomplete="off" spellcheck="false" autofocus />
+            <input bind:value={command} aria-label="Comando de preview" autocomplete="off" spellcheck="false" />
         </form>
     </section>
 
