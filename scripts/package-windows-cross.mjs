@@ -43,8 +43,8 @@ const root = resolve(projectRoot);
 const source = resolve(sourceDir);
 const outputDir = join(resolve(releaseRoot), ...(fast ? ['dev'] : []));
 const suffix = fast ? '-dev' : '';
-const portableName = `WinSlimTerminal-${version}${suffix}`;
-const archiveName = `WinSlimTerminal-Unpacked-${version}${suffix}.zip`;
+const portableName = `WTerminal-${version}${suffix}`;
+const archiveName = `WTerminal-Unpacked-${version}${suffix}.zip`;
 const portablePath = join(outputDir, portableName);
 const archivePath = join(outputDir, archiveName);
 const manifestPath = join(outputDir, 'SHA256SUMS.txt');
@@ -53,7 +53,7 @@ const tauriConfigPath = join(root, 'src-tauri', 'tauri.conf.json');
 const tauriConfig = JSON.parse(await readFile(tauriConfigPath, 'utf8'));
 const resourceMap = tauriConfig.bundle?.resources ?? {};
 const payload = [
-    'winslim-terminal.exe',
+    'wterminal.exe',
     'conpty.dll',
     'OpenConsole.exe',
     'WebView2Loader.dll',

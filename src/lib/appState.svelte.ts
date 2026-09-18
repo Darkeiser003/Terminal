@@ -103,7 +103,7 @@ class AppStore {
         this.appInfo = info;
         // El HTML inicial es compartido por las dos builds. La identidad real
         // llega del backend, así que el título del documento también debe
-        // seguir la plataforma: LTerminal en Linux y WinSlim Terminal en
+        // seguir la plataforma: LTerminal en Linux y WTerminal en
         // Windows.
         if (typeof document !== 'undefined') document.title = info.name;
         await this.syncWindowDecorations(prefs.preferences);

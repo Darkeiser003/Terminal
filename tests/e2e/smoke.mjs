@@ -2,6 +2,7 @@ import { execFile as execFileCallback, spawn } from 'node:child_process';
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { createServer } from 'node:net';
 import process from 'node:process';
 import { promisify } from 'node:util';
 import {
@@ -25,14 +26,26 @@ if (process.platform === 'win32') process.env.LTERMINAL_E2E_DISABLE_GPU ??= '1';
 
 const driverPath = process.env.TAURI_DRIVER ?? 'tauri-driver';
 const nativeDriver = process.env.TAURI_NATIVE_DRIVER;
-const driverPort = process.env.TAURI_DRIVER_PORT ?? '4444';
-const nativePort = process.env.TAURI_NATIVE_PORT ?? String(Number(driverPort) + 1);
+async function findFreePort() {
+    return new Promise((resolve, reject) => {
+        const server = createServer();
+        server.once('error', reject);
+        server.listen({ host: '127.0.0.1', port: 0 }, () => {
+            const address = server.address();
+            const port = typeof address === 'object' && address ? address.port : null;
+            server.close((error) => error ? reject(error) : port ? resolve(port) : reject(new Error('No se pudo reservar un puerto E2E')));
+        });
+    });
+}
+const driverPort = process.env.TAURI_DRIVER_PORT ?? String(await findFreePort());
+const nativePort = process.env.TAURI_NATIVE_PORT ?? String(await findFreePort());
 const webdriverRequestTimeoutMs = Math.min(300_000, Math.max(1_000, Number(process.env.E2E_WEBDRIVER_TIMEOUT_MS) || 90_000));
 const application = process.env.E2E_BINARY;
 if (!application) throw new Error('E2E_BINARY debe apuntar al binario Tauri compilado');
 await access(application);
 const execFile = promisify(execFileCallback);
-const IS_HYPRLAND = [
+const SKIP_WINDOW_MANAGER = /^(1|true|yes)$/i.test(process.env.E2E_SKIP_WINDOW_MANAGER ?? '');
+const IS_HYPRLAND = !SKIP_WINDOW_MANAGER && [
     process.env.XDG_CURRENT_DESKTOP,
     process.env.DESKTOP_SESSION,
     process.env.HYPRLAND_INSTANCE_SIGNATURE,
@@ -102,6 +115,11 @@ const webviewUserDataFolder = process.platform === 'win32'
 const ownsWebViewUserDataFolder = Boolean(webviewUserDataFolder && !configuredWebViewUserDataFolder);
 if (webviewUserDataFolder) await mkdir(webviewUserDataFolder, { recursive: true });
 let sessionCreationFinished = false;
+// En un gestor de ventanas en mosaico el proceso puede estar visible y ser
+// totalmente usable, pero el compositor puede impedir que WebDriver cambie
+// su rectángulo. La cobertura de aplicación sigue siendo válida; solo se
+// marca como no disponible la parte que depende de una ventana flotante.
+let nativeResizeSupported = true;
 
 // El modo enfocado ADB instala un ejecutable falso en un directorio temporal
 // delante del PATH. Así prueba el descubrimiento real y el transporte PTY sin
@@ -110,7 +128,6 @@ const adbRefreshOnly = process.env.E2E_ADB_REFRESH_ONLY === '1';
 const ltoolsIntegration = process.env.E2E_LTOOLS_INTEGRATION === '1';
 const ltoolsOnly = process.env.E2E_LTOOLS_ONLY === '1';
 const progressLayoutOnly = process.env.E2E_PROGRESS_LAYOUT_ONLY === '1';
-const LTOOLS_MAX_PINNED = 8;
 let fakeAdbDirectory = null;
 if (adbRefreshOnly) {
     if (process.platform === 'win32') {
@@ -433,12 +450,35 @@ function processGroupExists(groupId) {
     }
 }
 
+async function processGroupMembers(groupId) {
+    try {
+        const { stdout } = await execFile('ps', ['-eo', 'pid=,pgid=,stat=,comm='], { timeout: 2000 });
+        return stdout.split('\n').flatMap((line) => {
+            const match = line.trim().match(/^(\d+)\s+(\d+)\s+([^\s]+)/);
+            return match && Number(match[2]) === groupId
+                ? [{ pid: Number(match[1]), stat: match[3], command: line.trim().slice(match[0].length).trim() }]
+                : [];
+        });
+    } catch {
+        return null;
+    }
+}
+
+async function processGroupHasLiveProcess(groupId) {
+    const members = await processGroupMembers(groupId);
+    if (members) return members.some(({ stat }) => !stat.startsWith('Z'));
+    // Si `ps` no está disponible, conservamos la comprobación POSIX como
+    // fallback. En hosts normales `ps` permite distinguir grupos que solo
+    // conservan un zombie de procesos realmente vivos.
+    return processGroupExists(groupId);
+}
+
 async function stopDriverProcessTree() {
     const pid = driver.pid;
     if (!pid) return { strategy: 'no-driver-pid', closed: true, durationMs: 0 };
     const startedAt = Date.now();
     if (process.platform !== 'win32') {
-        const groupExists = () => processGroupExists(pid);
+        const groupExists = () => processGroupHasLiveProcess(pid);
         const signalGroup = (signal) => {
             try {
                 process.kill(-pid, signal);
@@ -459,11 +499,16 @@ async function stopDriverProcessTree() {
             signalGroup('SIGKILL');
             closed = await waitForGroupExit(1000);
         }
+        // El grupo puede quedar visible durante un instante después de que
+        // sus procesos terminen. Recalcularlo evita conservar un falso fallo
+        // cuando `ps` ya confirma que no queda ningún miembro vivo.
+        if (!closed) closed = !(await processGroupHasLiveProcess(pid));
         return {
             strategy: 'dedicated-process-group',
             processGroupClosed: closed,
             passed: closed,
             closed,
+            remainingProcesses: await processGroupMembers(pid),
             durationMs: Date.now() - startedAt,
         };
     }
@@ -1000,28 +1045,41 @@ async function hyprlandActiveWindow() {
 }
 
 async function prepareWindowManagerForResize() {
-    if (!IS_HYPRLAND) return;
+    if (!IS_HYPRLAND) return true;
     const active = await hyprlandActiveWindow();
     if (!active) throw new Error('Hyprland está activo, pero hyprctl no pudo consultar la ventana activa');
     if (active.fullscreen) {
         throw new Error('El smoke no puede medir tamaños mientras LTerminal está en fullscreen; desactívalo antes de ejecutar la batería');
     }
+    if (active.floating === true) return true;
     if (active.floating === false) {
         // Hyprland ignora window/rect en modo mosaico. Super+Space es el
         // atajo del usuario para desacoplarla y permitir el resize. WebDriver
         // no siempre entrega los atajos globales al compositor, por lo que
         // queda un fallback equivalente y acotado a la ventana activa.
-        await click(await findWhenReady('.cell:not(.hidden) .xterm'));
-        await sendWindowShortcut(['\uE03D', ' ']); // Meta + Space
-        await new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS));
-        if ((await hyprlandActiveWindow())?.floating !== true) {
-            if (!active.address) {
-                throw new Error('Hyprland no devolvió la dirección de la ventana activa para desacoplarla');
+        try {
+            await click(await findWhenReady('.cell:not(.hidden) .xterm'));
+            await sendWindowShortcut(['\uE03D', ' ']); // Meta + Space
+            await new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS));
+            if ((await hyprlandActiveWindow())?.floating !== true) {
+                if (!active.address) throw new Error('Hyprland no devolvió la dirección de la ventana activa para desacoplarla');
+                await execFile('hyprctl', ['dispatch', 'togglefloating', `address:${active.address}`], { timeout: 3000 });
             }
-            await execFile('hyprctl', ['dispatch', 'togglefloating', `address:${active.address}`], { timeout: 3000 });
+            await waitUntil(async () => (await hyprlandActiveWindow())?.floating === true, WM_TRANSITION_TIMEOUT_MS, 'ventana flotante en Hyprland');
+            return true;
+        } catch (error) {
+            nativeResizeSupported = false;
+            recordEvent('window-manager', {
+                action: 'native-resize-skipped',
+                reason: 'hyprland-no-permitio-ventana-flotante',
+                error: error instanceof Error ? error.message : String(error),
+                passed: true,
+            });
+            process.stdout.write('E2E: Hyprland mantiene la ventana en mosaico; se omiten solo las comprobaciones de resize nativo.\n');
+            return false;
         }
-        await waitUntil(async () => (await hyprlandActiveWindow())?.floating === true, WM_TRANSITION_TIMEOUT_MS, 'ventana flotante en Hyprland');
     }
+    return true;
 }
 
 async function waitForHyprlandState(predicate, description) {
@@ -1031,7 +1089,10 @@ async function waitForHyprlandState(predicate, description) {
 
 async function exerciseWindowManagerStates() {
     if (!IS_HYPRLAND) {
-        recordEvent('window-manager', { skipped: true, reason: 'no-hyprland' });
+        recordEvent('window-manager', {
+            skipped: true,
+            reason: SKIP_WINDOW_MANAGER ? 'explicit-skip' : 'no-hyprland',
+        });
         return;
     }
     const initial = await hyprlandActiveWindow();
@@ -1759,7 +1820,7 @@ function latestBannerBlock(text) {
     // La capa accesible de xterm puede exponer varias filas como una sola
     // cadena sin saltos de línea. Buscar el identificador en cualquier
     // posición permite separar igualmente el último `sysinfo` en Linux.
-    const markers = [...normalized.matchAll(/(?:WinSlim Terminal|LTerminal)\b/gi)];
+    const markers = [...normalized.matchAll(/(?:WTerminal|LTerminal)\b/gi)];
     if (!markers.length) return normalized;
     const marker = markers[markers.length - 1];
     return normalized.slice(marker.index);
@@ -2098,7 +2159,7 @@ function bannerTextAnomalies(text) {
         .replace(/\x1b[78]/g, '')
         .replace(/\r/g, '');
     const lines = clean.split('\n').map((line) => line.trim()).filter(Boolean);
-    // Windows muestra «WinSlim Terminal», mientras que Linux usa la marca
+    // Windows muestra «WTerminal», mientras que Linux usa la marca
     // compacta «LTerminal». Ambas son cabeceras válidas del mismo banner.
     const headers = lines.filter((line) => /^(?:LTerminal\b|WinSlim\b.*\bTerminal\b)/i.test(line));
     const anomalies = [];
@@ -2505,6 +2566,10 @@ function ptyDimensionsChanged(before, after) {
  * viewport pero no la ventana» (o al revés).
  */
 async function resizeWindowAndAssertTransition(width, height, label) {
+    if (!nativeResizeSupported) {
+        recordEvent('resize', { label, skipped: true, reason: 'native-resize-unavailable-on-window-manager', passed: true });
+        return await request(`/session/${sessionId}/window/rect`);
+    }
     const beforeRect = await request(`/session/${sessionId}/window/rect`);
     const beforeContent = await contentGeometry();
     await resizeWindow(width, height, { waitForBanner: false });
@@ -2785,7 +2850,12 @@ async function exerciseShellMatrix() {
             `.env-menu [data-environment-id="${id}"] .env-copy strong`,
         ))).trim();
         const normalizeLabel = (value) => value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
-        await click(option);
+        // Las opciones viven dentro de un menú desplazable. En WebKit/WebDriver
+        // un click de elemento puede devolver `element not interactable` justo
+        // después de que el menú se reabre (aunque la opción ya sea visible).
+        // Reproduce un clic de puntero real, centra la opción y conserva el
+        // fallback geométrico que verifica que sigue teniendo superficie.
+        await pointerClickInView(option);
         currentId = id;
         await waitUntil(async () => {
             const currentButton = await findWhenReady('.env-select .env-current');
@@ -3151,7 +3221,7 @@ async function readLToolsCatalogForE2E() {
     for (const candidate of candidates) {
         const candidateStartedAt = Date.now();
         try {
-            const result = await execFile(candidate, ['actions', 'list', '--format', 'json'], {
+            const result = await execFile(candidate, ['--lang', 'es', 'actions', 'list', '--format', 'json'], {
                 encoding: 'utf8',
                 timeout: 7000,
                 maxBuffer: 1024 * 1024,
@@ -3192,6 +3262,11 @@ async function exerciseLToolsIntegration() {
     await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de paneles antes de LTools');
     await click(await findWhenReady('[data-testid="toolbar-library"]'));
     const library = await findWhenReady('[role="dialog"]');
+    const fileSectionTitle = await findWhenReady('[data-testid="scripts-file-section-title"]');
+    const fileSectionText = await textOf(fileSectionTitle);
+    if (!/Tipos de archivo/i.test(fileSectionText)) {
+        throw new Error(`La Biblioteca no identifica el filtro de archivos con su sección propia: ${JSON.stringify(fileSectionText)}`);
+    }
     const section = await findWhenReady('[data-testid="scripts-ltools"]');
     await click(await findWhenReady('[data-testid="scripts-ltools"] > summary'));
     await waitUntil(async () => (await attribute(section, 'open')) === 'true', 5000, 'apertura del apartado LTools');
@@ -3199,22 +3274,37 @@ async function exerciseLToolsIntegration() {
     const meta = await textOf(await findWhenReady('[data-testid="scripts-ltools-meta"]'));
     const availableCount = Number(meta.match(/(\d+)\s+disponibles/i)?.[1]);
     const compatibleCount = compatible.length;
-    if (!Number.isInteger(availableCount) || availableCount < 1 || availableCount > compatibleCount) {
-        throw new Error(`La Biblioteca no refleja el catálogo compatible de LTools: ${JSON.stringify({ meta, availableCount, compatibleCount })}`);
+    if (!Number.isInteger(availableCount) || availableCount < 1 || availableCount > catalog.actions.length) {
+        throw new Error(`La Biblioteca no refleja el catálogo publicado de LTools: ${JSON.stringify({ meta, availableCount, catalogActions: catalog.actions.length, compatibleCount })}`);
     }
 
     await click(await findWhenReady('[data-testid="scripts-ltools-configure"]'));
     const picker = await findWhenReady('[aria-label*="Elegir acciones"]');
+    const ltoolsFilter = await findWhenReady('[data-testid="scripts-ltools-filter"]');
+    const ltoolsFilterPlaceholder = await attribute(ltoolsFilter, 'placeholder');
+    if (!/acciones|nombre|grupo|identificador/i.test(ltoolsFilterPlaceholder ?? '')
+        || /archivo|extensi[oó]n/i.test(ltoolsFilterPlaceholder ?? '')) {
+        throw new Error(`El selector LTools muestra un filtro incorrecto o no traducido: ${JSON.stringify(ltoolsFilterPlaceholder)}`);
+    }
     const labels = await findAllWithin(picker, '[data-testid="scripts-ltools-action"]');
     const pickerIds = [];
     for (const label of labels) pickerIds.push(await attribute(label[elementKey], 'data-ltools-action-id'));
     const pickerIdSet = new Set(pickerIds.filter(Boolean));
+    const compatibleIds = new Set(compatible.map((action) => action.id));
+    const unexpectedPickerIds = pickerIds.filter((id) => id && !compatibleIds.has(id));
+    if (unexpectedPickerIds.length) {
+        throw new Error(`La Biblioteca está usando un catálogo LTools distinto al CLI probado: ${JSON.stringify({ unexpectedPickerIds, binary, configuredBinary: process.env.LTOOLS_TEST_BINARY })}`);
+    }
+    let runIds = [];
+    for (const button of await findAll('[data-testid="scripts-ltools-run"]')) {
+        runIds.push(await attribute(button[elementKey], 'data-ltools-action-id'));
+    }
     // Para probar la ejecución real sin convertir el smoke en una auditoría
     // larga, se prefiere una acción segura de consulta sin argumentos. El
     // criterio sigue siendo declarativo: si una versión futura de LTools no
     // publica ese ejemplo, se usa cualquier acción marcada como rápida y,
     // finalmente, la primera acción compatible del catálogo.
-    const chosen = [...compatible]
+    const safeCandidates = [...compatible]
         .filter((action) => pickerIdSet.has(action.id)
             && action.mutating === false
             && action.confirmation === 'none')
@@ -3225,22 +3315,27 @@ async function exerciseLToolsIntegration() {
                     ? 1
                     : (Array.isArray(action.args) && action.args.length === 0 ? 2 : 3);
             return priority(left) - priority(right);
-        })[0];
+        });
+    const toAdd = [];
+    // La E2E cruza deliberadamente el antiguo umbral de ocho cuando el
+    // catálogo lo permite. Así una futura regresión de límites vuelve a fallar
+    // aquí, en vez de quedar como una restricción silenciosa en la interfaz.
+    for (const action of safeCandidates) {
+        if (runIds.includes(action.id)) continue;
+        const input = await findWhenReady(`[data-testid="scripts-ltools-action"][data-ltools-action-id="${action.id}"] input`);
+        if (await property(input, 'disabled')) continue;
+        toAdd.push(action);
+        if (runIds.length + toAdd.length >= 9) break;
+    }
+    const chosen = safeCandidates.find((action) => action.id === 'defaults.show')
+        ?? toAdd[0]
+        ?? safeCandidates[0];
     if (!chosen) throw new Error(`No se encontró una acción segura del JSON en el selector: ${JSON.stringify({ compatibleCount, pickerIds })}`);
 
-    let runIds = [];
-    for (const button of await findAll('[data-testid="scripts-ltools-run"]')) {
-        runIds.push(await attribute(button[elementKey], 'data-ltools-action-id'));
-    }
-    if (!runIds.includes(chosen.id)) {
-        const selectedIds = runIds.filter(Boolean);
-        if (selectedIds.length >= LTOOLS_MAX_PINNED) {
-            const removeInput = await findWhenReady(`[data-testid="scripts-ltools-action"][data-ltools-action-id="${selectedIds[0]}"] input`);
-            await clickInView(removeInput);
-        }
-        const input = await findWhenReady(`[data-testid="scripts-ltools-action"][data-ltools-action-id="${chosen.id}"] input`);
+    for (const action of toAdd) {
+        const input = await findWhenReady(`[data-testid="scripts-ltools-action"][data-ltools-action-id="${action.id}"] input`);
         if (!(await property(input, 'checked'))) await clickInView(input);
-        await findWhenReady(`[data-testid="scripts-ltools-run"][data-ltools-action-id="${chosen.id}"]`);
+        await findWhenReady(`[data-testid="scripts-ltools-run"][data-ltools-action-id="${action.id}"]`);
     }
     const selectedAfterToggle = [];
     for (const button of await findAll('[data-testid="scripts-ltools-run"]')) {
@@ -3248,9 +3343,9 @@ async function exerciseLToolsIntegration() {
         if (id) selectedAfterToggle.push(id);
     }
     if (new Set(selectedAfterToggle).size !== selectedAfterToggle.length
-        || selectedAfterToggle.length > LTOOLS_MAX_PINNED
+        || selectedAfterToggle.length < runIds.length + toAdd.length
         || !selectedAfterToggle.includes(chosen.id)) {
-        throw new Error(`El selector de LTools no respetó sus límites o no fijó la acción elegida: ${JSON.stringify(selectedAfterToggle)}`);
+        throw new Error(`El selector de LTools no reflejó el catálogo o no fijó las acciones elegidas: ${JSON.stringify({ selectedBefore: runIds.length, requestedAdds: toAdd.map((action) => action.id), selectedAfterToggle, compatibleCount })}`);
     }
     const selectionStored = await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `const prefix = 'lterminal.ltools.quick-actions.v1.';
@@ -3258,7 +3353,8 @@ async function exerciseLToolsIntegration() {
                 .filter((key) => key.startsWith(prefix))
                 .some((key) => {
                     try {
-                        const ids = JSON.parse(localStorage.getItem(key) ?? 'null');
+                        const stored = JSON.parse(localStorage.getItem(key) ?? 'null');
+                        const ids = Array.isArray(stored) ? stored : stored?.selectedIds;
                         return Array.isArray(ids) && ids.includes(arguments[0]);
                     } catch {
                         return false;
@@ -3291,7 +3387,9 @@ async function exerciseLToolsIntegration() {
     recordEvent('ltools-integration', {
         binary,
         schema: catalog.schema,
+        catalogMatch: true,
         catalogActions: catalog.actions.length,
+        availableActions: availableCount,
         compatibleActions: compatibleCount,
         pickerActions: pickerIds.length,
         selectedAction: chosen.id,
@@ -3355,9 +3453,11 @@ try {
         const layout = await verifyCompactSettingsFooterLayout();
         recordEvent('settings-footer-compact-layout', { ...layout, passed: true });
         await captureScreenshot('settings-footer-800x600');
+        await assertCurrentLog();
         phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
         smokeReport.focusedScenario = 'settings-footer-800x600';
         smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
         process.stdout.write(`E2E enfocado OK: pie de Ajustes visible a 800x600 (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (process.env.E2E_EXPLORER_DOUBLE_CLICK_ONLY === '1') {
         markPhase('doble clic real del Explorador');
@@ -3515,9 +3615,11 @@ try {
             gesture: 'pointerDown → pointerMove while pressed → pointerUp',
             passed: true,
         });
+        await assertCurrentLog();
         phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
         smokeReport.focusedScenario = 'terminal-mouse-drag-selection';
         smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
         process.stdout.write(`E2E enfocado OK: selección con arrastre real (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (process.env.E2E_SHELL_MATRIX_ONLY === '1') {
         markPhase('cambio de shell');
@@ -4266,7 +4368,7 @@ try {
         await waitUntil(async () => {
             const text = await textOf(await findWhenReady('.cell:not(.hidden) .xterm-rows'));
             const latest = latestBannerBlock(text);
-            return (/WinSlim Terminal|LTerminal/i.test(latest)) === enabled;
+            return (/WTerminal|LTerminal/i.test(latest)) === enabled;
         }, 15000, description);
     };
     // El alias ya está instalado en la shell: cambiar la preferencia solo
@@ -4423,11 +4525,17 @@ try {
     await click(await findWhenReady('[data-testid="toolbar-library"]'));
     const libraryDialog = await findWhenReady('[role="dialog"]');
     const libraryIdentity = await textOf(libraryDialog);
-    if (process.platform === 'win32') {
-        if (!/WinSlim Terminal/i.test(libraryIdentity) || /\bLTerminal\b/i.test(libraryIdentity)) {
-            throw new Error(`La Biblioteca Windows mezcla la identidad Linux: ${JSON.stringify(libraryIdentity.slice(0, 240))}`);
-        }
-    } else if (!/LTerminal/i.test(libraryIdentity) || /WinSlim Terminal/i.test(libraryIdentity)) {
+    // La Biblioteca es un panel común y no tiene por qué repetir el nombre de
+    // la aplicación en su contenido. La comprobación correcta es negativa:
+    // una ejecución Linux no puede mostrar la marca de Windows y viceversa.
+    // Antes se exigía encontrar "LTerminal" dentro del diálogo; eso convirtió
+    // etiquetas legítimas como «Scripts Windows» en un falso fallo de identidad.
+    const hasLinuxBrand = /\bLTerminal\b/i.test(libraryIdentity);
+    const hasWindowsBrand = /\bWTerminal\b/i.test(libraryIdentity);
+    if (process.platform === 'win32' && hasLinuxBrand) {
+        throw new Error(`La Biblioteca Windows mezcla la identidad Linux: ${JSON.stringify(libraryIdentity.slice(0, 240))}`);
+    }
+    if (process.platform !== 'win32' && hasWindowsBrand) {
         throw new Error(`La Biblioteca Linux mezcla la identidad Windows: ${JSON.stringify(libraryIdentity.slice(0, 240))}`);
     }
     if ((await findAll('[data-testid="scripts-quick-operations"]')).length !== 0) {

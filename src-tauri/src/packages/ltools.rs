@@ -33,11 +33,17 @@ const MAX_ARGUMENT: usize = 512;
 const MAX_CATALOG_BYTES: usize = 512 * 1024;
 const MAX_VERSION_BYTES: usize = 160;
 const MAX_RELEASE_DIRECTORIES: usize = 64;
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "pl", "pt", "ro", "ru", "uk", "zh",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LToolsAction {
     pub id: String,
+    pub action_key: String,
+    pub scope: String,
+    pub operation: String,
     pub label: String,
     #[serde(default)]
     pub short_label: Option<String>,
@@ -254,15 +260,19 @@ fn discovery_directories() -> Vec<PathBuf> {
     add(home.join(".local/share/ltools"));
     add(home.join("bin"));
     add(crate::paths::documents_dir().join("LTerminal Projects/Darkeiser003/Tools"));
+    add(crate::paths::documents_dir().join("WTerminal Projects/Darkeiser003/Tools"));
+    // Compatibilidad con instalaciones anteriores a la marca WTerminal.
     add(crate::paths::documents_dir().join("WinSlim Projects/Darkeiser003/Tools"));
     // `projects_download_release` guarda los adjuntos en `_releases` para no
     // mezclar descargas con clones. Esa carpeta también es una instalación
     // válida: si el usuario pulsa «Obtener LTools», el siguiente escaneo debe
     // encontrar el CLI sin exigir que copie archivos a mano a ~/.local/bin.
     add(crate::paths::documents_dir().join("LTerminal Projects/_releases/Darkeiser003/Tools"));
+    add(crate::paths::documents_dir().join("WTerminal Projects/_releases/Darkeiser003/Tools"));
     add(crate::paths::documents_dir().join("WinSlim Projects/_releases/Darkeiser003/Tools"));
     for release_root in [
         crate::paths::documents_dir().join("LTerminal Projects/_releases/Darkeiser003/Tools"),
+        crate::paths::documents_dir().join("WTerminal Projects/_releases/Darkeiser003/Tools"),
         crate::paths::documents_dir().join("WinSlim Projects/_releases/Darkeiser003/Tools"),
     ] {
         for release_directory in versioned_release_directories(&release_root) {
@@ -411,7 +421,15 @@ fn action_is_safe(action: &LToolsAction) -> bool {
 #[serde(rename_all = "camelCase")]
 struct RawLToolsAction {
     id: String,
+    #[serde(default)]
+    action_key: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    operation: Option<String>,
     category: String,
+    #[serde(default)]
+    group: Option<String>,
     command: String,
     args: Vec<String>,
     target: String,
@@ -433,12 +451,26 @@ struct RawLToolsAction {
     quick: bool,
 }
 
-fn human_label(id: &str) -> String {
-    let word = id.rsplit(['.', '-', '_']).next().unwrap_or(id);
-    let mut chars = word.chars();
+fn humanize_label(value: &str) -> String {
+    let normalized = value.replace(['-', '_'], " ");
+    let mut chars = normalized.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => "Acción".into(),
+    }
+}
+
+fn human_label(id: &str) -> String {
+    match id.rsplit_once('.') {
+        Some((scope, verb)) => {
+            let scope_label = scope
+                .split('.')
+                .map(humanize_label)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!("{} · {}", scope_label, humanize_label(verb))
+        }
+        None => humanize_label(id),
     }
 }
 
@@ -470,6 +502,12 @@ fn parse_actions(output: &[u8], executable: &str) -> Result<Vec<LToolsAction>, S
         let raw: RawLToolsAction = serde_json::from_value(raw.clone())
             .map_err(|error| format!("Acción de LTools mal formada: {error}"))?;
         let fallback_label = human_label(&raw.id);
+        let action_key =
+            optional_safe_text(raw.action_key, MAX_ID).unwrap_or_else(|| raw.id.clone());
+        let scope = optional_safe_text(raw.scope, MAX_ID).unwrap_or_else(|| raw.category.clone());
+        let operation =
+            optional_safe_text(raw.operation, MAX_ID).unwrap_or_else(|| raw.id.replace('.', "-"));
+        let group = optional_safe_text(raw.group, 240).unwrap_or_else(|| scope.clone());
         let label = optional_safe_text(raw.label, 240).unwrap_or_else(|| fallback_label.clone());
         let short_label = optional_safe_text(raw.short_label, 240).or_else(|| Some(label.clone()));
         let description = optional_safe_text(raw.description, MAX_TEXT).unwrap_or_else(|| {
@@ -485,9 +523,12 @@ fn parse_actions(output: &[u8], executable: &str) -> Result<Vec<LToolsAction>, S
         });
         let action = LToolsAction {
             id: raw.id.clone(),
+            action_key,
+            scope,
+            operation,
             label,
             short_label,
-            group: raw.category,
+            group,
             description,
             command: raw.command,
             executable: executable.to_string(),
@@ -559,7 +600,16 @@ fn run_ltools_command(
     crate::process::run_with_timeout(executable, args, timeout)
 }
 
-fn list_actions() -> LToolsActionList {
+fn run_ltools_command_owned(
+    executable: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_ltools_command(executable, &borrowed, timeout)
+}
+
+fn list_actions(language: Option<&str>) -> LToolsActionList {
     let candidates = find_executables();
     if candidates.is_empty() {
         return LToolsActionList {
@@ -574,11 +624,17 @@ fn list_actions() -> LToolsActionList {
     let mut last_error = "LTools terminó con un error al consultar sus acciones.".to_string();
     for path in candidates {
         let executable = path.to_string_lossy().into_owned();
-        let Some(output) = run_ltools_command(
-            &executable,
-            &["actions", "list", "--format", "json"],
-            Duration::from_secs(5),
-        ) else {
+        let mut args = vec![
+            "actions".to_string(),
+            "list".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+        if let Some(language) = language.filter(|value| SUPPORTED_LANGUAGES.contains(value)) {
+            args.splice(0..0, ["--lang".to_string(), language.to_string()]);
+        }
+        let Some(output) = run_ltools_command_owned(&executable, &args, Duration::from_secs(5))
+        else {
             last_error = "LTools no respondió dentro del tiempo permitido.".into();
             continue;
         };
@@ -613,8 +669,8 @@ fn list_actions() -> LToolsActionList {
 }
 
 #[tauri::command(async)]
-pub fn ltools_actions_list() -> LToolsActionList {
-    list_actions()
+pub fn ltools_actions_list(language: Option<String>) -> LToolsActionList {
+    list_actions(language.as_deref())
 }
 
 fn quote_for_shell(value: &str, kind: ShellKind) -> String {
@@ -669,7 +725,7 @@ pub fn ltools_action_run(
     if !state.tabs.has_session(&tab_id) {
         return failed("La pestaña ya no está disponible.");
     }
-    let catalog = list_actions();
+    let catalog = list_actions(None);
     let Some(executable) = catalog.executable else {
         return failed("LTools no está instalado. Puedes obtenerlo desde Proyectos.");
     };
@@ -733,16 +789,35 @@ mod tests {
     fn conserva_metadatos_de_presentacion_y_preferencia_del_catalogo() {
         let actions = catalog(serde_json::json!({
             "id":"native.network-status", "category":"native",
+            "actionKey":"native.network.status", "scope":"native", "operation":"native-network-status", "group":"Red",
             "command":"native", "args":[], "target":"none",
             "targetPolicy":"none", "mutating":false, "confirmation":"none",
             "profile":"safe-default", "label":"Estado de red",
             "shortLabel":"Red", "description":"Consulta la red del equipo.",
             "quick":true
         }));
+        assert_eq!(actions[0].action_key, "native.network.status");
+        assert_eq!(actions[0].scope, "native");
+        assert_eq!(actions[0].operation, "native-network-status");
+        assert_eq!(actions[0].group, "Red");
         assert_eq!(actions[0].label, "Estado de red");
         assert_eq!(actions[0].short_label.as_deref(), Some("Red"));
         assert_eq!(actions[0].description, "Consulta la red del equipo.");
         assert!(actions[0].quick);
+    }
+
+    #[test]
+    fn el_fallback_de_etiqueta_conserva_el_ambito_para_evitar_duplicados() {
+        assert_eq!(human_label("packages.inventory"), "Packages · Inventory");
+        assert_eq!(human_label("games.inventory"), "Games · Inventory");
+        assert_eq!(
+            human_label("native.security-status"),
+            "Native · Security status"
+        );
+        assert_eq!(
+            human_label("system.packages.inventory"),
+            "System · Packages · Inventory"
+        );
     }
 
     #[test]
@@ -753,8 +828,8 @@ mod tests {
             "mutating":false, "confirmation":"none", "profile":"safe-default",
             "label":"texto\nno seguro", "shortLabel":"", "description":"\u{0001}"
         }));
-        assert_eq!(actions[0].label, "Quick");
-        assert_eq!(actions[0].short_label.as_deref(), Some("Quick"));
+        assert_eq!(actions[0].label, "Audit · Quick");
+        assert_eq!(actions[0].short_label.as_deref(), Some("Audit · Quick"));
         assert!(actions[0].description.contains("Acción de consulta"));
         assert!(!actions[0].quick);
     }

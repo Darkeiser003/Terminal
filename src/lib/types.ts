@@ -213,7 +213,7 @@ export interface WindowsIntegrationStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003';
+    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'ltools' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003';
     argument?: string;
 }
 
@@ -578,6 +578,9 @@ export interface InstallRunResult {
  * que LTerminal deba dividir o interpretar como shell. */
 export interface LToolsAction {
     id: string;
+    actionKey: string;
+    scope: string;
+    operation: string;
     label: string;
     shortLabel: string | null;
     group: string;

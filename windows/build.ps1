@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.0
 <#
-    Build de WinSlim Terminal (Tauri 2 + Rust) para Windows.
+    Build de WTerminal (Tauri 2 + Rust) para Windows.
 
     Produce por defecto la carpeta desempaquetada con el .exe y un instalador
     NSIS con WebView2 offline incluido; la descripción mantenida está en README.md.
@@ -60,7 +60,7 @@ $VendorDir   = Join-Path $TauriDir 'vendor\conpty'
 Set-Location $ProjectRoot
 
 $script:VersionManifestBackupDir = $null
-$script:BuildTempDir = Join-Path ([IO.Path]::GetTempPath()) "winslim-terminal-build-$PID-$([guid]::NewGuid().ToString('N'))"
+$script:BuildTempDir = Join-Path ([IO.Path]::GetTempPath()) "wterminal-build-$PID-$([guid]::NewGuid().ToString('N'))"
 $script:VersionManifestPaths = @(
     (Join-Path $ProjectRoot 'package.json'),
     (Join-Path $ProjectRoot 'package-lock.json'),
@@ -70,7 +70,7 @@ $script:VersionManifestPaths = @(
 
 function Backup-VersionManifests {
     if ($script:VersionManifestBackupDir) { return }
-    $script:VersionManifestBackupDir = Join-Path ([IO.Path]::GetTempPath()) "winslim-terminal-version-$PID"
+    $script:VersionManifestBackupDir = Join-Path ([IO.Path]::GetTempPath()) "wterminal-version-$PID"
     New-Item -ItemType Directory -Force -Path $script:VersionManifestBackupDir | Out-Null
     try {
         foreach ($path in $script:VersionManifestPaths) {
@@ -1141,9 +1141,9 @@ if ($devServer) {
     throw 'Servidor de desarrollo en marcha.'
 }
 
-$running = Get-Process -Name 'winslim-terminal' -ErrorAction SilentlyContinue
+$running = Get-Process -Name 'wterminal' -ErrorAction SilentlyContinue
 if ($running) {
-    Write-Err "WinSlim Terminal esta abierto ($($running.Count) proceso(s))."
+    Write-Err "WTerminal esta abierto ($($running.Count) proceso(s))."
     Write-Err 'Cierralo antes de compilar: su .exe y su conpty.dll no se pueden reemplazar en uso.'
     throw 'La aplicacion esta en marcha.'
 }
@@ -1343,7 +1343,7 @@ foreach ($marker in @('shortcutPaneLeft', 'shortcutOpenSystemExplorer', 'environ
 }
 Write-Ok 'Frontend compartido actualizado: atajos configurables y preferencias compactas presentes'
 
-$exePath = Join-Path $ReleaseDir 'winslim-terminal.exe'
+$exePath = Join-Path $ReleaseDir 'wterminal.exe'
 if (-not (Test-Path $exePath)) { throw "La compilacion termino pero no hay ejecutable en $exePath." }
 Write-Ok "Compilado: $exePath"
 
@@ -1360,13 +1360,13 @@ Write-Step 'Preparando la carpeta desempaquetada'
 # NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build,
 # asi que la release anterior desapareceria al compilar la siguiente.
 $distSuffix = if ($Fast) { '-dev' } else { '' }
-$distDir = Join-Path $ProjectRoot "release\WinSlimTerminal-$version$distSuffix"
+$distDir = Join-Path $ProjectRoot "release\WTerminal-$version$distSuffix"
 Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
 Ensure-WebView2Loader | Out-Null
 
-$payload = @('winslim-terminal.exe') + $conptyFiles + @('WebView2Loader.dll')
+$payload = @('wterminal.exe') + $conptyFiles + @('WebView2Loader.dll')
 $portableWebView2Bootstrapper = Find-PortableWebView2Bootstrapper
 if ($portableWebView2Bootstrapper) {
     Copy-Item -LiteralPath $portableWebView2Bootstrapper -Destination (Join-Path $ReleaseDir 'MicrosoftEdgeWebView2Setup.exe') -Force
@@ -1399,7 +1399,7 @@ $sizeMb = [math]::Round(((Get-ChildItem $distDir -Recurse -File | Measure-Object
 Write-Ok "Carpeta lista: $distDir ($sizeMb MB, $($payload.Count) binarios + $resourceCount recursos)"
 $artifactCode = Invoke-Native 'node' @(
     'scripts/verify-release-artifacts.mjs',
-    '--windows', (Join-Path $distDir 'winslim-terminal.exe'),
+    '--windows', (Join-Path $distDir 'wterminal.exe'),
     '--windows-dir', $distDir
 )
 if ($artifactCode -ne 0) { throw "La validación PE/runtime de Windows falló (código $artifactCode)." }
@@ -1415,7 +1415,7 @@ Write-Step 'Comprobacion de humo (ventana, frontend, terminal y PTY)'
 Write-Host '    Este paso comprueba solo el arranque mínimo y se cerrará automáticamente.' -ForegroundColor DarkGray
 Write-Host '    Las pestañas, menús, acciones y redimensionado se prueban después en E2E ampliado.' -ForegroundColor DarkGray
 $smokeToken = "windows-build-$([guid]::NewGuid().ToString('N'))"
-$logPath = Join-Path $env:APPDATA 'winslim-terminal\logs\main.log'
+$logPath = Join-Path $env:APPDATA 'wterminal\logs\main.log'
 $previousSmokeToken = $env:LTERMINAL_SMOKE_TOKEN
 $previousLogFile = $env:LTERMINAL_LOG_FILE
 $previousSmokeAutoExit = $env:LTERMINAL_SMOKE_AUTO_EXIT
@@ -1425,7 +1425,7 @@ $process = $null
 # Recordar los PIDs previos permite limpiar únicamente los que pertenecen a
 # esta prueba, sin cerrar una instancia que ya estuviera abierta al comenzar.
 $preSmokeProcessIds = @(
-    Get-Process -Name 'winslim-terminal' -ErrorAction SilentlyContinue |
+    Get-Process -Name 'wterminal' -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Id
 )
 try {
@@ -1437,7 +1437,7 @@ try {
     # Resource-dir, WebView2 y los scripts deben resolverse contra la carpeta
     # desempaquetada, no contra la carpeta desde la que se lanzó PowerShell.
     $env:LTERMINAL_LOG_FILE = $logPath
-    $process = Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -WorkingDirectory $distDir -PassThru
+    $process = Start-Process -FilePath (Join-Path $distDir 'wterminal.exe') -WorkingDirectory $distDir -PassThru
     $ready = $false
     # El PTY tiene un límite propio de 30 s y se crea en segundo plano; el
     # smoke necesita margen para cargar WebView y completar el handshake.
@@ -1451,7 +1451,7 @@ try {
             }
             Write-Err "La aplicacion se cerro sola con codigo $($process.ExitCode)."
             Show-SmokeDiagnostics $logPath $smokeToken
-            throw 'La build compila pero no arranca. Revisa el log en %APPDATA%\winslim-terminal\logs.'
+            throw 'La build compila pero no arranca. Revisa el log en %APPDATA%\wterminal\logs.'
         }
         if (Test-SmokeReady $logPath $smokeToken) {
             $ready = $true
@@ -1481,7 +1481,7 @@ try {
     # falle con "archivo en uso" aunque el proceso principal ya haya terminado.
     for ($cleanupAttempt = 0; $cleanupAttempt -lt 8; $cleanupAttempt++) {
         $smokeRemainders = @(
-            Get-Process -Name 'winslim-terminal' -ErrorAction SilentlyContinue |
+            Get-Process -Name 'wterminal' -ErrorAction SilentlyContinue |
                 Where-Object { $_.Id -notin $preSmokeProcessIds }
         )
         if (-not $smokeRemainders) { break }
@@ -1662,8 +1662,8 @@ if ($runExtendedTests) {
             # El smoke activa CDP mediante la API de WebView2 al lanzar la app.
             # Probar la propia release evita una segunda compilación y asegura
             # que el ejecutable que se distribuye supera también el E2E.
-            $env:E2E_BINARY = Join-Path $distDir 'winslim-terminal.exe'
-            $env:LTERMINAL_SMOKE_REPORT = Join-Path $env:TEMP "winslim-terminal-e2e-$([guid]::NewGuid().ToString('N')).json"
+            $env:E2E_BINARY = Join-Path $distDir 'wterminal.exe'
+            $env:LTERMINAL_SMOKE_REPORT = Join-Path $env:TEMP "wterminal-e2e-$([guid]::NewGuid().ToString('N')).json"
             $env:TAURI_NATIVE_DRIVER = $nativeE2eDriver
             # El binario lanzado por tauri-driver debe escribir en el mismo
             # archivo que el smoke de arranque. Así el informe no puede pasar
@@ -1755,7 +1755,7 @@ if ($Fast) {
 }
 New-Item -ItemType Directory -Force -Path $releaseOut | Out-Null
 $zipSuffix = if ($Fast) { '-dev' } else { '' }
-$zipPath = Join-Path $releaseOut "WinSlimTerminal-Unpacked-$version$zipSuffix.zip"
+$zipPath = Join-Path $releaseOut "WTerminal-Unpacked-$version$zipSuffix.zip"
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 # Se comprime el CONTENIDO, sin carpeta intermedia. El actualizador acepta las
 # dos formas, pero asi la carpeta de destino queda igual que la de aqui.
@@ -1783,7 +1783,7 @@ if ($Installer) {
     if ($null -eq $installerPath -or -not (Test-Path -LiteralPath $installerPath.FullName -PathType Leaf)) {
         throw 'La build indicó que generó NSIS, pero no queda ningún instalador para publicar.'
     }
-    $installerReleasePath = Join-Path $releaseOut "WinSlimTerminal-$version$zipSuffix-x64-setup.exe"
+    $installerReleasePath = Join-Path $releaseOut "WTerminal-$version$zipSuffix-x64-setup.exe"
     Copy-Item -LiteralPath $installerPath.FullName -Destination $installerReleasePath -Force
     $publishedInstaller = Get-Item -LiteralPath $installerReleasePath
     if ($publishedInstaller.Length -ne $installerPath.Length -or $publishedInstaller.Length -lt 1MB) {
@@ -1835,11 +1835,11 @@ if ($env:LTERMINAL_SIGNING_PRIVATE_KEY) {
 
 if (-not $NoRun) {
     Write-Step 'Lanzando la version compilada'
-    Start-Process -FilePath (Join-Path $distDir 'winslim-terminal.exe') -WorkingDirectory $distDir
+    Start-Process -FilePath (Join-Path $distDir 'wterminal.exe') -WorkingDirectory $distDir
 }
 
 Write-Host ''
-Write-Host "Listo. WinSlim Terminal $version compilado y verificado." -ForegroundColor Green
+Write-Host "Listo. WTerminal $version compilado y verificado." -ForegroundColor Green
 Write-Host "  Carpeta: $distDir"
 Write-Host "  Release: $zipPath"
 if ($Installer) { Write-Host "  Instalador: $installerReleasePath" }

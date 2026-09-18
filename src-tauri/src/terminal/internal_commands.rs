@@ -39,6 +39,7 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "help" => "help",
         "banner" => "banner",
         "quick-actions" | "quickactions" => "quickActions",
+        "ltools" | "tools" => "ltools",
         "panel" | "open" => "panel",
         "theme" => "theme",
         "font" | "fuente" => "font",
@@ -90,6 +91,8 @@ mod tests {
             parse(":quickactions off").unwrap().argument.as_deref(),
             Some("off")
         );
+        assert_eq!(parse(":ltools").unwrap().action, "ltools");
+        assert_eq!(parse(":tools").unwrap().action, "ltools");
         assert_eq!(parse(":open deps").unwrap().action, "panel");
         assert_eq!(parse(":theme list").unwrap().action, "theme");
         assert_eq!(parse(":font jetbrains").unwrap().action, "font");

@@ -28,8 +28,8 @@ const entries = await readdir(releaseDirectory, { withFileTypes: true });
 const assets = [];
 const expectedAssetNames = [
     /^LTerminal-[A-Za-z0-9.+-]+-[A-Za-z0-9_-]+\.AppImage$/,
-    /^WinSlimTerminal-Unpacked-[A-Za-z0-9.+-]+\.zip$/,
-    /^WinSlimTerminal-[A-Za-z0-9.+-]+-x64-setup\.exe$/,
+    /^WTerminal-Unpacked-[A-Za-z0-9.+-]+\.zip$/,
+    /^WTerminal-[A-Za-z0-9.+-]+-x64-setup\.exe$/,
 ];
 for (const entry of entries) {
     const isPublishable = entry.name.endsWith('.AppImage')
@@ -49,7 +49,7 @@ for (const entry of entries) {
 }
 
 const hasLinuxAppImage = assets.some(({ name }) => name.endsWith('.AppImage'));
-const hasWindowsArchive = assets.some(({ name }) => name.startsWith('WinSlimTerminal-Unpacked-') && name.endsWith('.zip'));
+const hasWindowsArchive = assets.some(({ name }) => name.startsWith('WTerminal-Unpacked-') && name.endsWith('.zip'));
 const hasWindowsInstaller = assets.some(({ name }) => name.endsWith('-x64-setup.exe'));
 if (!hasLinuxAppImage || !hasWindowsArchive || !hasWindowsInstaller) {
     throw new Error('La publicación necesita al menos un AppImage Linux, un ZIP portable Windows y un instalador NSIS Windows.');

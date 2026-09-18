@@ -342,7 +342,7 @@ fn string_list(source: &Value, key: &str) -> Vec<String> {
 }
 
 /// El catálogo puede traer un bloque por plataforma. Existe porque la
-/// aplicación tiene DOS identidades (WinSlim Terminal en Windows, LTerminal
+/// aplicación tiene DOS identidades (WTerminal en Windows, LTerminal
 /// en Linux y macOS) y sus anclados de fábrica no tienen que coincidir.
 ///
 /// Lo que no está en el bloque se hereda del catálogo base, así que un override

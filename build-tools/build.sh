@@ -196,7 +196,10 @@ tests_menu() {
             3) run_action 'Ejecutando pruebas Rust' cargo test --manifest-path src-tauri/Cargo.toml ;;
             4) run_action 'Validando la aplicación ya empaquetada' bash linux/validate-release.sh ;;
             5)
-                local default_binary="${E2E_BINARY:-$ROOT/src-tauri/target/release/winslim-terminal}"
+                local default_binary="${E2E_BINARY:-$ROOT/src-tauri/target/release/lterminal}"
+                case "$(uname -s 2>/dev/null || true)" in
+                    MINGW*|MSYS*|CYGWIN*) default_binary="${E2E_BINARY:-$ROOT/src-tauri/target/release/wterminal.exe}" ;;
+                esac
                 local binary
                 read -r -p "Ruta al ejecutable compilado [$default_binary]: " binary || return
                 binary="${binary:-$default_binary}"

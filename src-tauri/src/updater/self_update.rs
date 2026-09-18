@@ -119,7 +119,7 @@ pub struct UpdateStatus {
 /// La carpeta que de verdad contiene los archivos, dentro de lo extraído.
 ///
 /// Un `.zip` publicado puede traer los archivos en la raíz o dentro de una
-/// única carpeta (`WinSlimTerminal-1.4.3/…`), según cómo se comprimiera. Se
+/// única carpeta (`WTerminal-1.4.3/…`), según cómo se comprimiera. Se
 /// desciende mientras solo haya una carpeta y nada más, para que las dos formas
 /// funcionen sin que quien publique tenga que acordarse de cuál toca.
 pub fn payload_root(staged: &Path) -> PathBuf {
@@ -250,24 +250,8 @@ pub fn validate_payload_tree(root: &Path) -> Result<(), String> {
 /// actualización. El instalador y la build portable ya lo validan antes de
 /// publicar; repetirlo aquí evita que una release incompleta rompa una copia
 /// que funcionaba.
-fn windows_runtime_files() -> [&'static str; 15] {
-    [
-        "conpty.dll",
-        "OpenConsole.exe",
-        "WebView2Loader.dll",
-        "scripts/containers/docker-manager.sh",
-        "scripts/containers/kubernetes-manager.sh",
-        "scripts/operations/docker-manager.ps1",
-        "scripts/operations/kubernetes-manager.ps1",
-        "scripts/operations/ssh-manager.ps1",
-        "scripts/operations/service-manager.ps1",
-        "scripts/operations/network-manager.ps1",
-        "scripts/operations/adb-manager.ps1",
-        "scripts/operations/ssh-manager.sh",
-        "scripts/operations/service-manager.sh",
-        "scripts/operations/network-manager.sh",
-        "scripts/operations/adb-manager.sh",
-    ]
+fn windows_runtime_files() -> [&'static str; 3] {
+    ["conpty.dll", "OpenConsole.exe", "WebView2Loader.dll"]
 }
 
 /// Los archivos de la versión nueva, con su ruta relativa a la raíz.
@@ -681,7 +665,7 @@ pub fn binary_name() -> String {
         })
         .unwrap_or_else(|| {
             if crate::platform::host().is_windows() {
-                "winslim-terminal.exe".to_string()
+                "wterminal.exe".to_string()
             } else {
                 "lterminal".to_string()
             }
@@ -746,13 +730,13 @@ mod tests {
     #[test]
     fn de_una_release_se_elige_el_adjunto_de_esta_plataforma() {
         let adjuntos = [
-            "WinSlimTerminal-Unpacked-1.4.3.zip",
+            "WTerminal-Unpacked-1.4.3.zip",
             "LTerminal-1.4.3-x86_64.AppImage",
             "Source code (zip)",
         ];
         let elegido = asset_for_platform(&adjuntos).unwrap();
         if cfg!(windows) {
-            assert_eq!(elegido, "WinSlimTerminal-Unpacked-1.4.3.zip");
+            assert_eq!(elegido, "WTerminal-Unpacked-1.4.3.zip");
         } else {
             assert_eq!(elegido, "LTerminal-1.4.3-x86_64.AppImage");
         }
@@ -774,8 +758,8 @@ mod tests {
     fn se_desciende_hasta_la_carpeta_que_de_verdad_trae_los_archivos() {
         let dir = tempfile::tempdir().unwrap();
         // Un zip comprimido "con carpeta dentro".
-        escribir(&dir.path().join("WinSlimTerminal-1.4.3/app.exe"), "x");
-        escribir(&dir.path().join("WinSlimTerminal-1.4.3/conpty.dll"), "y");
+        escribir(&dir.path().join("WTerminal-1.4.3/app.exe"), "x");
+        escribir(&dir.path().join("WTerminal-1.4.3/conpty.dll"), "y");
         let raiz = payload_root(dir.path());
         assert!(raiz.join("app.exe").is_file());
     }
@@ -804,7 +788,7 @@ mod tests {
         // archivo mas de la version nueva: acabaria copiado junto al .exe. Por
         // eso se extrae en su propia subcarpeta.
         let dir = tempfile::tempdir().unwrap();
-        escribir(&dir.path().join("WinSlimTerminal-1.4.3.zip"), "zip");
+        escribir(&dir.path().join("WTerminal-1.4.3.zip"), "zip");
         escribir(&dir.path().join("payload/app.exe"), "nuevo");
 
         // Mezclados, el zip entra en el reparto.
@@ -1003,25 +987,14 @@ mod tests {
     #[test]
     fn la_limpieza_quita_respaldos_anidados_del_paquete_y_conserva_archivos_ajenos() {
         let install = tempfile::tempdir().unwrap();
-        let managed = [
-            PathBuf::from("winslim-terminal.exe"),
-            PathBuf::from("scripts/operations/service-manager.ps1"),
-        ];
-        escribir(&install.path().join("winslim-terminal.exe.old"), "anterior");
-        escribir(
-            &install
-                .path()
-                .join("scripts/operations/service-manager.ps1.old"),
-            "anterior",
-        );
+        let managed = [PathBuf::from("wterminal.exe"), PathBuf::from("conpty.dll")];
+        escribir(&install.path().join("wterminal.exe.old"), "anterior");
+        escribir(&install.path().join("conpty.dll.old"), "anterior");
         escribir(&install.path().join("scripts/mi-script.old"), "conservar");
 
         assert_eq!(cleanup_managed_backups(install.path(), &managed), 2);
-        assert!(!install.path().join("winslim-terminal.exe.old").exists());
-        assert!(!install
-            .path()
-            .join("scripts/operations/service-manager.ps1.old")
-            .exists());
+        assert!(!install.path().join("wterminal.exe.old").exists());
+        assert!(!install.path().join("conpty.dll.old").exists());
         assert!(install.path().join("scripts/mi-script.old").exists());
     }
 
@@ -1032,16 +1005,13 @@ mod tests {
 
         let install = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        escribir(
-            &outside.path().join("service-manager.ps1.old"),
-            "no eliminar",
-        );
+        escribir(&outside.path().join("conpty.dll.old"), "no eliminar");
         symlink(outside.path(), install.path().join("scripts")).unwrap();
-        let managed = [PathBuf::from("scripts/service-manager.ps1")];
+        let managed = [PathBuf::from("scripts/conpty.dll")];
 
         assert_eq!(cleanup_managed_backups(install.path(), &managed), 0);
         assert_eq!(
-            std::fs::read_to_string(outside.path().join("service-manager.ps1.old")).unwrap(),
+            std::fs::read_to_string(outside.path().join("conpty.dll.old")).unwrap(),
             "no eliminar"
         );
     }

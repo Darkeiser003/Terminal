@@ -1,4 +1,4 @@
-# Valores de fábrica compartidos por LTerminal y WinSlim Terminal.
+# Valores de fábrica compartidos por LTerminal y WTerminal.
 #
 # No se copia automáticamente al perfil del usuario: `Preferences` lo carga,
 # lo valida y lo expone al frontend. El archivo existe para que los valores por

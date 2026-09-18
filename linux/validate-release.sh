@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "$#" -gt 0 ]; then
     APPIMAGE="$1"
 else
-    APPIMAGE="$(find "$ROOT/release" "$ROOT/releases" -maxdepth 1 -type f -name 'LTerminal-*.AppImage' -print -quit 2>/dev/null || true)"
+    APPIMAGE="$(find "$ROOT/release" -maxdepth 1 -type f -name 'LTerminal-*.AppImage' -print -quit 2>/dev/null || true)"
 fi
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 LOG="$CONFIG_HOME/lterminal/logs/main.log"

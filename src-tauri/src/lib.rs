@@ -1,4 +1,4 @@
-//! LTerminal / WinSlim Terminal — backend.
+//! LTerminal / WTerminal — backend.
 //!
 //! Migración de `electron/main.js` (Electron + node-pty) a Tauri 2 + Rust.
 //! Cada módulo anota de qué archivo de la versión anterior viene, para poder

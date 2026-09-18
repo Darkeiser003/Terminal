@@ -632,11 +632,11 @@ mod tests {
             "v1.2.3"
         ));
         assert!(asset_matches_release_version(
-            "WinSlimTerminal-Unpacked-1.2.3.zip",
+            "WTerminal-Unpacked-1.2.3.zip",
             "1.2.3"
         ));
         assert!(!asset_matches_release_version(
-            "WinSlimTerminal-Unpacked-1.2.2.zip",
+            "WTerminal-Unpacked-1.2.2.zip",
             "1.2.3"
         ));
         assert!(!asset_matches_release_version(
@@ -667,7 +667,7 @@ mod tests {
             );
         }
         assert!(safe_asset_file_name("LTerminal-1.2.3-x86_64.AppImage"));
-        assert!(safe_asset_file_name("WinSlimTerminal-Unpacked-1.2.3.zip"));
+        assert!(safe_asset_file_name("WTerminal-Unpacked-1.2.3.zip"));
         assert!(!safe_asset_file_name(&"a".repeat(241)));
     }
 

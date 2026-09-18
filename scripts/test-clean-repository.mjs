@@ -21,7 +21,6 @@ try {
     const scripts = join(project, 'scripts');
     const source = join(project, 'src');
     const release = join(project, 'release');
-    const releases = join(project, 'releases');
     const generated = join(project, 'node_modules');
     const scalaBuild = join(project, '.scala-build');
     const versionBackup = join(temp, 'lterminal-version-backup.ABC123');
@@ -40,7 +39,6 @@ try {
         mkdir(scripts),
         mkdir(source),
         mkdir(release),
-        mkdir(releases),
         mkdir(generated),
         mkdir(scalaBuild),
         mkdir(temp),
@@ -64,8 +62,6 @@ try {
     await writeFile(join(scripts, 'clean-repository.sh'), cleaner, { mode: 0o755 });
     await writeFile(join(source, 'keep.txt'), 'user data\n');
     await writeFile(join(release, 'LTerminal-1.0.0.AppImage'), 'published release\n');
-    await writeFile(join(releases, 'LTerminal-1.0.0.AppImage'), 'published plural release\n');
-    await writeFile(join(releases, 'build-report.md'), 'packaged release documentation\n');
     await writeFile(join(generated, 'generated.txt'), 'generated\n');
     await writeFile(join(scalaBuild, 'generated.txt'), 'generated cache\n');
     await writeFile(join(versionBackup, 'manifest.bak'), 'generated backup\n');
@@ -116,8 +112,6 @@ try {
     assert.equal((await lstat(join(project, 'dist'))).isSymbolicLink(), true, 'el enlace dist se conserva intacto');
     assert.equal(await readFile(join(source, 'keep.txt'), 'utf8'), 'user data\n', 'el destino del enlace no se borra');
     assert.equal(await readFile(join(release, 'LTerminal-1.0.0.AppImage'), 'utf8'), 'published release\n', 'release/ y los artefactos publicados quedan intactos');
-    assert.equal(await readFile(join(releases, 'LTerminal-1.0.0.AppImage'), 'utf8'), 'published plural release\n', 'releases/ y los artefactos publicados quedan intactos');
-    assert.equal(await readFile(join(releases, 'build-report.md'), 'utf8'), 'packaged release documentation\n', 'releases/ conserva también sus Markdown empaquetados');
     assert.equal(await readFile(join(externalData, 'logs', 'keep.log'), 'utf8'), 'user log\n', 'no se atraviesa el enlace de la carpeta de configuración');
     await assert.rejects(lstat(generated), { code: 'ENOENT' }, 'las salidas normales sí se limpian');
     await assert.rejects(lstat(scalaBuild), { code: 'ENOENT' }, 'la caché Scala ignorada también se limpia');
@@ -147,7 +141,6 @@ try {
         const psProject = join(fixture, 'powershell-project');
         const psScripts = join(psProject, 'scripts');
         const psRelease = join(psProject, 'release');
-        const psReleases = join(psProject, 'releases');
         const psTemp = join(fixture, 'powershell-temp');
         const psHome = join(fixture, 'powershell-home');
         const psBuildTemp = join(psTemp, 'winslim-terminal-build-regression');
@@ -156,14 +149,11 @@ try {
         await Promise.all([
             mkdir(psScripts, { recursive: true }),
             mkdir(psRelease, { recursive: true }),
-            mkdir(psReleases, { recursive: true }),
             mkdir(psBuildTemp, { recursive: true }),
             mkdir(psHome, { recursive: true }),
         ]);
         await writeFile(join(psScripts, 'clean-repository.ps1'), await readFile(new URL('./clean-repository.ps1', import.meta.url)));
         await writeFile(join(psRelease, 'WinSlimTerminal-1.0.0.zip'), 'published release\n');
-        await writeFile(join(psReleases, 'WinSlimTerminal-1.0.0.zip'), 'published plural release\n');
-        await writeFile(join(psReleases, 'build-report.md'), 'release documentation\n');
         await writeFile(join(psBuildTemp, 'node-v22.14.0-x64.msi'), 'LTerminal build download\n');
         await writeFile(join(psBuildTemp, 'rustup-init.exe'), 'LTerminal build download\n');
         await writeFile(psExternalMsi, 'external installer\n');
@@ -187,8 +177,6 @@ try {
         assert.equal(psResult.status, 0, `El limpiador PowerShell terminó con ${psResult.status}:\n${psResult.stdout}\n${psResult.stderr}`);
         await assert.rejects(lstat(psBuildTemp), { code: 'ENOENT' }, 'PowerShell limpia el staging propio de descargas Windows');
         assert.equal(await readFile(join(psRelease, 'WinSlimTerminal-1.0.0.zip'), 'utf8'), 'published release\n', 'PowerShell conserva release/');
-        assert.equal(await readFile(join(psReleases, 'WinSlimTerminal-1.0.0.zip'), 'utf8'), 'published plural release\n', 'PowerShell conserva releases/');
-        assert.equal(await readFile(join(psReleases, 'build-report.md'), 'utf8'), 'release documentation\n', 'PowerShell conserva la documentación dentro de releases/');
         assert.equal(await readFile(psExternalMsi, 'utf8'), 'external installer\n', 'PowerShell conserva un MSI genérico ajeno');
         assert.equal(await readFile(psExternalRustup, 'utf8'), 'external installer\n', 'PowerShell conserva un instalador genérico ajeno');
         console.log('OK: PowerShell limpia solo la carpeta propia y conserva instaladores externos con nombres genéricos.');

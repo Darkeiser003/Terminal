@@ -10,7 +10,7 @@
   "app": {
     "windows": [
       {
-        "title": "WinSlim Terminal",
+        "title": "WTerminal",
         "visible": false,
         "backgroundColor": "#080808"
       }

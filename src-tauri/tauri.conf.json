@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "WinSlim Terminal",
-  "mainBinaryName": "winslim-terminal",
-  "identifier": "com.winslim.terminal",
+  "productName": "WTerminal",
+  "mainBinaryName": "wterminal",
+  "identifier": "com.wterminal.terminal",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "WinSlim Terminal",
+        "title": "WTerminal",
         "width": 980,
         "height": 640,
         "minWidth": 480,
@@ -38,19 +38,7 @@
   "bundle": {
     "active": true,
     "resources": {
-      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
-      "../scripts/containers/docker-manager.sh": "scripts/containers/docker-manager.sh",
-      "../scripts/containers/kubernetes-manager.sh": "scripts/containers/kubernetes-manager.sh",
-      "../scripts/operations/docker-manager.ps1": "scripts/operations/docker-manager.ps1",
-      "../scripts/operations/kubernetes-manager.ps1": "scripts/operations/kubernetes-manager.ps1",
-      "../scripts/operations/ssh-manager.sh": "scripts/operations/ssh-manager.sh",
-      "../scripts/operations/service-manager.sh": "scripts/operations/service-manager.sh",
-      "../scripts/operations/network-manager.sh": "scripts/operations/network-manager.sh",
-      "../scripts/operations/adb-manager.sh": "scripts/operations/adb-manager.sh",
-      "../scripts/operations/ssh-manager.ps1": "scripts/operations/ssh-manager.ps1",
-      "../scripts/operations/service-manager.ps1": "scripts/operations/service-manager.ps1",
-      "../scripts/operations/network-manager.ps1": "scripts/operations/network-manager.ps1",
-      "../scripts/operations/adb-manager.ps1": "scripts/operations/adb-manager.ps1"
+      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
     },
     "targets": [
       "nsis"

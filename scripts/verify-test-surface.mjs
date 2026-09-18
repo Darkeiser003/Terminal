@@ -131,11 +131,15 @@ check('App monta el explorador', app.includes('<ExplorerSidebar />'));
 check('Panel común implementa cierre, Escape y foco', ['panels.close()', "event.key === 'Escape'", 'previousFocus'].every((marker) => read('src/components/Panel.svelte').includes(marker)));
 check('Panel común implementa acordeón exclusivo en los paneles', read('src/components/DependenciesPanel.svelte').includes('exclusiveAccordionGroups'));
 check('Biblioteca conserva ejecución directa de scripts', read('src/components/ScriptsPanel.svelte').includes('onclick={() => run(script, false)}'));
-check('Biblioteca etiqueta los scripts integrados según la plataforma', (() => {
+check('Biblioteca no empaqueta ni inyecta scripts operativos de LTerminal', (() => {
     const panelCommands = read('src-tauri/src/app/panel_commands.rs');
-    return panelCommands.includes('bundled_source_label(is_windows)')
-        && panelCommands.includes('crate::config::identity::WINDOWS.name')
-        && panelCommands.includes('crate::config::identity::LINUX.name');
+    const production = panelCommands.split('#[cfg(test)]')[0];
+    const config = JSON.parse(read('src-tauri/tauri.conf.json'));
+    const resources = Object.keys(config.bundle?.resources ?? {});
+    return !production.includes('bundled_operation_scripts')
+        && !production.includes('scripts/operations')
+        && !production.includes('scripts/containers')
+        && resources.every((resource) => !resource.includes('scripts/operations') && !resource.includes('scripts/containers'));
 })());
 check('La ayuda PowerShell no arrastra la marca Linux', (() => {
     const aliases = read('src-tauri/src/terminal/aliases.rs');
@@ -153,6 +157,7 @@ check('LTools se integra desde un catálogo JSON extensible y con límites segur
     const backend = read('src-tauri/src/packages/ltools.rs');
     const types = read('src/lib/types.ts');
     const panel = read('src/components/ScriptsPanel.svelte');
+    const selection = read('src/lib/ltools-selection.ts');
     const smoke = read('tests/e2e/smoke.mjs');
     const report = read('scripts/verify-e2e-report.mjs');
     return backend.includes('quick: bool')
@@ -161,8 +166,13 @@ check('LTools se integra desde un catálogo JSON extensible y con límites segur
         && backend.includes('discovery_directories')
         && backend.includes('LTOOLS_PATH')
         && types.includes('quick: boolean')
-        && panel.includes('MAX_PINNED_LTOOLS_ACTIONS')
-        && panel.includes('action.quick')
+        && !panel.includes('MAX_PINNED_LTOOLS_ACTIONS')
+        && selection.includes('action.quick')
+        && selection.includes('knownIds')
+        && panel.includes('filteredLToolsActions')
+        && panel.includes('ltoolsActionLabel')
+        && read('src/components/SettingsPanel.svelte').includes('settings-ltools-configure')
+        && read('src-tauri/src/terminal/internal_commands.rs').includes('"ltools" | "tools"')
         && panel.includes('data-testid="scripts-ltools"')
         && panel.includes('data-testid="scripts-ltools-action"')
         && panel.includes('installLTools')
@@ -365,24 +375,22 @@ check('Linux y Windows comparten la geometría base de ventana', (() => {
 })());
 check('Ajustes normaliza atajos antes de guardarlos', read('src/components/SettingsPanel.svelte').includes('normalizeShortcut') && read('src/components/SettingsPanel.svelte').includes('normalizedDraft'));
 check('El entorno de scripts respeta noAutoSelect', read('src-tauri/src/app/panel_commands.rs').includes('!env.no_auto_select'));
-check('Los scripts integrados siguen visibles aunque falte su herramienta', (() => {
+check('La Biblioteca no inyecta scripts operativos heredados', (() => {
     const panelCommands = read('src-tauri/src/app/panel_commands.rs');
-    const bundledStart = panelCommands.indexOf('fn bundled_operation_scripts');
-    const bundledEnd = panelCommands.indexOf('fn library_panel', bundledStart);
-    const bundled = bundledStart >= 0 && bundledEnd > bundledStart
-        ? panelCommands.slice(bundledStart, bundledEnd)
-        : '';
-    return bundled.includes('is_native_bundled_script')
-        && !bundled.includes('is_tool_installed');
+    const production = panelCommands.split('#[cfg(test)]')[0];
+    return production.includes('fn library_panel')
+        && !production.includes('fn bundled_operation_scripts')
+        && !production.includes('scripts/operations')
+        && !production.includes('scripts/containers');
 })());
 const updater = read('src-tauri/src/updater/self_update.rs');
 const cargoBuild = read('src-tauri/build.rs');
 const windowsPlatform = read('src-tauri/src/platform/windows/mod.rs');
-check('El actualizador Windows rechaza payloads sin runtime ni scripts', [
+check('El actualizador Windows rechaza payloads sin runtime', [
     updater.includes('windows_runtime_files'),
     updater.includes('WebView2Loader.dll'),
-    updater.includes('scripts/operations/adb-manager.ps1'),
-    updater.includes('scripts/containers/kubernetes-manager.sh'),
+    !updater.includes('scripts/operations/'),
+    !updater.includes('scripts/containers/'),
     updater.includes('La actualización Windows está incompleta')
 ].every(Boolean));
 check('ConPTY solo se considera listo con DLL y host', windowsPlatform.includes('conpty.dll') && windowsPlatform.includes('OpenConsole.exe') && windowsPlatform.includes('dll.is_file() && host.is_file()'));
@@ -452,7 +460,7 @@ check('El E2E rechaza prompts que conservan el wrap de un tamaño anterior',
     read('tests/e2e/smoke.mjs').includes('assertPromptReflowsAfterResize')
         && read('tests/e2e/smoke.mjs').includes("recordEvent('prompt-resize-reflow'"));
 check('La integración Windows registra y consume rutas de archivos',
-    windowsIntegration.includes('Software\\Classes\\*\\shell\\WinSlimTerminal')
+    windowsIntegration.includes('Software\\Classes\\*\\shell\\WTerminal')
         && windowsIntegration.includes('--open-path')
         && read('src-tauri/src/app/commands.rs').includes('pub fn open_path_argument')
         && read('src-tauri/src/lib.rs').includes('commands::open_path_argument()'));

@@ -71,7 +71,7 @@ if (linuxPath) {
         check('AppDir Linux contiene ELF x64', appBinary.data.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) && appBinary.data[4] === 2, appBinary.absolute);
         const desktop = file(resolve(appDir, 'LTerminal.desktop'), 'Desktop Linux del AppDir');
         check('Desktop Linux apunta a lterminal', desktop.data.toString('utf8').split(/\r?\n/).includes('Exec=lterminal'), desktop.absolute);
-        for (const forbidden of ['usr/bin/winslim-terminal', 'usr/bin/com.winslim.terminal']) {
+        for (const forbidden of ['usr/bin/wterminal', 'usr/bin/com.wterminal.terminal']) {
             check(`AppDir Linux no contiene ${forbidden}`, !statExists(resolve(appDir, forbidden)), resolve(appDir, forbidden));
         }
     }

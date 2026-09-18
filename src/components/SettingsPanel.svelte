@@ -14,6 +14,7 @@
     import * as api from "../lib/api";
     import { app } from "../lib/appState.svelte";
     import { includesLocalized } from "../lib/localization";
+    import { panels } from "../lib/panels.svelte";
     import {
         normalizeShortcut,
         shortcutFromEvent,
@@ -110,6 +111,14 @@
         if (enabled) hidden.delete(environmentId);
         else hidden.add(environmentId);
         draft.hiddenEnvironmentIds = [...hidden].join(',');
+    }
+
+    function openLToolsConfiguration(): void {
+        // La configuración vive en un único selector (Biblioteca): Ajustes
+        // solo ofrece una entrada coherente para no duplicar el catálogo ni
+        // crear dos estados de selección que puedan divergir.
+        panels.show("scripts");
+        window.dispatchEvent(new CustomEvent("winslim:open-panel", { detail: { panel: "scripts" } }));
     }
 
     const environmentGroups = $derived([...new Set(app.environments.map((environment) => environment.group))]);
@@ -913,6 +922,16 @@
                         )}
                     </div>
 
+                    <div class="ltools-settings" data-testid="settings-ltools">
+                        <div class="heading">
+                            <strong>{app.t("scripts.ltools.title", "Acciones de LTools")}</strong>
+                            <span>{app.t("scripts.ltools.note", "Las acciones se descubren desde el catálogo de LTools / WinSlim Tools y se ejecutan en una shell visible.")}</span>
+                        </div>
+                        <button type="button" class="secondary" data-testid="settings-ltools-configure" onclick={openLToolsConfiguration}>
+                            {app.t("scripts.ltools.configure", "Configurar…")}
+                        </button>
+                    </div>
+
                     <label class="field wide">
                         <span
                             >{app.t(
@@ -1107,7 +1126,7 @@
                         </div>
                         <label class="check">
                             <input type="checkbox" checked={windowsIntegration.contextMenuRegistered} onchange={toggleWindowsIntegration} />
-                            <span><strong>{app.t("settings.windowsContext", "Menús «Abrir con WinSlim Terminal», App Paths y protocolo winslim://")}</strong><small>{app.t("settings.windowsUserScope", "Se registra únicamente en HKCU para el usuario actual.")}</small></span>
+                            <span><strong>{app.t("settings.windowsContext", "Menús «Abrir con WTerminal», App Paths y protocolo wterminal://")}</strong><small>{app.t("settings.windowsUserScope", "Se registra únicamente en HKCU para el usuario actual.")}</small></span>
                         </label>
                         <div class="field-hint">
                             NSudo: {windowsIntegration.nsudoAvailable
@@ -1700,6 +1719,42 @@
         border: 1px solid var(--border);
         border-radius: 6px;
         background: var(--surface-alt);
+    }
+
+    .ltools-settings {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 4px;
+        padding: 9px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-alt);
+    }
+
+    .ltools-settings button {
+        flex: 0 0 auto;
+        padding: 5px 10px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface);
+        color: var(--text);
+        font: inherit;
+        font-size: 10px;
+        cursor: pointer;
+    }
+
+    .ltools-settings button:hover {
+        border-color: var(--accent);
+        background: var(--surface-hover);
+    }
+
+    @container (max-width: 420px) {
+        .ltools-settings {
+            align-items: stretch;
+            flex-direction: column;
+        }
     }
 
     .banner-presets {

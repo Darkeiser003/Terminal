@@ -12,13 +12,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::environments::{Environment, ShellKind, Transport};
 use crate::file_explorer::{self, EntryKind};
 use crate::file_viewers;
-use crate::platform::traits::HostPlatform;
 use crate::preferences;
 use crate::scripts::{self, FileCategory, LaunchContext, ScanOptions, Scope, ScriptEntry};
 use crate::state::AppState;
@@ -134,49 +133,12 @@ impl ScriptsPanel {
     }
 }
 
-fn bundled_operation_scripts(app: &AppHandle, categories: &[FileCategory]) -> Vec<ScriptEntry> {
-    let Ok(resource_dir) = app.path().resource_dir() else {
-        return Vec::new();
-    };
-    let is_windows = crate::platform::host().is_windows();
-    let mut found = Vec::new();
-    for folder_name in ["containers", "operations"] {
-        let folder = resource_dir.join("scripts").join(folder_name);
-        found.extend(scripts::list_all_scripts(&folder, categories));
-    }
-    found.retain(|entry| is_native_bundled_script(entry, is_windows));
-    let source = bundled_source_label(is_windows);
-    for entry in &mut found {
-        entry.source = source.to_string();
-    }
-    found
-}
-
-fn bundled_source_label(is_windows: bool) -> &'static str {
-    if is_windows {
-        crate::config::identity::WINDOWS.name
-    } else {
-        crate::config::identity::LINUX.name
-    }
-}
-
-fn is_native_bundled_script(entry: &ScriptEntry, is_windows: bool) -> bool {
-    // Si el usuario activa todos los filtros, no se mezclan los gestores POSIX
-    // con los de PowerShell: cada build enseña su variante nativa.
-    //
-    // No se filtra por la presencia del binario asociado. El script forma parte
-    // de la Biblioteca y debe seguir visible para poder abrir su menú, mostrar
-    // su diagnóstico y guiar a Entorno y dependencias. Si Docker, kubectl, SSH
-    // o ADB faltan, el propio script lo explica; si lo ocultamos aquí
-    // desaparecen también sus acciones rápidas.
-    !(entry.ext == ".ps1" && !is_windows || entry.ext == ".sh" && is_windows)
-}
-
-fn library_panel(app: &AppHandle, state: &AppState, categories: &[FileCategory]) -> ScriptsPanel {
+fn library_panel(state: &AppState, categories: &[FileCategory]) -> ScriptsPanel {
     let folder = crate::tabs::scripts_folder();
-    let mut found = bundled_operation_scripts(app, categories);
-    let mut personal = scripts::list_all_scripts(&folder, categories);
-    found.append(&mut personal);
+    // Las operaciones de sistema pertenecen al catálogo declarativo de LTools.
+    // La Biblioteca de LTerminal solo muestra scripts del usuario; así una
+    // release no duplica ni conserva una copia antigua de cada herramienta.
+    let found = scripts::list_all_scripts(&folder, categories);
     state.remember_visible_items(&found);
     ScriptsPanel {
         dir: folder.to_string_lossy().to_string(),
@@ -191,11 +153,10 @@ fn library_panel(app: &AppHandle, state: &AppState, categories: &[FileCategory])
 /// `scripts:list`
 #[tauri::command(async)]
 pub fn scripts_list(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     categories: Option<Vec<String>>,
 ) -> ScriptsPanel {
-    library_panel(&app, &state, &categories_from(categories))
+    library_panel(&state, &categories_from(categories))
 }
 
 fn here_panel(
@@ -1256,44 +1217,13 @@ mod tests {
     }
 
     #[test]
-    fn los_scripts_integrados_se_muestran_sin_exigir_la_herramienta_previa() {
-        let ps1 = ScriptEntry {
-            name: "docker-manager.ps1".into(),
-            ext: ".ps1".into(),
-            kind: crate::scripts::ScriptType::Powershell,
-            category: FileCategory::Powershell,
-            interpreter: Some("powershell".into()),
-            runnable: true,
-            openable: false,
-            instruction: "",
-            path: r"C:\app\scripts\operations\docker-manager.ps1".into(),
-            rel_dir: "operations".into(),
-            source: "LTerminal".into(),
-            hint: None,
-        };
-        let sh = ScriptEntry {
-            name: "docker-manager.sh".into(),
-            ext: ".sh".into(),
-            kind: crate::scripts::ScriptType::Shell,
-            category: FileCategory::Shell,
-            interpreter: Some("bash".into()),
-            runnable: true,
-            openable: false,
-            instruction: "",
-            path: "/app/scripts/operations/docker-manager.sh".into(),
-            rel_dir: "operations".into(),
-            source: "LTerminal".into(),
-            hint: None,
-        };
-        assert!(is_native_bundled_script(&ps1, true));
-        assert!(!is_native_bundled_script(&ps1, false));
-        assert!(is_native_bundled_script(&sh, false));
-        assert!(!is_native_bundled_script(&sh, true));
-    }
-
-    #[test]
-    fn los_scripts_integrados_usan_la_marca_de_la_build() {
-        assert_eq!(bundled_source_label(false), "LTerminal");
-        assert_eq!(bundled_source_label(true), "WinSlim Terminal");
+    fn la_biblioteca_no_inyecta_operaciones_de_la_release() {
+        // La función de producción escanea únicamente la carpeta persistente;
+        // las acciones integradas se descubren desde `ltools-actions-v1`.
+        let panel_commands = include_str!("panel_commands.rs");
+        let production = panel_commands.split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("fn library_panel"));
+        assert!(!production.contains("scripts/operations"));
+        assert!(!production.contains("scripts/containers"));
     }
 }

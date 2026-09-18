@@ -1801,20 +1801,12 @@ mod tests {
 
     #[test]
     fn el_banner_compacto_separa_titulo_y_sistema() {
-        let lines: Vec<String> = build_banner(
-            "cmd.exe",
-            "WinSlim Terminal",
-            80,
-            24,
-            1,
-            &Translator::default(),
-        )
-        .lines()
-        .map(crate::current_dir::strip_ansi)
-        .collect();
-        assert!(lines
-            .first()
-            .is_some_and(|line| line.contains("WinSlim Terminal")));
+        let lines: Vec<String> =
+            build_banner("cmd.exe", "WTerminal", 80, 24, 1, &Translator::default())
+                .lines()
+                .map(crate::current_dir::strip_ansi)
+                .collect();
+        assert!(lines.first().is_some_and(|line| line.contains("WTerminal")));
         assert!(lines
             .get(1)
             .is_some_and(|line| line.starts_with("Sistema  ")));
@@ -2036,14 +2028,7 @@ mod tests {
 
     #[test]
     fn el_banner_legible_mantiene_un_formato_compacto_unico() {
-        let banner = build_banner(
-            "cmd.exe",
-            "WinSlim Terminal",
-            120,
-            40,
-            1,
-            &Translator::default(),
-        );
+        let banner = build_banner("cmd.exe", "WTerminal", 120, 40, 1, &Translator::default());
         let lines: Vec<String> = banner.lines().map(crate::current_dir::strip_ansi).collect();
         assert!(
             lines.iter().any(|line| line.starts_with("Sistema  ")),
@@ -2062,8 +2047,8 @@ mod tests {
     fn el_banner_mantiene_el_mismo_formato_al_cambiar_la_rejilla() {
         let t = Translator::default();
         for (columns, rows) in [(120, 40), (120, 20), (60, 14)] {
-            let single = build_banner("cmd.exe", "WinSlim Terminal", columns, rows, 1, &t);
-            let grid = build_banner("cmd.exe", "WinSlim Terminal", columns, rows, 4, &t);
+            let single = build_banner("cmd.exe", "WTerminal", columns, rows, 1, &t);
+            let grid = build_banner("cmd.exe", "WTerminal", columns, rows, 4, &t);
             let strip = |value: String| {
                 value
                     .lines()
@@ -2098,7 +2083,7 @@ mod tests {
     #[test]
     fn una_rejilla_mantiene_el_mismo_formato_en_todas_sus_casillas() {
         let t = Translator::default();
-        let banner = build_banner("cmd.exe", "WinSlim Terminal", 120, 40, 4, &t);
+        let banner = build_banner("cmd.exe", "WTerminal", 120, 40, 4, &t);
         let lineas: Vec<_> = banner.lines().map(crate::current_dir::strip_ansi).collect();
         assert!(
             lineas.iter().any(|linea| linea.starts_with("CPU")),
@@ -2192,7 +2177,7 @@ mod tests {
     fn el_banner_de_ancho_extremo_no_desborda_ni_pierde_su_cabecera() {
         let t = Translator::default();
         for columnas in [1u16, 2, 3, 4, 5] {
-            let banner = build_banner("cmd.exe", "WinSlim Terminal", columnas, 40, 1, &t);
+            let banner = build_banner("cmd.exe", "WTerminal", columnas, 40, 1, &t);
             for linea in banner.lines() {
                 let ancho = crate::current_dir::strip_ansi(linea).chars().count();
                 assert!(ancho <= columnas as usize, "{columnas}: {linea:?}");
@@ -2212,13 +2197,12 @@ mod tests {
         // cabecera y no generar líneas que xterm parta por la mitad.
         for (columnas, filas) in [(48u16, 14u16), (58, 17), (80, 22), (120, 30)] {
             for paneles in [2usize, 3, 4] {
-                let banner =
-                    build_banner("cmd.exe", "WinSlim Terminal", columnas, filas, paneles, &t);
+                let banner = build_banner("cmd.exe", "WTerminal", columnas, filas, paneles, &t);
                 let lineas: Vec<_> = banner.lines().map(crate::current_dir::strip_ansi).collect();
                 assert!(
                     lineas
                         .first()
-                        .is_some_and(|linea| linea.contains("WinSlim Terminal")),
+                        .is_some_and(|linea| linea.contains("WTerminal")),
                     "panel {paneles} de {columnas}x{filas}: {banner:?}"
                 );
                 assert!(

@@ -25,6 +25,49 @@ const terminalReady = await importTypeScript('src/lib/terminal-ready.ts');
 const terminalPrompt = await importTypeScript('src/lib/terminal-prompt.ts');
 const keyedQueue = await importTypeScript('src/lib/keyed-serial-queue.ts');
 const terminalRender = await importTypeScript('src/lib/terminal-render.ts');
+const ltoolsSelection = await importTypeScript('src/lib/ltools-selection.ts');
+
+const ltoolsActions = Array.from({ length: 73 }, (_, index) => ({
+    id: `scope.action-${index}`,
+    actionKey: `scope.action-${index}`,
+    scope: 'scope',
+    operation: `action-${index}`,
+    label: `Action ${index}`,
+    shortLabel: `Action ${index}`,
+    group: 'scope',
+    description: 'Consulta segura',
+    target: 'none',
+    targetPolicy: 'none',
+    safe: true,
+    mutating: false,
+    confirmation: 'none',
+    profile: 'safe-default',
+    quick: index < 12,
+    requirementsAvailable: true,
+}));
+const firstSelection = ltoolsSelection.reconcileLToolsSelection(ltoolsActions, null);
+assert.equal(firstSelection.selectedIds.length, 12, 'el catálogo nuevo propone todas las acciones quick, sin un tope artificial');
+assert.equal(firstSelection.knownIds.length, 73, 'la selección conserva todos los IDs conocidos para reconciliar futuras versiones');
+const expandedCatalog = [
+    ...ltoolsActions,
+    {
+        ...ltoolsActions[72],
+        id: 'scope.action-new',
+        label: 'Nueva acción',
+        quick: true,
+    },
+];
+const removedByUser = ltoolsSelection.reconcileLToolsSelection(
+    expandedCatalog,
+    { selectedIds: firstSelection.selectedIds.slice(1), knownIds: firstSelection.knownIds },
+);
+assert(!removedByUser.selectedIds.includes(firstSelection.selectedIds[0]), 'una acción desmarcada no reaparece al refrescar el catálogo');
+assert(removedByUser.selectedIds.includes('scope.action-new'), 'una acción quick nueva se propone automáticamente una sola vez');
+const withMissingRequirement = ltoolsSelection.reconcileLToolsSelection(
+    [{ ...ltoolsActions[0], requirementsAvailable: false }, ltoolsActions[1]],
+    { selectedIds: ['scope.action-0', 'scope.action-1'], knownIds: [] },
+);
+assert.deepEqual(withMissingRequirement.selectedIds, ['scope.action-1'], 'las acciones con dependencias no disponibles no quedan ejecutables');
 
 assert.equal(localization.foldLocalized('İSTANBUL', 'tr'), 'istanbul');
 assert(localization.includesLocalized('Überblick 12', 'ÜBER', 'de'));
@@ -283,14 +326,14 @@ await assert.rejects(enqueueByTab('tab-1', async () => { throw new Error('cambio
 assert.equal(await enqueueByTab('tab-1', async () => 'recovered'), 'recovered', 'un rechazo no atasca la cola de esa pestaña');
 
 assert.equal(
-    localization.platformBrandText('Abrir LTerminal y LTerminal Projects', 'windows', 'WinSlim Terminal'),
-    'Abrir WinSlim Terminal y WinSlim Projects',
+    localization.platformBrandText('Abrir LTerminal y LTerminal Projects', 'windows', 'WTerminal'),
+    'Abrir WTerminal y WTerminal Projects',
 );
 assert.equal(
-    localization.platformBrandText('Abrir WinSlim Terminal en WinSlim Projects', 'linux', 'LTerminal'),
+    localization.platformBrandText('Abrir WTerminal en WTerminal Projects', 'linux', 'LTerminal'),
     'Abrir LTerminal en LTerminal Projects',
 );
-assert(!localization.platformBrandText('WinSlim Projects', 'linux', 'LTerminal').includes('LTerminals'));
+assert(!localization.platformBrandText('WTerminal Projects', 'linux', 'LTerminal').includes('LTerminals'));
 assert.equal(localization.platformBrandText('LTerminal', 'unknown', 'Otro'), 'LTerminal');
 
 const defaults = await readFile('src-tauri/default_settings.toml', 'utf8');

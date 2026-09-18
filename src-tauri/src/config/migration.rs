@@ -4,7 +4,8 @@
 //!
 //! Port de `electron/main/userDataMigration.js`. Sigue haciendo falta después
 //! de dejar Electron: la instalación existente de un usuario puede tener sus
-//! ajustes en `%APPDATA%\WinSlim Terminal` en vez de en el slug.
+//! ajustes en `%APPDATA%\WinSlim Terminal` en vez de en el slug. Esa carpeta
+//! antigua se conserva como origen de migración aunque la marca actual sea WTerminal.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

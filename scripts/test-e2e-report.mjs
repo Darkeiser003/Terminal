@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -77,7 +77,7 @@ const valid = {
         { type: 'keyboard-shortcuts', passed: true, newTab: true, nextTab: true, cyclePanes: true, explorerToggle: true },
         { type: 'shell-startup-performance', passed: true, samples: 4, maxMs: 740, limitMs: 2500 },
         { type: 'responsive-matrix', panes: 2, cases: 20, explorerStates: [false, true] },
-        { type: 'banner-ready', promptsVisible: true, preview: ['WinSlim Terminal 1.0.0\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
+        { type: 'banner-ready', promptsVisible: true, preview: ['WTerminal 1.0.0\nSistema  Windows\nPlaca  ASUS\nGPU  Intel\nC:\\>'] },
     ],
 };
 
@@ -134,6 +134,12 @@ function addTimingFixture(report) {
 addTimingFixture(valid);
 const directory = await mkdtemp(join(tmpdir(), 'lterminal-e2e-report-test-'));
 const verifier = resolve('scripts/verify-e2e-report.mjs');
+const smokeSource = await readFile(resolve('tests/e2e/smoke.mjs'), 'utf8');
+assert.match(
+    smokeSource,
+    /const selectEnvironment = async \(id\) =>[\s\S]*?await pointerClickInView\(option\);/,
+    'la matriz de shells debe usar un clic de puntero robusto para opciones desplazables',
+);
 
 async function run(name, report) {
     const path = join(directory, `${name}.json`);
@@ -168,7 +174,7 @@ const focusedLTools = {
     events: [
         { type: 'phase', name: 'arranque de interfaz' },
         { type: 'phase', name: 'integración opcional de LTools' },
-        { type: 'ltools-integration', passed: true, binary: '/tmp/ltools', schema: 'ltools-actions-v1', catalogActions: 50, compatibleActions: 32, pickerActions: 32, selectedAction: 'defaults.show', selectedCount: 4, selectionPersisted: true, selectionStorageVerified: true, executionCompleted: true, resultPromptVisible: true },
+        { type: 'ltools-integration', passed: true, binary: '/tmp/ltools', schema: 'ltools-actions-v1', catalogMatch: true, catalogActions: 50, availableActions: 32, compatibleActions: 32, pickerActions: 32, selectedAction: 'defaults.show', selectedCount: 9, selectionPersisted: true, selectionStorageVerified: true, executionCompleted: true, resultPromptVisible: true },
         { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
     ],
 };
@@ -195,10 +201,91 @@ const focusedProgress = {
         { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
     ],
 };
+const focusedSettings = {
+    ...valid,
+    focusedScenario: 'settings-footer-800x600',
+    phases: [
+        { name: 'driver', durationMs: 10 },
+        { name: 'arranque de interfaz', durationMs: 10 },
+        { name: 'Ajustes compactos 800x600', durationMs: 10 },
+    ],
+    captures: [{ label: 'settings-footer-800x600', path: 'settings.png' }],
+    events: [
+        { type: 'phase', name: 'arranque de interfaz' },
+        { type: 'phase', name: 'Ajustes compactos 800x600' },
+        { type: 'settings-footer-compact-layout', passed: true, viewport: { width: 800, height: 600 }, maxScroll: 200, contentBottom: 480, footerTop: 500 },
+        { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
+    ],
+};
+const focusedExplorer = {
+    ...valid,
+    focusedScenario: 'explorer-double-click',
+    phases: [
+        { name: 'driver', durationMs: 10 },
+        { name: 'arranque de interfaz', durationMs: 10 },
+        { name: 'doble clic real del Explorador', durationMs: 10 },
+    ],
+    captures: [
+        { label: 'explorer-double-click-before', path: 'before.png' },
+        { label: 'explorer-double-click-entered', path: 'entered.png' },
+        { label: 'explorer-double-click-restored', path: 'restored.png' },
+    ],
+    events: [
+        { type: 'phase', name: 'arranque de interfaz' },
+        { type: 'phase', name: 'doble clic real del Explorador' },
+        { type: 'explorer-double-click', passed: true, enteredOnce: true, restored: true, enteredPath: '/tmp/nested', expectedPath: '/tmp/nested', gesture: 'pointerMove → pointerDown → pointerUp × 2', captures: ['explorer-double-click-before', 'explorer-double-click-entered', 'explorer-double-click-restored'] },
+        { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
+    ],
+};
+const focusedMouseSelection = {
+    ...valid,
+    focusedScenario: 'terminal-mouse-drag-selection',
+    phases: [
+        { name: 'driver', durationMs: 10 },
+        { name: 'arranque de interfaz', durationMs: 10 },
+        { name: 'selección de texto mediante arrastre real', durationMs: 10 },
+    ],
+    captures: [{ label: 'mouse-selection-drag', path: 'selection.png' }],
+    events: [
+        { type: 'phase', name: 'arranque de interfaz' },
+        { type: 'phase', name: 'selección de texto mediante arrastre real' },
+        { type: 'terminal-mouse-selection', passed: true, gesture: 'pointerDown → pointerMove while pressed → pointerUp', target: { startX: 10, endX: 100 }, selection: { boxes: [{ width: 90, height: 16 }] } },
+        { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
+    ],
+};
+const focusedAdb = {
+    ...valid,
+    focusedScenario: 'adb-progressive-output-repaint',
+    phases: [
+        { name: 'driver', durationMs: 10 },
+        { name: 'arranque de interfaz', durationMs: 10 },
+        { name: 'salida progresiva ADB sin cambios de layout', durationMs: 10 },
+    ],
+    captures: [
+        { label: 'adb-refresh-ready', path: 'adb-ready.png' },
+        { label: 'adb-refresh-frame-1', path: 'adb-1.png' },
+        { label: 'adb-refresh-frame-2', path: 'adb-2.png' },
+        { label: 'adb-refresh-frame-3', path: 'adb-3.png' },
+    ],
+    events: [
+        { type: 'phase', name: 'arranque de interfaz' },
+        { type: 'phase', name: 'salida progresiva ADB sin cambios de layout' },
+        { type: 'adb-progressive-output-repaint', passed: true, transport: 'adb-shell-pty', layoutUnchanged: true, frames: [
+            { layoutUnchanged: true, capture: 'adb-refresh-frame-1' },
+            { layoutUnchanged: true, capture: 'adb-refresh-frame-2' },
+            { layoutUnchanged: true, capture: 'adb-refresh-frame-3' },
+        ] },
+        { type: 'e2e-process-cleanup', strategy: 'dedicated-process-group', processGroupClosed: true, passed: true, closed: true },
+    ],
+};
 
 addTimingFixture(focusedShellMatrix);
 addTimingFixture(focusedLTools);
 addTimingFixture(focusedProgress);
+addTimingFixture(focusedSettings);
+addTimingFixture(focusedExplorer);
+addTimingFixture(focusedMouseSelection);
+addTimingFixture(focusedAdb);
 
 try {
     assert.equal((await run('valid', valid)).status, 0, 'un informe completo debe pasar');
@@ -256,6 +343,14 @@ try {
         'un informe enfocado debe validar el catálogo y la ejecución opcional de LTools');
     assert.equal((await run('focused-progress', focusedProgress)).status, 0,
         'un informe enfocado debe validar las barras de actualización y la recuperación del ancho');
+    assert.equal((await run('focused-settings', focusedSettings)).status, 0,
+        'un informe enfocado debe validar el pie fijo y el scroll compacto de Ajustes');
+    assert.equal((await run('focused-explorer', focusedExplorer)).status, 0,
+        'un informe enfocado debe validar el doble clic real del Explorador');
+    assert.equal((await run('focused-mouse-selection', focusedMouseSelection)).status, 0,
+        'un informe enfocado debe validar la selección de texto con el ratón');
+    assert.equal((await run('focused-adb', focusedAdb)).status, 0,
+        'un informe enfocado debe validar la salida progresiva ADB sin cambiar el layout');
     assert.notEqual((await run('focused-ltools-without-event', {
         ...focusedLTools,
         events: focusedLTools.events.filter((event) => event.type !== 'ltools-integration'),
@@ -455,7 +550,7 @@ try {
     assert.notEqual((await run('mixed-banner', {
         ...valid,
         events: valid.events.map((event) => event.type === 'banner-ready'
-            ? { ...event, preview: ['WinSlim Terminal 1.0.0\nPlaca ASUS 1 GB (60%)'] }
+            ? { ...event, preview: ['WTerminal 1.0.0\nPlaca ASUS 1 GB (60%)'] }
             : event),
     })).status, 0, 'un banner mezclado debe fallar');
     assert.notEqual((await run('missing-prompt', {

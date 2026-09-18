@@ -14,11 +14,11 @@ pub struct Identity {
 }
 
 pub const WINDOWS: Identity = Identity {
-    name: "WinSlim Terminal",
-    // Se conserva únicamente para migrar perfiles de versiones antiguas.
-    slug: "winslim-terminal",
-    user_agent: "WinSlim-Terminal",
-    projects_folder_name: "WinSlim Projects",
+    name: "WTerminal",
+    // El slug también identifica los datos de usuario de la aplicación Windows.
+    slug: "wterminal",
+    user_agent: "WTerminal",
+    projects_folder_name: "WTerminal Projects",
     desktop_file: None,
 };
 
@@ -59,9 +59,9 @@ mod tests {
 
     #[test]
     fn cada_plataforma_tiene_su_marca() {
-        assert_eq!(identity_for_platform("win32").name, "WinSlim Terminal");
+        assert_eq!(identity_for_platform("win32").name, "WTerminal");
         assert_eq!(identity_for_platform("linux").name, "LTerminal");
-        assert_eq!(identity_for_platform("win32").slug, "winslim-terminal");
+        assert_eq!(identity_for_platform("win32").slug, "wterminal");
         assert_eq!(identity_for_platform("linux").slug, "lterminal");
         assert_eq!(identity_for_platform("darwin").slug, "lterminal");
     }

@@ -35,7 +35,7 @@ pub use windows::{open_directory, open_path};
 pub use windows::{probe_virtualization, run_wsl};
 
 #[cfg(not(any(target_os = "linux", windows)))]
-compile_error!("WinSlim Terminal solo admite actualmente Windows y Linux");
+compile_error!("WTerminal/LTerminal solo admite actualmente Windows y Linux");
 
 #[cfg(target_os = "linux")]
 static HOST: LinuxPlatform = LinuxPlatform;

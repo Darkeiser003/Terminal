@@ -562,6 +562,8 @@
             await configureBanner(command.argument);
         } else if (command.action === 'quickActions') {
             await configureQuickActions(command.argument);
+        } else if (command.action === 'ltools') {
+            await configurePanel('scripts');
         } else if (command.action === 'panel') {
             await configurePanel(command.argument);
         } else if (command.action === 'theme') {
@@ -606,10 +608,10 @@
                 // `ayuda` en Python, Node, Docker o ADB como si fuera código
                 // de esa shell.
                 term?.writeln(`\r\n${translated('terminal.helpFallback', 'Help{topic}: use :help from a terminal or consult the internal commands.', { topic: topic ? ` (${topic})` : '' })}`);
-                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :help [section]  :config/:settings  :reload  :shell [list|current|<name>]  :repl <name>  :panel <panel|close>  :explorer-here  :theme [list|<id>]  :font [list|<id>]  :language [list|<id>]  :terminal [list|<key> <value>]  :panes [1|2|3|4|cycle]  :banner [options]  :quick-actions list'));
+                term?.writeln(app.t('terminal.internalCommands', 'Internal commands: :help [section]  :config/:settings  :reload  :shell [list|current|<name>]  :repl <name>  :panel <panel|close>  :ltools  :explorer-here  :theme [list|<id>]  :font [list|<id>]  :language [list|<id>]  :terminal [list|<key> <value>]  :panes [1|2|3|4|cycle]  :banner [options]  :quick-actions list'));
             }
         } else {
-            term?.writeln(`\r\n${app.t('terminal.commandList', ':help  :config/:settings  :reload  :shell  :repl  :panel  :explorer-here  :theme  :font  :language  :terminal  :panes  :alias  :banner  :quick-actions')}`);
+            term?.writeln(`\r\n${app.t('terminal.commandList', ':help  :config/:settings  :reload  :shell  :repl  :panel  :ltools  :explorer-here  :theme  :font  :language  :terminal  :panes  :alias  :banner  :quick-actions')}`);
         }
         return { handled: true, shellPrintsPrompt };
     }
@@ -723,8 +725,37 @@
                     ? normalizedText.includes(normalizedCommand.slice(0, 24))
                         && normalizedText.includes(normalizedCommand.slice(-24))
                     : normalizedText.includes(normalizedCommand);
-                if (commandMatches || (isLongCommand && promptLike)) ignoredInputLineStarts.add(lineStart);
+                // Algunas shells reenvuelven o colorean el eco de una orden
+                // larga antes de que el espejo de entrada conserve el texto
+                // completo. Su prompt sigue siendo una señal inequívoca de
+                // que la línea es entrada del usuario, no salida que deba
+                // ensanchar la rejilla horizontal.
+                const shellInputLike = /^(?:~\s+)?(?:❯|➜|[$#]|PS\s|[A-Za-z]:[\\/])(?:\s|$)/u.test(normalizedText);
+                if (commandMatches || (isLongCommand && (promptLike || shellInputLike))) {
+                    ignoredInputLineStarts.add(lineStart);
+                }
             }
+        }
+        // El driver y algunas shells pueden entregar una orden larga en un
+        // solo bloque, sin poblar `submittedCommand`. Reconocer el prompt en
+        // la propia pantalla cubre ese caso sin volver a tratar la entrada
+        // como salida; solo se ignoran líneas realmente reenvueltas.
+        const visibleInputStarts = new Set<number>();
+        const firstRow = buffer.viewportY;
+        const lastRow = Math.min(buffer.length, firstRow + terminal.rows);
+        for (let row = firstRow; row < lastRow; row += 1) {
+            let lineStart = row;
+            while (lineStart > 0 && buffer.getLine(lineStart)?.isWrapped) lineStart -= 1;
+            if (visibleInputStarts.has(lineStart)) continue;
+            visibleInputStarts.add(lineStart);
+            let text = '';
+            for (let part = lineStart; part < lastRow; part += 1) {
+                text += buffer.getLine(part)?.translateToString(true) ?? '';
+                if (!buffer.getLine(part + 1)?.isWrapped) break;
+            }
+            const normalizedText = text.replace(/\s+/gu, ' ');
+            const shellInputLike = /^(?:~\s+)?(?:❯|➜|[$#]|PS\s|[A-Za-z]:[\\/])(?:\s|$)/u.test(normalizedText);
+            if (shellInputLike && text.length > terminal.cols) ignoredInputLineStarts.add(lineStart);
         }
         return longestVisibleLogicalLineWidth(
             buffer.length,
@@ -1305,7 +1336,7 @@
             text += `${buffer.getLine(row)?.translateToString(true) ?? ''}\n`;
         }
         const titleIndex = Math.max(
-            text.lastIndexOf('WinSlim Terminal'),
+            text.lastIndexOf('WTerminal'),
             text.lastIndexOf('LTerminal'),
         );
         const latestBanner = titleIndex >= 0 ? text.slice(titleIndex) : text;
@@ -1319,7 +1350,7 @@
             && /(?:Uptime|Tiempo activo)/i.test(latestBanner)
             && /(?:Memory|Memoria)/i.test(latestBanner);
         return terminalPromptVisible()
-            && /(?:WinSlim Terminal|LTerminal)\s+\d/i.test(latestBanner)
+            && /(?:WTerminal|LTerminal)\s+\d/i.test(latestBanner)
             && (fullBannerComplete || compactBannerComplete);
     }
 

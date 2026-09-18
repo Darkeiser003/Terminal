@@ -22,7 +22,7 @@ const source = join(fixture, 'cargo-release');
 const release = join(fixture, 'release');
 const helper = join(root, 'scripts/package-windows-cross.mjs');
 const version = '9.8.7';
-const required = ['winslim-terminal.exe', 'conpty.dll', 'OpenConsole.exe', 'WebView2Loader.dll'];
+const required = ['wterminal.exe', 'conpty.dll', 'OpenConsole.exe', 'WebView2Loader.dll'];
 const manifest = join(release, 'SHA256SUMS.txt');
 const signature = join(release, 'SHA256SUMS.txt.sig');
 const linuxArtifact = `LTerminal-${version}-x86_64.AppImage`;
@@ -43,19 +43,20 @@ try {
 
     let result = await run();
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    const portable = join(release, `WinSlimTerminal-${version}`);
-    const archive = join(release, `WinSlimTerminal-Unpacked-${version}.zip`);
+    const portable = join(release, `WTerminal-${version}`);
+    const archive = join(release, `WTerminal-Unpacked-${version}.zip`);
     for (const name of required) assert.equal(await readFile(join(portable, name), 'utf8'), `fixture:${name}\n`);
-    assert.ok((await readdir(portable)).includes('scripts'), 'se deben incluir los recursos Tauri en su ruta portable');
-    const hashLine = (await readFile(manifest, 'utf8')).split('\n').find((line) => line.endsWith(`  WinSlimTerminal-Unpacked-${version}.zip`));
+    assert.ok((await readFile(join(portable, 'THIRD-PARTY-NOTICES.txt'), 'utf8')).length > 0, 'se deben incluir los recursos Tauri en su ruta portable');
+    const hashLine = (await readFile(manifest, 'utf8')).split('\n').find((line) => line.endsWith(`  WTerminal-Unpacked-${version}.zip`));
     assert.ok(hashLine, 'el manifiesto debe identificar el ZIP publicado');
     assert.equal(hashLine.slice(0, 64), createHash('sha256').update(await readFile(archive)).digest('hex'));
     assert.match(await readFile(manifest, 'utf8'), new RegExp(`${linuxDigest}  ${linuxArtifact}`), 'publicar Windows conserva hashes Linux previos');
     await assert.rejects(readFile(signature), { code: 'ENOENT' }, 'cambiar el manifiesto elimina una firma anterior que ya no corresponde');
     const entries = spawnSync('zip', ['-sf', archive], { encoding: 'utf8' });
     assert.equal(entries.status, 0, entries.stderr);
-    assert.match(entries.stdout, /winslim-terminal\.exe/);
-    assert.match(entries.stdout, /scripts\/operations\/ssh-manager\.ps1/);
+    assert.match(entries.stdout, /wterminal\.exe/);
+    assert.match(entries.stdout, /conpty\.dll/);
+    assert.doesNotMatch(entries.stdout, /scripts\/(operations|containers)\//, 'la release ya no debe empaquetar scripts heredados');
 
     const existingArchive = await readFile(archive);
     await writeFile(signature, 'firma anterior');
@@ -75,10 +76,10 @@ try {
     result = await run(true);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const devDir = join(release, 'dev');
-    assert.ok((await readdir(devDir)).includes(`WinSlimTerminal-${version}-dev`));
-    assert.ok((await readdir(devDir)).includes(`WinSlimTerminal-Unpacked-${version}-dev.zip`));
+    assert.ok((await readdir(devDir)).includes(`WTerminal-${version}-dev`));
+    assert.ok((await readdir(devDir)).includes(`WTerminal-Unpacked-${version}-dev.zip`));
     assert.ok((await readdir(devDir)).includes('SHA256SUMS.txt'));
-    assert.equal((await readdir(release)).includes(`WinSlimTerminal-${version}-dev`), false, 'el perfil rápido no debe contaminar release/ normal');
+    assert.equal((await readdir(release)).includes(`WTerminal-${version}-dev`), false, 'el perfil rápido no debe contaminar release/ normal');
 
     console.log('OK: cross-build Windows publica portable y ZIP en release/ o release/dev, conserva hashes y no reemplaza artefactos válidos si falla.');
 } finally {

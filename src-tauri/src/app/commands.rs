@@ -391,9 +391,15 @@ fn valid_profile_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            ["winslim-profile", "lterminal-profile", "sh", "ps1"]
-                .iter()
-                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            [
+                "wterminal-profile",
+                "winslim-profile",
+                "lterminal-profile",
+                "sh",
+                "ps1",
+            ]
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
         })
 }
 
@@ -415,7 +421,8 @@ fn embedded_profile(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    if extension.eq_ignore_ascii_case("winslim-profile")
+    if extension.eq_ignore_ascii_case("wterminal-profile")
+        || extension.eq_ignore_ascii_case("winslim-profile")
         || extension.eq_ignore_ascii_case("lterminal-profile")
     {
         return Ok(bytes);
@@ -436,7 +443,7 @@ fn embedded_profile(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
 fn read_profile_document(path: &Path) -> Result<Value, String> {
     if !valid_profile_path(path) {
         return Err(
-            "El perfil debe terminar en .winslim-profile, .lterminal-profile, .sh o .ps1".into(),
+            "El perfil debe terminar en .wterminal-profile, .winslim-profile, .lterminal-profile, .sh o .ps1".into(),
         );
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
@@ -447,7 +454,10 @@ fn read_profile_document(path: &Path) -> Result<Value, String> {
     let document: Value =
         serde_json::from_slice(&bytes).map_err(|error| format!("Perfil JSON inválido: {error}"))?;
     if document.get("schemaVersion").and_then(Value::as_u64) != Some(1)
-        || document.get("application").and_then(Value::as_str) != Some("winslim-terminal")
+        || !matches!(
+            document.get("application").and_then(Value::as_str),
+            Some("wterminal") | Some("winslim-terminal")
+        )
     {
         return Err("Formato o versión de perfil incompatible".into());
     }
@@ -491,7 +501,7 @@ pub fn profile_import_argument() -> Option<PathBuf> {
     None
 }
 
-/// Ruta que Windows entrega al verbo «Abrir con WinSlim Terminal». Se usa solo
+/// Ruta que Windows entrega al verbo «Abrir con WTerminal». Se usa solo
 /// para elegir la carpeta inicial de la pestaña; el archivo nunca se ejecuta
 /// de forma silenciosa.
 pub fn open_path_argument() -> Option<PathBuf> {
@@ -514,7 +524,7 @@ pub fn profile_export(path: String) -> ProfileTransferResult {
         return ProfileTransferResult {
             ok: false,
             error: Some(
-                "El perfil debe terminar en .winslim-profile, .lterminal-profile, .sh o .ps1"
+                "El perfil debe terminar en .wterminal-profile, .winslim-profile, .lterminal-profile, .sh o .ps1"
                     .into(),
             ),
             preferences: None,
@@ -522,7 +532,7 @@ pub fn profile_export(path: String) -> ProfileTransferResult {
     }
     let document = serde_json::json!({
         "schemaVersion": 1,
-        "application": "winslim-terminal",
+        "application": "wterminal",
         "preferences": preferences::current(),
         "plugins": crate::config::plugins::export_bundle(),
     });
@@ -607,7 +617,7 @@ pub fn app_info(app: AppHandle) -> AppInfo {
         developers: catalog.developers,
         owners: catalog.owners,
         project_leads: catalog.project_leads,
-        collaborators: (identity.slug == "winslim-terminal")
+        collaborators: (identity.slug == "wterminal")
             .then_some(vec![CollaboratorCredit {
                 login: "Christianlg97",
                 role: "Colaborador y desarrollador de WinSlim",
@@ -684,7 +694,7 @@ mod tests {
 
     #[test]
     fn el_perfil_se_puede_extraer_de_los_dos_scripts() {
-        let document = r#"{"schemaVersion":1,"application":"winslim-terminal","preferences":{}}"#;
+        let document = r#"{"schemaVersion":1,"application":"wterminal","preferences":{}}"#;
         for extension in ["sh", "ps1"] {
             let path = Path::new(if extension == "sh" {
                 "perfil.sh"
@@ -699,6 +709,7 @@ mod tests {
 
     #[test]
     fn los_perfiles_json_siguen_siendo_validos() {
+        assert!(valid_profile_path(Path::new("perfil.wterminal-profile")));
         assert!(valid_profile_path(Path::new("perfil.winslim-profile")));
         assert!(valid_profile_path(Path::new("perfil.lterminal-profile")));
         assert!(valid_profile_path(Path::new("perfil.sh")));

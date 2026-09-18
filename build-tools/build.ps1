@@ -270,7 +270,7 @@ function Show-TestsMenu {
                 else { Invoke-MenuAction 'Validando la aplicación ya empaquetada' 'bash' @('linux/validate-release.sh') }
             }
             '5' {
-                $defaultBinary = if ($script:OnWindows) { Join-Path $Root 'src-tauri\target\release\winslim-terminal.exe' } else { Join-Path $Root 'src-tauri/target/release/winslim-terminal' }
+                $defaultBinary = if ($script:OnWindows) { Join-Path $Root 'src-tauri\target\release\wterminal.exe' } else { Join-Path $Root 'src-tauri/target/release/lterminal' }
                 $binary = Read-Host "Ruta al ejecutable compilado [$defaultBinary]"
                 if ([string]::IsNullOrWhiteSpace($binary)) { $binary = $defaultBinary }
                 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {

@@ -275,7 +275,7 @@ fn detect_windows_shells() -> Vec<Environment> {
     // NSudo conserva el ConPTY heredado con `-UseCurrentConsole`. `-Wait`
     // mantiene vivo el proceso raíz de la pestaña mientras la shell elevada
     // esté abierta, de modo que entrada, salida y redimensionado siguen dentro
-    // del marco de WinSlim Terminal.
+    // del marco de WTerminal.
     if let Some(nsudo) = crate::platform::nsudo_path() {
         let note = "Sesión TrustedInstaller con todos los privilegios. Úsala solo para tareas administrativas concretas.";
         let mut cmd = Environment::new(

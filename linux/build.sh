@@ -378,6 +378,51 @@ graphical_session_available() {
     return 1
 }
 
+# El builder también puede ejecutarse desde CI, un terminal del editor o un
+# sandbox que hereda DISPLAY/WAYLAND_DISPLAY pero no puede hablar con ellos.
+# En ese caso no debemos publicar una release sin E2E solo porque el display
+# del proceso padre no es accesible: si Xvfb está instalado, creamos un display
+# privado para el smoke y WebDriver y lo retiramos al salir.
+XVFB_PID=""
+start_private_xvfb() {
+    [ -n "${XVFB_PID:-}" ] && return 0
+    command -v Xvfb >/dev/null 2>&1 || return 1
+    command -v xdpyinfo >/dev/null 2>&1 || return 1
+
+    local display_number
+    for display_number in $(seq 90 110); do
+        [ -e "/tmp/.X11-unix/X${display_number}" ] && continue
+        Xvfb ":${display_number}" -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &
+        XVFB_PID=$!
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if DISPLAY=":${display_number}" timeout 5 xdpyinfo >/dev/null 2>&1; then
+                export DISPLAY=":${display_number}"
+                # No permitas que el proceso herede la identidad del compositor
+                # real: el E2E tiene una ruta específica de Hyprland y un
+                # Xvfb no ofrece ese dispatcher. Mantener estas variables hacía
+                # que una ventana virtual intentase acoplarse en el compositor
+                # real y fallase de forma engañosa.
+                unset WAYLAND_DISPLAY XDG_CURRENT_DESKTOP DESKTOP_SESSION HYPRLAND_INSTANCE_SIGNATURE
+                warn "Display privado Xvfb activo para smoke/E2E: $DISPLAY"
+                return 0
+            fi
+            sleep 0.1
+        done
+        kill "$XVFB_PID" >/dev/null 2>&1 || true
+        wait "$XVFB_PID" >/dev/null 2>&1 || true
+        XVFB_PID=""
+    done
+    return 1
+}
+
+cleanup_private_xvfb() {
+    local pid="${XVFB_PID:-}"
+    [ -n "$pid" ] || return 0
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+    XVFB_PID=""
+}
+
 # Con `set -e` un fallo a mitad corta el script sin decir nada más, y en una
 # build de varios minutos no queda claro qué paso se quedó a medias. El
 # equivalente del "La build fallo con codigo N" de build.bat.
@@ -505,6 +550,7 @@ on_error() {
 on_exit() {
     local exit_code=$?
     cleanup_smoke_process
+    cleanup_private_xvfb
     restore_node_modules
     if ! restore_version_manifests; then
         # El estado devuelto por una función EXIT se ignora si la build ya
@@ -1796,6 +1842,10 @@ fi
 # Que compile no significa que arranque. Sin servidor gráfico no se puede
 # comprobar, y eso no es un fallo de la build: se avisa y se sigue.
 step "Comprobación de humo"
+
+if ! graphical_session_available; then
+    start_private_xvfb || true
+fi
 
 # Un AppImage necesita tanto su helper FUSE como el dispositivo del kernel.
 # Un contenedor puede tener fusermount instalado y aun así no exponer /dev/fuse;

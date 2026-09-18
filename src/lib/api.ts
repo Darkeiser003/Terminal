@@ -181,7 +181,7 @@ export const parseInternalCommand = (line: string) =>
 export async function exportProfile(platform = 'linux'): Promise<ProfileTransferResult | null> {
     const windows = platform === 'windows';
     const extension = windows ? 'ps1' : 'sh';
-    const name = windows ? 'WinSlimTerminal-Perfil.ps1' : 'LTerminal-Perfil.sh';
+    const name = windows ? 'WTerminal-Perfil.ps1' : 'LTerminal-Perfil.sh';
     const path = await save({ defaultPath: name, filters: [{ name: 'Script de perfil', extensions: [extension, 'winslim-profile', 'lterminal-profile'] }] });
     return path ? invokeLogged<ProfileTransferResult>('profile_export', { path }) : null;
 }
@@ -385,7 +385,8 @@ export const runInstallAction = (tabId: string, actionId: string) =>
 
 /** Lee el catálogo ltools-actions-v1 del CLI instalado, sin instalar ni
  * ejecutar nada. Si no existe, devuelve `available: false`. */
-export const listLToolsActions = () => invokeLogged<LToolsActionList>('ltools_actions_list');
+export const listLToolsActions = (language?: string) =>
+    invokeLogged<LToolsActionList>('ltools_actions_list', { language });
 
 /** Revalida el catálogo y escribe la acción elegida en una shell visible. */
 export const runLToolsAction = (tabId: string, actionId: string) =>

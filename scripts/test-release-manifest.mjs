@@ -21,8 +21,8 @@ function run(...args) {
 try {
     const files = new Map([
         ['LTerminal-1.0.0-x86_64.AppImage', 'linux image payload'],
-        ['WinSlimTerminal-Unpacked-1.0.0.zip', 'windows portable payload'],
-        ['WinSlimTerminal-1.0.0-x64-setup.exe', 'windows installer payload'],
+        ['WTerminal-Unpacked-1.0.0.zip', 'windows portable payload'],
+        ['WTerminal-1.0.0-x64-setup.exe', 'windows installer payload'],
     ]);
     for (const [name, contents] of files) await writeFile(join(directory, name), contents);
     await writeFile(join(directory, 'unrelated.log'), 'must not be published');
@@ -39,7 +39,7 @@ try {
     assert.equal(manifest, expected, 'debe reemplazar el manifiesto previo por hashes de ambas plataformas, ordenados');
     assert.doesNotMatch(manifest, /unrelated\.log|stale platform/);
 
-    await rm(join(directory, 'WinSlimTerminal-1.0.0-x64-setup.exe'));
+    await rm(join(directory, 'WTerminal-1.0.0-x64-setup.exe'));
     const insufficient = await run('--directory', directory);
     assert.notEqual(insufficient.code, 0, 'debe rechazar una publicación sin instalador Windows');
     assert.equal(await readFile(join(directory, 'SHA256SUMS.txt'), 'utf8'), manifest,

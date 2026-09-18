@@ -13,6 +13,18 @@ if (process.platform === 'win32') {
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixture = await mkdtemp(join(tmpdir(), 'lterminal-build-menu-test-'));
 try {
+    const powerShellMenu = await readFile(join(root, 'build-tools', 'build.ps1'), 'utf8');
+    const linuxBuilder = await readFile(join(root, 'linux', 'build.sh'), 'utf8');
+    assert.match(
+        powerShellMenu,
+        /\$defaultBinary\s*=\s*if \(\$script:OnWindows\).*wterminal\.exe.*else \{ Join-Path \$Root 'src-tauri\/target\/release\/lterminal' \}/s,
+        'El menú PowerShell debe usar wterminal.exe en Windows y lterminal en Linux/macOS.',
+    );
+    assert.match(linuxBuilder, /start_private_xvfb\(\)/, 'El builder Linux debe poder preparar un display privado para smoke/E2E.');
+    assert.match(linuxBuilder, /cleanup_private_xvfb\(\)/, 'El builder Linux debe limpiar el display privado al terminar.');
+    assert.match(linuxBuilder, /if ! graphical_session_available; then\n    start_private_xvfb \|\| true/, 'El builder Linux debe intentar Xvfb cuando el display heredado no es accesible.');
+    assert.match(linuxBuilder, /unset WAYLAND_DISPLAY XDG_CURRENT_DESKTOP DESKTOP_SESSION HYPRLAND_INSTANCE_SIGNATURE/, 'El display virtual debe aislar la identidad de Hyprland del escritorio real.');
+
     const mockBin = join(fixture, 'bin');
     const mockBash = join(mockBin, 'bash');
     await mkdir(mockBin);

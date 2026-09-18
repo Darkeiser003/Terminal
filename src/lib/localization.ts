@@ -30,21 +30,25 @@ export function compareLocalized(left: string, right: string, locale?: string): 
 }
 
 /** Adapta textos compartidos a la identidad real de la build. Los reemplazos
- * largos van primero para no convertir “WinSlim Projects” en “LTerminals”. */
+ * largos van primero para no convertir “WTerminal Projects” en “LTerminals”. */
 export function platformBrandText(text: string, platform?: string, appName?: string): string {
     if (platform === 'windows') {
-        const name = appName || 'WinSlim Terminal';
+        const name = appName || 'WTerminal';
         return text
-            .replaceAll('LTerminal Projects', 'WinSlim Projects')
+            .replaceAll('LTerminal Projects', 'WTerminal Projects')
+            .replaceAll('WinSlim Projects', 'WTerminal Projects')
+            .replaceAll('WinSlim Terminal', name)
+            .replaceAll('WinSlimTerminal', name)
+            .replaceAll('winslim://', 'wterminal://')
+            .replaceAll('WinSlim', 'WTerminal')
             .replaceAll('LTerminal', name);
     }
 
     if (platform === 'linux' || platform === 'macos') {
         const name = appName || 'LTerminal';
         return text
-            .replaceAll('WinSlim Projects', `${name} Projects`)
-            .replaceAll('WinSlim Terminal', name)
-            .replaceAll('WinSlim', name);
+            .replaceAll('WTerminal Projects', `${name} Projects`)
+            .replaceAll('WTerminal', name);
     }
 
     return text;

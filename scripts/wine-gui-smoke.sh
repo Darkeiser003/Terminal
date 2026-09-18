@@ -40,7 +40,7 @@ wine "${executable}" >"$wine_log" 2>&1 &
 app_pid=$!
 window_id=''
 for _ in {1..400}; do
-    window_id="$(xdotool search --onlyvisible --name 'WinSlim Terminal' 2>/dev/null | head -n 1 || true)"
+    window_id="$(xdotool search --onlyvisible --name 'WTerminal' 2>/dev/null | head -n 1 || true)"
     if [[ -n "$window_id" ]] && grep -Fq 'Frontend y terminal preparados' "$app_log"; then
         break
     fi
@@ -52,7 +52,7 @@ for _ in {1..400}; do
     sleep 0.1
 done
 if [[ -z "$window_id" ]]; then
-    printf 'No apareció la ventana visible «WinSlim Terminal» bajo Wine.\n' >&2
+    printf 'No apareció la ventana visible «WTerminal» bajo Wine.\n' >&2
     cat "$wine_log" >&2 || true
     exit 1
 fi

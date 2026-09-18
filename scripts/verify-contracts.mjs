@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, relative, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const root = process.cwd();
 const read = (path) => readFileSync(resolve(root, path), 'utf8');
@@ -60,44 +60,23 @@ const handledActions = [...terminal.matchAll(/command\.action\s*===\s*'([^']+)'/
 sameSet(typedActions, parsedActions, 'El tipo InternalCommand no coincide con el parser Rust');
 for (const action of parsedActions) assert(handledActions.includes(action), `TerminalPane no maneja el comando interno ${action}`);
 const aliases = read('src-tauri/src/terminal/aliases.rs');
-for (const command of [':config', ':settings', ':reload', ':shell', ':repl', ':alias', ':help', ':banner', ':quick-actions', ':panel', ':explorer-here', ':theme', ':font', ':language', ':terminal', ':panes']) {
+for (const command of [':config', ':settings', ':reload', ':shell', ':repl', ':alias', ':help', ':banner', ':quick-actions', ':ltools', ':panel', ':explorer-here', ':theme', ':font', ':language', ':terminal', ':panes']) {
     assert(aliases.includes(command), `La ayuda no documenta ${command}`);
 }
 
-// Recursos integrados: se deriva la lista real del árbol y se compara con el
-// manifiesto. Así Windows y Linux no pierden una variante al añadir un script.
-function filesUnder(directory) {
-    const files = [];
-    for (const entry of readdirSync(resolve(root, directory))) {
-        const absolute = resolve(root, directory, entry);
-        if (statSync(absolute).isDirectory()) files.push(...filesUnder(join(directory, entry)));
-        else files.push(relative(root, absolute).replaceAll('\\', '/'));
-    }
-    return files;
-}
-const nativeScripts = filesUnder('scripts')
-    .filter((path) => ['.sh', '.ps1'].includes(extname(path)))
-    .filter((path) => path.includes('/containers/') || path.includes('/operations/'))
-    .sort();
 const baseConfig = JSON.parse(read('src-tauri/tauri.conf.json'));
 const bundledSources = Object.keys(baseConfig.bundle?.resources ?? {})
     .map((path) => path.replace(/^\.\.\//, ''))
     .filter((path) => path.startsWith('scripts/'))
     .sort();
-sameSet(bundledSources, nativeScripts, 'El manifiesto no incluye exactamente todos los scripts nativos');
-const variants = new Map();
-for (const path of nativeScripts) {
-    const name = path.split('/').at(-1).replace(/\.(sh|ps1)$/, '');
-    const set = variants.get(name) ?? new Set();
-    set.add(extname(path));
-    variants.set(name, set);
-}
-for (const [name, extensions] of variants) {
-    assert.deepEqual([...extensions].sort(), ['.ps1', '.sh'], `${name} no tiene variantes Windows y Linux`);
+assert.equal(bundledSources.length, 0, 'La release no debe empaquetar operaciones heredadas; LTools publica el catálogo.');
+for (const directory of ['scripts/operations', 'scripts/containers']) {
+    const absolute = resolve(root, directory);
+    assert(!existsSync(absolute) || readdirSync(absolute).length === 0, `No deben quedar scripts operativos duplicados en ${directory}.`);
 }
 const windowsConfig = JSON.parse(read('src-tauri/tauri.windows.conf.json'));
 for (const runtime of ['vendor/conpty/conpty.dll', 'vendor/conpty/OpenConsole.exe']) {
     assert(runtime in (windowsConfig.bundle?.resources ?? {}), `Windows no incluye ${runtime}`);
 }
 
-console.log(`Contratos verificados: ${rustPreferences.length} preferencias, ${rustInstallAction.length} campos de dependencias, ${parsedActions.length} comandos y ${nativeScripts.length} scripts nativos.`);
+console.log(`Contratos verificados: ${rustPreferences.length} preferencias, ${rustInstallAction.length} campos de dependencias, ${parsedActions.length} comandos y sin scripts operativos heredados.`);

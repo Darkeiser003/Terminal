@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title WinSlim Terminal - Build
+title WTerminal - Build
 
 REM Envoltorio para poder compilar con doble clic desde el explorador.
 REM Todo el trabajo lo hace build.ps1; aqui solo se comprueba que PowerShell
@@ -35,7 +35,7 @@ for %%A in (%*) do (
     if /I "%%~A"=="-h" set "HELP_MODE=1"
 )
 if "%HELP_MODE%"=="1" goto invoke_build
-echo Compilando WinSlim Terminal (Tauri + Rust)...
+echo Compilando WTerminal (Tauri + Rust)...
 echo.
 
 :invoke_build

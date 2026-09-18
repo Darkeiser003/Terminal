@@ -35,7 +35,7 @@ TARGET="x86_64-pc-windows-gnu"
 # que dos builds de plataformas distintas no compartan artefactos parciales.
 WINDOWS_TARGET_DIR="${LTERMINAL_WINDOWS_TARGET_DIR:-$TAURI_DIR/target/windows-cross}"
 RELEASE_DIR="$WINDOWS_TARGET_DIR/$TARGET/release"
-EXE="$RELEASE_DIR/winslim-terminal.exe"
+EXE="$RELEASE_DIR/wterminal.exe"
 
 AUTO_INSTALL=1
 RUN_WINE=0
@@ -698,7 +698,11 @@ run_wine_smoke() {
             LTERMINAL_SMOKE_AUTO_EXIT=1 \
             LTERMINAL_TEST_UNDER_WINE=1 \
             LTERMINAL_WINE_SMOKE=1 \
+            LTERMINAL_E2E_WEBDRIVER=1 \
+            LTERMINAL_E2E_DISABLE_GPU=1 \
             LTERMINAL_LOG_FILE="$app_log_win" \
+            LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe \
+            WEBKIT_DISABLE_DMABUF_RENDERER=1 \
             WINEPREFIX="$prefix" WINEDEBUG=-all timeout --foreground 75s \
             "${wine_gui_prefix[@]}" bash "$PROJECT_ROOT/scripts/wine-gui-smoke.sh" \
             "Z:${EXE//\//\\}" "$wine_gui_capture" "$app_log" "$wine_process_log" >"$wine_log" 2>&1
@@ -847,7 +851,7 @@ if [ "$SKIP_CHECKS" -eq 0 ]; then
     ok "Código y tests condicionados para Windows compilados sin avisos"
 fi
 
-step "Compilando WinSlim Terminal ($TARGET)"
+step "Compilando WTerminal ($TARGET)"
 # Esta ruta usa Cargo directamente en lugar de `tauri build`, por lo que debe
 # reproducir explícitamente los dos pasos que el bundler hace por configuración:
 # generar `dist` y activar `tauri/custom-protocol`. Sin esto el EXE arranca,
@@ -860,6 +864,15 @@ npm run build
 cargo build --manifest-path "$TAURI_DIR/Cargo.toml" \
     --release --target "$TARGET" --bin winslim-terminal \
     --features tauri/custom-protocol
+
+# Cargo conserva el nombre interno del crate por compatibilidad con el target
+# compartido, pero el artefacto Windows publicado pertenece a WTerminal.
+# Renombrarlo aquí evita que la build cruzada deje un `winslim-terminal.exe`
+# que luego el empaquetador no puede encontrar.
+CARGO_EXE="$RELEASE_DIR/winslim-terminal.exe"
+if [ -f "$CARGO_EXE" ] && [ "$CARGO_EXE" != "$EXE" ]; then
+    mv -f -- "$CARGO_EXE" "$EXE"
+fi
 
 [ -f "$EXE" ] || fail "No se generó $EXE."
 for asset in conpty.dll OpenConsole.exe WebView2Loader.dll; do
@@ -949,10 +962,10 @@ if [ "$FAST_BUILD" -eq 1 ]; then
     release_out="$release_out/dev"
     release_suffix="-dev"
 fi
-portable_release="$release_out/WinSlimTerminal-$VERSION_OVERRIDE$release_suffix"
-archive_release="$release_out/WinSlimTerminal-Unpacked-$VERSION_OVERRIDE$release_suffix.zip"
+portable_release="$release_out/WTerminal-$VERSION_OVERRIDE$release_suffix"
+archive_release="$release_out/WTerminal-Unpacked-$VERSION_OVERRIDE$release_suffix.zip"
 node "$PROJECT_ROOT/scripts/verify-release-artifacts.mjs" \
-    --windows "$portable_release/winslim-terminal.exe" \
+    --windows "$portable_release/wterminal.exe" \
     --windows-dir "$portable_release"
 ok "Carpeta portable publicada y verificada: $portable_release"
 

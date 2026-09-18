@@ -1,4 +1,4 @@
-# WinSlim Terminal / LTerminal (1.0.0)
+# WTerminal / LTerminal (1.0.0)
 
 ---
 
@@ -8,7 +8,7 @@ Android disponibles en la máquina y los ofrece como entornos intercambiables
 dentro de la misma ventana. Funciona además como hub local de proyectos GitHub
 y como lanzador de scripts.
 
-La aplicación se llama **WinSlim Terminal** en Windows y **LTerminal** en
+La aplicación se llama **WTerminal** en Windows y **LTerminal** en
 Linux. No es una marca distinta: es la misma base con identidad,
 identificador y rutas de datos propias por plataforma (`src-tauri/src/config/identity.rs`).
 
@@ -166,20 +166,19 @@ incluye los recursos junto al ejecutable.
 ## Instalación para usar la aplicación
 
 **Windows portable.** Se distribuye como carpeta desempaquetada: se descomprime
-donde se quiera y se ejecuta `winslim-terminal.exe`. La build cruzada incluye,
+donde se quiera y se ejecuta `wterminal.exe`. La build cruzada incluye,
 cuando dispone del bootstrapper de Microsoft, `MicrosoftEdgeWebView2Setup.exe`:
 si falta WebView2, la aplicación lo instala en silencio antes de crear la
-ventana. No crea accesos directos. Los binarios y la carpeta `scripts/` tienen
-que ir juntos: además de `winslim-terminal.exe`, `conpty.dll`, `OpenConsole.exe`
-y `WebView2Loader.dll`, esa carpeta contiene los gestores integrados que
-muestra la Biblioteca. Para una build portable mínima se puede usar
+ventana. No crea accesos directos. El portable necesita `wterminal.exe`,
+`conpty.dll`, `OpenConsole.exe` y `WebView2Loader.dll`. Las operaciones de sistema no se copian dentro de la
+release: se descubren de forma declarativa desde LTools / WinSlim Tools. Para una build portable mínima se puede usar
 `LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER=0`; en ese caso el runtime debe estar
 instalado previamente.
 
 **Windows instalable.** La release completa (`npm run dist:win`) y su alias
 explícito `npm run dist:win:installer` generan un NSIS con el instalador
 offline de WebView2 incluido y lo publican como
-`release/WinSlimTerminal-<versión>-x64-setup.exe`. Es la opción recomendada
+`release/WTerminal-<versión>-x64-setup.exe`. Es la opción recomendada
 para equipos recortados, instalaciones limpias o despliegues sin Internet.
 
 **Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
@@ -234,7 +233,7 @@ usando o no se puede comprobar su actividad. No se borran temporales genéricos
 de otras aplicaciones. El builder Windows guarda los instaladores temporales en
 `winslim-terminal-build-*`, que elimina al terminar o el limpiador recoge si el
 proceso se interrumpe. También retiran logs de build en AppData y cachés privadas
-de LTerminal. `release/`, `releases/` y todo su contenido están protegidos y nunca se borran.
+de LTerminal. `release/` y todo su contenido están protegidos y nunca se borran.
 Por seguridad, la vista previa es el comportamiento predeterminado; el borrado
 requiere una opción explícita.
 
@@ -273,10 +272,10 @@ a degradar Unicode a ASCII.
 
 Todos se ejecutan desde la raíz del repositorio.
 
-Las herramientas operativas reutilizables para Docker Compose y Kubernetes viven
-en `scripts/containers/`; las de red, SSH y servicios están en
-`scripts/operations/`. El panel **Scripts** puede descubrirlas y ejecutarlas
-directamente en la terminal.
+Los scripts del repositorio en `scripts/` sirven para desarrollo, pruebas y
+empaquetado; no se instalan ni se muestran como operaciones integradas de la
+aplicación. Las operaciones de sistema reutilizables las publica LTools como
+catálogo versionado y LTerminal las descubre y ejecuta de forma segura.
 
 | Script | Qué hace |
 |---|---|
@@ -289,7 +288,7 @@ directamente en la terminal.
 | `npm run check:contracts` | Cruza las preferencias Rust/TOML/TypeScript, los comandos internos Rust/Svelte y los recursos nativos Linux/Windows. |
 | `npm run test:frontend-logic` | Ejecuta la lógica pura de idioma, identidad, scroll de terminal y los 20 atajos sin necesitar una ventana. |
 | `npm run test:ltools-contract` | Comprueba el contrato `ltools-actions-v1`, la validación de plataforma y la integración opcional de LTools; con `LTOOLS_TEST_BINARY` también prueba el CLI real. |
-| `npm run test:e2e:ltools` | Ejecuta, contra un binario ya compilado, la E2E optativa de LTools: descubre el catálogo JSON real, abre el selector, fija una acción segura, cierra/reabre la Biblioteca para probar persistencia y verifica el comando canónico. Requiere `E2E_BINARY` y un CLI LTools en `PATH` o `LTOOLS_TEST_BINARY`. |
+| `npm run test:e2e:ltools` | Ejecuta, contra un binario ya compilado, la E2E optativa de LTools: descubre el catálogo JSON real, abre el selector, fija una acción segura, cierra/reabre la Biblioteca para probar persistencia y verifica el comando canónico. Autodetecta el binario de la release más reciente; `E2E_BINARY` y `LTOOLS_TEST_BINARY` permiten fijarlos explícitamente. Si no hay release de LTools, lo informa como prueba omitida, nunca como éxito falso. |
 | `npm run test:cleaner` | Prueba los limpiadores Bash y PowerShell en proyectos temporales; verifica los enlaces, conserva `release/` y descargas externas genéricas, y elimina solo temporales identificados de LTerminal. |
 | `npm run test:version-restore` | Fuerza fallos de build y una copia de seguridad ausente; comprueba que no se anuncia éxito y que los cuatro manifiestos quedan byte a byte como estaban al terminar la prueba. |
 | `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o una Biblioteca sin el contrato único de LTools. |
@@ -344,7 +343,7 @@ declarados entre el código y el catálogo tienen una sonda o una omisión segur
 La integración con LTools también se puede probar sin recompilar:
 
 ```bash
-E2E_BINARY="$PWD/releases/LTerminal-1.0.0-x86_64.AppImage" \
+E2E_BINARY="$PWD/release/dev/LTerminal-1.0.0-x86_64-dev.AppImage" \
 LTOOLS_TEST_BINARY="$PWD/../Tools/release/ltools-1.0.0-linux-x86_64-cli.AppImage" \
 npm run test:e2e:ltools
 ```
@@ -353,20 +352,29 @@ Esta prueba es optativa porque LTools no es una dependencia de LTerminal. La
 release Linux se puede probar aunque el equipo no tenga FUSE montado: el
 contrato establece automáticamente `APPIMAGE_EXTRACT_AND_RUN=1` al invocar el
 AppImage. En Windows, usa el ejecutable CLI equivalente de la carpeta
-`release/`.
-interfaz no mantiene una lista cerrada: vuelve a leer `ltools-actions-v1`,
+`release/`. Si no se indica `E2E_BINARY`, la prueba busca automáticamente una
+build local conocida; si no encuentra ninguna, termina como `SKIP` explícito.
+Los puertos del driver y de la sonda nativa se reservan dinámicamente para no
+colisionar con otra ejecución.
+Si se ejecuta dentro de `xvfb-run` desde un escritorio Hyprland, usa
+`E2E_SKIP_WINDOW_MANAGER=1`: así se omiten únicamente las comprobaciones del
+dispatcher del compositor anfitrión, que no puede controlar la ventana del
+display virtual; el resto del smoke sigue siendo obligatorio.
+
+La interfaz no mantiene una lista cerrada: vuelve a leer `ltools-actions-v1`,
 acepta los metadatos opcionales `label`, `shortLabel`, `description` y `quick`,
 y muestra automáticamente cualquier acción nueva que cumpla las reglas de
-seguridad. El usuario puede fijar hasta ocho botones; las acciones nuevas no
-rompen la selección guardada y aparecen en **Configurar…**. Las acciones que
-requieren un objetivo siguen fuera de esos botones hasta que exista una
-interfaz explícita para pedirlo.
+seguridad. El usuario puede fijar todas las acciones compatibles que quiera;
+no hay un límite artificial de ocho botones y la botonera mantiene su propio
+scroll vertical. Las acciones nuevas no rompen la selección guardada y aparecen
+en **Configurar…**. Las acciones que requieren un objetivo siguen fuera de esos
+botones hasta que exista una interfaz explícita para pedirlo.
 
 Para revisar exclusivamente el espacio horizontal que ocupan las salidas de
 instaladores y actualizadores, reutiliza una build existente:
 
 ```bash
-E2E_BINARY="$PWD/releases/LTerminal-1.0.0-x86_64.AppImage" \
+E2E_BINARY="$PWD/release/dev/LTerminal-1.0.0-x86_64-dev.AppImage" \
 E2E_PROGRESS_LAYOUT_ONLY=1 npm run e2e
 ```
 
@@ -417,7 +425,7 @@ pestañas y comandos de demostración (`help`, `update`, `upgrade`, `clear`) y n
 debe confundirse con una validación del backend real. En Linux pregunta antes
 de instalar dependencias del sistema; en Windows avisa antes de iniciar el
 builder, que puede preparar Node.js, Rust o herramientas de Visual Studio si
-faltan. `release/` y `releases/` se conservan al limpiar; `dist-preview/` es
+faltan. `release/` se conserva al limpiar; `dist-preview/` es
 salida temporal ignorada.
 
 La firma de commits Git es independiente de la compilación y de la firma
@@ -462,8 +470,8 @@ linux/build-windows.sh --version 1.0.0 --wine-smoke
 
 Esta ruta compila en `src-tauri/target/windows-cross/x86_64-pc-windows-gnu/release/`
 por defecto y, al terminar, publica una carpeta portable y un ZIP en la raíz
-del proyecto: `release/WinSlimTerminal-<versión>/` y
-`release/WinSlimTerminal-Unpacked-<versión>.zip`. Con `--fast`, ambos quedan
+del proyecto: `release/WTerminal-<versión>/` y
+`release/WTerminal-Unpacked-<versión>.zip`. Con `--fast`, ambos quedan
 bajo `release/dev/` y llevan el sufijo `-dev`. También actualiza el
 `SHA256SUMS.txt` de esa variante. El target conserva la salida técnica y la
 caché de Cargo; el paquete limpio para probar o compartir queda en `release/`,
@@ -535,7 +543,7 @@ runtime averiado. Un fallo de sonda, WebDriver, E2E o WSL cruzado ya no impide
 comprimir ni publicar la release: se muestra junto al resumen final y el
 proceso termina con código 1 para que CI lo detecte. `-StrictTests` sigue
 convirtiendo también las ausencias opcionales en ese diagnóstico final. El
-informe E2E se conserva en `%TEMP%\winslim-terminal-e2e-<id>.json` cuando falla.
+informe E2E se conserva en `%TEMP%\wterminal-e2e-<id>.json` cuando falla.
 
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
@@ -545,9 +553,10 @@ Cada script comprueba los requisitos, instala dependencias, pasa `npm run check`
 compila, monta el artefacto, hace una comprobación de humo (abre la app y mira
 que no se cierre sola) y publica la release con su SHA-256 en `release/`.
 Por defecto los builders publican ahí. `LTERMINAL_RELEASE_DIR` permite elegir
-otra carpeta; las rutas relativas se resuelven desde la raíz del proyecto. Por
-ejemplo, `LTERMINAL_RELEASE_DIR="$PWD/releases"` publica las builds Linux y
-Windows cruzada en `releases/` sin tocar la carpeta histórica `release/`.
+otra carpeta; las rutas relativas se resuelven desde la raíz del proyecto. Para
+mantener la estructura estándar, usa `LTERMINAL_RELEASE_DIR="$PWD/release"`:
+Linux y Windows cruzado publicarán en la única carpeta de artefactos del
+proyecto.
 El manifiesto `SHA256SUMS.txt` se actualiza por artefacto y de forma atómica:
 conserva los hashes de las demás arquitecturas, plataformas y perfiles de la
 misma versión, y solo sustituye la entrada del archivo que se acaba de generar.
@@ -580,7 +589,7 @@ build, incluidas las comprobaciones que lanza `prebuild`.
 
 | Plataforma | Artefacto |
 |---|---|
-| Windows | Carpeta desempaquetada + `WinSlimTerminal-Unpacked-<versión>.zip` + `WinSlimTerminal-<versión>-x64-setup.exe` (NSIS offline) |
+| Windows | Carpeta desempaquetada + `WTerminal-Unpacked-<versión>.zip` + `WTerminal-<versión>-x64-setup.exe` (NSIS offline) |
 | Linux | `LTerminal-<versión>-<arch>.AppImage` |
 
 La build con instalador publica el NSIS en `release/`, junto al ZIP, y registra
@@ -1229,13 +1238,12 @@ Se inyectan al crear una pestaña, solo en shells reales.
 | `ayuda` | Ayuda explicada: qué hace cada alias, qué gestor los atiende y qué scripts se han registrado. Se lee de un archivo generado por sesión, así que ocupa varias líneas y va traducida. |
 | `nsudo` | Solo si el ejecutable existe en la máquina. |
 | `install`, `update`, `upgrade`, `uninstall`, `remove`, `search` | Se traducen al gestor de paquetes real del entorno. |
-| `adb-manager`, `docker-manager`, `kubernetes-manager`, `network-manager`, `service-manager`, `ssh-manager` | Scripts integrados de la **Biblioteca**; se selecciona la variante PowerShell o Shell según el entorno. Los scripts personales detectados se muestran con sus nombres concretos en la ayuda de cada sesión. |
+| `:ltools` / `:tools` | Abre la Biblioteca y su catálogo de LTools para descubrir y configurar las acciones fijadas. Las acciones se ejecutan mediante el CLI validado, no como scripts copiados por LTerminal. |
 
-Los scripts integrados que se pueden registrar como alias son `adb-manager`,
-`docker-manager`, `kubernetes-manager`, `network-manager`, `service-manager` y
-`ssh-manager` (se elige la variante PowerShell o Shell según el entorno). La
-ayuda de cada sesión añade también los scripts personales detectados y muestra
-sus nombres concretos.
+Los scripts personales detectados siguen apareciendo con sus nombres concretos
+en la ayuda de cada sesión; las operaciones de sistema de LTerminal se
+mantienen en LTools para evitar duplicados y permitir que el catálogo crezca
+sin modificar este proyecto.
 
 ### Comandos internos de la aplicación (`:`)
 
@@ -1307,7 +1315,7 @@ lo explica en la propia sesión, diciendo además cuál le ha tocado.
 
 En una línea propia de la terminal, `Darkeiser003`, `darkeiser003`,
 `@darkeiser003` y `@Darkeiser003` muestran una presentación del desarrollo,
-el perfil público y los proyectos [WinSlim Terminal](https://github.com/Darkeiser003/Terminal)
+el perfil público y los proyectos [WTerminal](https://github.com/Darkeiser003/Terminal)
 y [Infraestructura-Web](https://github.com/Darkeiser003/Infraestructura-Web).
 El crédito de colaboradores no se expone como comando ni como easter egg: se
 mantiene únicamente en `Ajustes › Información`. No se interceptan órdenes que
@@ -1376,7 +1384,7 @@ exactamente qué va a hacer:
 **Actualizar release** elige el adjunto por él: no hay que abrir la lista y
 reconocer cuál de los archivos es el propio. La elección es por puntos, no por
 una regla rígida, porque cada proyecto nombra sus adjuntos a su manera
-(`WinSlimTerminal-Latest.zip`, `LTerminal-AppImage-Latest-x64.x86.tar.gz`…), y
+(`WTerminal-Latest.zip`, `LTerminal-AppImage-Latest-x64.x86.tar.gz`…), y
 descarta de entrada los que llevan el nombre de otro sistema: un `.zip` que
 diga `linux` no se ofrece en Windows. Si nada encaja **no se descarga nada a
 ciegas**: se avisa de que hay que elegir a mano en **Release**.
@@ -1412,9 +1420,9 @@ compilar nada.
 
 Dos ámbitos:
 
-- **Biblioteca**: carpeta persistente elegida por el usuario, más las
-  utilidades de la aplicación detectadas en el sistema. Solo estos se registran como
-  alias.
+- **Biblioteca**: carpeta persistente elegida por el usuario. Las acciones de
+  sistema de LTools aparecen en su apartado independiente y no se mezclan con
+  los archivos personales.
 - **Aquí**: directorio actual de la pestaña y hasta tres niveles de
   subdirectorios por defecto, configurable entre 0 y 10. **No** crea alias ni
   modifica la shell.
@@ -1455,18 +1463,23 @@ otra ubicación. Solo inspecciona carpetas candidatas y nombres conocidos; no
 recorre el HOME completo ni ejecuta archivos encontrados sin validar su
 catálogo.
 Lee el catálogo versionado `ltools-actions-v1` mediante
-`actions list --format json`; el CLI publica `id`, `category`, `command`,
-`args`, `target`, `mutating`, `profile`, confirmación y alias. También puede
-publicar `label`, `shortLabel`, `description` y `quick`; son metadatos de
-presentación opcionales, con fallback seguro si faltan o no son válidos. No
-duplica nombres ni separa cadenas de comandos a mano. El usuario puede elegir
-hasta ocho acciones sin objetivo obligatorio por plataforma y la selección se
-guarda por perfil y sistema. Las acciones nuevas compatibles aparecen sin
-modificar LTerminal; las que tienen un objetivo (disco, servicio, usuario,
+`actions list --format json` y transmite el idioma activo como `--lang <idioma>`;
+el CLI publica `id`, `actionKey`, `scope`, `operation`, `category`, `group`,
+`command`, `args`, `target`, `mutating`, `profile`, confirmación y alias.
+También puede publicar `label`, `shortLabel`, `description` y `quick`; son
+metadatos de presentación opcionales, con fallback seguro si faltan o no son
+válidos. `actionKey` identifica la acción de forma estable, mientras `scope` y
+`operation` permiten presentar nombres claros aunque varias acciones compartan
+un título. LTerminal no duplica nombres ni separa cadenas de comandos a mano. El usuario puede elegir
+tantas acciones sin objetivo obligatorio como quiera y la selección se guarda
+por perfil y sistema. Las acciones nuevas compatibles aparecen sin modificar
+LTerminal; las que tienen un objetivo (disco, servicio, usuario,
 etc.), una shell distinta o argumentos no compatibles se excluyen del panel de
 botones seguros para no inventar parámetros; las que modifican el sistema piden
 confirmación. La E2E optativa comprueba también
-que la selección sobrevive a cerrar y reabrir la Biblioteca.
+que la selección sobrevive a cerrar y reabrir la Biblioteca. También puedes
+abrir esta misma configuración desde **Ajustes → Comportamiento** o escribiendo
+`:ltools` / `:tools`; ambos accesos llevan al único selector compartido.
 
 Al pulsar una acción, LTerminal vuelve a consultar el catálogo, valida el ID y
 escribe `ltools actions run <id>` con argumentos separados en una shell visible.
@@ -1695,7 +1708,7 @@ visible; el mecanismo y el validador ya las contemplan.
 
 | | Windows | Linux |
 |---|---|---|
-| `userData` | `%APPDATA%\winslim-terminal\` | `~/.config/lterminal/` |
+| `userData` | `%APPDATA%\wterminal\` | `~/.config/lterminal/` |
 | Configuración | `settings.json` | `settings.json` |
 | Biblioteca de scripts | `scripts\` | `scripts/` |
 | Logs | `logs\main.log` (rota a `main.log.1` al superar 2 MB) | ídem |
@@ -1944,7 +1957,6 @@ visible y ConPTY real deben validarse en Windows nativo.
 
 ## Créditos
 
-Desarrollado por [Darkeiser003](https://github.com/Darkeiser003), con la
-colaboración de [Christianlg97](https://github.com/Christianlg97). Sus proyectos
-relacionados son [WinSlim Center Store](https://github.com/Christianlg97/WINSLIM_CENTER_STORE)
-y [WinSlim Update](https://github.com/Christianlg97/WinSlim-Update).
+Desarrollado por [Darkeiser003](https://github.com/Darkeiser003). Las acciones
+operativas se publican y mantienen en
+[LTools / WinSlim Tools](https://github.com/Darkeiser003/Tools).

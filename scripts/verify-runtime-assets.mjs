@@ -7,18 +7,6 @@ const required = [
   "src-tauri/default_settings.toml",
   "src-tauri/config/technology-catalog.json",
   "src-tauri/resources/com.lterminal.terminal.metainfo.xml",
-  "scripts/containers/docker-manager.sh",
-  "scripts/containers/kubernetes-manager.sh",
-  "scripts/operations/ssh-manager.sh",
-  "scripts/operations/ssh-manager.ps1",
-  "scripts/operations/service-manager.sh",
-  "scripts/operations/service-manager.ps1",
-  "scripts/operations/network-manager.sh",
-  "scripts/operations/network-manager.ps1",
-  "scripts/operations/adb-manager.sh",
-  "scripts/operations/adb-manager.ps1",
-  "scripts/operations/docker-manager.ps1",
-  "scripts/operations/kubernetes-manager.ps1",
 ];
 
 const conptyPreparer = readFileSync(resolve(root, "scripts/prepare-conpty.mjs"), "utf8");

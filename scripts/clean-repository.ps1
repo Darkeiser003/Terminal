@@ -24,8 +24,7 @@ function Get-NormalizedDirectoryPath {
 $ProjectRoot = Get-NormalizedDirectoryPath (Split-Path -Parent $PSScriptRoot)
 $RootPrefix = $ProjectRoot + [IO.Path]::DirectorySeparatorChar
 $ReleaseRoots = @(
-    (Get-NormalizedDirectoryPath (Join-Path $ProjectRoot 'release')),
-    (Get-NormalizedDirectoryPath (Join-Path $ProjectRoot 'releases'))
+    (Get-NormalizedDirectoryPath (Join-Path $ProjectRoot 'release'))
 )
 $TempRoot = Get-NormalizedDirectoryPath ([IO.Path]::GetTempPath())
 $appDataPath = [Environment]::GetFolderPath('ApplicationData')
@@ -368,7 +367,7 @@ function Remove-CleanupDirectory {
             $releasePrefix = $releaseRoot + [IO.Path]::DirectorySeparatorChar
             if ($safeTarget.Equals($releaseRoot, [StringComparison]::OrdinalIgnoreCase) -or
                 $safeTarget.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "La ruta está protegida porque pertenece a release/ o releases/: $safeTarget"
+                throw "La ruta está protegida porque pertenece a release/: $safeTarget"
             }
         }
         Remove-DirectoryTreeSafely $safeTarget
@@ -434,4 +433,4 @@ foreach ($target in $externalTargets) {
 if ($failedTargets.Count -gt 0) {
     throw "Limpieza incompleta: $($failedTargets.Count) ruta(s) sigue(n) bloqueada(s)."
 }
-Write-Host ('Limpieza terminada: {0} directorio(s), {1} Markdown y {2} rastro(s) externo(s) eliminados. release/ y releases/ se conservaron.' -f $directoryTargets.Count, $markdownTargets.Count, $externalTargets.Count) -ForegroundColor Green
+Write-Host ('Limpieza terminada: {0} directorio(s), {1} Markdown y {2} rastro(s) externo(s) eliminados. release/ se conservó.' -f $directoryTargets.Count, $markdownTargets.Count, $externalTargets.Count) -ForegroundColor Green

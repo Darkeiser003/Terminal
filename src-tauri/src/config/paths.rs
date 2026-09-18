@@ -30,10 +30,15 @@ pub fn app_data_dir() -> PathBuf {
 pub static USER_DATA_DIR: Lazy<PathBuf> =
     Lazy::new(|| app_data_dir().join(identity::current().slug));
 
-/// La ruta que usaba la build de Electron antes de la unificación:
-/// `appData/<nombre visible>`. Solo se lee, para migrar lo que quedara ahí.
-pub static LEGACY_USER_DATA_DIR: Lazy<PathBuf> =
-    Lazy::new(|| app_data_dir().join(identity::current().name));
+/// La ruta que usaba la build anterior de Windows antes de la renombración:
+/// `%APPDATA%/WinSlim Terminal`. Solo se lee, para migrar lo que quedara ahí.
+pub static LEGACY_USER_DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
+    app_data_dir().join(if cfg!(windows) {
+        "WinSlim Terminal"
+    } else {
+        identity::current().name
+    })
+});
 
 pub fn user_data_dir() -> PathBuf {
     USER_DATA_DIR.clone()
@@ -99,10 +104,15 @@ mod tests {
     }
 
     #[test]
-    fn la_ruta_heredada_usa_el_nombre_visible_no_el_slug() {
+    fn la_ruta_heredada_conserva_el_directorio_de_windows_anterior() {
+        let expected = if cfg!(windows) {
+            "WinSlim Terminal"
+        } else {
+            identity::current().name
+        };
         assert_eq!(
             LEGACY_USER_DATA_DIR.file_name().and_then(|n| n.to_str()),
-            Some(identity::current().name)
+            Some(expected)
         );
     }
 

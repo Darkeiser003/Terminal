@@ -12,6 +12,10 @@ try {
 }
 
 const reportEvents = Array.isArray(report.events) ? report.events : [];
+const captureNames = new Set((report.captures ?? []).flatMap((capture) => [
+    capture?.label,
+    typeof capture?.path === 'string' ? capture.path.split(/[\\/]/).at(-1) : null,
+].filter(Boolean)));
 const processCleanup = reportEvents.find((event) => event?.type === 'e2e-process-cleanup');
 if (!processCleanup || processCleanup.passed !== true || processCleanup.closed !== true
     || (report.host?.platform !== 'win32' && processCleanup.processGroupClosed !== true)) {
@@ -112,14 +116,18 @@ if (report.focusedScenario === 'ltools-catalog-integration') {
     if (!phases.has('arranque de interfaz') || !phases.has('integración opcional de LTools')
         || !integration || integration.passed !== true
         || integration.schema !== 'ltools-actions-v1'
+        || integration.catalogMatch !== true
         || typeof integration.binary !== 'string' || !integration.binary
         || !Number.isInteger(integration.catalogActions) || integration.catalogActions < 1
         || !Number.isInteger(integration.compatibleActions) || integration.compatibleActions < 1
         || integration.compatibleActions > integration.catalogActions
+        || !Number.isInteger(integration.availableActions) || integration.availableActions < 1
+        || integration.availableActions > integration.catalogActions
         || !Number.isInteger(integration.pickerActions) || integration.pickerActions < 1
         || integration.pickerActions > integration.compatibleActions
         || typeof integration.selectedAction !== 'string' || !integration.selectedAction
-        || !Number.isInteger(integration.selectedCount) || integration.selectedCount < 1 || integration.selectedCount > 8
+        || !Number.isInteger(integration.selectedCount) || integration.selectedCount < 1
+        || integration.selectedCount > integration.pickerActions
         || integration.selectionPersisted !== true
         || integration.selectionStorageVerified !== true
         || integration.executionCompleted !== true
@@ -170,6 +178,61 @@ if (report.focusedScenario === 'progress-output-layout') {
         `Informe E2E enfocado de progreso validado: update sin overflow, upgrade con overflow por contenido y ancho recuperado (${progress.durationMs} ms).\n`,
         resolve,
     ));
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'settings-footer-800x600') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const layout = reportEvents.find((event) => event?.type === 'settings-footer-compact-layout');
+    if (!phases.has('arranque de interfaz') || !phases.has('Ajustes compactos 800x600')
+        || !layout || layout.passed !== true
+        || layout.viewport?.width !== 800 || layout.viewport?.height !== 600
+        || !Number.isFinite(layout.maxScroll) || layout.maxScroll <= 0
+        || !Number.isFinite(layout.contentBottom) || !Number.isFinite(layout.footerTop)
+        || layout.contentBottom > layout.footerTop + 1
+        || !(report.captures ?? []).some((capture) => capture?.label === 'settings-footer-800x600')) {
+        throw new Error('El E2E enfocado de Ajustes no verificó el pie fijo y el scroll completo a 800x600.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'explorer-double-click') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const explorer = reportEvents.find((event) => event?.type === 'explorer-double-click');
+    if (!phases.has('arranque de interfaz') || !phases.has('doble clic real del Explorador')
+        || !explorer || explorer.passed !== true || explorer.enteredOnce !== true
+        || explorer.restored !== true || explorer.enteredPath !== explorer.expectedPath
+        || explorer.gesture !== 'pointerMove → pointerDown → pointerUp × 2'
+        || !Array.isArray(explorer.captures) || explorer.captures.length < 3
+        || explorer.captures.some((label) => !captureNames.has(label))) {
+        throw new Error('El E2E enfocado del Explorador no verificó doble clic, navegación única, restauración y capturas.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'terminal-mouse-drag-selection') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const selection = reportEvents.find((event) => event?.type === 'terminal-mouse-selection');
+    if (!phases.has('arranque de interfaz') || !phases.has('selección de texto mediante arrastre real')
+        || !selection || selection.passed !== true
+        || selection.gesture !== 'pointerDown → pointerMove while pressed → pointerUp'
+        || !selection.target || !selection.selection
+        || !captureNames.has('mouse-selection-drag')) {
+        throw new Error('El E2E enfocado del ratón no verificó una selección visible y capturada en xterm.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'adb-progressive-output-repaint') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const adb = reportEvents.find((event) => event?.type === 'adb-progressive-output-repaint');
+    if (!phases.has('arranque de interfaz') || !phases.has('salida progresiva ADB sin cambios de layout')
+        || !adb || adb.passed !== true || adb.transport !== 'adb-shell-pty'
+        || adb.layoutUnchanged !== true || !Array.isArray(adb.frames) || adb.frames.length < 3
+        || adb.frames.some((frame) => frame.layoutUnchanged !== true || !frame.capture
+            || !captureNames.has(frame.capture))) {
+        throw new Error('El E2E enfocado ADB no verificó los tres frames progresivos ni la conservación del layout.');
+    }
     process.exit(0);
 }
 
@@ -485,8 +548,8 @@ if (!responsive || responsive.panes < 2 || responsive.cases < 20
 const bannerReady = events.filter((event) => event?.type === 'banner-ready');
 if (bannerReady.length === 0) throw new Error('El E2E no dejó evidencia textual del banner.');
 // Linux usa la cabecera compacta «LTerminal 1.0.0»; Windows mantiene
-// «WinSlim Terminal». Ambas representan un único bloque válido.
-const bannerHeader = /^(?:LTerminal\b|WinSlim\b.*\bTerminal\b)/i;
+// «WTerminal» o «LTerminal». Ambas representan un único bloque válido.
+const bannerHeader = /^(?:LTerminal\b|WTerminal\b)/i;
 // La GPU puede incluir legítimamente memoria dedicada («1 GB»). Solo es una
 // mezcla si invade otro campo del banner; tratar GB como corrupción hacía
 // fallar informes válidos de Windows.

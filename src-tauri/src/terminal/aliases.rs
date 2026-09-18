@@ -920,6 +920,10 @@ fn render_internal(lines: &mut Vec<String>, app_name: &str) {
         "Muestra u oculta el submenú de acciones rápidas de la Biblioteca.",
     ));
     lines.push(help_row(
+        ":ltools",
+        "Abre la Biblioteca para descubrir y configurar acciones de LTools.",
+    ));
+    lines.push(help_row(
         ":panel <settings|deps|projects|scripts|explorer|close>",
         "Abre, cierra o enumera los paneles principales sin usar el ratón.",
     ));
@@ -1043,9 +1047,7 @@ fn render_plugins(lines: &mut Vec<String>) {
 
 fn render_support(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
     section(lines, "Soporte y límites");
-    lines.push(
-        "    Plataformas principales: Linux/LTerminal y Windows/WinSlim Terminal.".to_string(),
-    );
+    lines.push("    Plataformas principales: Linux/LTerminal y Windows/WTerminal.".to_string());
     lines.push("    Shells: Bash, Zsh, Fish, PowerShell y CMD; además WSL, Git Bash, contenedores, Android y REPLs detectados.".to_string());
     lines.push("    Gestores: pacman, apt, dnf, zypper, apk, Homebrew, winget, Chocolatey y Scoop según disponibilidad.".to_string());
     lines.push("    Los intérpretes, frameworks y herramientas solo aparecen como instalables si su plataforma y gestor los soportan.".to_string());
@@ -1061,8 +1063,7 @@ enum CreditKind {
 fn render_credits(lines: &mut Vec<String>, t: &Translator) {
     render_credit(lines, t, CreditKind::Darkeiser);
     lines.push(
-        "    Linux se presenta como LTerminal; Windows se presenta como WinSlim Terminal."
-            .to_string(),
+        "    Linux se presenta como LTerminal; Windows se presenta como WTerminal.".to_string(),
     );
     lines.push(String::new());
 }
@@ -1088,12 +1089,13 @@ fn render_credit(lines: &mut Vec<String>, t: &Translator, kind: CreditKind) {
         CreditKind::Darkeiser => t.tp(
             "terminal.creditDarkeiser",
             &dark_params,
-            "Darkeiser003 · desarrollador de WinSlim Terminal\nGracias por visitar este proyecto. Puedes seguir el desarrollo, abrir incidencias y conocer las novedades en:\nPerfil: {darkeiserProfile}\nWinSlim Terminal: {terminalProject}\nInfraestructura-Web: {cloudProject}",
+            "Darkeiser003 · desarrollador de WTerminal\nGracias por visitar este proyecto. Puedes seguir el desarrollo, abrir incidencias y conocer las novedades en:\nPerfil: {darkeiserProfile}\nWTerminal: {terminalProject}\nInfraestructura-Web: {cloudProject}",
         ),
     };
     for line in text.lines() {
         lines.push(format!("    {line}"));
     }
+    lines.push("    LTools / WinSlim Tools: https://github.com/Darkeiser003/Tools".to_string());
     lines.push(String::new());
 }
 
@@ -1471,7 +1473,7 @@ mod tests {
             clear_banner_flag_path: None,
             help_path: None,
             transport,
-            app_name: "WinSlim Terminal",
+            app_name: "WTerminal",
             env_label: "cmd.exe",
             manager_label: None,
             platform: "windows",

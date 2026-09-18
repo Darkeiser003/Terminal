@@ -4,7 +4,6 @@ node_modules/
 /.node_modules.windows.*
 /dist/
 /dist-preview/
-/releases/
 /release/
 
 # Cachés y temporales de los empaquetadores (Vite, Svelte, Tauri/Cargo).

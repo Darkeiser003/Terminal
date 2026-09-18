@@ -3,9 +3,10 @@
     //
     // Port de `renderScripts` y `buildScriptItem` de `electron/renderer`.
     //
-    // Dos ámbitos: la Biblioteca (la carpeta persistente del usuario más las
-    // utilidades del sistema) y «Aquí» (la carpeta de la pestaña activa y sus
-    // subcarpetas). Encima de los dos, los anclados, que se ven siempre.
+    // Dos ámbitos: la Biblioteca (la carpeta persistente del usuario) y «Aquí»
+    // (la carpeta de la pestaña activa y sus subcarpetas). Encima de los dos,
+    // los anclados, que se ven siempre. Las operaciones de sistema llegan del
+    // catálogo declarativo de LTools, no como scripts duplicados de la release.
     //
     // El escaneo lo hace el backend y puede tardar segundos en «Aquí»: por eso
     // hay un estado de carga explícito. El filtro de texto, en cambio, es local
@@ -15,6 +16,10 @@
     import { app } from '../lib/appState.svelte';
     import { compareLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
+    import {
+        LTOOLS_SELECTION_KEY,
+        reconcileLToolsSelection,
+    } from '../lib/ltools-selection';
     import type { LToolsAction, LToolsActionList, ScriptEntry, ScriptsPanel as PanelData } from '../lib/types';
     import Panel from './Panel.svelte';
 
@@ -35,6 +40,7 @@
     let ltools = $state<LToolsActionList | null>(null);
     let ltoolsLoading = $state(false);
     let ltoolsConfiguring = $state(false);
+    let ltoolsQuery = $state('');
     let ltoolsRunning = $state('');
     let selectedLToolsIds = $state<string[]>([]);
     let loadSerial = 0;
@@ -153,10 +159,6 @@
     }
 
     const NIVELES = [0, 1, 2, 3, 4, 5, 6, 8, 10];
-    const LTOOLS_SELECTION_KEY = 'lterminal.ltools.quick-actions.v1';
-    const MAX_PINNED_LTOOLS_ACTIONS = 8;
-    const DEFAULT_LTOOLS_ACTIONS = ['audit.quick', 'packages.inventory', 'clean.preview', 'defaults.show'];
-
     function ltoolsSelectionKey(): string {
         return `${LTOOLS_SELECTION_KEY}.${app.appInfo?.platform ?? 'unknown'}`;
     }
@@ -168,32 +170,24 @@
         } catch {
             saved = null;
         }
-        const savedIds = Array.isArray(saved)
-            ? saved.filter((id): id is string => typeof id === 'string')
-            : DEFAULT_LTOOLS_ACTIONS;
-        const knownIds = new Set(actions.filter((action) => action.requirementsAvailable).map((action) => action.id));
-        selectedLToolsIds = [...new Set(savedIds)].filter((id) => knownIds.has(id)).slice(0, MAX_PINNED_LTOOLS_ACTIONS);
-        if (selectedLToolsIds.length === 0) {
-            const available = actions.filter((action) => action.safe && action.requirementsAvailable);
-            const preferredIds = new Set([
-                ...available.filter((action) => action.quick).map((action) => action.id),
-                ...DEFAULT_LTOOLS_ACTIONS,
-            ]);
-            selectedLToolsIds = available
-                .filter((action) => preferredIds.has(action.id))
-                .concat(available.filter((action) => !preferredIds.has(action.id)))
-                .slice(0, 4)
-                .map((action) => action.id);
-        }
+        const reconciled = reconcileLToolsSelection(actions, saved);
+        selectedLToolsIds = reconciled.selectedIds;
         // También se guarda la selección inicial. De lo contrario los botones
         // parecen configurados, pero desaparecen al reiniciar el WebView o al
         // cambiar de perfil porque nunca llegaron a localStorage.
-        if (selectedLToolsIds.length > 0) saveLToolsSelection();
+        saveLToolsSelection(reconciled.knownIds);
     }
 
-    function saveLToolsSelection(): void {
+    function saveLToolsSelection(knownIds?: string[]): void {
         try {
-            localStorage.setItem(ltoolsSelectionKey(), JSON.stringify(selectedLToolsIds));
+            const previous = JSON.parse(localStorage.getItem(ltoolsSelectionKey()) ?? 'null');
+            const previousKnown = previous && typeof previous === 'object' && Array.isArray(previous.knownIds)
+                ? previous.knownIds.filter((id: unknown): id is string => typeof id === 'string')
+                : [];
+            localStorage.setItem(ltoolsSelectionKey(), JSON.stringify({
+                selectedIds: selectedLToolsIds,
+                knownIds: knownIds ?? previousKnown,
+            }));
         } catch {
             // El catálogo sigue funcionando si el perfil no permite storage.
         }
@@ -201,7 +195,7 @@
 
     function toggleLToolsAction(id: string, checked: boolean): void {
         if (checked) {
-            if (selectedLToolsIds.includes(id) || selectedLToolsIds.length >= MAX_PINNED_LTOOLS_ACTIONS) return;
+            if (selectedLToolsIds.includes(id)) return;
             selectedLToolsIds = [...selectedLToolsIds, id];
         } else {
             selectedLToolsIds = selectedLToolsIds.filter((value) => value !== id);
@@ -212,7 +206,7 @@
     async function loadLToolsActions(): Promise<void> {
         ltoolsLoading = true;
         try {
-            const next = await api.listLToolsActions();
+            const next = await api.listLToolsActions(app.catalog.language);
             ltools = next;
             if (next.available && next.actions.length) loadLToolsSelection(next.actions);
         } catch (cause) {
@@ -230,6 +224,53 @@
     const selectedLToolsActions = $derived.by(() => {
         const actions = new Map((ltools?.actions ?? []).map((action) => [action.id, action]));
         return selectedLToolsIds.map((id) => actions.get(id)).filter((action): action is LToolsAction => Boolean(action));
+    });
+
+    function normalizedActionLabel(action: LToolsAction): string {
+        return actionBaseLabel(action).toLocaleLowerCase();
+    }
+
+    function actionBaseLabel(action: LToolsAction): string {
+        return action.shortLabel?.trim() || action.label.trim() || action.id;
+    }
+
+    function actionScope(action: LToolsAction): string {
+        return action.scope || action.group || action.actionKey || action.id;
+    }
+
+    /**
+     * El catálogo puede ser perfectamente válido y aun así publicar varios
+     * «Status» o «Inventory». Conservamos el texto del catálogo, pero solo
+     * añadimos el ámbito/ID cuando hace falta para que cada atajo sea
+     * reconocible sin abrir el tooltip.
+     */
+    function ltoolsActionLabel(action: LToolsAction): string {
+        const base = actionBaseLabel(action);
+        const sameLabel = (ltools?.actions ?? []).filter(
+            (candidate) => normalizedActionLabel(candidate) === normalizedActionLabel(action),
+        );
+        if (sameLabel.length < 2) return base;
+        const scope = actionScope(action);
+        const sameScope = sameLabel.some(
+            (candidate) => candidate.id !== action.id && actionScope(candidate) === scope,
+        );
+        return `${base} · ${sameScope ? action.id : scope}`;
+    }
+
+    function ltoolsActionMeta(action: LToolsAction): string {
+        return `${action.group || action.scope} · ${action.operation || action.actionKey || action.id}`;
+    }
+
+    const filteredLToolsActions = $derived.by(() => {
+        const needle = ltoolsQuery.trim().toLocaleLowerCase();
+        if (!needle) return ltools?.actions ?? [];
+        return (ltools?.actions ?? []).filter((action) => [
+            action.id,
+            action.label,
+            action.shortLabel ?? '',
+            action.group,
+            action.description,
+        ].join(' ').toLocaleLowerCase().includes(needle));
     });
 
     function scanCategoriesForSelection(filterIds: string[]): string[] {
@@ -710,7 +751,10 @@
         >⟳</button>
     </div>
 
-    <div class="filter">
+    <div class="content-section-title" data-testid="scripts-file-section-title">
+        {app.t('scripts.fileTypes', 'Tipos de archivo')}
+    </div>
+        <div class="filter" aria-label={app.t('scripts.filterPlaceholder', 'Filtrar archivos por nombre, carpeta o extensión')}>
         <span aria-hidden="true">🔍</span>
         <input
             type="text"
@@ -855,7 +899,10 @@
             {:else}
                 <div class="ltools-meta" data-testid="scripts-ltools-meta">
                     <span>{ltools.version ?? app.t('scripts.ltools.detected', 'CLI detectada')}</span>
-                    <span>{availableLToolsActions.length} {app.t('scripts.ltools.available', 'disponibles')}</span>
+                    <span data-testid="scripts-ltools-selection-count">
+                        {selectedLToolsActions.length}/{availableLToolsActions.length}
+                        {app.t('scripts.ltools.available', 'disponibles')} · ∞
+                    </span>
                 </div>
                 {#if selectedLToolsActions.length}
                     <div class="operation-actions ltools-actions">
@@ -864,10 +911,10 @@
                                 type="button"
                                 data-testid="scripts-ltools-run"
                                 data-ltools-action-id={action.id}
-                                title={action.description}
+                                title={`${ltoolsActionMeta(action)} · ${action.description}`}
                                 disabled={running !== '' || ltoolsRunning !== '' || !app.activeTabId || !action.requirementsAvailable}
                                 onclick={() => void runLToolsAction(action)}
-                            >{action.shortLabel ?? action.label}</button>
+                            >{ltoolsActionLabel(action)}</button>
                         {/each}
                     </div>
                 {:else}
@@ -883,8 +930,19 @@
                 </div>
                 {#if ltoolsConfiguring}
                     <div class="ltools-picker" aria-label={app.t('scripts.ltools.choose', 'Elegir acciones fijadas de LTools')}>
-                        {#each ltools.actions as action (action.id)}
-                            <label class="ltools-action" data-testid="scripts-ltools-action" data-ltools-action-id={action.id} class:unavailable={!action.requirementsAvailable} title={action.description}>
+                        <div class="ltools-picker-toolbar">
+                            <input
+                                type="search"
+                                data-testid="scripts-ltools-filter"
+                                value={ltoolsQuery}
+                                placeholder={app.t('scripts.ltools.filterPlaceholder', 'Filtrar acciones por nombre, grupo o identificador')}
+                                aria-label={app.t('scripts.ltools.filterPlaceholder', 'Filtrar acciones por nombre, grupo o identificador')}
+                                oninput={(event) => (ltoolsQuery = event.currentTarget.value)}
+                            />
+                            <span>{filteredLToolsActions.length}/{ltools.actions.length}</span>
+                        </div>
+                        {#each filteredLToolsActions as action (action.id)}
+                            <label class="ltools-action" data-testid="scripts-ltools-action" data-ltools-action-id={action.id} class:unavailable={!action.requirementsAvailable} title={`${ltoolsActionMeta(action)} · ${action.description}`}>
                                 <input
                                     type="checkbox"
                                     checked={selectedLToolsIds.includes(action.id)}
@@ -892,11 +950,14 @@
                                     onchange={(event) => toggleLToolsAction(action.id, (event.currentTarget as HTMLInputElement).checked)}
                                 />
                                 <span>
-                                    <strong>{action.label}</strong>
-                                    <small>{action.group} · {action.requirementsAvailable ? action.description : app.t('scripts.ltools.missing', 'Falta una dependencia')}</small>
+                                    <strong>{ltoolsActionLabel(action)}</strong>
+                                    <small>{ltoolsActionMeta(action)} · {action.requirementsAvailable ? action.description : app.t('scripts.ltools.missing', 'Falta una dependencia')}</small>
                                 </span>
                             </label>
                         {/each}
+                        {#if filteredLToolsActions.length === 0}
+                            <div class="ltools-picker-empty">{app.t('scripts.noFilterMatch', 'Ninguna acción coincide con el filtro.')}</div>
+                        {/if}
                     </div>
                 {/if}
             {/if}
@@ -1336,6 +1397,9 @@
 
     .ltools-actions {
         justify-content: flex-start;
+        align-content: flex-start;
+        max-height: 150px;
+        overflow-y: auto;
         padding: 4px 8px 7px;
     }
 
@@ -1390,6 +1454,33 @@
         overflow: auto;
         padding: 5px 8px 8px;
         border-top: 1px solid var(--border);
+    }
+
+    .ltools-picker-toolbar {
+        display: flex;
+        grid-column: 1 / -1;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        padding-bottom: 3px;
+    }
+
+    .ltools-picker-toolbar input {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .ltools-picker-toolbar span {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 8px;
+    }
+
+    .ltools-picker-empty {
+        grid-column: 1 / -1;
+        padding: 8px;
+        color: var(--muted);
+        font-size: 9px;
     }
 
     .ltools-action {
