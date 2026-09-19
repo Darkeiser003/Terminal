@@ -5,8 +5,8 @@
 Security fixes are prepared for the latest stable release.
 
 | Version | Supported |
-|---|---|
-| 1.0.0 | Yes |
+|---------|-----------|
+| 1.0.0   | Yes       |
 
 Older versions may not receive security updates. Update to the latest release
 and verify its published hashes and signature.
