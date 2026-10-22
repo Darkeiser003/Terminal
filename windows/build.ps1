@@ -1324,10 +1324,33 @@ function Get-RustLldPath {
     return $null
 }
 
+function Test-MSVCImportLibraries {
+    # rust-lld solo sustituye a link.exe: sigue necesitando las bibliotecas de
+    # importación del Windows SDK (kernel32.lib) y del CRT de MSVC (msvcrt.lib).
+    # En un Windows sin Visual Studio ni SDK no existen y el enlace fallaría
+    # dentro de Cargo; en ese caso hay que instalar las Build Tools.
+    $directories = @(([string]$env:LIB) -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($library in @('kernel32.lib', 'msvcrt.lib')) {
+        $found = $directories | Where-Object { Test-Path (Join-Path $_ $library) -PathType Leaf } | Select-Object -First 1
+        if (-not $found) { return $false }
+    }
+    return $true
+}
+
 function Test-WindowsLinker {
     if (Test-MSVCLinker) { return 'msvc' }
-    if (Get-RustLldPath) { return 'rust-lld' }
+    if ((Get-RustLldPath) -and (Test-MSVCImportLibraries)) { return 'rust-lld' }
     return $null
+}
+
+function Use-RustLldLinker {
+    # Cargo usa link.exe por defecto en el target MSVC aunque no exista. Se
+    # exporta rust-lld para este proceso y sus hijos (npm, cargo test, tauri).
+    $rustLld = Get-RustLldPath
+    if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER)) {
+        $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $rustLld
+    }
+    return $rustLld
 }
 
 if (-not (Test-WindowsLinker)) {
@@ -1356,6 +1379,7 @@ if (-not (Test-WindowsLinker)) {
         if ($detectedLinker -eq 'msvc') {
             Write-Ok 'Visual Studio C++ Build Tools instaladas correctamente'
         } elseif ($detectedLinker -eq 'rust-lld') {
+            [void](Use-RustLldLinker)
             Write-Warn 'Visual Studio no quedó disponible; se mantiene el enlazador Rust LLD'
             Write-Ok 'Rust LLD disponible: se puede compilar la aplicación sin Visual Studio Build Tools'
         } else {
@@ -1367,9 +1391,43 @@ if (-not (Test-WindowsLinker)) {
 } elseif ((Test-MSVCLinker)) {
     Write-Ok 'Visual Studio C++ Build Tools (cl.exe + link.exe + Windows SDK)'
 } else {
-    $rustLld = Get-RustLldPath
+    $rustLld = Use-RustLldLinker
     Write-Warn "No se encontraron cl.exe/link.exe; se usará el enlazador incluido en Rust: $rustLld"
     Write-Ok 'Rust LLD disponible: se puede compilar la aplicación sin Visual Studio Build Tools'
+}
+
+function Find-SevenZip {
+    return @(
+        $env:LTERMINAL_7ZIP,
+        $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles '7-Zip\7z.exe' }),
+        $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.exe' })
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
+}
+
+# Con instalador, la carpeta desempaquetada y el portable reutilizan el
+# WebView2 offline que se extrae del NSIS con 7-Zip. Se comprueba aquí, antes
+# de compilar, para no descubrir la falta tras la batería completa.
+if ($Installer) {
+    if (Find-SevenZip) {
+        Write-Ok '7-Zip disponible para extraer WebView2 offline del NSIS'
+    } elseif (Test-Command 'winget') {
+        Write-Step 'Instalando 7-Zip mediante winget...'
+        [void](Invoke-Native 'winget' @(
+            'install',
+            '--id', '7zip.7zip',
+            '--exact',
+            '--source', 'winget',
+            '--accept-source-agreements',
+            '--accept-package-agreements',
+            '--disable-interactivity'
+        ))
+        if (-not (Find-SevenZip)) {
+            throw 'Falta 7-Zip para extraer WebView2 offline del NSIS. Se intento la instalacion con winget pero no concluyo. Instalalo desde https://www.7-zip.org/'
+        }
+        Write-Ok '7-Zip instalado correctamente'
+    } else {
+        throw 'Falta 7-Zip para extraer WebView2 offline del NSIS. Instalalo desde https://www.7-zip.org/'
+    }
 }
 
 # La versión se pregunta antes de empaquetar. Enter conserva la actual; el
@@ -1536,6 +1594,7 @@ if (-not $SkipChecks) {
 function Import-UpdateTrustMaterialForBuild {
     if ($env:CI -match '^(1|true|yes)$') { return }
     $desktop = [Environment]::GetFolderPath('Desktop')
+    $documents = [Environment]::GetFolderPath('MyDocuments')
     $configRoot = if (-not [string]::IsNullOrWhiteSpace($env:XDG_CONFIG_HOME)) {
         $env:XDG_CONFIG_HOME
     } elseif ($env:USERPROFILE) {
@@ -1556,6 +1615,8 @@ function Import-UpdateTrustMaterialForBuild {
             $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE,
             $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing.pub' }),
             $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing.pub' }),
+            $(if ($documents) { Join-Path $documents '.ssh\lterminal-release-signing.pub' }),
+            $(if ($documents) { Join-Path $documents '.ssh\ltools-release-signing.pub' }),
             $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing.pub' }),
             $(if ($desktop) { Join-Path $desktop 'ltools-release-signing.pub' })
         ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
@@ -1695,11 +1756,7 @@ function Find-PortableWebView2Bootstrapper {
 
 function Extract-OfflineWebView2Installer {
     param([Parameter(Mandatory = $true)][string]$NsisPath)
-    $sevenZip = @(
-        $env:LTERMINAL_7ZIP,
-        $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles '7-Zip\7z.exe' }),
-        $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.exe' })
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
+    $sevenZip = Find-SevenZip
     if (-not $sevenZip) { throw 'La release Windows completa necesita 7-Zip para extraer WebView2 offline del NSIS.' }
     $cacheDir = Join-Path $TauriDir 'target\release\portable-webview2'
     New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
@@ -2527,6 +2584,7 @@ function Import-LocalSigningMaterial {
         Join-Path $env:USERPROFILE '.config'
     }
     $desktop = [Environment]::GetFolderPath('Desktop')
+    $documents = [Environment]::GetFolderPath('MyDocuments')
     $privateCandidates = @(
         $env:LTERMINAL_SIGNING_PRIVATE_KEY_FILE,
         $(if ($configRoot) { Join-Path $configRoot 'lterminal\release-signing-private.pem' }),
@@ -2547,6 +2605,8 @@ function Import-LocalSigningMaterial {
         $env:LTERMINAL_SSH_SIGNING_KEY_FILE,
         $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing' }),
         $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing' }),
+        $(if ($documents) { Join-Path $documents '.ssh\lterminal-release-signing' }),
+        $(if ($documents) { Join-Path $documents '.ssh\ltools-release-signing' }),
         $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing' }),
         $(if ($desktop) { Join-Path $desktop 'ltools-release-signing' })
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
@@ -2555,6 +2615,8 @@ function Import-LocalSigningMaterial {
         $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE,
         $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing.pub' }),
         $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing.pub' }),
+        $(if ($documents) { Join-Path $documents '.ssh\lterminal-release-signing.pub' }),
+        $(if ($documents) { Join-Path $documents '.ssh\ltools-release-signing.pub' }),
         $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing.pub' }),
         $(if ($desktop) { Join-Path $desktop 'ltools-release-signing.pub' })
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
@@ -2665,8 +2727,13 @@ if ($runExtendedTests -and -not [string]::IsNullOrWhiteSpace($e2eReportPath)) {
     $previousReportOverride = $env:WTERMINAL_E2E_REPORT
     $previousReleaseOverride = $env:LTERMINAL_RELEASE_DIR
     $previousExpectedArtifacts = $env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS
+    $previousExpectedSignatures = $env:WTERMINAL_EXPECTED_RELEASE_SIGNATURES
     try {
         $env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS = ($publishedArtifacts -join ';')
+        # Solo se exigen las firmas que esta build generó: sin clave local la
+        # release queda sin firmar con un aviso, no rota.
+        $env:WTERMINAL_EXPECTED_RELEASE_SIGNATURES = (@('SHA256SUMS.txt.sig', 'SHA256SUMS.txt.sshsig') |
+            Where-Object { $signingRequired -or (Test-Path -LiteralPath (Join-Path $releaseOut $_) -PathType Leaf) }) -join ';'
         $env:WTERMINAL_REQUIRE_E2E_REPORT = '1'
         $env:WTERMINAL_E2E_REPORT = $e2eReportPath
         $env:LTERMINAL_RELEASE_DIR = $releaseOut
@@ -2680,6 +2747,7 @@ if ($runExtendedTests -and -not [string]::IsNullOrWhiteSpace($e2eReportPath)) {
         if ($null -eq $previousReportOverride) { Remove-Item Env:WTERMINAL_E2E_REPORT -ErrorAction SilentlyContinue } else { $env:WTERMINAL_E2E_REPORT = $previousReportOverride }
         if ($null -eq $previousReleaseOverride) { Remove-Item Env:LTERMINAL_RELEASE_DIR -ErrorAction SilentlyContinue } else { $env:LTERMINAL_RELEASE_DIR = $previousReleaseOverride }
         if ($null -eq $previousExpectedArtifacts) { Remove-Item Env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS -ErrorAction SilentlyContinue } else { $env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS = $previousExpectedArtifacts }
+        if ($null -eq $previousExpectedSignatures) { Remove-Item Env:WTERMINAL_EXPECTED_RELEASE_SIGNATURES -ErrorAction SilentlyContinue } else { $env:WTERMINAL_EXPECTED_RELEASE_SIGNATURES = $previousExpectedSignatures }
     }
 }
 

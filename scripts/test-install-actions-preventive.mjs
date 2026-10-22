@@ -225,7 +225,13 @@ for (const line of sums) {
     const hash = createHash('sha256').update(data).digest('hex');
     check(hash.toLowerCase() === match[1].toLowerCase(), `hash incorrecto para ${match[2]}`);
 }
-for (const signature of ['SHA256SUMS.txt.sig', 'SHA256SUMS.txt.sshsig']) {
+// Una release local sin clave de firma es válida (el builder avisa de que el
+// actualizador la rechazará); el build indica qué firmas generó. Sin esa
+// lista se exigen ambas, como en una release oficial.
+const expectedSignatures = process.env.WTERMINAL_EXPECTED_RELEASE_SIGNATURES === undefined
+    ? ['SHA256SUMS.txt.sig', 'SHA256SUMS.txt.sshsig']
+    : process.env.WTERMINAL_EXPECTED_RELEASE_SIGNATURES.split(';').map((name) => name.trim()).filter(Boolean);
+for (const signature of expectedSignatures) {
     const info = await stat(join(releaseRoot, signature)).catch(() => null);
     check(info !== null && info.size > 32, `firma ausente o vacía: ${signature}`);
 }
