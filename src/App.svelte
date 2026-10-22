@@ -8,11 +8,14 @@
 
     import * as api from "./lib/api";
     import { app } from "./lib/appState.svelte";
+    import type { PaletteAppAction, PaletteEntry } from "./lib/command-palette";
     import { panels } from "./lib/panels.svelte";
     import * as perf from "./lib/performance";
     import { matchesPaneShortcut, matchesShortcut } from "./lib/shortcuts";
     import { createTerminalRefreshScheduler } from "./lib/terminal-render";
-    import { getTerminal } from "./lib/terminalRegistry";
+    import { themePreferencePatch } from "./lib/theme";
+    import { getTerminal, getTerminalControls, type TerminalLineRejection } from "./lib/terminalRegistry";
+    import CommandPalette from "./components/CommandPalette.svelte";
     import DependenciesPanel from "./components/DependenciesPanel.svelte";
     import ExplorerSidebar from "./components/ExplorerSidebar.svelte";
     import ProjectsPanel from "./components/ProjectsPanel.svelte";
@@ -42,8 +45,18 @@
     /** La versión publicada, cuando una comprobación autenticada la confirma. */
     let update = $state<UpdateStatus | null>(null);
     let packageUpdates = $state<PackageUpdateStatus | null>(null);
+    let packageUpdateRunning = $state(false);
+    let packageUpdateError = $state('');
     let updating = $state(false);
     let updateError = $state("");
+    // La guía se puede cerrar solo para la sesión actual sin tocar las
+    // preferencias persistentes. Al volver a entrar en modo limpio se vuelve
+    // a mostrar, salvo que el usuario haya elegido ocultarla definitivamente.
+    let hideTerminalOnlyGuideForSession = $state(false);
+    let cleanModeObserved = $state(false);
+    /** La paleta se monta solo mientras está abierta: cada apertura empieza
+     *  con la búsqueda vacía y el estado actual de pestañas y entornos. */
+    let paletteOpen = $state(false);
     /** Inicio del cambio de shell por pestaña. Se consume al completar el
      * primer `term.write`, que es el instante en que el usuario ya ve la nueva
      * sesión (el IPC por sí solo no incluye el arranque del inicializador). */
@@ -111,6 +124,27 @@
             // La notificación no depende de que el WebView permita persistirla.
         }
         packageUpdates = null;
+        packageUpdateError = '';
+    }
+
+    async function runPackageUpdates(): Promise<void> {
+        if (packageUpdateRunning || !packageUpdates?.manager || !app.activeTabId) return;
+        packageUpdateRunning = true;
+        packageUpdateError = '';
+        const actionId = packageUpdates.manager === 'winget' ? 'winget-upgrade' : 'pkg-update';
+        try {
+            const result = await api.runInstallAction(app.activeTabId, actionId);
+            if (!result.ok) {
+                packageUpdateError = result.error ?? app.t('update.failed', 'No se pudo preparar la actualización.');
+                return;
+            }
+            dismissPackageUpdates();
+            if (result.tabId) await app.adoptTab(result.tabId, result.created);
+        } catch (cause) {
+            packageUpdateError = String(cause);
+        } finally {
+            packageUpdateRunning = false;
+        }
     }
 
     function invalidateTerminalOutput(tabId: string, preserveOrdering = false): Promise<void> {
@@ -185,8 +219,11 @@
      *  una palabra en bash/readline, así que no se usa para cerrar pestaña.
      *
      *  Dentro de un campo de formulario no se atienden — alguien escribiendo una
-     *  ruta en Ajustes no quiere abrir pestañas — salvo Ctrl+Tab, que es
-     *  navegación y tiene sentido desde cualquier sitio. */
+     *  ruta en Ajustes no quiere abrir pestañas — salvo Ctrl+Tab y la paleta de
+     *  comandos, que son navegación y tienen sentido desde cualquier sitio.
+     *
+     *  Cada atajo acaba en `runAppAction`, el mismo manejador que usa la
+     *  paleta: una acción hace lo mismo se pida como se pida. */
     function onShortcut(event: KeyboardEvent): void {
         // Los eventos de WebView/IME y los sintéticos del E2E pueden llegar
         // con `window` como target; solo los elementos DOM ofrecen `closest`.
@@ -208,6 +245,12 @@
                 target?.isContentEditable === true);
         const preferences = app.preferences;
         if (!preferences) return;
+        // También desde su propio buscador: el mismo atajo la cierra.
+        if (preferences.shortcutCommandPalette && matchesShortcut(event, preferences.shortcutCommandPalette)) {
+            consumeShortcut(event);
+            paletteOpen = !paletteOpen;
+            return;
+        }
         const esSiguiente = matchesShortcut(event, preferences.shortcutNextTab);
         const esAnterior = matchesShortcut(event, preferences.shortcutPreviousTab);
         const esNavegacion = esSiguiente || esAnterior;
@@ -215,9 +258,7 @@
 
         if (matchesShortcut(event, preferences.shortcutToggleTerminalOnly)) {
             consumeShortcut(event);
-            panels.close();
-            app.explorerVisible = false;
-            void app.savePreferences({ terminalOnlyMode: !preferences.terminalOnlyMode });
+            void runAppAction('toggleTerminalOnly');
             return;
         }
 
@@ -225,27 +266,18 @@
             matchesShortcut(event, preferences.shortcutNewTab)
         ) {
             consumeShortcut(event);
-            void app.createTab(app.activeTab?.envId ?? undefined);
+            void runAppAction('newTab');
             return;
         }
         if (esNavegacion) {
             consumeShortcut(event);
-            if (app.tabs.length < 2) return;
-            const actual = app.tabs.findIndex(
-                (tab) => tab.id === app.activeTabId,
-            );
-            // Shift invierte el sentido; el módulo hace que dé la vuelta por los
-            // dos extremos sin casos especiales.
-            const salto = esAnterior ? -1 : 1;
-            const siguiente =
-                (actual + salto + app.tabs.length) % app.tabs.length;
-            void app.activateTab(app.tabs[siguiente].id);
+            void runAppAction(esAnterior ? 'previousTab' : 'nextTab');
             return;
         }
         // Ctrl+Shift+\ rota entre 1, 2, 3 y 4 terminales a la vista.
         if (matchesShortcut(event, preferences.shortcutCyclePanes)) {
             consumeShortcut(event);
-            app.cyclePanes();
+            void runAppAction('cyclePanes');
             return;
         }
         // Atajos direccionales configurables: mover el foco en la vista dividida.
@@ -268,12 +300,11 @@
             matchesShortcut(event, preferences.shortcutToggleExplorer)
         ) {
             consumeShortcut(event);
-            if (preferences.showExplorerPanel === false) return;
-            app.explorerVisible = !app.explorerVisible;
+            void runAppAction('toggleExplorer');
             return;
         }
 
-        const extraActions = [
+        const extraActions: ReadonlyArray<readonly [string, PaletteAppAction]> = [
             [preferences.shortcutOpenSettings, 'openSettings'],
             [preferences.shortcutOpenProjects, 'openProjects'],
             [preferences.shortcutOpenScripts, 'openScripts'],
@@ -284,69 +315,201 @@
             [preferences.shortcutExplorerCd, 'explorerCd'],
             [preferences.shortcutClearTerminal, 'clearTerminal'],
             [preferences.shortcutOpenSystemExplorer, 'openSystemExplorer'],
-        ] as const;
+        ];
         const extra = extraActions.find(([shortcut]) => shortcut && matchesShortcut(event, shortcut));
         if (extra) {
             consumeShortcut(event);
-            runExtraShortcut(extra[1]);
+            void runAppAction(extra[1]);
         }
     }
 
-    function runExtraShortcut(action: string): void {
+    function activeTabIsRepl(): boolean {
+        const environment = app.environments.find((candidate) => candidate.id === app.activeTab?.envId);
+        return environment?.repl === true || environment?.kind === 'repl';
+    }
+
+    function rejectionMessage(reason: TerminalLineRejection): string {
+        switch (reason) {
+            case 'not-ready':
+                return app.t('palette.rejected.notReady', 'La terminal todavía está arrancando; inténtalo en un momento.');
+            case 'busy':
+                return app.t('palette.rejected.busy', 'La terminal está ocupada: no muestra un prompt donde escribir.');
+            case 'draft':
+                return app.t('palette.rejected.draft', 'La línea de la terminal tiene texto sin enviar: bórralo o envíalo primero.');
+        }
+    }
+
+    /** Teclea una orden en la pestaña activa por la misma ruta que el teclado
+     *  (ver `submitLine` en `terminalRegistry.ts`). Nada se escribe solo en
+     *  xterm: el eco, la salida y el prompt los sigue pintando la shell a
+     *  través de ConPTY, así que las filas de ambos no se separan. */
+    function submitToActiveTerminal(line: string): string | null {
+        const controls = app.activeTabId ? getTerminalControls(app.activeTabId) : undefined;
+        if (!controls) return app.t('palette.disabled.noTab', 'No hay ninguna pestaña activa.');
+        if (activeTabIsRepl()) {
+            return app.t('palette.disabled.shellOnly', 'Solo en una pestaña de shell; la activa es un intérprete o un asistente.');
+        }
+        const rejected = controls.submitLine(line);
+        return rejected ? rejectionMessage(rejected) : null;
+    }
+
+    /** Un único manejador para las acciones de la aplicación: lo usan los
+     *  atajos globales y la paleta de comandos. Devuelve el motivo si no se
+     *  pudo hacer (la paleta lo muestra; un atajo simplemente no hace nada). */
+    async function runAppAction(action: PaletteAppAction): Promise<string | null> {
+        const preferences = app.preferences;
         switch (action) {
+            case 'toggleTerminalOnly':
+                if (!preferences) return null;
+                panels.close();
+                app.explorerVisible = false;
+                if (!preferences.terminalOnlyMode) hideTerminalOnlyGuideForSession = false;
+                void app.savePreferences({ terminalOnlyMode: !preferences.terminalOnlyMode });
+                return null;
+            case 'newTab':
+                void app.createTab(app.activeTab?.envId ?? undefined);
+                return null;
+            case 'nextTab':
+            case 'previousTab': {
+                if (app.tabs.length < 2) return null;
+                const actual = app.tabs.findIndex(
+                    (tab) => tab.id === app.activeTabId,
+                );
+                // Shift invierte el sentido; el módulo hace que dé la vuelta por los
+                // dos extremos sin casos especiales.
+                const salto = action === 'previousTab' ? -1 : 1;
+                const siguiente =
+                    (actual + salto + app.tabs.length) % app.tabs.length;
+                void app.activateTab(app.tabs[siguiente].id);
+                return null;
+            }
+            case 'cyclePanes':
+                void app.cyclePanes();
+                return null;
+            case 'toggleExplorer':
+                if (preferences?.showExplorerPanel === false) return null;
+                app.explorerVisible = !app.explorerVisible;
+                return null;
             case 'openSettings':
                 panels.show('settings');
                 void loadSettings();
-                break;
+                return null;
             case 'openProjects':
-                if (app.preferences?.showProjectsPanel === false) return;
+                if (preferences?.showProjectsPanel === false) return null;
                 panels.show('projects');
                 void loadProjects();
-                break;
+                return null;
             case 'openScripts':
-                if (app.preferences?.showScriptsPanel === false) return;
+                if (preferences?.showScriptsPanel === false) return null;
                 panels.show('scripts');
                 void loadScripts();
-                break;
+                return null;
             case 'openDependencies':
-                if (app.preferences?.showDependenciesPanel === false) return;
+                if (preferences?.showDependenciesPanel === false) return null;
                 panels.show('deps');
                 void loadDeps();
-                break;
+                return null;
             case 'closePanel':
                 panels.close();
                 app.explorerVisible = false;
-                break;
+                return null;
             case 'refreshEnvironments':
                 void app.refreshEnvironments();
-                break;
+                return null;
             case 'explorerFollow':
-                if (app.preferences?.showExplorerPanel === false) return;
+                if (preferences?.showExplorerPanel === false) return null;
                 app.explorerVisible = true;
                 window.dispatchEvent(new CustomEvent('winslim:explorer-follow', {
                     detail: { tabId: app.activeTabId },
                 }));
-                break;
+                return null;
             case 'explorerCd':
-                if (app.preferences?.showExplorerPanel === false) return;
+                if (preferences?.showExplorerPanel === false) return null;
                 app.explorerVisible = true;
                 window.dispatchEvent(new CustomEvent('winslim:explorer-cd', {
                     detail: { tabId: app.activeTabId },
                 }));
-                break;
-            case 'clearTerminal': {
-                const terminal = app.activeTabId ? getTerminal(app.activeTabId) : undefined;
-                terminal?.clear();
-                terminal?.focus();
-                break;
-            }
+                return null;
+            case 'searchTerminal':
+                if (app.activeTabId) getTerminalControls(app.activeTabId)?.openSearch();
+                return null;
+            case 'clearTerminal':
+                // Antes era `terminal.clear()`, que solo vaciaba xterm: el
+                // prompt subía a la primera fila mientras ConPTY seguía con el
+                // cursor abajo, y el siguiente eco salía despegado. `clear` es
+                // el alias real de cada shell (limpia pantalla e historial y,
+                // según Ajustes, reimprime el fastfetch) y pasa por ConPTY.
+                return submitToActiveTerminal('clear');
             case 'openSystemExplorer':
                 if (app.activeTabId) {
                     window.dispatchEvent(new CustomEvent('winslim:open-current-directory', {
                         detail: { tabId: app.activeTabId },
                     }));
                 }
-                break;
+                return null;
+        }
+    }
+
+    /** Ejecuta una entrada de la paleta con el manejador que ya tenía esa
+     *  acción: `runAppAction`, el selector de entornos, `:repl`, `:theme`,
+     *  `:font`, `:language`, el interceptor de `:` o el botón de LTools. */
+    async function runPaletteEntry(entry: PaletteEntry): Promise<string | null> {
+        const action = entry.action;
+        perf.mark('ui.palette.run', { id: entry.id, kind: action.kind });
+        switch (action.kind) {
+            case 'app':
+                return runAppAction(action.action);
+            case 'panes':
+                void app.setPaneCount(action.count);
+                return null;
+            case 'environment': {
+                const tabId = app.activeTabId;
+                const environment = app.environments.find((candidate) => candidate.id === action.envId);
+                if (!tabId || !environment?.available) {
+                    return entry.disabledReason || app.t('palette.disabled.unavailable', 'No está disponible todavía.');
+                }
+                const switched = await app.switchEnvironment(tabId, environment.id);
+                return switched ? null : app.t('palette.failed', 'No se pudo completar la acción.');
+            }
+            case 'newTabIn':
+                void app.createTab(action.envId);
+                return null;
+            case 'theme': {
+                // Lo mismo que `:theme <id>` y la tarjeta de Ajustes: elegir
+                // un tema sin sus colores solo cambiaría el identificador.
+                const patch = app.preferences ? themePreferencePatch(action.themeId, app.preferences, app.themes) : null;
+                await app.savePreferences(patch ?? { themeId: action.themeId });
+                return null;
+            }
+            case 'font':
+                await app.savePreferences({ terminalFontFamily: action.fontId });
+                return null;
+            case 'language':
+                await app.savePreferences({ language: action.languageId });
+                return null;
+            case 'internal': {
+                // El parser Rust decide qué es un comando interno: una línea
+                // que no reconoce no se teclea, porque la shell la ejecutaría.
+                const command = await api.parseInternalCommand(action.line);
+                if (!command) return app.t('palette.rejected.notInternal', 'No es un comando interno. Prueba :help.');
+                return submitToActiveTerminal(action.line);
+            }
+            case 'ltools': {
+                // La misma ruta que el botón de la Biblioteca: el backend vuelve
+                // a validar el ID contra el catálogo y escribe la orden en una
+                // shell visible.
+                const tabId = app.activeTabId;
+                if (!tabId) return app.t('palette.disabled.noTab', 'No hay ninguna pestaña activa.');
+                if (action.needsConfirmation) {
+                    const details = `${entry.label}\n\n${entry.detail}\n\n${app.t('scripts.ltools.confirm', 'Esta acción puede cambiar el sistema. ¿Quieres continuar?')}`;
+                    if (!window.confirm(details)) return app.t('palette.cancelled', 'Acción cancelada.');
+                }
+                const result = await api.runLToolsAction(tabId, action.actionId);
+                if (!result.ok) return result.error ?? app.t('scripts.ltools.runFailed', 'No se pudo ejecutar la acción de LTools.');
+                panels.close();
+                if (result.tabId) await app.adoptTab(result.tabId, false);
+                return null;
+            }
         }
     }
 
@@ -375,8 +538,10 @@
         };
         window.addEventListener('winslim:open-settings', openSettingsFromTerminal);
         const openPanelFromTerminal = (event: Event) => {
-            const panel = (event as CustomEvent<{ panel?: string }>).detail?.panel;
+            const detail = (event as CustomEvent<{ panel?: string; query?: string }>).detail;
+            const panel = detail?.panel;
             if (panel === 'deps') {
+                if (detail?.query) panels.depsQuery = detail.query;
                 panels.show('deps');
                 void loadDeps();
             } else if (panel === 'projects') {
@@ -393,7 +558,15 @@
         window.addEventListener('winslim:open-panel', openPanelFromTerminal);
         const unlisteners: Promise<UnlistenFn>[] = [
             api.onData((tabId, data) => {
-                window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
+                // CMD/ConPTY emite CSI 2J/3J para `cls`. Tratarlo como un
+                // clear aunque venga de la shell permite retirar la anchura
+                // CSS anterior y forzar un repintado de xterm al terminar;
+                // de lo contrario el lienzo puede seguir midiendo la salida
+                // larga ya borrada.
+                const isShellClear = /\x1b\[(?:2|3)J/u.test(data);
+                window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', {
+                    detail: { tabId, data, ...(isShellClear ? { kind: 'clear' } : {}) },
+                }));
                 const previous = outputQueues.get(tabId) ?? Promise.resolve();
                 const epoch = outputEpochs.get(tabId) ?? 0;
                 const queued = previous.catch(() => undefined).then(() => new Promise<void>((resolve) => {
@@ -476,7 +649,14 @@
             // fila donde se escribe la siguiente entrada.
             api.onClear((tabId) => {
                 const previous = invalidateTerminalOutput(tabId, true);
-                window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', { detail: { tabId } }));
+                // Marcar el origen permite que TerminalPane descarte la
+                // reserva horizontal de la salida anterior solo cuando el
+                // clear haya terminado. Un evento busy normal no debe tocar
+                // esa reserva porque todavía puede estar llegando una línea
+                // larga legítima.
+                window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', {
+                    detail: { tabId, kind: 'clear' },
+                }));
                 const epoch = outputEpochs.get(tabId) ?? 0;
                 const queued = previous.catch(() => undefined).then(() => new Promise<void>((resolve) => {
                     if ((outputEpochs.get(tabId) ?? 0) !== epoch) {
@@ -652,9 +832,25 @@
             outputEpochs.clear();
         };
     });
+
+    // El modo limpio también puede activarse desde Ajustes o al arrancar con
+    // la preferencia guardada. Detectar la entrada aquí mantiene el cierre
+    // «esta vez» limitado a una sola sesión en todas esas rutas.
+    $effect(() => {
+        const cleanMode = app.preferences?.terminalOnlyMode === true;
+        if (cleanMode && !cleanModeObserved) hideTerminalOnlyGuideForSession = false;
+        cleanModeObserved = cleanMode;
+    });
 </script>
 
-<main class:platform-linux={app.appInfo?.platform === "linux"}>
+<main
+    class:platform-linux={app.appInfo?.platform === "linux"}
+    class:terminal-only={app.preferences?.terminalOnlyMode === true}
+    data-window-mode={app.preferences?.terminalOnlyMode === true ? "terminal-only" : "normal"}
+    aria-label={app.preferences?.terminalOnlyMode === true
+        ? app.t("settings.terminalOnlyMode", "Modo de terminal limpia")
+        : "Terminal"}
+>
     {#if startupError}
         <section class="startup-error" role="alert">
             <h1>{app.t("startup.errorTitle", "La terminal no pudo iniciar la interfaz")}</h1>
@@ -705,6 +901,38 @@
         </div>
     </div>
 
+    {#if app.preferences?.terminalOnlyMode === true && app.preferences.showTerminalOnlyGuide !== false && !hideTerminalOnlyGuideForSession}
+        <div class="terminal-only-guide" role="status" aria-live="polite">
+            <!-- Un atajo vacío está desasignado: anunciar el de fábrica sería
+                 mentir, así que la guía indica la salida que siempre existe. -->
+            <span>{app.preferences.shortcutToggleTerminalOnly
+                    ? app
+                          .t(
+                              "terminal.terminalOnlyGuide",
+                              "Modo de pantalla limpia · Atajo: {shortcut} para volver al modo normal · Cambia el atajo en Ajustes.",
+                          )
+                          .replace("{shortcut}", app.preferences.shortcutToggleTerminalOnly)
+                    : app.t("terminal.terminalOnlyGuideNoShortcut", "Modo de pantalla limpia · Sin atajo para volver al modo normal · Escribe :settings en la terminal para asignar uno o desactivar el modo.")}</span>
+            <div class="terminal-only-guide-actions">
+                <button
+                    type="button"
+                    class="terminal-only-guide-action"
+                    data-testid="terminal-only-guide-dismiss"
+                    onclick={() => (hideTerminalOnlyGuideForSession = true)}
+                >{app.t("terminal.terminalOnlyGuideDismiss", "Cerrar esta vez")}</button>
+                <button
+                    type="button"
+                    class="terminal-only-guide-action terminal-only-guide-action-danger"
+                    data-testid="terminal-only-guide-never"
+                    onclick={() => {
+                        hideTerminalOnlyGuideForSession = true;
+                        void app.savePreferences({ showTerminalOnlyGuide: false });
+                    }}
+                >{app.t("terminal.terminalOnlyGuideNever", "No mostrar nunca más")}</button>
+            </div>
+        </div>
+    {/if}
+
     {#if app.activeTabId && app.suggestions[app.activeTabId]}
         {@const suggestion = app.suggestions[app.activeTabId]}
         <div class="suggestion" role="status">
@@ -754,18 +982,21 @@
                         'Hay actualizaciones disponibles para las aplicaciones gestionadas por {manager}.',
                     )
                     .replace('{manager}', packageUpdates.manager === 'winget' ? 'WinGet' : packageUpdates.manager ?? '')}
+                {#if packageUpdateError}
+                    <strong class="update-error">{packageUpdateError}</strong>
+                {/if}
             </span>
             <div class="update-actions">
                 <button
                     type="button"
                     class="primary"
-                    onclick={() => {
-                        dismissPackageUpdates();
-                        panels.show('deps');
-                        void loadDeps();
-                    }}
+                    data-testid="package-update-now"
+                    disabled={packageUpdateRunning || !app.activeTabId}
+                    onclick={runPackageUpdates}
                 >
-                    {app.t('toolbar.deps', 'Entorno y dependencias')}
+                    {packageUpdateRunning
+                        ? app.t('update.installing', 'Actualizando…')
+                        : app.t('update.packagesNow', 'Actualizar')}
                 </button>
                 <button type="button" onclick={dismissPackageUpdates}>
                     {app.t('update.later', 'Ahora no')}
@@ -843,6 +1074,9 @@
     {#if settingsMounted}
         <SettingsPanel bind:this={settings} />
     {/if}
+    {#if paletteOpen && ready}
+        <CommandPalette onRun={runPaletteEntry} onClose={() => (paletteOpen = false)} />
+    {/if}
 </main>
 
 <style>
@@ -860,6 +1094,70 @@
         min-height: 0;
         background: var(--app-bg);
         padding: 4px;
+    }
+
+    /* En el modo de terminal limpia el borde nativo y el chrome de la app ya
+       desaparecen; quitar también este marco de 4px evita una franja vacía y
+       deja que xterm aproveche cada fila y columna de la ventana. */
+    main.terminal-only .workspace {
+        padding: 0;
+    }
+
+    main.terminal-only .cell {
+        border-radius: 0;
+        border-width: 0;
+    }
+
+    main.terminal-only .grid {
+        gap: 0;
+    }
+
+    .terminal-only-guide {
+        /* Mantener la guía en el flujo de la ventana reserva su propia fila.
+           Cuando aparece el aviso de WinGet, una posición fija hacía que
+           ambos elementos ocuparan el mismo borde inferior y se solaparan. */
+        position: relative;
+        z-index: 30;
+        align-self: flex-end;
+        box-sizing: border-box;
+        margin: 10px 12px 0;
+        max-width: min(92vw, 720px);
+        padding: 6px 10px;
+        border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+        border-radius: 5px;
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
+        color: var(--muted);
+        font: 12px/1.35 var(--font-mono);
+        text-align: right;
+        user-select: none;
+    }
+
+    .terminal-only-guide-actions {
+        display: inline-flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 5px;
+        margin-top: 4px;
+    }
+
+    .terminal-only-guide-action {
+        padding: 2px 7px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+    }
+
+    .terminal-only-guide-action:hover,
+    .terminal-only-guide-action:focus-visible {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .terminal-only-guide-action-danger {
+        color: var(--muted);
     }
 
     /* Dos columnas a partir de la tercera casilla: con cuatro quedan 2x2, y con

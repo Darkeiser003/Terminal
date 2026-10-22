@@ -1,33 +1,39 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
+import { packageManager, packageManagerArgs } from './package-manager.mjs';
 
-const skipChecks = /^(1|true|yes|si|sí)$/i.test(process.env.LTERMINAL_SKIP_CHECKS ?? '');
+const controlVar = process.platform === 'win32' ? 'WTERMINAL_SKIP_CHECKS' : 'LTERMINAL_SKIP_CHECKS';
+const skipChecks = /^(1|true|yes|si|sí)$/i.test(process.env[controlVar] ?? process.env.LTERMINAL_SKIP_CHECKS ?? '');
+const manager = packageManager();
+const managerBin = manager === 'pnpm'
+    ? (process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm')
+    : (process.platform === 'win32' ? 'npm.cmd' : 'npm');
 
-function run(command, args) {
+function run(args) {
     return new Promise((resolve, reject) => {
-        // npm.cmd es un script por lotes, no un ejecutable PE. Invocarlo a
-        // través de cmd.exe mantiene compatibilidad con Windows sin activar
-        // `shell: true` (deprecado por Node). Los argumentos de estos scripts
-        // son constantes del proyecto y se citan si contienen espacios.
+        // Los shims .cmd de Windows necesitan cmd.exe. Así se evita shell:true
+        // y se conserva el comportamiento con npm o pnpm sin depender del
+        // terminal que lanzó el build.
         const quote = (value) => /[\s"&()^<>|]/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+        const commandArgs = packageManagerArgs(manager, args);
         const child = process.platform === 'win32'
-            ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', [command, ...args].map(quote).join(' ')], { stdio: 'inherit' })
-            : spawn(command, args, { stdio: 'inherit' });
+            ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', [managerBin, ...commandArgs].map(quote).join(' ')], { stdio: 'inherit' })
+            : spawn(managerBin, commandArgs, { stdio: 'inherit' });
         child.on('error', reject);
         child.on('exit', (code, signal) => {
             if (code === 0) resolve();
-            else reject(new Error(`${command} ${args.join(' ')} terminó con ${signal ?? `código ${code}`}`));
+            else reject(new Error(`${managerBin} ${commandArgs.join(' ')} terminó con ${signal ?? `código ${code}`}`));
         });
     });
 }
 
 if (skipChecks) {
-    console.warn('Prebuild: comprobaciones externas omitidas por LTERMINAL_SKIP_CHECKS=1.');
+    console.warn(`Prebuild: comprobaciones externas omitidas por ${controlVar}=1.`);
     console.warn('Prebuild: se conserva únicamente la sincronización de metadatos necesaria para empaquetar.');
 } else {
-    await run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'check:workspace']);
-    await run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'check:links']);
-    await run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'check:install-sources']);
+    await run(['run', 'check:workspace']);
+    await run(['run', 'check:links']);
+    await run(['run', 'check:install-sources']);
 }
 
-await run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'metadata:sync']);
+await run(['run', 'metadata:sync']);

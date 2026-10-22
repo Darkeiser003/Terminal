@@ -1,30 +1,34 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
+import { packageManager, packageManagerArgs } from './package-manager.mjs';
 
-const skipChecks = /^(1|true|yes|si|sí)$/i.test(process.env.LTERMINAL_SKIP_CHECKS ?? '');
-const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const controlVar = process.platform === 'win32' ? 'WTERMINAL_SKIP_CHECKS' : 'LTERMINAL_SKIP_CHECKS';
+const skipChecks = /^(1|true|yes|si|sí)$/i.test(process.env[controlVar] ?? process.env.LTERMINAL_SKIP_CHECKS ?? '');
+const manager = packageManager();
+const managerBin = manager === 'pnpm'
+    ? (process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm')
+    : (process.platform === 'win32' ? 'npm.cmd' : 'npm');
 
-function run(command, args) {
+function run(args) {
     return new Promise((resolve, reject) => {
-        // npm.cmd es un script por lotes; usar cmd.exe explícitamente evita
-        // el `shell: true` deprecado por Node y conserva el comportamiento de
-        // npm en Windows. Los argumentos son constantes del proyecto y se
-        // citan si contienen espacios.
+        // Los shims .cmd necesitan cmd.exe; no usamos shell:true y aceptamos
+        // tanto npm como pnpm sin depender del terminal que lanzó Tauri.
         const quote = (value) => /[\s"&()^<>|]/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+        const commandArgs = packageManagerArgs(manager, args);
         const child = process.platform === 'win32'
-            ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', [command, ...args].map(quote).join(' ')], { stdio: 'inherit' })
-            : spawn(command, args, { stdio: 'inherit' });
+            ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', [managerBin, ...commandArgs].map(quote).join(' ')], { stdio: 'inherit' })
+            : spawn(managerBin, commandArgs, { stdio: 'inherit' });
         child.on('error', reject);
         child.on('exit', (code, signal) => {
             if (code === 0) resolve();
-            else reject(new Error(`${command} ${args.join(' ')} terminó con ${signal ?? `código ${code}`}`));
+            else reject(new Error(`${managerBin} ${commandArgs.join(' ')} terminó con ${signal ?? `código ${code}`}`));
         });
     });
 }
 
 if (skipChecks) {
-    console.warn('Build frontend: svelte-check omitido por LTERMINAL_SKIP_CHECKS=1.');
+    console.warn(`Build frontend: svelte-check omitido por ${controlVar}=1.`);
 } else {
-    await run(npmBin, ['exec', '--', 'svelte-check', '--tsconfig', './tsconfig.json']);
+    await run(['exec', '--', 'svelte-check', '--tsconfig', './tsconfig.json']);
 }
-await run(npmBin, ['exec', '--', 'vite', 'build']);
+await run(['exec', '--', 'vite', 'build']);

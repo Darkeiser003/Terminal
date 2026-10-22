@@ -77,6 +77,83 @@ pub const WINDOWS_ALIASES: [(&str, &str); 5] = [
     ("pwd",  "cd"),
 ];
 
+/// Archivo de la carpeta de sesión con el `ls` de cmd (ver [`CMD_LS_SCRIPT`]).
+pub const CMD_LS_HELPER: &str = "wt-ls.cmd";
+
+/// `ls` para cmd. Un `doskey ls=dir $*` pasaba las opciones Unix a `dir`, que
+/// tomaba `-l` por un archivo: `ls -l .cargo` decía «No se encuentra el
+/// archivo» antes de listar. Este script traduce las opciones habituales
+/// (`-a` → `/a`, `-R` → `/s`, `-t`/`-S` → `/o:-d`/`/o:-s`, `-r` invierte el
+/// orden, `-1` → `/b`; `-l` y `-h` no cambian nada porque `dir` ya da el
+/// formato largo), deja pasar los modificadores de `dir` (`/w`, `/o:n`…) y
+/// cambia `/` por `\` en las rutas. `findstr` distingue mayúsculas (`-r` no
+/// es `-R`). Se escribe con CRLF: con LF, cmd puede perder las etiquetas.
+pub const CMD_LS_SCRIPT: &[&str] = &[
+    "@echo off",
+    "setlocal EnableExtensions DisableDelayedExpansion",
+    "set \"wt_sw=\"",
+    "set \"wt_sort=\"",
+    "set \"wt_rev=\"",
+    "set \"wt_paths=\"",
+    ":wt_next",
+    "if \"%~1\"==\"\" goto wt_run",
+    "set \"wt_arg=%~1\"",
+    "if \"%wt_arg:~0,1%\"==\"/\" goto wt_switch",
+    "if not \"%wt_arg:~0,1%\"==\"-\" goto wt_path",
+    "echo(%wt_arg%| findstr /r /c:\"^-[a-zA-Z1]*$\" >nul || goto wt_path",
+    "echo(%wt_arg%| findstr /c:\"a\" /c:\"A\" >nul && set \"wt_sw=%wt_sw% /a\"",
+    "echo(%wt_arg%| findstr /c:\"R\" >nul && set \"wt_sw=%wt_sw% /s\"",
+    "echo(%wt_arg%| findstr /c:\"t\" >nul && set \"wt_sort=d\"",
+    "echo(%wt_arg%| findstr /c:\"S\" >nul && set \"wt_sort=s\"",
+    "echo(%wt_arg%| findstr /c:\"r\" >nul && set \"wt_rev=1\"",
+    "echo(%wt_arg%| findstr /c:\"1\" >nul && set \"wt_sw=%wt_sw% /b\"",
+    "shift",
+    "goto wt_next",
+    ":wt_switch",
+    "set \"wt_sw=%wt_sw% %wt_arg%\"",
+    "shift",
+    "goto wt_next",
+    ":wt_path",
+    "set \"wt_paths=%wt_paths% \"%wt_arg:/=\\%\"\"",
+    "shift",
+    "goto wt_next",
+    ":wt_run",
+    "if not defined wt_sort goto wt_dir",
+    "if defined wt_rev (set \"wt_sw=%wt_sw% /o:%wt_sort%\") else (set \"wt_sw=%wt_sw% /o:-%wt_sort%\")",
+    ":wt_dir",
+    "dir%wt_sw%%wt_paths%",
+];
+
+/// Contenido de [`CMD_LS_HELPER`], listo para escribir (CRLF).
+pub fn cmd_ls_script() -> String {
+    CMD_LS_SCRIPT.join("\r\n") + "\r\n"
+}
+
+/// `ls` de PowerShell en Windows. Sin opciones Unix es `Get-ChildItem @args`
+/// tal cual (sus parámetros, `-Force`, `-Name`…, siguen funcionando). Con
+/// grupos como `-la`, `-ltr` o `-R`: `a` → `-Force`, `R` → `-Recurse`,
+/// `1` → `-Name`, `t`/`S` ordenan por fecha/tamaño (`r` invierte), y `l`,
+/// `h` y `d` no cambian nada. Antes `-l` era ambiguo y daba error.
+pub const POWERSHELL_LS_BODY: &str = "$wtUnix = '^-[lahRtrS1d]+$'; $wtFlags = @($args | Where-Object { $_ -is [string] -and $_ -cmatch $wtUnix }); if ($wtFlags.Count -eq 0) { Get-ChildItem @args; return }; $wtRest = @($args | Where-Object { -not ($_ -is [string] -and $_ -cmatch $wtUnix) }); $wtAll = -join $wtFlags; $wtParams = @{}; if ($wtAll -cmatch 'a') { $wtParams.Force = $true }; if ($wtAll -cmatch 'R') { $wtParams.Recurse = $true }; if ($wtAll -cmatch '1') { $wtParams.Name = $true }; $wtSort = if ($wtAll -cmatch 'S') { 'Length' } elseif ($wtAll -cmatch 't') { 'LastWriteTime' } else { $null }; $wtItems = Get-ChildItem @wtParams @wtRest; if ($wtSort) { $wtItems | Sort-Object $wtSort -Descending:(-not ($wtAll -cmatch 'r')) } elseif ($wtAll -cmatch 'r') { $wtItems | Sort-Object Name -Descending } else { $wtItems }";
+
+/// Quita el alias integrado `ls` (AllScope en Windows PowerShell, de ahí
+/// `-Force`) para que se use la función `ls` de WTerminal.
+pub const POWERSHELL_FREE_LS_ALIAS: &str =
+    "if (Test-Path Alias:ls) { Remove-Item Alias:ls -Force -ErrorAction SilentlyContinue }";
+
+/// Orden de cmd para un alias de [`WINDOWS_ALIASES`] (sin el `$*` final).
+fn cmd_alias_command(name: &str, value: &str) -> String {
+    let helper = format!(
+        "call \"%{}%\\{CMD_LS_HELPER}\"",
+        crate::console_ui::CMD_FRAME_DIR_VAR
+    );
+    match name {
+        "ls" => helper,
+        "ll" => format!("{helper} -la"),
+        _ => value.to_string(),
+    }
+}
+
 /// Vocabulario estable que debe existir en todas las shells que aceptan la
 /// inicialización de la aplicación. El comando que hay detrás cambia cuando
 /// corresponde (por ejemplo `dir` frente a `ls`), pero el nombre y la
@@ -102,7 +179,14 @@ fn powershell_aliases(platform: &str) -> Vec<(&'static str, String)> {
     if platform == "windows" || platform == "win32" {
         return WINDOWS_ALIASES
             .iter()
-            .map(|(name, value)| (*name, (*value).to_string()))
+            .map(|(name, value)| {
+                let command = match *name {
+                    "ls" => POWERSHELL_LS_BODY.to_string(),
+                    "ll" => "ls -la @args".to_string(),
+                    _ => (*value).to_string(),
+                };
+                (*name, command)
+            })
             .collect();
     }
     // PowerShell Core en Linux/macOS no entiende la sintaxis POSIX de
@@ -138,6 +222,24 @@ pub fn clear_command(
     transport: Transport,
     app_name: &str,
 ) -> String {
+    clear_command_with_marker(
+        kind,
+        banner_path,
+        inside_doskey_macro,
+        transport,
+        app_name,
+        true,
+    )
+}
+
+fn clear_command_with_marker(
+    kind: ShellKind,
+    banner_path: Option<&str>,
+    inside_doskey_macro: bool,
+    transport: Transport,
+    app_name: &str,
+    include_marker: bool,
+) -> String {
     let title = if app_name.trim().is_empty() {
         "Terminal"
     } else {
@@ -165,11 +267,12 @@ pub fn clear_command(
         // título de la consola, y la app interpretaría cada una de esas
         // reemisiones como una limpieza nueva: la salida del comando
         // desaparecía sola y el banner no volvía a pintarse.
-        let mut parts = vec![
-            format!("@title {title} {CLEAR_MARKER}{random}"),
-            "@cls".to_string(),
-            format!("@title {title}"),
-        ];
+        let title_line = if include_marker {
+            format!("@title {title} {CLEAR_MARKER}{random}")
+        } else {
+            format!("@title {title}")
+        };
+        let mut parts = vec![title_line, "@cls".to_string(), format!("@title {title}")];
         if let Some(banner) = banner_path {
             parts.push(format!("@type \"{banner}\""));
         }
@@ -178,8 +281,13 @@ pub fn clear_command(
 
     if kind == ShellKind::Powershell {
         let ps_title = title.replace('\'', "''");
+        let title_line = if include_marker {
+            format!("$Host.UI.RawUI.WindowTitle = '{ps_title} {CLEAR_MARKER}' + (Get-Random)")
+        } else {
+            format!("$Host.UI.RawUI.WindowTitle = '{ps_title}'")
+        };
         let mut parts = vec![
-            format!("$Host.UI.RawUI.WindowTitle = '{ps_title} {CLEAR_MARKER}' + (Get-Random)"),
+            title_line,
             "Clear-Host".to_string(),
             format!("$Host.UI.RawUI.WindowTitle = '{ps_title}'"),
         ];
@@ -200,8 +308,13 @@ pub fn clear_command(
         "\"${RANDOM:-$$}\""
     };
     let safe_title = title.replace('\'', "");
+    let title_line = if include_marker {
+        format!("printf '\\033]0;{safe_title} {CLEAR_MARKER}%s\\007' {random}")
+    } else {
+        format!("printf '\\033]0;{safe_title}\\007'")
+    };
     let mut parts = vec![
-        format!("printf '\\033]0;{safe_title} {CLEAR_MARKER}%s\\007' {random}"),
+        title_line,
         "command clear".to_string(),
         format!("printf '\\033]0;{safe_title}\\007'"),
     ];
@@ -209,6 +322,38 @@ pub fn clear_command(
         parts.push(format!("cat '{}'", unix_path_for(banner, transport)));
     }
     parts.join("; ")
+}
+
+/// Marca el final del script inicial. El marcador de `clear_command` debe
+/// llegar antes del borrado en una limpieza normal, pero durante el arranque
+/// se necesita saber que ya terminaron todos los aliases y funciones.
+fn initialization_done_command(kind: ShellKind, app_name: &str) -> String {
+    let title = if app_name.trim().is_empty() {
+        "Terminal"
+    } else {
+        app_name.trim()
+    };
+    match kind {
+        ShellKind::Cmd => format!("@title {title} {CLEAR_MARKER}%RANDOM%&@title {title}"),
+        ShellKind::Powershell => {
+            let ps_title = title.replace('\'', "''");
+            format!(
+                "$Host.UI.RawUI.WindowTitle = '{ps_title} {CLEAR_MARKER}' + (Get-Random); $Host.UI.RawUI.WindowTitle = '{ps_title}'"
+            )
+        }
+        ShellKind::Fish => {
+            let safe_title = title.replace('\'', "");
+            format!(
+                "printf '\\033]0;{safe_title} {CLEAR_MARKER}%s\\007' (random); printf '\\033]0;{safe_title}\\007'"
+            )
+        }
+        _ => {
+            let safe_title = title.replace('\'', "");
+            format!(
+                "printf '\\033]0;{safe_title} {CLEAR_MARKER}%s\\007' \"${{RANDOM:-$$}}\"; printf '\\033]0;{safe_title}\\007'"
+            )
+        }
+    }
 }
 
 /// Redefine clear/cls en la shell. En PowerShell hay que forzar los alias: la
@@ -461,6 +606,7 @@ pub enum HelpTopic {
     Support,
     Credits,
     DarkeiserCredit,
+    ChristianCredit,
 }
 
 impl HelpTopic {
@@ -490,6 +636,7 @@ impl HelpTopic {
             Self::Support => "soporte",
             Self::Credits => "creditos",
             Self::DarkeiserCredit => "darkeiser003",
+            Self::ChristianCredit => "christianlg97",
         }
     }
 
@@ -506,6 +653,7 @@ impl HelpTopic {
             Self::Support => "soporte",
             Self::Credits => "creditos",
             Self::DarkeiserCredit => "credito de Darkeiser003",
+            Self::ChristianCredit => "crédito de Christianlg97",
         }
     }
 
@@ -531,6 +679,7 @@ impl HelpTopic {
             }
             "credito" | "creditos" | "credits" | "autor" | "autores" => Some(Self::Credits),
             "darkeiser003" => Some(Self::DarkeiserCredit),
+            "christianlg97" if cfg!(windows) => Some(Self::ChristianCredit),
             _ => None,
         }
     }
@@ -546,7 +695,15 @@ fn sibling_path(help_path: &str, extension: &str) -> String {
     format!("{base}.{extension}")
 }
 
-pub fn build_cmd_help_dispatcher(help_path: &str, t: &Translator) -> String {
+fn help_sections(windows: bool) -> Vec<HelpTopic> {
+    let mut topics = HelpTopic::SECTIONS.to_vec();
+    if windows {
+        topics.push(HelpTopic::ChristianCredit);
+    }
+    topics
+}
+
+pub fn build_cmd_help_dispatcher(help_path: &str, windows: bool, t: &Translator) -> String {
     let mut lines = vec![
         "@echo off".to_string(),
         "set \"topic=%~1\"".to_string(),
@@ -557,7 +714,7 @@ pub fn build_cmd_help_dispatcher(help_path: &str, t: &Translator) -> String {
             "if /I \"%topic%\"==\"{name}\" type \"{help_path}\" & exit /b 0"
         ));
     }
-    for topic in HelpTopic::SECTIONS {
+    for topic in help_sections(windows) {
         let path = help_topic_path(help_path, topic);
         for name in help_topic_names(topic) {
             lines.push(format!(
@@ -589,10 +746,11 @@ pub fn build_help_runner(
     kind: ShellKind,
     help_path: &str,
     transport: Transport,
+    windows: bool,
     t: &Translator,
 ) -> String {
     match kind {
-        ShellKind::Cmd => build_cmd_help_dispatcher(help_path, t),
+        ShellKind::Cmd => build_cmd_help_dispatcher(help_path, windows, t),
         ShellKind::Powershell => {
             let mut lines = vec![
                 "param([string]$Topic)".to_string(),
@@ -608,7 +766,7 @@ pub fn build_help_runner(
                     help_path.replace('\'', "''")
                 ));
             }
-            for topic in HelpTopic::SECTIONS {
+            for topic in help_sections(windows) {
                 let path = help_topic_path(help_path, topic).replace('\'', "''");
                 for name in help_topic_names(topic) {
                     lines.push(format!("        '{name}' {{ '{path}'; break }}"));
@@ -645,7 +803,7 @@ pub fn build_help_runner(
                     shell_help_path
                 ),
             ];
-            for topic in HelpTopic::SECTIONS {
+            for topic in help_sections(windows) {
                 lines.push(format!(
                     "{} ) cat \"{}\" ;;",
                     help_topic_names(topic).join("|"),
@@ -698,6 +856,7 @@ fn help_topic_names(topic: HelpTopic) -> &'static [&'static str] {
         ],
         HelpTopic::Credits => &["credito", "creditos", "credits", "autor", "autores"],
         HelpTopic::DarkeiserCredit => &["darkeiser003"],
+        HelpTopic::ChristianCredit => &["christianlg97"],
         HelpTopic::General => &["general", "inicio", "todo", "all", "help", "ayuda"],
     }
 }
@@ -723,7 +882,7 @@ pub fn build_help_topic_text(
             "comandos añadidos a esta sesión ({shell})"
         )
     ));
-    if topic != HelpTopic::General {
+    if topic != HelpTopic::General && (topic != HelpTopic::ChristianCredit || cfg!(windows)) {
         lines.push(format!(
             "{HELP_SECTION_COLOR}Sección: {}{HELP_RESET}",
             topic.label()
@@ -756,10 +915,13 @@ pub fn build_help_topic_text(
         render_support(&mut lines, options);
     }
     if topic == HelpTopic::General || topic == HelpTopic::Credits {
-        render_credits(&mut lines, t);
+        render_credits(&mut lines, t, cfg!(windows));
     }
     if topic == HelpTopic::DarkeiserCredit {
         render_credit(&mut lines, t, CreditKind::Darkeiser);
+    }
+    if topic == HelpTopic::ChristianCredit && cfg!(windows) {
+        render_credit(&mut lines, t, CreditKind::Christian);
     }
     lines.push(format!("{HELP_SECTION_COLOR}Uso de esta ayuda{HELP_RESET}"));
     lines.push(String::new());
@@ -1058,10 +1220,14 @@ fn render_support(lines: &mut Vec<String>, options: &HelpOptions<'_>) {
 #[derive(Clone, Copy)]
 enum CreditKind {
     Darkeiser,
+    Christian,
 }
 
-fn render_credits(lines: &mut Vec<String>, t: &Translator) {
+fn render_credits(lines: &mut Vec<String>, t: &Translator, windows: bool) {
     render_credit(lines, t, CreditKind::Darkeiser);
+    if windows {
+        render_credit(lines, t, CreditKind::Christian);
+    }
     lines.push(
         "    Linux se presenta como LTerminal; Windows se presenta como WTerminal.".to_string(),
     );
@@ -1085,17 +1251,47 @@ fn render_credit(lines: &mut Vec<String>, t: &Translator, kind: CreditKind) {
         .iter()
         .map(|(name, value)| (*name, (*value).to_string()))
         .collect();
+    const CHRISTIAN: &[(&str, &str)] = &[
+        ("christianProfile", "https://github.com/Christianlg97"),
+        ("winslimStore", ""),
+        ("winslimUpdate", ""),
+    ];
+    let christian_params: Vec<(&str, String)> = CHRISTIAN
+        .iter()
+        .map(|(name, value)| (*name, (*value).to_string()))
+        .collect();
     let text = match kind {
         CreditKind::Darkeiser => t.tp(
             "terminal.creditDarkeiser",
             &dark_params,
             "Darkeiser003 · desarrollador de WTerminal\nGracias por visitar este proyecto. Puedes seguir el desarrollo, abrir incidencias y conocer las novedades en:\nPerfil: {darkeiserProfile}\nWTerminal: {terminalProject}\nInfraestructura-Web: {cloudProject}",
         ),
+        CreditKind::Christian => {
+            let translated = t.tp(
+                "terminal.creditChristian",
+                &christian_params,
+                "Christianlg97 · WTerminal contributor\nThanks for sharing your knowledge, time and resources, especially about Windows.\nProfile: {christianProfile}",
+            );
+            let mut include_line = true;
+            translated
+                .lines()
+                .take_while(|line| {
+                    let include = include_line;
+                    if line.contains("https://github.com/Christianlg97") {
+                        include_line = false;
+                    }
+                    include
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
     };
     for line in text.lines() {
         lines.push(format!("    {line}"));
     }
-    lines.push("    LTools / WinSlim Tools: https://github.com/Darkeiser003/Tools".to_string());
+    if matches!(kind, CreditKind::Darkeiser) {
+        lines.push("    LTools / WinSlim Tools: https://github.com/Darkeiser003/Tools".to_string());
+    }
     lines.push(String::new());
 }
 
@@ -1252,6 +1448,11 @@ pub struct InitOptions<'a> {
     pub windows_manager: Option<&'a str>,
     /// La inicialización imprime el banner una sola vez cuando es posible.
     pub initial_banner: bool,
+    /// Líneas que cargan las sugerencias y colores de la línea de órdenes
+    /// (`shell_assist`). Van antes del borrado y el banner iniciales: lo que
+    /// impriman al cargarse queda borrado (ble.sh avisa cuando regenera su
+    /// caché de `tput`) y no deja a ConPTY filas por debajo de xterm.
+    pub assist_lines: &'a [String],
 }
 
 pub struct InitScript {
@@ -1267,22 +1468,8 @@ pub struct InitScript {
 
 /// Deja el carácter ESC en una variable de la sesión, para que las cabeceras
 /// que escribe la app puedan llevar color en cmd.
-///
-/// `echo` de cmd no interpreta secuencias de escape, y un ESC literal en la
-/// línea no vale: el editor de línea de la consola lo trata como "borrar la
-/// línea" y se comería el comando. `prompt $E` sí lo produce, y `for /f` lo
-/// captura. Se hace una vez por pestaña, aquí, porque en una línea encadenada
-/// con `&` la variable se expandiría antes de haberse asignado.
-///
-/// El script se ejecuta con `call`, así que la variable sobrevive al archivo.
 fn escape_capture_line() -> String {
     format!(
-        // No se debe invocar `cmd` a través del PATH: en Windows recortado
-        // puede resolver un shim o una copia incompatible. `/d` también evita
-        // que un AutoRun del Registro rompa este cmd auxiliar. El cmd padre
-        // sigue siendo el de la sesión; solo se usa este proceso efímero para
-        // que `prompt $E` entregue un ESC sin escribirlo literalmente en la
-        // línea que edita ConPTY.
         "for /f \"delims=\" %%E in ('echo prompt $E^| \"%ComSpec%\" /d') do set \"{}=%%E\"",
         crate::console_ui::CMD_ESC_VAR
     )
@@ -1303,8 +1490,18 @@ pub fn build_init_script(
         .flatten();
     let mut lines: Vec<String> = format.header.iter().map(|line| line.to_string()).collect();
 
-    // La primera salida visible debe ser realmente la primera instrucción del
-    // inicializador. Antes se registraban los alias base (y, en cmd, se
+    // Las sugerencias se cargan antes de limpiar: xterm no ve la salida del
+    // inicializador y recibe el banner sustituto tras el marcador, así que
+    // cualquier aviso impreso después del banner movería el cursor de ConPTY
+    // sin que xterm lo sepa. ble.sh, por ejemplo, escribe «updating tput
+    // cache» la primera vez que se carga con un TERM nuevo, y no se puede
+    // silenciar redirigiendo: guarda los descriptores que tenga al cargarse
+    // para pintar la línea de órdenes. Clink, PSReadLine y ble.sh leen los
+    // alias en cada orden, así que no necesitan que existan antes.
+    lines.extend(options.assist_lines.iter().cloned());
+
+    // Salvo esas sugerencias, la primera salida visible debe ser realmente la
+    // primera instrucción del inicializador. Antes se registraban los alias base (y, en cmd, se
     // ejecutaba además un `cmd /d` auxiliar para capturar ESC) antes de limpiar
     // y leer el banner. En equipos con Windows Defender o perfiles de shell
     // lentos eso hacía que el cambio de shell pareciera congelado aunque el
@@ -1314,22 +1511,30 @@ pub fn build_init_script(
     // pantalla. `sysinfo` conserva la misma ruta para una solicitud explícita;
     // el alias de `clear` decide después si vuelve a mostrarlo consultando su
     // indicador de preferencias.
-    lines.push(clear_command(
+    lines.push(clear_command_with_marker(
         kind,
         initial_banner_path,
         false,
         options.transport,
         options.app_name,
+        false,
     ));
 
     match kind {
         ShellKind::Cmd => {
             lines.push(escape_capture_line());
             for (name, value) in WINDOWS_ALIASES {
-                lines.push(format!("doskey {name}={value} $*"));
+                lines.push(format!(
+                    "doskey {name}={} $*",
+                    cmd_alias_command(name, value)
+                ));
             }
         }
         ShellKind::Powershell => {
+            // En PowerShell un alias gana a una función con el mismo nombre,
+            // y `ls` es un alias integrado de `Get-ChildItem`: sin quitarlo,
+            // la función `ls` de WTerminal no llegaba a ejecutarse nunca.
+            lines.push(POWERSHELL_FREE_LS_ALIAS.to_string());
             for (name, value) in powershell_aliases(options.platform) {
                 let body = if value.contains("@args") {
                     value
@@ -1409,6 +1614,10 @@ pub fn build_init_script(
         options.transport,
     ));
     lines.push(help_compat_line(kind, options.help_path));
+    // El marcador de arranque va al final: hasta aquí la shell ha terminado
+    // de registrar aliases y el siguiente prompt ya puede liberarse sin
+    // quedar en una línea vacía durante una transición de paneles.
+    lines.push(initialization_done_command(kind, options.app_name));
 
     let help_options = HelpOptions {
         app_name: options.app_name,
@@ -1424,7 +1633,7 @@ pub fn build_init_script(
             .help_path
             .map(|_| build_help_topic_text(t, &help_options, HelpTopic::General)),
         help_topics: options.help_path.map(|_| {
-            HelpTopic::SECTIONS
+            help_sections(cfg!(windows))
                 .into_iter()
                 .map(|topic| {
                     (
@@ -1436,7 +1645,7 @@ pub fn build_init_script(
         }),
         help_runner: options
             .help_path
-            .map(|path| build_help_runner(kind, path, options.transport, t)),
+            .map(|path| build_help_runner(kind, path, options.transport, cfg!(windows), t)),
     })
 }
 
@@ -1464,6 +1673,102 @@ pub fn build_init_invocation(
 mod tests {
     use super::*;
 
+    /// Carpeta con dos archivos (uno oculto) para probar `ls` de verdad.
+    #[cfg(windows)]
+    fn carpeta_de_prueba() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "a").unwrap();
+        let oculto = dir.path().join("oculto.txt");
+        std::fs::write(&oculto, "b").unwrap();
+        std::process::Command::new("attrib")
+            .arg("+h")
+            .arg(&oculto)
+            .status()
+            .unwrap();
+        dir
+    }
+
+    /// El `ls` de cmd con un cmd real: `-l` ya no se toma por un archivo,
+    /// `-a` enseña los ocultos, `-1` da solo nombres y `/` vale en rutas.
+    #[cfg(windows)]
+    #[test]
+    fn ls_de_cmd_entiende_las_opciones_unix_de_verdad() {
+        let carpeta = carpeta_de_prueba();
+        let scripts = tempfile::tempdir().unwrap();
+        let helper = scripts.path().join(CMD_LS_HELPER);
+        std::fs::write(&helper, cmd_ls_script()).unwrap();
+        assert!(cmd_ls_script().contains("\r\n"), "cmd necesita CRLF");
+        let ls = |args: &[&str]| {
+            let line = format!("call \"{}\" {}", helper.display(), args.join(" "));
+            use std::os::windows::process::CommandExt;
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c"])
+                .raw_arg(&line)
+                .current_dir(carpeta.path().parent().unwrap())
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).to_string()
+                + &String::from_utf8_lossy(&output.stderr)
+        };
+        let nombre = carpeta
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let largo = ls(&["-l", &nombre]);
+        assert!(largo.contains("visible.txt"), "{largo}");
+        assert!(!largo.contains("oculto.txt"), "{largo}");
+        assert!(!largo.to_lowercase().contains("no se encuentra"), "{largo}");
+        assert!(!largo.to_lowercase().contains("file not found"), "{largo}");
+        let todo = ls(&["-la", &nombre]);
+        assert!(todo.contains("oculto.txt"), "{todo}");
+        let nombres = ls(&["-1a", &format!("./{nombre}")]);
+        let lineas: Vec<&str> = nombres
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lineas.len(), 2, "{nombres}");
+        assert!(lineas.iter().all(|l| l.ends_with(".txt")), "{nombres}");
+        // Un modificador de `dir` sigue funcionando.
+        assert!(ls(&["/b", &nombre]).contains("visible.txt"));
+    }
+
+    /// La función `ls` de PowerShell en Windows PowerShell 5.1 real.
+    #[cfg(windows)]
+    #[test]
+    fn ls_de_powershell_entiende_las_opciones_unix_y_las_propias() {
+        let carpeta = carpeta_de_prueba();
+        let ruta = carpeta.path().display().to_string().replace('\'', "''");
+        let ls = |args: &str| {
+            let script = format!(
+                "{POWERSHELL_FREE_LS_ALIAS}; function ls {{ {POWERSHELL_LS_BODY} }}; ls {args} '{ruta}' | ForEach-Object {{ $_.ToString() }}"
+            );
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+                .unwrap();
+            (
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )
+        };
+        let (largo, error) = ls("-l");
+        assert!(error.trim().is_empty(), "{error}");
+        assert!(
+            largo.contains("visible.txt") && !largo.contains("oculto.txt"),
+            "{largo}"
+        );
+        let (todo, error) = ls("-la");
+        assert!(error.trim().is_empty(), "{error}");
+        assert!(todo.contains("oculto.txt"), "{todo}");
+        // Los parámetros de PowerShell siguen intactos.
+        let (propio, error) = ls("-Force");
+        assert!(error.trim().is_empty(), "{error}");
+        assert!(propio.contains("oculto.txt"), "{propio}");
+    }
+
     fn options<'a>(transport: Transport) -> InitOptions<'a> {
         InitOptions {
             nsudo_path: None,
@@ -1479,11 +1784,68 @@ mod tests {
             platform: "windows",
             windows_manager: Some("winget"),
             initial_banner: true,
+            assist_lines: &[],
         }
     }
 
     fn build(kind: ShellKind, options: &InitOptions<'_>) -> InitScript {
         build_init_script(kind, &Translator::default(), options).expect("familia conocida")
+    }
+
+    #[test]
+    fn el_asistente_de_la_linea_de_ordenes_se_carga_antes_del_borrado_y_el_banner() {
+        let assist = vec!["call \"C:\\clink\\clink.bat\" inject --quiet".to_string()];
+        let mut opts = options(Transport::Native);
+        opts.assist_lines = &assist;
+        opts.banner_path = Some("C:\\tmp\\banner.txt");
+        let script = build(ShellKind::Cmd, &opts);
+        let lines: Vec<&str> = script.content.lines().collect();
+        let inject = lines
+            .iter()
+            .position(|line| line.contains("inject --quiet"))
+            .expect("Clink se inyecta");
+        let clear = lines
+            .iter()
+            .position(|line| line.contains("@cls") && line.contains("banner.txt"))
+            .expect("borrado y banner iniciales");
+        // Lo que imprima al cargarse queda debajo del borrado: el cursor de
+        // ConPTY termina donde xterm, tras el banner sustituto.
+        assert!(inject < clear, "{lines:#?}");
+        // El marcador de arranque sigue siendo lo último.
+        assert!(lines.last().is_some_and(|line| line.contains(CLEAR_MARKER)));
+        // Sin asistente no se añade nada.
+        let plain = build(ShellKind::Cmd, &options(Transport::Native));
+        assert!(!plain.content.contains("inject"));
+    }
+
+    #[test]
+    fn ble_sh_psreadline_y_los_plugins_de_zsh_se_cargan_antes_del_banner() {
+        for (kind, line) in [
+            (
+                ShellKind::Bash,
+                "if [[ $- == *i* ]]; then source /tmp/ble.sh; fi",
+            ),
+            (ShellKind::Zsh, "source /tmp/zsh-autosuggestions.zsh"),
+            (
+                ShellKind::Powershell,
+                "try { Set-PSReadLineOption -PredictionSource History } catch {}",
+            ),
+        ] {
+            let assist = vec![line.to_string()];
+            let mut opts = options(Transport::Native);
+            opts.assist_lines = &assist;
+            opts.banner_path = Some("/tmp/banner.txt");
+            let script = build(kind, &opts);
+            let assist_at = script.content.find(line).expect("línea de sugerencias");
+            let banner_at = script.content.find("banner.txt").expect("banner inicial");
+            assert!(assist_at < banner_at, "{kind:?}: {}", script.content);
+            assert!(script
+                .content
+                .trim_end()
+                .lines()
+                .last()
+                .is_some_and(|last| last.contains(CLEAR_MARKER)));
+        }
     }
 
     // ---- clear ----
@@ -1643,7 +2005,12 @@ mod tests {
     #[test]
     fn todas_las_shells_reciben_el_mismo_vocabulario_canonico() {
         let cmd = build(ShellKind::Cmd, &options(Transport::Native));
-        assert!(cmd.content.contains("doskey ls=dir $*"));
+        assert!(cmd
+            .content
+            .contains("doskey ls=call \"%WSTERM_UI%\\wt-ls.cmd\" $*"));
+        assert!(cmd
+            .content
+            .contains("doskey ll=call \"%WSTERM_UI%\\wt-ls.cmd\" -la $*"));
         assert!(cmd.content.contains("doskey pwd=cd $*"));
         assert!(cmd.content.contains("\"%ComSpec%\" /d"));
         assert!(!cmd.content.contains("prompt $E^| cmd')"));
@@ -1905,13 +2272,13 @@ mod tests {
     }
 
     #[test]
-    fn el_archivo_limpia_la_pantalla_antes_de_los_aliases() {
+    fn el_archivo_limpia_la_pantalla_antes_de_los_aliases_y_marca_al_final() {
         let script = build(ShellKind::Cmd, &options(Transport::Native));
         let limpieza = script
             .content
             .lines()
-            .position(|line| line.contains(CLEAR_MARKER))
-            .expect("el inicializador debe emitir el marcador");
+            .position(|line| line.contains("@cls"))
+            .expect("el inicializador debe limpiar la pantalla");
         let primer_alias = script
             .content
             .lines()
@@ -1921,15 +2288,27 @@ mod tests {
             limpieza < primer_alias,
             "el banner debe mostrarse antes de cargar la biblioteca"
         );
+        let marcador = script
+            .content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(CLEAR_MARKER))
+            .map(|(index, _)| index)
+            .last()
+            .expect("el inicializador debe emitir el marcador");
+        assert!(
+            marcador > primer_alias,
+            "el marcador confirma el final del script"
+        );
     }
 
     #[test]
-    fn el_banner_se_emite_antes_de_las_sondas_auxiliares() {
+    fn el_banner_se_emite_antes_de_las_sondas_auxiliares_y_el_marcador_cierra() {
         let script = build(ShellKind::Cmd, &options(Transport::Native));
         let limpieza = script
             .content
-            .find(CLEAR_MARKER)
-            .expect("el inicializador debe emitir el marcador");
+            .find("@cls")
+            .expect("el inicializador debe limpiar la pantalla");
         let captura_escape = script
             .content
             .find("for /f")
@@ -1938,6 +2317,14 @@ mod tests {
             limpieza < captura_escape,
             "el primer banner no debe esperar al cmd auxiliar: {0}",
             script.content
+        );
+        let marcador = script
+            .content
+            .rfind(CLEAR_MARKER)
+            .expect("el inicializador debe emitir el marcador");
+        assert!(
+            marcador > captura_escape,
+            "el marcador se emite al terminar los aliases"
         );
     }
 
@@ -1958,13 +2345,16 @@ mod tests {
             let script = build(kind, &opts);
             let marker = script
                 .content
-                .find(CLEAR_MARKER)
+                .rfind(CLEAR_MARKER)
                 .expect("cada shell debe emitir el marcador");
             let alias = script
                 .content
                 .find("backup")
                 .expect("el alias de prueba debe llegar al inicializador");
-            assert!(marker < alias, "{kind:?} carga el alias antes del banner");
+            assert!(
+                marker > alias,
+                "{kind:?} marca el final tras cargar el alias"
+            );
         }
     }
 
@@ -1990,7 +2380,7 @@ mod tests {
         assert!(script
             .help_topics
             .as_ref()
-            .is_some_and(|topics| topics.len() == 10));
+            .is_some_and(|topics| topics.len() == help_sections(cfg!(windows)).len()));
         assert!(script
             .help_runner
             .as_ref()
@@ -2036,7 +2426,10 @@ mod tests {
             HelpTopic::from_argument(Some("darkeiser003")),
             Some(HelpTopic::DarkeiserCredit)
         );
-        assert_eq!(HelpTopic::from_argument(Some("christianlg97")), None);
+        assert_eq!(
+            HelpTopic::from_argument(Some("christianlg97")),
+            cfg!(windows).then_some(HelpTopic::ChristianCredit)
+        );
         assert_eq!(HelpTopic::from_argument(Some("frameworks")), None);
     }
 
@@ -2058,7 +2451,19 @@ mod tests {
         assert!(!dark.contains("Christianlg97"));
         let all = build_help_topic_text(&Translator::default(), &opciones, HelpTopic::Credits);
         assert!(all.contains("Darkeiser003"));
-        assert!(!all.contains("Christianlg97"));
+        assert_eq!(all.contains("Christianlg97"), cfg!(windows));
+        let christian = build_help_topic_text(
+            &Translator::default(),
+            &opciones,
+            HelpTopic::ChristianCredit,
+        );
+        assert_eq!(christian.contains("Christianlg97"), cfg!(windows));
+        if cfg!(windows) {
+            assert!(christian.contains("https://github.com/Christianlg97"));
+            assert!(!christian.contains("WinSlim Center Store:"));
+        }
+        assert!(!christian.contains("github.com/Darkeiser003/Tools"));
+        assert!(dark.contains("github.com/Darkeiser003/Tools"));
     }
 
     #[test]
@@ -2067,6 +2472,7 @@ mod tests {
             ShellKind::Cmd,
             "C:\\t\\help.txt",
             Transport::Native,
+            cfg!(windows),
             &Translator::default(),
         );
         assert!(cmd.contains("%topic%"));
@@ -2074,6 +2480,7 @@ mod tests {
             ShellKind::Powershell,
             "C:\\t\\help.txt",
             Transport::Native,
+            cfg!(windows),
             &Translator::default(),
         );
         assert!(powershell.contains("param([string]$Topic)"));
@@ -2081,6 +2488,7 @@ mod tests {
             ShellKind::Bash,
             "/tmp/help.txt",
             Transport::Native,
+            cfg!(windows),
             &Translator::default(),
         );
         assert!(unix.contains("paquete|paquetes"));
@@ -2092,6 +2500,7 @@ mod tests {
             ShellKind::Cmd,
             "C:\\t\\help.txt",
             Transport::Native,
+            cfg!(windows),
             &Translator::new("en"),
         );
         assert!(en.contains("Help%topic%"));
@@ -2101,6 +2510,7 @@ mod tests {
             ShellKind::Bash,
             "/tmp/help.txt",
             Transport::Native,
+            cfg!(windows),
             &Translator::new("es"),
         );
         assert!(es.contains("Ayuda$topic"));

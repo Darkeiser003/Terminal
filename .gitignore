@@ -5,6 +5,9 @@ node_modules/
 /dist/
 /dist-preview/
 /release/
+# Salida local de pruebas: logs, informes E2E y resúmenes de las suites
+# (scripts/run-e2e-suite.mjs, windows/build.ps1 -ReleaseValidation).
+/artifacts/
 
 # Cachés y temporales de los empaquetadores (Vite, Svelte, Tauri/Cargo).
 # Se mantienen las rutas de configuración y los locks versionados.
@@ -44,6 +47,11 @@ lcov.info
 # pruebas manualmente. Los informes oficiales se escriben normalmente en %TEMP%.
 /*-smoke-*.json
 /*-e2e-*.json
+
+# Notas de los asistentes de IA (traspasos, auditorías, borradores): no son
+# documentación del proyecto. La documentación publicada es README.md,
+# SECURITY.md y CONTRIBUTING.md; docs-ia/LEEME.md explica la regla.
+/docs-ia/
 
 # Evidencia local de auditorías y builds; los registros y capturas temporales
 # no deben volver al repositorio. La documentación mantenida vive en README.md.

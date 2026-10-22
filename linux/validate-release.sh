@@ -13,6 +13,8 @@ TOKEN="release-$$-$(date +%s)"
 OUTPUT="$(mktemp "${TMPDIR:-/tmp}/lterminal-release-validation.XXXXXX")"
 PID=""
 
+# Invoked by the EXIT/INT/TERM trap below.
+# shellcheck disable=SC2329
 cleanup() {
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         kill "$PID" 2>/dev/null || true
@@ -38,7 +40,7 @@ SMOKE_READY_TIMEOUT="${LTERMINAL_SMOKE_READY_TIMEOUT:-45}"
 if ! [[ "$SMOKE_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
     SMOKE_READY_TIMEOUT=45
 fi
-for attempt in $(seq 1 "$SMOKE_READY_TIMEOUT"); do
+for ((attempt = 1; attempt <= SMOKE_READY_TIMEOUT; attempt++)); do
     if grep -Fq "\"smokeToken\":\"$TOKEN\"" "$LOG" 2>/dev/null; then
         echo "OK: runtime, ventana, frontend, IPC, xterm y primera PTY operativos."
         exit 0
@@ -54,7 +56,7 @@ for attempt in $(seq 1 "$SMOKE_READY_TIMEOUT"); do
     sleep 1
 done
 
-echo "ERROR: el proceso vive, pero el frontend no confirmó una terminal funcional." >&2
+echo "ERROR: el proceso vive, pero el frontend no confirmó una terminal funcional en $((attempt - 1)) s." >&2
 sed 's/^/  /' "$OUTPUT" >&2
 tail -n 80 "$LOG" 2>/dev/null >&2 || true
 exit 1

@@ -178,7 +178,14 @@
     function onPointerDown(event: MouseEvent): void {
         const target = event.target as Node | null;
         if (!box || !target) return;
+        // Durante una detección el contenido puede reemplazar el nodo que
+        // estaba enlazado en `box`. En ese instante `box.contains(target)`
+        // puede consultar el panel anterior y considerar externo un clic que
+        // sigue dentro del diálogo visible, cerrándolo justo al refrescar.
+        // Comprobar también el ancestro vivo hace el cierre resistente a ese
+        // rerender sin cambiar el comportamiento de pulsar fuera.
         if (box.contains(target)) return;
+        if (target instanceof Element && target.closest('.panel')) return;
         if (target instanceof Element && target.closest('[data-panel-toggle]')) return;
         panels.close();
     }
@@ -291,33 +298,39 @@
                     title={app.t('tabs.dragHint', 'Arrastra para reordenar; doble clic para restablecer.')}
         ></div>
 
-        <!-- Solo este hijo se desplaza. Las asas son hermanas suyas y se
-             quedan ancladas al marco exterior aunque la lista haga scroll. -->
-        <div class="panel-scroll">
-            <div class="panel-header">
-                <div class="panel-heading">
-                    <div class="panel-title">{title}</div>
-                    {#if subtitle}
-                        <div class="panel-subtitle" class:error>{subtitle}</div>
-                    {/if}
-                </div>
-                {#if count !== undefined}
-                    <span class="panel-count" title={countLabel} aria-label={countLabel}>{count}</span>
+        <!-- La cabecera queda fuera del scroller: así nunca tapa una fila
+             cuando una lista larga se desplaza hasta el borde superior. Las
+             asas también son hermanas y permanecen ancladas al marco. -->
+        <div class="panel-header">
+            <div class="panel-heading">
+                <div class="panel-title">{title}</div>
+                {#if subtitle}
+                    <div class="panel-subtitle" class:error>{subtitle}</div>
                 {/if}
-                <button
-                    type="button"
-                    class="panel-close"
-                    bind:this={closeButton}
-                    aria-label={app.t('common.close', 'Cerrar')}
-                    title={app.t('common.close', 'Cerrar')}
-                    onclick={() => panels.close()}
-                >×</button>
             </div>
-
-            {#if header}
-                {@render header()}
+            {#if count !== undefined}
+                <span class="panel-count" title={countLabel} aria-label={countLabel}>{count}</span>
             {/if}
+            <button
+                type="button"
+                class="panel-close"
+                bind:this={closeButton}
+                aria-label={app.t('common.close', 'Cerrar')}
+                title={app.t('common.close', 'Cerrar')}
+                onclick={() => panels.close()}
+            >×</button>
+        </div>
 
+        {#if header}
+            <!-- Los controles de navegación pertenecen a la cabecera, no al
+                 contenido desplazable. Mantenerlos fuera del scroller evita
+                 que el sticky deje pasar filas por detrás al hacer scroll. -->
+            <div class="panel-subheader">
+                {@render header()}
+            </div>
+        {/if}
+
+        <div class="panel-scroll">
             {@render children()}
         </div>
     </div>
@@ -355,8 +368,10 @@
         overflow-x: hidden;
         overflow-y: auto;
         /* Deja sitio al asa inferior para que la última acción siga siendo
-           pulsable incluso con el scroll completamente abajo. */
-        padding: 6px 6px 14px;
+           pulsable incluso con el scroll completamente abajo. Se publica como
+           variable: un pie sticky necesita la misma medida para tocar el borde. */
+        --panel-scroll-bottom: 14px;
+        padding: 6px 6px var(--panel-scroll-bottom);
     }
 
     /* Mientras se arrastra no se selecciona texto ni se disparan estados de
@@ -416,14 +431,11 @@
         border-color: var(--accent);
     }
 
-    /* La cabecera se queda a la vista al desplazar: es donde aparecen los
-       errores de una acción que se acaba de pulsar, y en una lista larga el
-       aviso se perdía fuera de pantalla. El -6px compensa el padding del
-       panel, para que no asome el contenido por encima. */
+    /* La cabecera está fuera de la lista desplazable. Además de mantener el
+       título y el cierre visibles, evita que una fila quede debajo de una capa
+       sticky y no pueda recibir el clic. */
     .panel-header {
-        position: sticky;
-        top: -6px;
-        z-index: 2;
+        flex: 0 0 auto;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -432,6 +444,17 @@
         background: var(--surface);
         border-bottom: 1px solid var(--border);
         color: var(--text);
+    }
+
+    .panel-subheader {
+        flex: 0 0 auto;
+        min-width: 0;
+        overflow: hidden;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        color: var(--text);
+        position: relative;
+        z-index: 2;
     }
 
     /* El encabezado es un hijo flex: `min-width: 0` permite que el título se

@@ -30,6 +30,15 @@ struct SettingsCache {
 static SETTINGS_CACHE: Lazy<Mutex<SettingsCache>> =
     Lazy::new(|| Mutex::new(SettingsCache::default()));
 
+/// Una sola escritura de settings.json a la vez dentro del proceso, y ninguna
+/// lectura del disco a medio guardar. Los guardados de Ajustes, del tamaño de
+/// la ventana (hilo `viewport-saver`), de los anclados… comparten el temporal
+/// `.tmp-<pid>`: a la vez, uno instalaba el JSON a medio escribir del otro
+/// (EOF al verificarlo) y el otro ya no encontraba su temporal. Y una lectura
+/// entre los dos renombres veía el archivo ausente y devolvía la configuración
+/// vacía.
+static SETTINGS_IO: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
 fn file_signature(file: &Path) -> Option<FileSignature> {
     let metadata = std::fs::metadata(file).ok()?;
     Some(FileSignature {
@@ -53,6 +62,13 @@ fn read_object(file: &Path) -> Option<Map<String, Value>> {
 /// Lee la configuración. Un archivo ausente es lo normal en el primer arranque
 /// y devuelve un objeto vacío; uno corrupto intenta primero la copia `.bak`.
 pub fn load_settings() -> Map<String, Value> {
+    let _io = SETTINGS_IO.lock();
+    load_settings_unlocked()
+}
+
+/// `load_settings` para quien ya tiene `SETTINGS_IO` (el guardado, que fusiona
+/// sobre lo último escrito).
+fn load_settings_unlocked() -> Map<String, Value> {
     let target = settings_path();
     let signature = file_signature(&target);
     {
@@ -114,11 +130,35 @@ fn temp_path(target: &Path) -> PathBuf {
 /// Devuelve la configuración completa resultante, o `None` si no se pudo
 /// escribir.
 pub fn save_settings(patch: &Map<String, Value>) -> Option<Map<String, Value>> {
-    let target = settings_path();
-    let backup = backup_path(&target);
-    let temp = temp_path(&target);
+    let next = save_merged(&settings_path(), patch, load_settings_unlocked)?;
+    // Cambiar la carpeta propia, desactivarla o cambiar sus categorías
+    // afecta a las terminales que se abran desde ahora.
+    if patch.keys().any(|key| key.starts_with("toolchainStore")) {
+        crate::config::toolchain_store::refresh_environment();
+        // Y en el PATH del usuario, si la integración con el PATH está activa.
+        if let Err(error) = crate::platform::path_integration::sync_tool_bins() {
+            log_warn!(
+                "No se pudieron actualizar las carpetas de herramientas en el PATH",
+                serde_json::json!({ "error": error })
+            );
+        }
+    }
+    Some(next)
+}
 
-    match write_merged(&target, &backup, &temp, patch) {
+/// Fusiona `patch` sobre `current()` y lo escribe en `target` con
+/// `SETTINGS_IO` tomado de la lectura a la verificación; si falla, deja el
+/// destino como estaba.
+fn save_merged(
+    target: &Path,
+    patch: &Map<String, Value>,
+    current: impl FnOnce() -> Map<String, Value>,
+) -> Option<Map<String, Value>> {
+    let _io = SETTINGS_IO.lock();
+    let backup = backup_path(target);
+    let temp = temp_path(target);
+
+    match write_merged(target, &backup, &temp, current(), patch) {
         Ok(next) => Some(next),
         Err(error) => {
             log_error!(
@@ -129,7 +169,7 @@ pub fn save_settings(patch: &Map<String, Value>) -> Option<Map<String, Value>> {
             // Si el destino quedó apartado pero no se pudo instalar el nuevo,
             // se restaura la configuración anterior en el mejor esfuerzo.
             if !target.exists() && backup.exists() {
-                if let Err(restore_error) = std::fs::rename(&backup, &target) {
+                if let Err(restore_error) = std::fs::rename(&backup, target) {
                     log_error!(
                         "No se pudo restaurar settings.json.bak",
                         serde_json::json!({ "error": restore_error.to_string() })
@@ -145,12 +185,12 @@ fn write_merged(
     target: &Path,
     backup: &Path,
     temp: &Path,
+    mut next: Map<String, Value>,
     patch: &Map<String, Value>,
 ) -> anyhow::Result<Map<String, Value>> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut next = load_settings();
     for (key, value) in patch {
         next.insert(key.clone(), value.clone());
     }
@@ -205,23 +245,44 @@ mod tests {
     // sobre un directorio temporal.
     fn merged_in(dir: &Path, patch: Value) -> Map<String, Value> {
         let target = dir.join("settings.json");
-        let backup = backup_path(&target);
-        let temp = temp_path(&target);
         let patch = patch.as_object().expect("el parche es un objeto").clone();
-        // load_settings dentro de write_merged lee la ruta real de userData,
-        // así que aquí se replica la fusión sobre el archivo del temporal.
-        let mut next = read_object(&target).unwrap_or_default();
-        for (key, value) in &patch {
-            next.insert(key.clone(), value.clone());
+        // save_settings fusiona sobre la ruta real de userData; aquí se fusiona
+        // sobre el archivo del temporal con el mismo save_merged.
+        save_merged(&target, &patch, || read_object(&target).unwrap_or_default())
+            .expect("el guardado termina bien")
+    }
+
+    #[test]
+    fn guardados_simultaneos_no_se_pisan_ni_pierden_claves() {
+        // El E2E de administrador lo destapó: el hilo que guarda el tamaño de
+        // la ventana y un guardado de Ajustes a la vez dejaban settings.json
+        // vacío (EOF al verificar) y el otro sin temporal (os error 2).
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.json");
+        std::thread::scope(|scope| {
+            for writer in 0..8 {
+                let target = &target;
+                scope.spawn(move || {
+                    for round in 0..10 {
+                        let mut patch = Map::new();
+                        patch.insert(format!("clave{writer}"), json!(round));
+                        save_merged(target, &patch, || read_object(target).unwrap_or_default())
+                            .expect("cada guardado simultáneo termina bien");
+                    }
+                });
+            }
+        });
+        let saved = read_object(&target).expect("settings.json sigue siendo JSON válido");
+        for writer in 0..8 {
+            assert_eq!(saved.get(&format!("clave{writer}")), Some(&json!(9)));
         }
-        std::fs::write(&temp, serde_json::to_string_pretty(&next).unwrap()).unwrap();
-        let _ = std::fs::remove_file(&backup);
-        if target.exists() {
-            std::fs::rename(&target, &backup).unwrap();
-        }
-        std::fs::rename(&temp, &target).unwrap();
-        let _ = std::fs::remove_file(&backup);
-        next
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "settings.json")
+            .collect();
+        assert!(leftovers.is_empty(), "sobran archivos: {leftovers:?}");
     }
 
     #[test]

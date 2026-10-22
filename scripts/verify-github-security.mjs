@@ -184,7 +184,14 @@ check(
         && releaseBuildJobs.includes('LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}')
         && !releaseBuildJobs.includes('LTERMINAL_SIGNING_PRIVATE_KEY')
         && releasePublishJob.includes('LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}')
+        && releasePublishJob.includes('LTERMINAL_SSH_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SSH_SIGNING_PRIVATE_KEY }}')
+        && releasePublishJob.includes('LTERMINAL_SSH_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_SSH_UPDATE_PUBLIC_KEY }}')
         && (releaseWorkflow.match(/scripts\/sign-release-manifest\.mjs/g) ?? []).length === 2,
+);
+check(
+    'La publicación de releases verifica además la firma OpenSSH del manifiesto',
+    releasePublishJob.includes('scripts/sign-release-ssh.mjs')
+        && releaseBuildJobs.includes('LTERMINAL_SSH_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_SSH_UPDATE_PUBLIC_KEY }}'),
 );
 check(
     'La publicación de releases usa el gh CLI integrado de forma idempotente, sin acción externa adicional',
@@ -208,12 +215,17 @@ check(
 
 function missingScanner(label) {
     const message = `${label} no está instalado localmente; el escaneo remoto de workflows sigue activo en GitHub Actions.`;
-    if (process.env.LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS === '1') failures.push(message);
-    else console.log(`AVISO: ${message} Usa LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS=1 para exigir ambos analizadores locales.`);
+    const controlVar = process.platform === 'win32' ? 'WTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS' : 'LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS';
+    const required = process.env[controlVar] ?? process.env.LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS;
+    if (required === '1') failures.push(message);
+    else console.log(`AVISO: ${message} Usa ${controlVar}=1 para exigir ambos analizadores locales.`);
 }
 
 function runActionlint() {
-    const result = spawnSync('actionlint', [], { cwd: root, encoding: 'utf8', windowsHide: true });
+    // Pasar los workflows explícitamente también funciona en snapshots de
+    // código fuente que no incluyen metadatos .git (por ejemplo, WSL desde ZIP).
+    const workflowPaths = workflowFiles.map((name) => `.github/workflows/${name}`);
+    const result = spawnSync('actionlint', workflowPaths, { cwd: root, encoding: 'utf8', windowsHide: true });
     if (result.error?.code === 'ENOENT') return missingScanner('actionlint');
     if (result.error && result.status !== 0) {
         failures.push(`actionlint no pudo iniciarse: ${result.error.message}`);

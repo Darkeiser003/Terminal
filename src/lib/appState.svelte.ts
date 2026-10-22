@@ -5,6 +5,7 @@
 // cuando cambia y no hace falta repintar nada a mano.
 
 import * as api from './api';
+import defaultBannerLogo from '../assets/banner/logo.png';
 import { createKeyedSerialQueue } from './keyed-serial-queue';
 import { platformBrandText } from './localization';
 
@@ -39,6 +40,12 @@ class AppStore {
     languages = $state<LanguageOption[]>([]);
     catalog = $state<TranslationCatalog>({ language: 'es', strings: {} });
     appInfo = $state<AppInfo | null>(null);
+    /** Imagen a la izquierda del banner: el logo de la app o la propia como
+     *  `data:` (`syncBannerImage`). */
+    bannerImageUrl = $state<string>(defaultBannerLogo);
+    /** Motivo por el que no se pudo leer la imagen propia (Ajustes lo muestra). */
+    bannerImageError = $state<string | null>(null);
+    private bannerImagePath: string | null = null;
     /** Entornos que ya han terminado de detectarse. Mientras es falso, el
      *  selector enseña "Detectando…" en vez de una lista incompleta. */
     environmentsLoaded = $state(false);
@@ -59,6 +66,10 @@ class AppStore {
     /** Evita que un refresco lento de entornos pueda devolver la lista a un
      *  estado anterior si el usuario pulsa refrescar varias veces. */
     private environmentRequest = 0;
+    /** Los clics rápidos comparten la misma detección IPC. Así el botón no
+     *  deja varias sondas compitiendo ni puede quedarse en «Detectando…» si
+     *  el backend serializa las peticiones. */
+    private environmentRefreshPromise: Promise<void> | null = null;
     /** Identifica intentos de cambio de shell para ignorar respuestas IPC
      *  atrasadas si el usuario inicia otro cambio en la misma pestaña. */
     private environmentSwitchRequest = 0;
@@ -105,7 +116,11 @@ class AppStore {
         // llega del backend, así que el título del documento también debe
         // seguir la plataforma: LTerminal en Linux y WTerminal en
         // Windows.
-        if (typeof document !== 'undefined') document.title = info.name;
+        if (typeof document !== 'undefined') {
+            document.title = info.processElevated
+                ? `${this.t('app.adminTitle', 'Administrador:')} ${info.name}`
+                : info.name;
+        }
         await this.syncWindowDecorations(prefs.preferences);
         this.applyPayload(prefs);
         // El tamaño inicial es una preferencia de arranque, no una orden que
@@ -135,19 +150,28 @@ class AppStore {
     }
 
     async refreshEnvironments(): Promise<void> {
+        if (this.environmentRefreshPromise) return this.environmentRefreshPromise;
         const request = ++this.environmentRequest;
         this.environmentsLoaded = false;
-        try {
-            const inventory = await api.refreshEnvironments(this.activeTabId ?? undefined);
-            if (request !== this.environmentRequest) return;
-            this.environments = inventory.envs;
-            this.environmentsLoaded = true;
-        } catch (error) {
-            if (request === this.environmentRequest) {
+        const refresh = (async () => {
+            try {
+                const inventory = await api.refreshEnvironments(this.activeTabId ?? undefined);
+                if (request !== this.environmentRequest) return;
+                this.environments = inventory.envs;
                 this.environmentsLoaded = true;
-                console.error('[AppStore] environment refresh failed', error);
+            } catch (error) {
+                if (request === this.environmentRequest) {
+                    this.environmentsLoaded = true;
+                    console.error('[AppStore] environment refresh failed', error);
+                }
+                throw error;
             }
-            throw error;
+        })();
+        this.environmentRefreshPromise = refresh;
+        try {
+            await refresh;
+        } finally {
+            if (this.environmentRefreshPromise === refresh) this.environmentRefreshPromise = null;
         }
     }
 
@@ -357,8 +381,28 @@ class AppStore {
         return this.enqueueTabLifecycle(async () => {
             const created = await api.createTab(envId, paneCount);
             if (!created) return null;
+            const previousActiveTabId = this.activeTabId;
             this.tabs = [...this.tabs, created];
             this.activeTabId = created.id;
+            // Cuando una división abre una pestaña nueva, actualizar `tabs` y
+            // `panes` por separado deja un frame en el que Svelte monta el
+            // TerminalPane ocupando toda la ventana. Ese xterm envía su primer
+            // resize con el ancho completo y, un frame después, recibe el ancho
+            // dividido mientras `cmd` aún ejecuta el inicializador. ConPTY
+            // puede reenvolver el banner en esa matriz intermedia y el prompt
+            // queda fuera del repintado. Publicar la casilla nueva en la misma
+            // actualización evita esa geometría transitoria.
+            const requestedPaneCount = paneCount
+                ? Math.min(MAX_PANES, Math.max(2, Math.trunc(paneCount)))
+                : 1;
+            if (requestedPaneCount > 1) {
+                const existing = this.panes.length >= 2
+                    ? this.panes
+                    : (previousActiveTabId ? [previousActiveTabId] : []);
+                const nextPanes = [...existing.filter((id) => id !== created.id), created.id]
+                    .slice(0, requestedPaneCount);
+                if (nextPanes.length >= 2) this.panes = nextPanes;
+            }
             return created.id;
         });
     }
@@ -453,9 +497,12 @@ class AppStore {
             const before = this.preferences;
             const payload = await api.savePreferences({ ...this.preferences, ...patch });
             const after = payload.preferences;
+            // La imagen cambia el margen del banner: hay que recomponerlo.
             const bannerChanged = before.showSystemBanner !== after.showSystemBanner
                 || before.bannerHiddenItems !== after.bannerHiddenItems
-                || before.fastfetchColor !== after.fastfetchColor;
+                || before.fastfetchColor !== after.fastfetchColor
+                || before.bannerImage !== after.bannerImage
+                || before.bannerImageColumns !== after.bannerImageColumns;
             await this.syncWindowDecorations(after, before);
             this.applyPayload(payload);
             if (typeof window !== 'undefined') {
@@ -522,7 +569,30 @@ class AppStore {
         }
     }
 
+    /** Lee la imagen propia del banner cuando cambia su ruta. Si no se puede
+     *  leer, el banner usa el logo y Ajustes enseña el motivo. */
+    private async syncBannerImage(path: string): Promise<void> {
+        if (path === this.bannerImagePath) return;
+        this.bannerImagePath = path;
+        if (!path) {
+            this.bannerImageUrl = defaultBannerLogo;
+            this.bannerImageError = null;
+            return;
+        }
+        try {
+            const url = await api.readBannerImage(path);
+            if (this.bannerImagePath !== path) return;
+            this.bannerImageUrl = url;
+            this.bannerImageError = null;
+        } catch (error) {
+            if (this.bannerImagePath !== path) return;
+            this.bannerImageUrl = defaultBannerLogo;
+            this.bannerImageError = String(error);
+        }
+    }
+
     private applyPayload(payload: PreferencesPayload): void {
+        void this.syncBannerImage(payload.preferences.bannerImagePath ?? '');
         this.preferences = payload.preferences;
         this.defaults = payload.defaults;
         this.themes = payload.themes;

@@ -6,6 +6,7 @@
  */
 
 export const SHORTCUT_PREFERENCE_KEYS = [
+    'shortcutCommandPalette',
     'shortcutNewTab',
     'shortcutNextTab',
     'shortcutPreviousTab',
@@ -25,6 +26,7 @@ export const SHORTCUT_PREFERENCE_KEYS = [
     'shortcutExplorerFollow',
     'shortcutExplorerCd',
     'shortcutClearTerminal',
+    'shortcutSearchTerminal',
     'shortcutOpenSystemExplorer',
 ] as const;
 
@@ -38,6 +40,8 @@ export const SHORTCUT_DEFINITIONS: ReadonlyArray<{
     labelKey: string;
     fallback: string;
 }> = [
+    { key: 'shortcutCommandPalette', labelKey: 'settings.shortcutCommandPalette', fallback: 'Abrir la paleta de comandos' },
+    { key: 'shortcutSearchTerminal', labelKey: 'settings.shortcutSearchTerminal', fallback: 'Buscar en el historial de la terminal' },
     { key: 'shortcutNewTab', labelKey: 'settings.shortcutNewTab', fallback: 'Nueva pestaña' },
     { key: 'shortcutNextTab', labelKey: 'settings.shortcutNextTab', fallback: 'Pestaña siguiente' },
     { key: 'shortcutPreviousTab', labelKey: 'settings.shortcutPreviousTab', fallback: 'Pestaña anterior' },

@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 // Atajo para iterar: conserva el mismo Vite build que `npm run build`, pero
 // deja que `prebuild` omita las sondas de red. No se usa para publicar una
 // release; las validaciones estrictas siguen en `npm run check`/`dist:*`.
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const command = process.platform === 'win32' ? 'cmd.exe' : npm;
-const args = process.platform === 'win32' ? ['/d', '/s', '/c', `${npm} run build`] : ['run', 'build'];
+const script = fileURLToPath(new URL('./build-frontend.mjs', import.meta.url));
+const command = process.execPath;
+const args = [script];
 const child = spawn(command, args, {
     stdio: 'inherit',
     env: { ...process.env, LTERMINAL_SKIP_CHECKS: '1' },

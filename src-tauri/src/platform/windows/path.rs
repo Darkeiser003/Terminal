@@ -82,7 +82,7 @@ mod executable_tests {
 }
 
 pub(super) fn persistent_path_entries() -> Vec<String> {
-    REGISTRY_PATH_KEYS
+    let mut entries: Vec<String> = REGISTRY_PATH_KEYS
         .iter()
         .filter_map(|key| query_registry_path(key))
         .flat_map(|value| {
@@ -93,7 +93,20 @@ pub(super) fn persistent_path_entries() -> Vec<String> {
         })
         .map(|entry| entry.trim().to_string())
         .filter(|entry| !entry.is_empty())
-        .collect()
+        .collect();
+
+    // App Installer (winget) y muchos alias de ejecución de Microsoft Store
+    // viven aquí aunque Windows no lo haya incluido en el PATH persistente
+    // de la sesión que lanzó la aplicación. Incorporarlo al PATH del proceso
+    // permite que las sondas y las acciones de instalación usen el mismo
+    // ejecutable que el usuario tiene instalado.
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let windows_apps = PathBuf::from(local_app_data).join("Microsoft\\WindowsApps");
+        if windows_apps.is_dir() {
+            entries.push(windows_apps.to_string_lossy().into_owned());
+        }
+    }
+    entries
 }
 
 fn query_registry_path(key: &str) -> Option<String> {

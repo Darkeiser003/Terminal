@@ -19,6 +19,13 @@ export function interactiveReplPromptIsVisible(text: string, environmentId?: str
         // La CLI de DuckDB termina el prompt predeterminado con ` D`.
         duckdb: /^.+\sD(?:\s.*)?$/u,
         'common-lisp-sbcl': /^\*{1,4}(?:\s.*)?$/u,
+        // IRB numera el prompt como `irb(main):001:0>` (la parte `:0` no
+        // aparece en algunas versiones). Es un prompt interactivo válido,
+        // aunque no empieza por una ruta ni por un marcador de shell.
+        ruby: /^irb\([^)]*\):\d+(?::\d+)?[>]?\s?.*$/iu,
+        // JShell muestra `jshell>` incluso cuando la detección de entornos
+        // todavía no ha hidratado el registro de REPL de la pestaña.
+        java: /^jshell>\s?.*$/iu,
         // Los prompts Prolog y gforth tampoco terminan en los marcadores de
         // shell habituales; restringirlos al REPL correspondiente evita falsos positivos.
         'swi-prolog': /^(?:\d+\s+)?(?:\?-|\|\s*\?-)(?:\s.*)?$/u,
@@ -67,6 +74,8 @@ export function interactiveReplInputLine(text: string, environmentId?: string | 
         maxima: /^\(%[io]\d+\)\s?/u,
         duckdb: /^.+?\sD\s?/u,
         'common-lisp-sbcl': /^\*{1,4}\s?/u,
+        ruby: /^irb\([^)]*\):\d+(?::\d+)?[>]\s?/iu,
+        java: /^jshell>\s?/iu,
         'swi-prolog': /^(?:\d+\s+)?(?:\?-|\|\s*\?-)\s?/u,
         forth: /^ok(?:\s+|$)/iu,
     };

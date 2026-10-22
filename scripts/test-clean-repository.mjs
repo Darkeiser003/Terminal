@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, lstat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -132,6 +132,61 @@ try {
     assert.equal(await readFile(unrelatedNodeInstaller, 'utf8'), 'external download\n', 'no se elimina un MSI genérico externo');
     assert.equal(await readFile(unrelatedRustupInstaller, 'utf8'), 'external download\n', 'no se elimina un instalador genérico externo');
     console.log('OK: el limpiador borra salidas reales sin atravesar enlaces de salida o configuración.');
+
+    // Modo ligero: quita restos (logs sueltos de la raíz, releases anteriores
+    // apartadas, evidencias viejas de artifacts/ y temporales de pruebas) y
+    // conserva node_modules y target para que el siguiente build sea rápido.
+    const lightProject = join(fixture, 'light-project');
+    const lightScripts = join(lightProject, 'scripts');
+    const lightTemp = join(fixture, 'light-temp');
+    const lightModules = join(lightProject, 'node_modules');
+    const lightTarget = join(lightProject, 'src-tauri', 'target', 'release');
+    const previousRelease = join(lightProject, 'src-tauri', 'target', 'dist', 'release-anterior');
+    const oldEvidence = join(lightProject, 'artifacts', 'e2e-antiguo');
+    const newEvidence = join(lightProject, 'artifacts', 'e2e-reciente');
+    const e2eTemp = join(lightTemp, 'wterminal-e2e-gh-test');
+    await Promise.all([
+        mkdir(lightScripts, { recursive: true }),
+        mkdir(lightModules, { recursive: true }),
+        mkdir(lightTarget, { recursive: true }),
+        mkdir(previousRelease, { recursive: true }),
+        mkdir(oldEvidence, { recursive: true }),
+        mkdir(newEvidence, { recursive: true }),
+        mkdir(e2eTemp, { recursive: true }),
+    ]);
+    await writeFile(join(lightScripts, 'clean-repository.sh'), cleaner, { mode: 0o755 });
+    await writeFile(join(lightModules, 'kept.txt'), 'dependency\n');
+    await writeFile(join(lightTarget, 'kept.bin'), 'build cache\n');
+    await writeFile(join(lightProject, 'build-feature.log'), 'stray log\n');
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    await utimes(oldEvidence, tenDaysAgo, tenDaysAgo);
+    // La vista previa ligera sugiere la orden ligera: con solo --apply se
+    // ejecutaba la limpieza completa (node_modules y target).
+    const lightPreview = spawnSync('bash', [join(lightScripts, 'clean-repository.sh'), '--light', '--keep-days', '3'], {
+        cwd: lightProject,
+        encoding: 'utf8',
+        env: { ...process.env, TMPDIR: lightTemp, HOME: home, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache },
+        timeout: 15000,
+    });
+    assert.equal(lightPreview.status, 0, `La vista previa ligera terminó con ${lightPreview.status}:\n${lightPreview.stderr}`);
+    assert.match(lightPreview.stdout, /Ejecuta: scripts\/clean-repository\.sh --light --keep-days 3 --apply/u);
+    await lstat(previousRelease);
+    const lightResult = spawnSync('bash', [join(lightScripts, 'clean-repository.sh'), '--light', '--keep-days', '3', '--apply'], {
+        cwd: lightProject,
+        encoding: 'utf8',
+        env: { ...process.env, TMPDIR: lightTemp, HOME: home, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache },
+        timeout: 15000,
+    });
+    assert.equal(lightResult.status, 0, `El limpiador ligero terminó con ${lightResult.status}:\n${lightResult.stdout}\n${lightResult.stderr}`);
+    assert.match(lightResult.stdout, /LIGERA/u);
+    assert.equal(await readFile(join(lightModules, 'kept.txt'), 'utf8'), 'dependency\n', 'el modo ligero conserva node_modules');
+    assert.equal(await readFile(join(lightTarget, 'kept.bin'), 'utf8'), 'build cache\n', 'el modo ligero conserva target');
+    await lstat(newEvidence);
+    await assert.rejects(lstat(oldEvidence), { code: 'ENOENT' }, 'las evidencias viejas de artifacts/ se quitan');
+    await assert.rejects(lstat(previousRelease), { code: 'ENOENT' }, 'las releases anteriores apartadas se quitan');
+    await assert.rejects(lstat(join(lightProject, 'build-feature.log')), { code: 'ENOENT' }, 'los logs sueltos de la raíz se quitan');
+    await assert.rejects(lstat(e2eTemp), { code: 'ENOENT' }, 'los temporales de los E2E de WTerminal se quitan');
+    console.log('OK: el modo ligero quita restos y conserva dependencias y cachés de compilación.');
 
     const powerShellProbe = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-Command', 'exit 0'], {
         encoding: 'utf8',

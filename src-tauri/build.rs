@@ -7,7 +7,51 @@ fn main() {
     // referencia los assets con hash, por lo que cambia con cualquier bundle
     // nuevo y actúa como sello estable del frontend realmente incrustado.
     println!("cargo:rerun-if-changed=../dist/index.html");
+    // Las claves de confianza se incrustan mediante `option_env!` en el
+    // código del actualizador. Cargo no invalida una compilación cuando solo
+    // cambia una variable de entorno salvo que el build script lo declare;
+    // sin estas señales, una build firmada podía reutilizar un ejecutable
+    // anterior sin las claves y fallar únicamente al pulsar «Volver a
+    // comprobar».
+    for variable in [
+        "LTERMINAL_UPDATE_PUBLIC_KEY",
+        "LTERMINAL_SSH_UPDATE_PUBLIC_KEY",
+        "LTERMINAL_SSH_UPDATE_IDENTITY",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+        // Pasar la variable explícitamente a rustc hace que la incrustación
+        // sea determinista incluso si Cargo ejecuta el build script con un
+        // entorno filtrado. Nunca se incluye la clave privada.
+        if let Ok(value) = std::env::var(variable) {
+            println!("cargo:rustc-env={variable}={value}");
+        }
+    }
     copy_conpty_next_to_executable();
+    // `cargo test` no pasa por el manifiesto que Tauri incrusta en la app.
+    // Sin Common Controls v6, comctl32.dll se carga en modo clásico y la
+    // resolución de `TaskDialogIndirect` termina en STATUS_ENTRYPOINT_NOT_FOUND
+    // antes de que el ejecutable de tests pueda arrancar.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=windows-test.manifest.rc");
+        println!("cargo:rerun-if-changed=windows-test.manifest");
+        // Compilar el recurso sin pedirle a Cargo que lo enlace a los bins de
+        // la aplicación. El `#[link]` condicionado a `cfg(test)` de lib.rs
+        // será quien lo incorpore únicamente al harness unitario.
+        embed_resource::compile_for(
+            "windows-test.manifest.rc",
+            std::iter::empty::<&str>(),
+            embed_resource::NONE,
+        )
+        .manifest_required()
+        .expect("No se pudo incrustar el manifiesto de Common Controls en los tests");
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR falta"));
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+    }
+    // El ejecutable debe arrancar como `asInvoker`. La preferencia de
+    // terminal administrativa se aplica desde Rust mediante el relanzamiento
+    // UAC, cuando el usuario la activa. Incrustar `requireAdministrator` en
+    // todos los perfiles rompe WebDriver/tauri-driver: el navegador no puede
+    // atravesar el diálogo UAC y la sesión nunca llega a crear DevTools.
     tauri_build::build()
 }
 

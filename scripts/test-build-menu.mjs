@@ -5,12 +5,33 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const packageScriptList = spawnSync(process.execPath, ['scripts/package-scripts.mjs', 'list'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 10_000,
+});
+assert.equal(packageScriptList.status, 0, `No se pudieron enumerar dinámicamente los scripts: ${packageScriptList.stderr}`);
+assert.match(packageScriptList.stdout, /test:preview/);
+assert.match(packageScriptList.stdout, /test:e2e:ltools/);
+const [menuBashSource, menuPowerShellSource, dynamicRunnerSource] = await Promise.all([
+    readFile(join(root, 'build-tools', 'build.sh'), 'utf8'),
+    readFile(join(root, 'build-tools', 'build.ps1'), 'utf8'),
+    readFile(join(root, 'scripts', 'package-scripts.mjs'), 'utf8'),
+]);
+assert.match(menuBashSource, /package-scripts\.mjs menu/);
+assert.match(menuPowerShellSource, /package-scripts\.mjs', 'menu'/);
+assert.match(menuBashSource, /asistente interactivo completo del builder/i);
+assert.match(menuPowerShellSource, /asistente interactivo completo del builder/i);
+assert.match(menuBashSource, /printf '  6\. Comprobar herramientas\/shells disponibles en el host\\n'[\s\S]*printf '  7\. Ejecutar cualquier script npm\/pnpm del proyecto\\n'/,
+    'El menú Bash debe mostrar las opciones 6 y 7 en orden numérico.');
+assert.match(menuPowerShellSource, /Write-Host '  6\. Comprobar herramientas\/shells disponibles en el host'[\s\S]*Write-Host '  7\. Ejecutar cualquier script npm\/pnpm del proyecto'/,
+    'El menú PowerShell debe mostrar las opciones 6 y 7 en orden numérico.');
+assert.match(dynamicRunnerSource, /Object\.entries\(packageJson\.scripts\)/);
 if (process.platform === 'win32') {
-    console.log('SKIP: prueba interactiva del menú Bash; la ruta PowerShell se valida estáticamente en Windows.');
+    console.log('OK: menú dinámico de scripts y accesos a los asistentes de build verificados; interacción Bash no aplica en Windows.');
     process.exit(0);
 }
-
-const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixture = await mkdtemp(join(tmpdir(), 'lterminal-build-menu-test-'));
 try {
     const powerShellMenu = await readFile(join(root, 'build-tools', 'build.ps1'), 'utf8');

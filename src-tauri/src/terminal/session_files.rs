@@ -151,6 +151,8 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
         .map(|dir| dir.join(format!("clear-banner-{}.flag", request.tab_id)))
         .map(|p| p.to_string_lossy().to_string());
     let help_str = help_path.as_ref().map(|p| p.to_string_lossy().to_string());
+    let assist_lines =
+        crate::terminal::shell_assist::init_lines(request.env.kind, request.env.transport);
 
     let script = alias_profiles::build_init_script(
         request.env.kind,
@@ -169,6 +171,7 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
             platform: std::env::consts::OS,
             windows_manager: request.windows_manager,
             initial_banner: request.initial_banner && show_banner,
+            assist_lines: &assist_lines,
         },
     );
 
@@ -189,6 +192,15 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
             banner_text,
         };
     };
+    // El `ls` de cmd vive en un script de la carpeta de sesión: `doskey` no
+    // puede interpretar opciones. Se reescribe solo si cambió.
+    if request.env.kind == crate::environments::ShellKind::Cmd {
+        let helper = dir.join(alias_profiles::CMD_LS_HELPER);
+        let content = alias_profiles::cmd_ls_script();
+        if std::fs::read_to_string(&helper).ok().as_deref() != Some(content.as_str()) {
+            let _ = std::fs::write(&helper, &content);
+        }
+    }
     let init_path = dir.join(format!("init-{}.{}", request.tab_id, script.ext));
     if write_init_script(&init_path, request.env.kind, &script.content).is_err() {
         log_warn!(
@@ -264,7 +276,16 @@ pub fn refresh_banner_files(tab_id: &str, note: Option<&str>, banner: &str) {
     let note = note
         .map(|value| format!("\x1b[33m{value}\x1b[0m\r\n\r\n"))
         .unwrap_or_default();
-    let text = format!("\r\n{}{note}", banner);
+    // Sin banner (panel demasiado pequeño) el archivo queda vacío, igual que
+    // el texto que el backend entrega a xterm en su lugar. Si conservara el
+    // salto inicial, `type` lo pintaría en ConPTY durante el arranque —salida
+    // que xterm nunca ve— y la shell quedaría una fila más abajo: el eco de la
+    // primera orden aparecía separado de su prompt.
+    let text = if banner.is_empty() {
+        String::new()
+    } else {
+        format!("\r\n{banner}{note}")
+    };
     let normal = dir.join(format!("banner-{tab_id}.txt"));
     let cleared = dir.join(format!("bannerclear-{tab_id}.txt"));
     let clear_toggle = dir.join(format!("clear-banner-{tab_id}.flag"));
@@ -313,6 +334,58 @@ pub fn cleanup() {
     }
 }
 
+/// Borra las carpetas de sesión que dejaron procesos que ya no existen. Cada
+/// ejecución usa `<temp>/<slug>/<pid>` y la borra al cerrarse (`cleanup`),
+/// pero un cierre forzado, un apagado o un E2E interrumpido la dejaba atrás:
+/// en un equipo de desarrollo se habían juntado cientos (más de 100 MB).
+/// Se llama al arrancar, en segundo plano. Una carpeta cuyo PID sigue vivo se
+/// conserva, aunque sea otro programa que heredó el número: no estorba y se
+/// borrará en un arranque posterior.
+pub fn prune_orphaned_sessions() -> usize {
+    let Some(root) = paths::SESSION_DIR
+        .parent()
+        .map(std::path::Path::to_path_buf)
+    else {
+        return 0;
+    };
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing(),
+    );
+    let removed = prune_orphaned_sessions_in(&root, std::process::id(), &|pid| {
+        system.process(sysinfo::Pid::from_u32(pid)).is_some()
+    });
+    if removed > 0 {
+        log_info!(
+            "Carpetas de sesión huérfanas borradas",
+            serde_json::json!({ "root": root.to_string_lossy(), "removed": removed })
+        );
+    }
+    removed
+}
+
+fn prune_orphaned_sessions_in(
+    root: &std::path::Path,
+    current_pid: u32,
+    alive: &dyn Fn(u32) -> bool,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            // Solo carpetas con nombre de PID: nada más de ahí dentro es suyo.
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            (pid != current_pid && !alive(pid)).then(|| entry.path())
+        })
+        .filter(|path| std::fs::remove_dir_all(path).is_ok())
+        .count()
+}
+
 /// La carpeta de sesión, creada si aún no existía.
 pub fn dir() -> Option<std::path::PathBuf> {
     match paths::session_dir() {
@@ -332,6 +405,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn solo_se_borran_las_sesiones_de_procesos_que_ya_no_existen() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["100", "200", "300", "no-es-pid"] {
+            std::fs::create_dir_all(root.path().join(name)).unwrap();
+            std::fs::write(root.path().join(name).join("init-x.ps1"), "x").unwrap();
+        }
+        std::fs::write(root.path().join("400"), "archivo, no carpeta").unwrap();
+        // 100 es este proceso y 200 sigue vivo; 300 ya no existe.
+        let removed = prune_orphaned_sessions_in(root.path(), 100, &|pid| pid == 200);
+        assert_eq!(removed, 1);
+        assert!(root.path().join("100").is_dir());
+        assert!(root.path().join("200").is_dir());
+        assert!(!root.path().join("300").exists());
+        assert!(root.path().join("no-es-pid").is_dir());
+        assert!(root.path().join("400").is_file());
+    }
+
+    #[test]
     fn el_banner_actualizado_reemplaza_tambien_el_archivo_de_sysinfo() {
         let tab_id = "banner-refresh-regression";
         let dir = dir().expect("la carpeta de sesión se crea");
@@ -346,6 +437,22 @@ mod tests {
         assert!(normal.contains("Aviso de sesión"));
         assert!(cleared.starts_with("\x1b[H\x1b[2J\x1b[3J"));
 
+        remove_for_tab(tab_id);
+    }
+
+    #[test]
+    fn sin_banner_el_archivo_no_anade_filas_que_xterm_no_ve() {
+        let tab_id = "banner-empty-regression";
+        let dir = dir().expect("la carpeta de sesión se crea");
+        remove_for_tab(tab_id);
+
+        refresh_banner_files(tab_id, Some("Aviso de sesión"), "");
+
+        let normal = std::fs::read_to_string(dir.join(format!("banner-{tab_id}.txt"))).unwrap();
+        let cleared =
+            std::fs::read_to_string(dir.join(format!("bannerclear-{tab_id}.txt"))).unwrap();
+        assert_eq!(normal, "");
+        assert_eq!(cleared, "\x1b[H\x1b[2J\x1b[3J");
         remove_for_tab(tab_id);
     }
 

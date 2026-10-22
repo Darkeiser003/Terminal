@@ -11,6 +11,10 @@ export type PanelId = 'deps' | 'projects' | 'scripts' | 'explorer' | 'settings';
 
 class PanelStore {
     open = $state<PanelId | null>(null);
+    /** Texto con el que abrir Entorno y dependencias ya filtrado (por
+     *  ejemplo, el botón «Instalar» de Ajustes). Lo consume el panel al
+     *  cargar. */
+    depsQuery = $state('');
 
     isOpen(id: PanelId): boolean {
         return this.open === id;

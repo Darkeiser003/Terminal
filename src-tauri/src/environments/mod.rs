@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod ai;
 pub mod android;
 pub mod docker;
 pub mod languages;
@@ -275,26 +276,43 @@ fn detect_windows_shells() -> Vec<Environment> {
     // NSudo conserva el ConPTY heredado con `-UseCurrentConsole`. `-Wait`
     // mantiene vivo el proceso raíz de la pestaña mientras la shell elevada
     // esté abierta, de modo que entrada, salida y redimensionado siguen dentro
-    // del marco de WTerminal.
+    // del marco de WTerminal. NSudo exige un padre elevado: sin él termina
+    // con -1, así que se abre directo, a través de gsudo o del sudo de
+    // Windows «en línea», o se ofrece deshabilitado explicando qué hacer.
     if let Some(nsudo) = crate::platform::nsudo_path() {
-        let note = "Sesión TrustedInstaller con todos los privilegios. Úsala solo para tareas administrativas concretas.";
+        let t = crate::i18n::Translator::new(&crate::i18n::active_language());
+        let launcher = current_nsudo_launcher();
+        let base_note = t.t(
+            "env.nsudoNote",
+            "Sesión TrustedInstaller con todos los privilegios. Úsala solo para tareas administrativas concretas.",
+        );
+        let (exe, prefix, available, note) = nsudo_launch_parts(&launcher, &nsudo, &base_note, &t);
+        let with_prefix = |rest: &[&str]| -> Vec<String> {
+            prefix
+                .iter()
+                .cloned()
+                .chain(rest.iter().map(|arg| (*arg).to_string()))
+                .collect()
+        };
         let mut cmd = Environment::new(
             "nsudo:cmd",
             "CMD · TrustedInstaller (NSudo)",
             ShellKind::Cmd,
-            &nsudo,
-            &[
-                "-Wait",
-                "-UseCurrentConsole",
-                "-U:T",
-                "-P:E",
-                &comspec,
-                "/d",
-            ],
+            &exe,
+            &[],
         );
+        cmd.args = with_prefix(&[
+            "-Wait",
+            "-UseCurrentConsole",
+            "-U:T",
+            "-P:E",
+            &comspec,
+            "/d",
+        ]);
         cmd.group = "Shells elevadas · NSudo".to_string();
         cmd.shell = Some("cmd".to_string());
-        cmd.note = Some(note.to_string());
+        cmd.note = Some(note.clone());
+        cmd.available = available;
         cmd.no_auto_select = true;
         envs.push(cmd);
 
@@ -315,21 +333,23 @@ fn detect_windows_shells() -> Vec<Environment> {
                 "nsudo:powershell",
                 "PowerShell · TrustedInstaller (NSudo)",
                 ShellKind::Powershell,
-                &nsudo,
-                &[
-                    "-Wait",
-                    "-UseCurrentConsole",
-                    "-U:T",
-                    "-P:E",
-                    &target,
-                    "-NoLogo",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                ],
+                &exe,
+                &[],
             );
+            ps.args = with_prefix(&[
+                "-Wait",
+                "-UseCurrentConsole",
+                "-U:T",
+                "-P:E",
+                &target,
+                "-NoLogo",
+                "-ExecutionPolicy",
+                "Bypass",
+            ]);
             ps.group = "Shells elevadas · NSudo".to_string();
             ps.shell = Some(shell.to_string());
-            ps.note = Some(note.to_string());
+            ps.note = Some(note.clone());
+            ps.available = available;
             ps.no_auto_select = true;
             envs.push(ps);
         }
@@ -417,6 +437,106 @@ fn detect_unix_shells() -> Vec<Environment> {
 
 /// Las shells nativas del sistema. No habla con ningún servicio externo, así
 /// que es lo bastante rápida para el arranque de la primera ventana.
+/// Cómo se abre NSudo, que exige un proceso padre con permisos de
+/// administrador.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NsudoLauncher {
+    /// WTerminal ya es administrador.
+    Direct,
+    /// A través de gsudo o del sudo de Windows «en línea» (ruta del
+    /// ejecutable): Windows pide el UAC y la shell elevada queda en la misma
+    /// pestaña, sin elevar el resto de WTerminal.
+    Through(String),
+    /// No hay forma de elevar desde aquí: se ofrece deshabilitado con el
+    /// motivo, en vez de terminar con -1 al abrirlo.
+    NeedsAdmin,
+}
+
+impl NsudoLauncher {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NsudoLauncher::Direct => "direct",
+            NsudoLauncher::Through(helper) if helper.to_ascii_lowercase().contains("gsudo") => {
+                "gsudo"
+            }
+            NsudoLauncher::Through(_) => "windows-sudo",
+            NsudoLauncher::NeedsAdmin => "needs-admin",
+        }
+    }
+}
+
+/// Elige el lanzador: elevado → directo; si no, gsudo (si está instalado) y
+/// después el sudo de Windows solo en modo «en línea» (los otros modos abren
+/// otra ventana o no aceptan entrada).
+pub fn nsudo_launcher(
+    elevated: bool,
+    gsudo: Option<String>,
+    inline_windows_sudo: Option<String>,
+) -> NsudoLauncher {
+    if elevated {
+        return NsudoLauncher::Direct;
+    }
+    gsudo
+        .or(inline_windows_sudo)
+        .map(NsudoLauncher::Through)
+        .unwrap_or(NsudoLauncher::NeedsAdmin)
+}
+
+/// El lanzador de este equipo y este proceso.
+pub fn current_nsudo_launcher() -> NsudoLauncher {
+    #[cfg(windows)]
+    {
+        let inline = (crate::platform::windows_sudo() == crate::platform::WindowsSudo::Inline)
+            .then(|| {
+                crate::platform::windows_sudo_path()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        nsudo_launcher(
+            crate::platform::is_process_elevated(),
+            crate::platform::gsudo_path().map(|path| path.to_string_lossy().into_owned()),
+            inline,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        NsudoLauncher::Direct
+    }
+}
+
+/// Ejecutable, argumentos previos, disponibilidad y nota de un entorno NSudo.
+fn nsudo_launch_parts(
+    launcher: &NsudoLauncher,
+    nsudo: &str,
+    base_note: &str,
+    t: &crate::i18n::Translator,
+) -> (String, Vec<String>, bool, String) {
+    match launcher {
+        NsudoLauncher::Direct => (nsudo.to_string(), Vec::new(), true, base_note.to_string()),
+        NsudoLauncher::Through(helper) => (
+            helper.clone(),
+            vec![nsudo.to_string()],
+            true,
+            format!(
+                "{base_note} {}",
+                t.t(
+                    "env.nsudoThroughHelper",
+                    "Se pedirá permiso de administrador (UAC) al abrirla: solo esta pestaña será administrador.",
+                )
+            ),
+        ),
+        NsudoLauncher::NeedsAdmin => (
+            nsudo.to_string(),
+            Vec::new(),
+            false,
+            t.t(
+                "env.nsudoNeedsAdmin",
+                "NSudo necesita que WTerminal sea administrador. Reinícialo como administrador desde Ajustes → Comportamiento → Permisos de administrador, instala gsudo desde Entorno y dependencias o activa el sudo de Windows en modo «En línea» (Configuración → Sistema → Para programadores).",
+            ),
+        ),
+    }
+}
+
 pub fn detect_system_shells() -> Vec<Environment> {
     if crate::platform::host().is_windows() {
         detect_windows_shells()
@@ -424,6 +544,9 @@ pub fn detect_system_shells() -> Vec<Environment> {
         detect_unix_shells()
     }
 }
+
+/// Sufijo de una distro que no respondió durante la detección.
+pub const WSL_UNVERIFIED_SUFFIX: &str = " (sin comprobar)";
 
 /// Las distros WSL instaladas, cada una como un entorno.
 fn detect_wsl_environments(options: wsl_env::ContextOptions) -> Vec<Environment> {
@@ -442,7 +565,7 @@ fn detect_wsl_environments(options: wsl_env::ContextOptions) -> Vec<Environment>
                 distro.name,
                 distro.shell,
                 if distro.probe_error {
-                    " (sin comprobar)"
+                    WSL_UNVERIFIED_SUFFIX
                 } else {
                     ""
                 }
@@ -452,7 +575,17 @@ fn detect_wsl_environments(options: wsl_env::ContextOptions) -> Vec<Environment>
             transport: Transport::Wsl,
             distro: Some(distro.name.clone()),
             exe: "wsl.exe".into(),
-            args: vec!["-d".into(), distro.name.clone()],
+            // Ejecutar la login shell detectada explícitamente en modo
+            // interactivo evita que WSL1 deje la terminal vacía cuando el
+            // host le conecta una ConPTY (el lanzamiento implícito de `wsl
+            // -d <distro>` no siempre adjunta el prompt/init al PTY).
+            args: vec![
+                "-d".into(),
+                distro.name.clone(),
+                "--".into(),
+                distro.shell.clone(),
+                "-i".into(),
+            ],
             note,
             ..Default::default()
         });
@@ -482,10 +615,11 @@ fn detect_wsl_environments(options: wsl_env::ContextOptions) -> Vec<Environment>
 
         // Los runtimes que solo están dentro de WSL deben aparecer como REPL
         // igual que aparecen en Linux. La lista procede de una única sonda de
-        // la distro y reutiliza el catálogo común de lenguajes.
+        // la distro y reutiliza el catálogo común de lenguajes; los que el
+        // kernel no puede ejecutar (`unrunnable`) no se ofrecen.
         envs.extend(crate::language_env::detect_wsl_language_environments(
             &distro.name,
-            &distro.tools,
+            &distro.runnable_tools(),
         ));
     }
     envs
@@ -545,6 +679,13 @@ pub fn detect_environments(quick: bool) -> Inventory {
     if !quick {
         crate::path_env::refresh_system_path();
         crate::android_env::ensure_adb_on_path();
+        crate::virtualization::reset_cache();
+        // Una actualización explícita debe volver a consultar WSL aunque la
+        // caché de arranque siga dentro de su TTL. Después de instalar una
+        // distro, habilitar la plataforma o cambiar sus paquetes, conservar
+        // esa instantánea hacía que el panel siguiera mostrando acciones y
+        // versiones de una pasada anterior.
+        crate::wsl_env::reset_cache();
     }
 
     let shells_started = std::time::Instant::now();
@@ -591,13 +732,23 @@ pub fn detect_environments(quick: bool) -> Inventory {
         });
         // Intérpretes interactivos de los lenguajes presentes en el sistema.
         let languages = scope.spawn(|| {
-            crate::language_env::detect_language_environments(
+            let mut detected = crate::language_env::detect_language_environments(
                 std::env::consts::OS,
                 &crate::language_env::Probe {
                     is_installed: &crate::path_env::is_tool_installed,
                     resolve_path: &|exe| which(exe).map(|path| path.to_string_lossy().to_string()),
                 },
-            )
+            );
+            // dotnet también está presente cuando solo se instaló el runtime.
+            // dotnet fsi necesita el SDK; sin él solo abre una pestaña con error.
+            if detected
+                .iter()
+                .any(|environment| environment.language.as_deref() == Some("fsharp"))
+                && !dotnet_sdk_available()
+            {
+                detected.retain(|environment| environment.language.as_deref() != Some("fsharp"));
+            }
+            detected
         });
         let docker = scope.spawn(move || {
             if docker_installed {
@@ -625,6 +776,18 @@ pub fn detect_environments(quick: bool) -> Inventory {
     let language_count = languages.len() + wsl_language_count;
     envs.extend(wsl);
     envs.extend(languages);
+    // Asistentes de IA (CLIs) y un chat por cada modelo local de Ollama. Solo
+    // consulta el PATH y los manifiestos en disco: no arranca nada.
+    let ai_envs = ai::detect_ai_environments(
+        std::env::consts::OS,
+        &crate::language_env::Probe {
+            is_installed: &crate::path_env::is_tool_installed,
+            resolve_path: &|exe| which(exe).map(|path| path.to_string_lossy().to_string()),
+        },
+        &ai::installed_ollama_models(&ai::ollama_models_dir()),
+    );
+    let ai_count = ai_envs.len();
+    envs.extend(ai_envs);
     // k9s sí es una interfaz interactiva persistente para Kubernetes (kubectl
     // sin argumentos solo imprime ayuda y termina). Se ofrece como entorno
     // cuando está instalado y, como un REPL, no recibe alias de la shell.
@@ -653,6 +816,7 @@ pub fn detect_environments(quick: bool) -> Inventory {
             "durationMs": detection_started.elapsed().as_millis() as u64,
             "wsl": wsl_count,
             "languages": language_count,
+            "ai": ai_count,
             "docker": docker_count,
             "android": android_count,
             "packageManager": &pkg_manager,
@@ -670,6 +834,26 @@ pub fn detect_environments(quick: bool) -> Inventory {
         android_device_count: android.device_count,
         pkg_manager,
     }
+}
+
+fn dotnet_sdk_available() -> bool {
+    let Some(dotnet) = which("dotnet") else {
+        return false;
+    };
+    let Some(output) = crate::infrastructure::process::run_with_timeout(
+        &dotnet.to_string_lossy(),
+        &["--list-sdks"],
+        std::time::Duration::from_secs(3),
+    ) else {
+        return false;
+    };
+    output.status.success() && dotnet_sdk_list_has_entries(&output.stdout)
+}
+
+fn dotnet_sdk_list_has_entries(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output)
+        .lines()
+        .any(|line| !line.trim().is_empty())
 }
 
 /// Entorno por defecto al arrancar: cmd.exe en Windows (igual que el .hta
@@ -715,6 +899,45 @@ mod tests {
     }
 
     #[test]
+    fn nsudo_se_eleva_con_gsudo_o_sudo_en_linea_o_se_ofrece_deshabilitado() {
+        let gsudo_path = r"C:\Tools\gsudo.exe".to_string();
+        let sudo_path = r"C:\Windows\System32\sudo.exe".to_string();
+        let gsudo = Some(gsudo_path.clone());
+        let sudo = Some(sudo_path.clone());
+        assert_eq!(
+            nsudo_launcher(true, gsudo.clone(), sudo.clone()),
+            NsudoLauncher::Direct
+        );
+        assert_eq!(
+            nsudo_launcher(false, gsudo.clone(), sudo.clone()),
+            NsudoLauncher::Through(gsudo_path.clone())
+        );
+        assert_eq!(
+            nsudo_launcher(false, None, sudo),
+            NsudoLauncher::Through(sudo_path)
+        );
+        assert_eq!(nsudo_launcher(false, None, None), NsudoLauncher::NeedsAdmin);
+
+        let t = crate::i18n::Translator::default();
+        let nsudo = r"C:\WSCore\Components\Hooks\NSudo\NSudoLC.exe";
+        let (exe, prefix, available, note) =
+            nsudo_launch_parts(&NsudoLauncher::Through(gsudo_path), nsudo, "Base.", &t);
+        assert!(exe.ends_with("gsudo.exe") && available);
+        assert_eq!(prefix, vec![nsudo.to_string()]);
+        assert!(note.starts_with("Base.") && note.contains("UAC"));
+        let (exe, prefix, available, note) =
+            nsudo_launch_parts(&NsudoLauncher::NeedsAdmin, nsudo, "Base.", &t);
+        assert_eq!(exe, nsudo);
+        assert!(prefix.is_empty() && !available);
+        assert!(note.contains("gsudo") && note.contains("administrador"));
+        assert_eq!(NsudoLauncher::NeedsAdmin.as_str(), "needs-admin");
+        assert_eq!(
+            NsudoLauncher::Through(r"C:\x\sudo.exe".into()).as_str(),
+            "windows-sudo"
+        );
+    }
+
+    #[test]
     fn nsudo_descarta_alias_de_windowsapps_del_usuario() {
         assert!(!usable_from_service_token(Path::new(
             r"C:\Users\Administrador\AppData\Local\Microsoft\WindowsApps\pwsh.exe"
@@ -725,6 +948,15 @@ mod tests {
         assert!(usable_from_service_token(Path::new(
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
         )));
+    }
+
+    #[test]
+    fn fsharp_requiere_una_lista_de_sdks_dotnet_no_vacia() {
+        assert!(dotnet_sdk_list_has_entries(
+            b"8.0.408 [C:\\Program Files\\dotnet\\sdk]\n"
+        ));
+        assert!(!dotnet_sdk_list_has_entries(b""));
+        assert!(!dotnet_sdk_list_has_entries(b"\n  \r\n"));
     }
 
     #[test]

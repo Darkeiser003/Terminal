@@ -20,7 +20,14 @@ details. Security reports belong in the private process described in
 4. Run `npm run check:local` for the repository's static checks and focused
    regression tests. Run the relevant platform build and E2E tests when your
    change affects runtime behavior; note any environment limitation in the PR.
-5. Open a pull request against `main`, explain the user-visible effect, and
+5. Update [README.md](README.md) for behavior, build, release, or test changes.
+   README is the only maintained documentation: when a source file, IPC
+   command, call chain, or flow changes, also update its technical map
+   ([README → Mapa de archivos, llamadas y mantenimiento](README.md#mapa-de-archivos-llamadas-y-mantenimiento)).
+   Run `npm run check:docs` and
+   `npm run check:flows`; these catch missing paths and diagram anchors, while
+   the technical descriptions still require review.
+6. Open a pull request against `main`, explain the user-visible effect, and
    include test results. Keep unrelated formatting or generated files out of
    the change.
 

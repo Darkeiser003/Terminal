@@ -37,6 +37,9 @@ const INSTALLED_CACHE: Duration = Duration::from_millis(10_000);
 /// Recordarlo un rato corto conserva la intención — se reintenta pronto, por si
 /// WSL solo estaba frío — sin repetir la espera dentro de la misma operación.
 const FAILED_PROBE_CACHE: Duration = Duration::from_secs(30);
+/// Primera orden dentro de una distro: incluye arrancar la VM de WSL en frío.
+pub const FIRST_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const RETRY_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const ONLINE_CACHE: Duration = Duration::from_secs(5 * 60);
 
 /// Si `wsl --list --online` no responde, se ofrecen al menos las distros
@@ -184,6 +187,10 @@ pub struct InstalledDistro {
     pub detailed: bool,
     /// La distro está instalada, pero WSL no respondió durante la sonda.
     pub probe_error: bool,
+    /// Intérpretes presentes que el kernel no puede ejecutar (código 126,
+    /// «Exec format error»): por ejemplo, el `node` de Ubuntu 24 en WSL 1.
+    /// Siguen en `tools`, pero no se ofrecen como REPL.
+    pub unrunnable: Vec<String>,
 }
 
 impl InstalledDistro {
@@ -196,6 +203,7 @@ impl InstalledDistro {
             tools: Vec::new(),
             detailed: false,
             probe_error: false,
+            unrunnable: Vec::new(),
         }
     }
 
@@ -211,7 +219,17 @@ impl InstalledDistro {
             tools: Vec::new(),
             detailed: false,
             probe_error: true,
+            unrunnable: Vec::new(),
         }
+    }
+
+    /// Las herramientas que sí se pueden lanzar como REPL.
+    pub fn runnable_tools(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .filter(|tool| !self.unrunnable.contains(tool))
+            .cloned()
+            .collect()
     }
 }
 
@@ -233,19 +251,117 @@ fn package_manager_order(distro_name: &str) -> [&'static str; 5] {
     }
 }
 
-/// Sondea una distro.
+/// Carpetas de usuario donde la sonda busca intérpretes además del PATH:
+/// gestores de versiones e instalaciones por usuario. Se añaden al final del
+/// PATH de la shell de login para lanzar un REPL o comprobar que se ejecuta,
+/// de modo que se usa exactamente el intérprete que se detectó (antes el REPL
+/// se lanzaba con `wsl -- <exe>`, sin login, y en Ubuntu sobre WSL 1 acababa
+/// en el `/usr/bin/node` del sistema, que no se puede ejecutar, en vez del de
+/// `~/.local/bin` que encontró la sonda).
+const USER_BIN_DIRS: &[&str] = &[
+    "\"$HOME/.cargo/bin\"",
+    "\"$HOME/go/bin\"",
+    "\"$HOME/.local/bin\"",
+    "\"$HOME/.npm-global/bin\"",
+    "\"$HOME/.local/share/pnpm\"",
+    "\"$HOME/.pub-cache/bin\"",
+    "\"$HOME/.asdf/shims\"",
+    "\"$HOME/.mise/shims\"",
+    "\"$HOME/.local/share/mise/shims\"",
+    "\"$HOME/.volta/bin\"",
+    "\"$HOME/.bun/bin\"",
+    "\"$HOME/.deno/bin\"",
+    "\"$HOME/.nvm/versions/node\"/*/bin",
+    "\"$HOME/.asdf/installs\"/*/*/bin",
+    "\"$HOME/.mise/installs\"/*/*/bin",
+];
+
+/// Añade `USER_BIN_DIRS` al PATH de la shell de login (sin repetir ni cambiar
+/// el orden del usuario: lo suyo manda).
+fn user_path_prelude() -> String {
+    format!(
+        "for wt_dir in {}; do case \":$PATH:\" in *\":$wt_dir:\"*) ;; *) [ -d \"$wt_dir\" ] && PATH=\"$PATH:$wt_dir\" ;; esac; done; export PATH",
+        USER_BIN_DIRS.join(" ")
+    )
+}
+
+/// Argumentos de `wsl.exe` para abrir un REPL dentro de una distro con el
+/// mismo PATH con el que la sonda lo encontró: shell de login y carpetas de
+/// usuario. `--exec` pasa los argumentos tal cual (sin otra shell que los
+/// interprete) y `exec` deja al intérprete como proceso de la pestaña.
+pub fn repl_launch_args(distro: &str, executable: &str, args: &[String]) -> Vec<String> {
+    let mut command = vec![
+        "-d".to_string(),
+        distro.to_string(),
+        "--exec".to_string(),
+        "sh".to_string(),
+        "-lc".to_string(),
+        format!("{}; exec \"$0\" \"$@\"", user_path_prelude()),
+        executable.to_string(),
+    ];
+    command.extend(args.iter().cloned());
+    command
+}
+
+/// Inventario de ejecutables de la distro, uno por línea, más el marcador de
+/// cada complemento de la línea de órdenes presente (`shell_assist`).
 ///
-/// `wsl.exe ... sh -c <script>` altera algunas comillas al construir la línea
-/// de comandos de Windows. Se usan ejecutables directos: una sonda rápida para
-/// el selector y, solo al abrir Dependencias, un inventario de ejecutables de
-/// todos los directorios relevantes. No basta con listar `/bin` y `/usr/bin`:
-/// rustup, npm global, nvm, asdf/mise y las instalaciones de usuario viven
-/// normalmente fuera de esas carpetas.
+/// - No lanza un `basename` por archivo: con miles de ejecutables eran miles
+///   de procesos y la sonda superaba el minuto. `${entry##*/}` y `printf`
+///   son de la propia shell.
+/// - Se salta el PATH de Windows que WSL añade (`/mnt/c/...`): recorrerlo por
+///   el sistema de archivos compartido es lentísimo y sus programas no son
+///   herramientas de la distro.
+const LISTING_SCRIPT: &str = r#"
+emit_dir() {
+    [ -d "$1" ] || return 0
+    for entry in "$1"/*; do
+        [ -x "$entry" ] && printf '%s\n' "${entry##*/}"
+    done
+}
+for directory in \
+    /bin /usr/bin /usr/local/bin \
+    "$HOME/.cargo/bin" "$HOME/go/bin" "$HOME/.local/bin" "$HOME/.npm-global/bin" \
+    "$HOME/.local/share/pnpm" "$HOME/.pub-cache/bin" \
+    "$HOME/.asdf/shims" "$HOME/.mise/shims" "$HOME/.local/share/mise/shims" \
+    "$HOME/.volta/bin" "$HOME/.bun/bin" "$HOME/.deno/bin"; do
+    emit_dir "$directory"
+done
+for directory in "$HOME/.nvm/versions/node"/*/bin \
+    "$HOME/.asdf/installs"/*/*/bin "$HOME/.mise/installs"/*/*/bin; do
+    emit_dir "$directory"
+done
+old_ifs="$IFS"
+IFS=:
+for directory in ${PATH:-}; do
+    case "$directory" in
+        /mnt/[A-Za-z]/*) continue ;;
+    esac
+    emit_dir "$directory"
+done
+IFS="$old_ifs"
+"#;
+
+/// Sondea una distro: una sonda rápida para el selector y, solo al abrir
+/// Dependencias, un inventario de ejecutables de todos los directorios
+/// relevantes. No basta con listar `/bin` y `/usr/bin`: rustup, npm global,
+/// nvm, asdf/mise y las instalaciones de usuario viven normalmente fuera de
+/// esas carpetas.
+///
+/// Siempre con `--exec`: con `--`, WSL pasa la orden a la login shell de la
+/// distro como una cadena, y esa shell expande `$1`, `$HOME`... antes de que
+/// el script llegue a `sh`. El inventario salía con error de sintaxis, la
+/// distro quedaba «sin comprobar» y el panel no ofrecía nada para ella.
 pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
-    let Some(shell_path) = run_wsl(
-        &["-d", name, "--", "printenv", "SHELL"],
-        Duration::from_secs(3),
-    ) else {
+    // `wsl --list` no arranca la máquina virtual de WSL; la primera orden
+    // dentro de una distro sí, y en frío tarda varios segundos (más con varias
+    // distros a la vez). Con 3 s la sonda caducaba, la distro quedaba «sin
+    // comprobar» y luego la pestaña funcionaba igual. Ya en caliente responde
+    // en milisegundos; el reintento cubre una VM que arrancó justo al límite.
+    let shell_args = ["-d", name, "--exec", "printenv", "SHELL"];
+    let Some(shell_path) = run_wsl(&shell_args, FIRST_PROBE_TIMEOUT)
+        .or_else(|| run_wsl(&shell_args, RETRY_PROBE_TIMEOUT))
+    else {
         return InstalledDistro::failed(name);
     };
 
@@ -270,39 +386,19 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
             tools: Vec::new(),
             detailed: false,
             probe_error: false,
+            unrunnable: Vec::new(),
         };
     }
 
-    let listing_script = r#"
-emit_dir() {
-    [ -d "$1" ] || return 0
-    for entry in "$1"/*; do
-        [ -x "$entry" ] || continue
-        basename "$entry"
-    done
-}
-for directory in \
-    /bin /usr/bin /usr/local/bin \
-    "$HOME/.cargo/bin" "$HOME/go/bin" "$HOME/.local/bin" "$HOME/.npm-global/bin" \
-    "$HOME/.local/share/pnpm" "$HOME/.pub-cache/bin" \
-    "$HOME/.asdf/shims" "$HOME/.mise/shims" "$HOME/.local/share/mise/shims" \
-    "$HOME/.volta/bin" "$HOME/.bun/bin" "$HOME/.deno/bin"; do
-    emit_dir "$directory"
-done
-for directory in "$HOME/.nvm/versions/node"/*/bin \
-    "$HOME/.asdf/installs"/*/*/bin "$HOME/.mise/installs"/*/*/bin; do
-    emit_dir "$directory"
-done
-old_ifs="$IFS"
-IFS=:
-for directory in ${PATH:-}; do
-    emit_dir "$directory"
-done
-IFS="$old_ifs"
-"#;
+    let language_executables = crate::language_env::unix_language_executables();
+    let listing_script = format!(
+        "{LISTING_SCRIPT}{}\n{}\n",
+        crate::terminal::shell_assist::plugin_probe_script(),
+        runnable_probe_script(&language_executables)
+    );
     let Some(listing) = run_wsl(
-        &["-d", name, "--", "sh", "-lc", listing_script],
-        Duration::from_secs(8),
+        &["-d", name, "--exec", "sh", "-lc", &listing_script],
+        Duration::from_secs(12),
     ) else {
         return InstalledDistro {
             name: name.to_string(),
@@ -312,12 +408,15 @@ IFS="$old_ifs"
             tools: Vec::new(),
             detailed: false,
             probe_error: true,
+            unrunnable: Vec::new(),
         };
     };
 
     let commands = parse_command_listing(&listing);
-    let language_executables = crate::language_env::unix_language_executables();
+    let unrunnable = parse_unrunnable(&listing);
     let catalog_executables = crate::packages::actions::linux_tool_executables();
+    let assist_markers = crate::terminal::shell_assist::UNIX_PLUGINS.map(|plugin| plugin.marker);
+    let mut seen = HashSet::new();
     InstalledDistro {
         name: name.to_string(),
         shells: KNOWN_SHELLS
@@ -348,10 +447,77 @@ IFS="$old_ifs"
                     .into_iter()
                     .filter(|candidate| commands.contains(candidate.as_str())),
             )
+            // ble.sh y los plugins de zsh no son ejecutables: la sonda imprime
+            // un marcador por cada uno que encuentra.
+            .chain(
+                assist_markers
+                    .into_iter()
+                    .filter(|marker| commands.contains(marker))
+                    .map(str::to_string),
+            )
+            .filter(|tool| seen.insert(tool.clone()))
             .collect(),
         detailed: true,
         probe_error: false,
+        unrunnable,
     }
+}
+
+/// Marca de la sonda para un intérprete que el kernel no ejecuta.
+const UNRUNNABLE_MARKER: &str = "wterminal-unrunnable:";
+
+fn safe_executable_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+}
+
+/// Comprueba, dentro de la misma llamada del inventario, que cada intérprete
+/// de lenguaje presente se puede ejecutar. Solo prueba binarios ELF (es donde
+/// aparece «Exec format error»; los lanzadores de Kotlin o Scala son scripts y
+/// arrancar sus JVM costaría segundos), todos en paralelo y con `timeout`.
+/// Únicamente el código 126 cuenta como roto: un intérprete lento que agota
+/// el plazo sí se ejecuta. Se lanza a través de `sh -c 'exec …'` porque
+/// `timeout` usa `execvp`, que ante «Exec format error» reintenta el binario
+/// como un script y devuelve 2; la shell sí devuelve 126. Resuelve con el
+/// mismo PATH que el lanzador del REPL. Sin `timeout` no se prueba nada.
+fn runnable_probe_script(executables: &[String]) -> String {
+    let names: Vec<&str> = executables
+        .iter()
+        .map(String::as_str)
+        .filter(|name| safe_executable_name(name))
+        .collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    [
+        "if command -v timeout >/dev/null 2>&1; then".to_string(),
+        user_path_prelude(),
+        format!("for wt_exe in {}; do", names.join(" ")),
+        r#"wt_path=$(command -v "$wt_exe" 2>/dev/null) || continue"#.to_string(),
+        r#"case "$(head -c 4 "$wt_path" 2>/dev/null)" in ?ELF) ;; *) continue ;; esac"#
+            .to_string(),
+        format!(
+            r#"( timeout 3 sh -c 'exec "$0" --version' "$wt_path" </dev/null >/dev/null 2>&1; [ $? -eq 126 ] && printf '{UNRUNNABLE_MARKER}%s\n' "$wt_exe" ) &"#
+        ),
+        "done".to_string(),
+        "wait".to_string(),
+        "fi".to_string(),
+    ]
+    .join("\n")
+}
+
+fn parse_unrunnable(listing: &str) -> Vec<String> {
+    let mut found: Vec<String> = listing
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(UNRUNNABLE_MARKER))
+        .filter(|name| safe_executable_name(name))
+        .map(str::to_string)
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 fn parse_command_listing(listing: &str) -> HashSet<&str> {
@@ -434,6 +600,17 @@ static CACHE: Lazy<Mutex<CacheState>> = Lazy::new(|| Mutex::new(CacheState::defa
 
 pub fn reset_cache() {
     *CACHE.lock() = CacheState::default();
+}
+
+/// Las distros de la última detección, sin volver a detectar ni arrancar
+/// nada, por antigua que sea. Vacío si aún no se ha detectado.
+pub fn cached_installed() -> Vec<InstalledDistro> {
+    CACHE
+        .lock()
+        .installed
+        .as_ref()
+        .map(|entry| entry.installed.clone())
+        .unwrap_or_default()
 }
 
 pub fn get_wsl_context(options: ContextOptions) -> WslContext {
@@ -683,6 +860,105 @@ mod tests {
         assert!(commands.contains("ls"));
         // Los nombres raros (`[`) se descartan.
         assert!(!commands.contains("["));
+    }
+
+    #[test]
+    fn un_interprete_que_el_kernel_no_ejecuta_no_se_ofrece_como_repl() {
+        // Ubuntu 24 en WSL 1: `/usr/bin/node` existe, pero da «Exec format
+        // error» (código 126) y su REPL nunca llegaba a mostrar el prompt.
+        let script = runnable_probe_script(&[
+            "node".to_string(),
+            "python3".to_string(),
+            "mal;nombre".to_string(),
+        ]);
+        assert!(script.contains("for wt_exe in node python3; do"));
+        assert!(!script.contains("mal;nombre"));
+        assert!(script.contains("?ELF)"));
+        assert!(script.contains("timeout 3 sh -c 'exec \"$0\" --version'"));
+        assert!(script.contains(&user_path_prelude()));
+        assert!(script.contains("[ $? -eq 126 ]"));
+        assert!(script.contains("printf 'wterminal-unrunnable:%s\\n'"));
+        assert!(script.trim_end().ends_with("fi"));
+        assert!(runnable_probe_script(&[]).is_empty());
+
+        let listing = "bash\nnode\npython3\nwterminal-unrunnable:node\nwterminal-unrunnable:../x\n";
+        assert_eq!(parse_unrunnable(listing), vec!["node".to_string()]);
+        let distro = InstalledDistro {
+            tools: vec!["node".to_string(), "python3".to_string()],
+            unrunnable: parse_unrunnable(listing),
+            ..InstalledDistro::unprobed("Ubuntu")
+        };
+        assert_eq!(distro.runnable_tools(), vec!["python3".to_string()]);
+    }
+
+    /// Ejecuta de verdad el fragmento de sonda en `sh` (Linux) con un falso
+    /// ELF que el kernel rechaza y un intérprete que sí funciona.
+    #[cfg(unix)]
+    #[test]
+    fn la_sonda_detecta_en_sh_un_binario_que_no_se_puede_ejecutar() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("wt-roto");
+        std::fs::write(&broken, b"\x7fELF basura que el kernel no carga").unwrap();
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = format!(
+            "PATH={}:$PATH\n{}",
+            dir.path().display(),
+            runnable_probe_script(&["wt-roto".to_string(), "sh".to_string()])
+        );
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(parse_unrunnable(&text), vec!["wt-roto".to_string()]);
+    }
+
+    #[test]
+    fn el_repl_se_lanza_con_el_mismo_path_con_el_que_se_detecto() {
+        let args = repl_launch_args("Ubuntu", "node", &["-i".to_string()]);
+        assert_eq!(&args[..5], ["-d", "Ubuntu", "--exec", "sh", "-lc"]);
+        assert!(args[5].starts_with(&user_path_prelude()));
+        assert!(args[5].ends_with("; exec \"$0\" \"$@\""));
+        assert_eq!(&args[6..], ["node", "-i"]);
+        // Cada carpeta de usuario que se añade al PATH es una de las que
+        // recorre la sonda: lo que se detecta es lo que se lanza.
+        for directory in USER_BIN_DIRS {
+            assert!(LISTING_SCRIPT.contains(directory), "{directory}");
+        }
+    }
+
+    /// El lanzador de verdad en `sh` (Linux): encuentra un intérprete que
+    /// solo está en una carpeta de usuario y le pasa los argumentos intactos.
+    #[cfg(unix)]
+    #[test]
+    fn el_lanzador_del_repl_encuentra_el_interprete_de_la_carpeta_de_usuario() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let tool = bin.join("wt-repl-falso");
+        std::fs::write(&tool, "#!/bin/sh\nprintf '%s|' \"$@\"\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let args = repl_launch_args("X", "wt-repl-falso", &["a b".to_string(), "c".to_string()]);
+        let output = std::process::Command::new("sh")
+            .args(["-c", &args[5], &args[6], &args[7], &args[8]])
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a b|c|");
+    }
+
+    #[test]
+    fn el_inventario_no_lanza_un_proceso_por_archivo_ni_recorre_el_path_de_windows() {
+        assert!(!LISTING_SCRIPT.contains("basename"));
+        assert!(LISTING_SCRIPT.contains("${entry##*/}"));
+        assert!(LISTING_SCRIPT.contains("/mnt/[A-Za-z]/*) continue"));
+        let listing = "bash\nwterminal-blesh\nwterminal-zsh-autosuggestions\n";
+        let commands = parse_command_listing(listing);
+        assert!(commands.contains("wterminal-blesh"));
+        assert!(commands.contains("wterminal-zsh-autosuggestions"));
     }
 
     #[test]

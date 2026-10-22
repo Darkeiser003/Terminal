@@ -11,6 +11,7 @@
     // pulsar, en vez de quedarse esperando un resultado que no va a llegar.
 
     import * as api from '../lib/api';
+    import { tick } from 'svelte';
     import { app } from '../lib/appState.svelte';
     import { compareLocalized, includesLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
@@ -18,11 +19,39 @@
     import Panel from './Panel.svelte';
 
     let actions = $state<InstallAction[]>([]);
+    // Conserva el tamaño del catálogo estructural antes de que las sondas
+    // perezosas retiren familias no aplicables. La auditoría puede así
+    // demostrar las 990 entradas publicadas inicialmente aunque la lista
+    // visible final solo contenga las acciones válidas para este sistema.
+    let catalogTotalActions = $state(0);
+    let catalogActionKeys = $state<string[]>([]);
+    let catalogComplete = $state(false);
     let error = $state('');
     let loading = $state(false);
+    /** Detección completa solicitada desde el botón visible del panel. Se
+     *  separa de `loading` porque la lista anterior debe seguir visible mientras
+     *  se vuelven a consultar PATH, WinGet, WSL y los gestores de paquetes. */
+    let detecting = $state(false);
+    /** Las secciones se confirman una a una después de recibir su inventario
+     *  completo. Nunca se pinta una categoría mientras aún se está mezclando
+     *  la respuesta de otra sonda. */
+    let confirmedSectionIds = $state<string[]>([]);
     /** La acción que se está preparando, para dejar su botón en marcha sin
      *  bloquear el resto del panel. */
     let running = $state('');
+    /** Sondas iniciadas al abrir una herramienta concreta. */
+    let checkingActions = $state<Set<string>>(new Set());
+    /** Las aperturas sucesivas del auditor pueden tocar muchas familias en un
+     *  mismo frame. Serializar las sondas evita que WinGet/WSL y los gestores
+     *  de paquetes arranquen decenas de procesos a la vez y desconecten
+     *  WebView2; el catálogo sigue apareciendo sin esperar a esta cola. */
+    let checkQueue: Promise<void> = Promise.resolve();
+    let queuedCheckIds = new Set<string>();
+    /** Generación de sondas perezosas. Una detección completa invalida las
+     *  comprobaciones que se iniciaron al navegar por el catálogo anterior;
+     *  sus respuestas no deben volver a mezclar estados antiguos en la lista
+     *  nueva ni dejar botones atascados en «Comprobando…». */
+    let checkGeneration = 0;
     let query = $state('');
     let statusFilter = $state<'all' | 'installed' | 'missing'>('all');
 
@@ -52,6 +81,9 @@
         description: string | null;
         installed: boolean;
         actions: InstallAction[];
+        children: Entry[];
+        /** Mantiene la cabecera del ecosistema aunque solo quede «Instalar». */
+        isSubgroup: boolean;
     }
 
     interface Group {
@@ -74,18 +106,23 @@
      *  stack de desarrollo o una plataforma concreta. Estas son las cuatro
      *  secciones de navegación, en el orden en que conviene recorrerlas. */
     const SECTION_GROUPS = [
-        { id: 'maintenance', keys: ['group.updates'] },
+        { id: 'updates', keys: ['group.updates'] },
         { id: 'environments', keys: ['group.shells', 'group.wsl', 'group.windowsCompat'] },
         { id: 'development', keys: ['group.languages', 'group.frameworks', 'group.tools', 'group.viewers'] },
+        // Asistentes en la terminal y modelos locales: apartado propio para
+        // que se encuentren sin rebuscar entre los frameworks.
+        { id: 'ai', keys: ['group.ai'] },
+        // Docker y ADB son plataformas de integración (contenedores y
+        // dispositivos), por eso permanecen juntos en este apartado.
         { id: 'platforms', keys: ['group.containers', 'group.android', 'group.network', 'group.virt'] }
     ] as const;
 
     function sectionCopy(id: string): { title: string; description: string } {
         switch (id) {
-            case 'maintenance':
+            case 'updates':
                 return {
-                    title: app.t('deps.section.maintenance', 'Mantenimiento'),
-                    description: app.t('deps.section.maintenanceHint', 'Actualiza la aplicación y las herramientas ya instaladas.')
+                    title: app.t('group.updates', 'Actualizaciones'),
+                    description: app.t('deps.group.updates', 'Aplicación y paquetes ya instalados')
                 };
             case 'environments':
                 return {
@@ -97,10 +134,15 @@
                     title: app.t('deps.section.development', 'Desarrollo'),
                     description: app.t('deps.section.developmentHint', 'Lenguajes, gestores de paquetes y herramientas para crear proyectos.')
                 };
+            case 'ai':
+                return {
+                    title: app.t('group.ai', 'Inteligencia artificial'),
+                    description: app.t('deps.section.aiHint', 'Asistentes de IA en la terminal y modelos locales, con sus requisitos.')
+                };
             default:
                 return {
                     title: app.t('deps.section.platforms', 'Plataformas e integración'),
-                    description: app.t('deps.section.platformsHint', 'Contenedores, dispositivos, red y virtualización.')
+                    description: app.t('deps.section.platformsHint', 'Dispositivos, red y virtualización.')
                 };
         }
     }
@@ -116,6 +158,7 @@
             'group.frameworks': ['deps.group.frameworks', 'Ecosistemas y herramientas de cada lenguaje'],
             'group.tools': ['deps.group.tools', 'Git, compilación, diagnóstico y utilidades de desarrollo'],
             'group.viewers': ['deps.group.viewers', 'Editores y visores para trabajar con archivos'],
+            'group.ai': ['deps.group.ai', 'Asistentes en la terminal y modelos que se ejecutan en tu equipo'],
             'group.containers': ['deps.group.containers', 'Docker, Kubernetes e imágenes de contenedor'],
             'group.android': ['deps.group.android', 'ADB y herramientas para dispositivos Android'],
             'group.network': ['deps.group.network', 'SSH, VPN y acceso a equipos remotos'],
@@ -136,6 +179,7 @@
     }
 
     function translateGroupTitle(rawGroup: string, groupKey?: string | null): string {
+        if (groupKey === 'group.containers') return app.t('group.docker', 'Docker');
         if (groupKey) return app.t(groupKey, rawGroup);
         if (rawGroup === 'Actualizaciones') return app.t('group.updates', 'Actualizaciones');
         if (rawGroup === 'Shells') return app.t('group.shells', 'Shells');
@@ -145,7 +189,10 @@
         if (rawGroup === 'Visores de archivos') return app.t('group.viewers', 'Visores de archivos');
         if (rawGroup === 'WSL') return app.t('group.wslShort', 'WSL');
         if (rawGroup === 'Docker') return app.t('group.dockerShort', 'Docker');
-        if (rawGroup === 'Contenedores y Kubernetes') return app.t('group.containers', 'Contenedores y Kubernetes');
+        // El nombre visible debe seguir siendo Docker, aunque el backend
+        // agrupe también sus acciones de Kubernetes e imágenes bajo el mismo
+        // grupo estable.
+        if (rawGroup === 'Contenedores y Kubernetes') return app.t('group.docker', 'Docker');
         if (rawGroup === 'Android · ADB') return app.t('group.androidShort', 'Android · ADB');
         return rawGroup;
     }
@@ -165,9 +212,8 @@
 
         return [...byGroup.values()].map(({ name, key, actions: groupActions }): Group => {
             // Las herramientas que traen varias acciones se pliegan bajo su
-            // propio nombre en vez de formar una lista larga y repetitiva. Las
-            // sueltas entran en la MISMA lista, para que el orden salga de
-            // compararlo todo junto y no de dos listas separadas.
+            // propio nombre. Los frameworks añaden un nivel: familia de
+            // ecosistema -> framework -> instalar/actualizar/desinstalar.
             const subgroups = new Map<string, Entry>();
             const entries: Entry[] = [];
             for (const action of groupActions) {
@@ -176,7 +222,9 @@
                         name: action.label,
                         description: action.description,
                         installed: action.installed === true,
-                        actions: [action]
+                        actions: [action],
+                        children: [],
+                        isSubgroup: false
                     });
                     continue;
                 }
@@ -186,38 +234,79 @@
                         name: action.subgroup,
                         description: action.subgroupDescription,
                         installed: false,
-                        actions: []
+                        actions: [],
+                        children: [],
+                        isSubgroup: true
                     };
                     subgroups.set(action.subgroup, entry);
                     entries.push(entry);
                 }
-                entry.actions.push(action);
-                if (!entry.description && action.subgroupDescription) {
-                    entry.description = action.subgroupDescription;
+                const target = action.subgroupItem
+                    ? (() => {
+                          let child = entry.children.find((candidate) => candidate.name === action.subgroupItem);
+                          if (!child) {
+                              child = {
+                                  name: action.subgroupItem,
+                                  description: null,
+                                  installed: false,
+                                  actions: [],
+                                  children: [],
+                                  isSubgroup: true
+                              };
+                              entry.children.push(child);
+                          }
+                          return child;
+                      })()
+                    : entry;
+                target.actions.push(action);
+                if (!target.description && action.subgroupDescription && !action.subgroupItem) {
+                    target.description = action.subgroupDescription;
                 }
-                // Basta con que UNA acción del subgrupo requiera la herramienta
-                // para saber que está presente.
-                if (action.installed === true) entry.installed = true;
+                // Basta con que UNA acción requiera la herramienta para saber
+                // que está presente; el padre hereda el estado de sus hijos.
+                if (action.installed === true) {
+                    target.installed = true;
+                    entry.installed = true;
+                }
             }
             // La clave viaja con el grupo para poder reconocer «Actualizaciones»
             // sin comparar contra su nombre traducido.
             const needle = query.trim();
-            const filteredEntries = entries.filter((entry) => {
-                if (statusFilter === 'installed' && !entry.installed) return false;
-                if (statusFilter === 'missing' && entry.installed) return false;
-                if (!needle) return true;
-                return [
-                    entry.name,
-                    entry.description ?? '',
-                    name,
-                    ...entry.actions.flatMap((action) => [
-                        action.label,
-                        action.description ?? '',
-                        action.hint ?? ''
-                    ])
-                ]
-                    .some((text) => includesLocalized(text, needle, app.catalog.language));
-            });
+            const stateMatches = (entry: Entry) =>
+                statusFilter === 'all'
+                    || (statusFilter === 'installed' ? entry.installed : !entry.installed);
+            const textMatches = (entry: Entry) => [
+                entry.name,
+                entry.description ?? '',
+                name,
+                ...entry.actions.flatMap((action) => [
+                    action.label,
+                    action.description ?? '',
+                    action.hint ?? ''
+                ])
+            ].some((text) => includesLocalized(text, needle, app.catalog.language));
+            const filterEntry = (entry: Entry): Entry | null => {
+                const parentMatches = !needle || textMatches(entry);
+                if (entry.children.length === 0) {
+                    return stateMatches(entry) && parentMatches ? entry : null;
+                }
+                const children = entry.children
+                    .map(filterEntry)
+                    .filter((child): child is Entry => child !== null);
+                if (!children.length && !parentMatches) return null;
+                return {
+                    ...entry,
+                    children: parentMatches && !needle && statusFilter === 'all' ? entry.children : children
+                };
+            };
+            const sortEntries = (list: Entry[]) => {
+                for (const entry of list) sortEntries(entry.children);
+                list.sort(byStateThenName);
+            };
+            const filteredEntries = entries
+                .map(filterEntry)
+                .filter((entry): entry is Entry => entry !== null);
+            sortEntries(filteredEntries);
             return {
                 name,
                 key,
@@ -241,12 +330,12 @@
         const ordered: Section[] = SECTION_GROUPS.map(({ id, keys }) => {
             const sectionGroups = keys.flatMap((key) => {
                 const group = groups.find((candidate) => candidate.key === key);
-                if (group) placed.add(group.name);
+                if (group) placed.add(group.key ?? group.name);
                 return group ? [group] : [];
             });
             return { id, ...sectionCopy(id), groups: sectionGroups };
         }).filter((section) => section.groups.length > 0);
-        const otherGroups = groups.filter((group) => !placed.has(group.name));
+        const otherGroups = groups.filter((group) => !placed.has(group.key ?? group.name));
         if (otherGroups.length) {
             ordered.push({
                 id: 'other',
@@ -258,6 +347,14 @@
         return ordered;
     });
 
+    /** Orden fijo de los menús visibles. Un grupo nuevo puede caer en
+     *  «other», pero nunca adelanta una sección que todavía no fue confirmada. */
+    const visibleSections = $derived(
+        loading
+            ? sections.filter((section) => confirmedSectionIds.includes(section.id))
+            : sections
+    );
+
     // El catálogo contiene varias acciones por herramienta (instalar,
     // actualizar, comprobar y desinstalar). El contador de la cabecera debe
     // reflejar las entradas que el usuario ve, igual que los contadores de cada
@@ -268,6 +365,12 @@
             0
         )
     );
+    // El catálogo rápido puede contener acciones aún desconocidas mientras
+    // se completa la primera detección. Mostrar ese recuento y luego cambiarlo
+    // al inventario confirmado hacía visible un salto (106 → 99) aunque la
+    // comprobación final fuese estable. El contador se publica solo cuando
+    // todas las acciones visibles tienen un estado confirmado.
+    const hasPendingDetection = $derived(actions.some((action) => action.detectionStatus === 'unknown'));
 
     /** Evita que una detección lenta de una apertura anterior pise la lista de
      *  una apertura posterior del panel. */
@@ -277,13 +380,54 @@
      *  esperar, en cambio, dejaría una respuesta huérfana al cambiar el serial. */
     let refreshInFlight: ReturnType<typeof api.refreshInstallActions> | null = null;
     // La detección completa ejecuta sondas externas y puede tardar decenas de
-    // segundos en Windows. Al reabrir el panel poco después no hay motivo para
-    // repetirla: la lista visible sigue siendo válida y la detección se renueva
-    // automáticamente cuando caduca esta ventana.
-    const REFRESH_CACHE_MS = 60_000;
+    // segundos en Windows. El resultado queda vivo durante toda la sesión: al
+    // reabrir el panel no se vuelve a sondear nada. Solo el botón visible de
+    // «Comprobar de nuevo» invalida esta copia y fuerza otra pasada completa.
     let refreshedAt = 0;
 
+    /** Ajustes puede abrir el panel ya filtrado por una herramienta
+     *  (`panels.depsQuery`): se aplica el filtro al empezar y, cuando el
+     *  catálogo está listo, se despliega todo lo que coincide. */
+    function takeRequestedQuery(): string {
+        const requested = panels.depsQuery.trim();
+        panels.depsQuery = '';
+        if (requested) {
+            query = requested;
+            statusFilter = 'all';
+        }
+        return requested;
+    }
+
+    async function openRequestedMatches(): Promise<void> {
+        await tick();
+        const sectionsOpen: Record<string, boolean> = {};
+        const accordions: Record<string, boolean> = {};
+        for (const section of sections) {
+            sectionsOpen[section.id] = true;
+            for (const group of section.groups) {
+                accordions[accordionKey('group', group)] = true;
+                for (const entry of group.entries) {
+                    if (entry.isSubgroup) accordions[accordionKey('subgroup', group, entry)] = true;
+                }
+            }
+        }
+        openSections = sectionsOpen;
+        openAccordions = accordions;
+    }
+
     export async function load(): Promise<void> {
+        const requested = takeRequestedQuery();
+        // Abrir el mismo panel otra vez no debe volver a ponerlo en estado de
+        // detección. `App.svelte` conserva el componente montado, por lo que
+        // un inventario ya confirmado se puede reutilizar sin lanzar sondas ni
+        // mostrar durante un frame la pantalla de carga.
+        if (refreshedAt > 0 && !refreshInFlight) {
+            openSections = {};
+            openAccordions = {};
+            if (requested) await openRequestedMatches();
+            void checkSelf();
+            return;
+        }
         // Cada apertura del panel empieza con los apartados plegados. El
         // estado de un `<details>` vive en el DOM y, al volver a mostrar el
         // panel, podía conservar la primera sección abierta aunque la
@@ -293,48 +437,93 @@
         openSections = {};
         openAccordions = {};
         const serial = ++loadSerial;
-        // Primero lo YA detectado, que no toca el sistema y llega al instante.
-        // Antes se pedía la detección completa antes de pintar nada y el panel
-        // tardaba segundos en abrirse, con la ventana aparentemente colgada.
-        loading = actions.length === 0;
+        // No se muestra el inventario rápido mientras la detección completa
+        // sigue en curso. Ese inventario podía contener solo una parte del
+        // catálogo y hacía parecer que las secciones iban apareciendo a
+        // medias. Cada apertura confirma todo el recorrido y publica la lista
+        // una sola vez, cuando todas las sondas han terminado.
+        loading = true;
         error = '';
-        try {
-            const list = await api.listInstallActions();
-            if (serial !== loadSerial) return;
-            actions = list.actions;
-        } catch (cause) {
-            if (serial !== loadSerial) return;
-            actions = [];
-            error = app
-                .t('deps.detectFailed', 'No se pudo detectar el entorno: {error}')
-                .replace('{error}', String(cause));
-        } finally {
-            if (serial === loadSerial) loading = false;
-        }
-        await refresh();
+        // `install_list` devuelve el último catálogo completo que guardó el
+        // backend. Si todavía no existe, el propio comando hace la primera
+        // detección completa. Nunca se lanza una actualización automática al
+        // volver a abrir el panel.
+        await refresh(false);
+        if (serial === loadSerial) loading = false;
+        if (requested && serial === loadSerial) await openRequestedMatches();
         void checkSelf();
     }
 
-    /** Re-detecta el entorno y sustituye la lista si algo ha cambiado. Un fallo
-     *  aquí no borra lo que ya se está enseñando: lo de antes sigue siendo
-     *  válido, solo puede estar desactualizado. */
-    async function refresh(): Promise<boolean> {
+    /** Re-detecta el entorno y sustituye la lista solo cuando el recorrido
+     *  completo ha terminado. Una respuesta parcial nunca llega al estado que
+     *  renderiza el panel. */
+    async function refresh(force = false): Promise<boolean> {
         const serial = loadSerial;
-        if (
-            !refreshInFlight &&
-            refreshedAt > 0 &&
-            Date.now() - refreshedAt < REFRESH_CACHE_MS
-        ) {
+        if (!force && refreshedAt > 0) {
             return true;
         }
-        const request = refreshInFlight ?? api.refreshInstallActions();
+        if (force) {
+            checkGeneration += 1;
+            queuedCheckIds = new Set();
+            checkingActions = new Set();
+        }
+        // Retirar el inventario anterior antes de la nueva pasada evita que el
+        // primer menú confirmado se mezcle visualmente con datos caducados.
+        if (serial === loadSerial) {
+            actions = [];
+            confirmedSectionIds = [];
+        }
+        const request = refreshInFlight ?? (force
+            ? api.refreshInstallActions()
+            : api.loadInstallCatalog());
         refreshInFlight = request;
+        detecting = true;
+        loading = true;
         let ok = true;
         try {
-            const list = await request;
+            let list = await request;
+            // Nunca enseñar el catálogo estructural como si fuera el estado
+            // confirmado. Esto solo ocurre si la precarga inicial agotó su
+            // espera; la segunda llamada completa la pasada antes de pintar
+            // cualquier sección.
+            if (!force && list.complete === false) {
+                list = await api.refreshInstallActions();
+            }
             refreshedAt = Date.now();
             if (serial !== loadSerial) return false;
+            // La respuesta de apertura es solo el catálogo estructural. No
+            // contiene sondas de PATH/WinGet/ecosistemas.
+            catalogTotalActions = Math.max(catalogTotalActions, list.actions.length);
+            if (catalogActionKeys.length === 0) {
+                catalogActionKeys = [...new Set(list.actions.map((action) => `${action.groupKey ?? action.group}/${action.id}`))];
+            }
             actions = list.actions;
+            catalogComplete = list.complete !== false;
+            if (force || list.complete !== false) {
+                // La pasada global puede dejar familias en `unknown` cuando
+                // una fuente (WinGet, WSL o un gestor) responde tarde. Abrir
+                // cada herramienta manualmente ya hacía una segunda sonda y
+                // resolvía esos estados; tanto la primera apertura como
+                // «Repetir detección» completan ese mismo recorrido antes de
+                // pintar el catálogo, sin dejar acciones que desaparezcan al
+                // terminar la detección.
+                await resolveUnknownActions(serial);
+                if (serial !== loadSerial) return false;
+                finalizeUnknownActions();
+                // El catálogo estructural puede contener familias que una
+                // sonda completa confirma como no aplicables. Publicar esas
+                // claves provisionales hacía que el E2E y el contador
+                // comparasen contra acciones que ya no forman parte del
+                // inventario estable. La referencia pública se actualiza
+                // después de resolverlas, antes de revelar las secciones.
+                catalogTotalActions = actions.length;
+                catalogActionKeys = [...new Set(actions.map((action) => `${action.groupKey ?? action.group}/${action.id}`))];
+                await revealSections(serial);
+            }
+            else {
+                await tick();
+                confirmedSectionIds = sections.map((section) => section.id);
+            }
         } catch {
             ok = false;
             if (serial === loadSerial) {
@@ -343,9 +532,238 @@
         } finally {
             if (refreshInFlight === request) {
                 refreshInFlight = null;
+                detecting = false;
+                if (serial === loadSerial) loading = false;
             }
         }
         return ok;
+    }
+
+    async function revealSections(serial: number): Promise<void> {
+        // `sections` se actualiza después de asignar `actions`; esperar un tick
+        // deja que Svelte construya todos los grupos antes de confirmar el
+        // primer menú.
+        await tick();
+        const ids = sections.map((section) => section.id);
+        for (const id of ids) {
+            if (serial !== loadSerial) return;
+            // Ceder un frame entre menús permite que el usuario vea el avance y
+            // evita que una categoría aparezca mientras aún se calcula la otra.
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            if (serial !== loadSerial) return;
+            confirmedSectionIds = [...confirmedSectionIds, id];
+            await tick();
+        }
+    }
+
+    async function repeatDetection(): Promise<void> {
+        if (detecting) return;
+        error = '';
+        await refresh(true);
+    }
+
+    function unknownActionIds(entry: Entry): string[] {
+        const ids = entry.actions
+            .filter((action) => action.detectionStatus === 'unknown')
+            .map((action) => action.id);
+        if (entry.children.length) {
+            for (const child of entry.children) {
+                ids.push(...child.actions
+                    .filter((action) => action.detectionStatus === 'unknown')
+                    .map((action) => action.id));
+            }
+        }
+        return [...new Set(ids)];
+    }
+
+    function checkEntry(entry: Entry): Promise<void> {
+        const ids = unknownActionIds(entry)
+            .filter((id) => !checkingActions.has(id) && !queuedCheckIds.has(id));
+        const anchor = ids[0];
+        if (!anchor) return Promise.resolve();
+        const anchorAction = actions.find((action) => action.id === anchor);
+        const familyIds = new Set(
+            anchorAction
+                ? anchorAction.subgroup
+                    ? actions
+                          .filter(
+                              (action) =>
+                                  action.subgroup === anchorAction.subgroup
+                                  && (anchorAction.subgroupItem === undefined
+                                      || action.subgroupItem === anchorAction.subgroupItem)
+                          )
+                          .map((action) => action.id)
+                    : [anchorAction.id]
+                : ids
+        );
+        const generation = checkGeneration;
+        for (const id of ids) queuedCheckIds.add(id);
+        checkingActions = new Set([...checkingActions, ...ids]);
+        const request = checkQueue.then(async () => {
+            try {
+                // Si se pulsó «Repetir detección» mientras esta entrada estaba
+                // esperando, se descarta sin lanzar otra sonda externa.
+                if (generation !== checkGeneration) return;
+                const result = await api.checkInstallAction(anchor);
+                if (generation !== checkGeneration) return;
+                if (!result.actions.length) {
+                    // Una respuesta vacía no debe borrar la tarjeta completa.
+                    // El backend solo devuelve acciones confirmadas; cuando
+                    // una familia no tiene todavía ninguna operación de
+                    // ciclo de vida aplicable, conservar la instalación base
+                    // como ausente deja una acción útil y mantiene visible el
+                    // menú. Los timeouts reales devuelven acciones `unknown`
+                    // y pasan por la rama normal, así que no se convierten en
+                    // una instalación falsa.
+                    const installIds = new Set(
+                        ids.filter((id) => {
+                            const action = actions.find((candidate) => candidate.id === id);
+                            return action && (!action.verb || action.verb === 'Instalar' || action.verb === 'Install');
+                        }),
+                    );
+                    const diagnosticIds = new Set(
+                        ids.filter((id) => {
+                            const action = actions.find((candidate) => candidate.id === id);
+                            return action && isDiagnosticAction(action);
+                        }),
+                    );
+                    if (installIds.size > 0 || diagnosticIds.size > 0) {
+                        actions = actions.map((action) => installIds.has(action.id) || diagnosticIds.has(action.id)
+                            ? { ...action, installed: false, detectionStatus: null }
+                            : action).filter((action) => !familyIds.has(action.id)
+                                || installIds.has(action.id)
+                                || diagnosticIds.has(action.id));
+                    }
+                    return;
+                }
+                const checkedById = new Map(result.actions.map((action) => [action.id, action]));
+                const checkedIds = new Set(checkedById.keys());
+                actions = actions
+                    // La respuesta confirma la familia completa que se acaba
+                    // de sondear. Si una acción no vuelve, es porque no es
+                    // aplicable en el estado confirmado (por ejemplo,
+                    // actualizar/desinstalar cuando GitHub CLI falta), no una
+                    // acción que deba quedarse eternamente en «Comprobar».
+                    // Las familias que no pudieron comprobarse siguen usando
+                    // la rama vacía de arriba y conservan sus acciones.
+                    .filter((action) => !familyIds.has(action.id)
+                        || checkedIds.has(action.id)
+                        || isInstallAction(action)
+                        || isDiagnosticAction(action))
+                    .map((action) => {
+                        const checked = checkedById.get(action.id);
+                        if (checked) return checked;
+                        if (familyIds.has(action.id)
+                            && (isInstallAction(action) || isDiagnosticAction(action))) {
+                            return { ...action, installed: false, detectionStatus: null };
+                        }
+                        return action;
+                    });
+            } catch (cause) {
+                console.debug('[DependenciesPanel] tool detection failed', cause);
+            } finally {
+                if (generation === checkGeneration) {
+                    queuedCheckIds = new Set([...queuedCheckIds].filter((id) => !ids.includes(id)));
+                    checkingActions = new Set([...checkingActions].filter((id) => !ids.includes(id)));
+                }
+            }
+        });
+        checkQueue = request.catch(() => undefined);
+        return request;
+    }
+
+    function unknownFamilyKey(action: InstallAction): string {
+        if (!action.subgroup) return `${action.groupKey ?? action.group}\u001f${action.id}`;
+        return [
+            action.groupKey ?? action.group,
+            action.subgroup,
+            action.subgroupItem ?? '',
+        ].join('\u001f');
+    }
+
+    function isInstallAction(action: InstallAction): boolean {
+        return action.verb === null
+            || /^(?:Instalar|Install)$/i.test(action.verb ?? '');
+    }
+
+    function isDiagnosticAction(action: InstallAction): boolean {
+        // Estado, versión y dispositivos siguen siendo acciones útiles aunque
+        // la herramienta esté ausente; una sonda tardía no debe convertirlas
+        // en tarjetas desaparecidas.
+        return /^(?:Comprobar|Check|Ver(?:\s+versión)?|Mostrar|View|Listar|List|Reiniciar|Restart)$/i
+            .test(action.verb ?? '')
+            || /(?:-check|-version|-list|-devices|-restart)$/i.test(action.id);
+    }
+
+    /**
+     * Un timeout no debe dejar el menú bloqueado en «Comprobar» después de una
+     * pasada explícita. Si una familia tiene acción de instalación, la
+     * instalación es la única operación segura que se puede ofrecer sin una
+     * confirmación positiva; las acciones de ciclo de vida se retiran hasta
+     * que exista una instalación confirmada. Las familias que no tienen una
+     * acción de instalación conservan su operación declarada, marcada como
+     * ausente, para que el usuario pueda ejecutarla o reintentarlo desde el
+     * mismo menú. Esto solo se aplica al final de «Repetir detección», después
+     * de que cada familia desconocida haya tenido su sonda individual.
+     */
+    function finalizeUnknownActions(): void {
+        const families = new Map<string, InstallAction[]>();
+        for (const action of actions) {
+            const key = action.subgroup
+                ? `${action.groupKey ?? action.group}\u001f${action.subgroup}\u001f${action.subgroupItem ?? ''}`
+                : `${action.groupKey ?? action.group}\u001f${action.id}`;
+            const family = families.get(key) ?? [];
+            family.push(action);
+            families.set(key, family);
+        }
+        const normalized: InstallAction[] = [];
+        for (const family of families.values()) {
+            const unknown = family.filter((action) => action.detectionStatus === 'unknown');
+            if (unknown.length === 0) {
+                normalized.push(...family);
+                continue;
+            }
+            const install = family.find(isInstallAction);
+            if (install) {
+                for (const action of family) {
+                    if (action.detectionStatus !== 'unknown') {
+                        normalized.push(action);
+                    } else if (action.id === install.id || isDiagnosticAction(action)) {
+                        normalized.push({ ...action, installed: false, detectionStatus: null });
+                    }
+                }
+            } else {
+                normalized.push(...family.map((action) => action.detectionStatus === 'unknown'
+                    ? { ...action, installed: false, detectionStatus: null }
+                    : action));
+            }
+        }
+        actions = normalized;
+    }
+
+    /** Resuelve todas las familias que la pasada masiva no pudo confirmar.
+     *
+     * Se ejecuta mientras `loading` sigue activo, por lo que no se muestra un
+     * catálogo intermedio con botones «Comprobar». Cada familia se intenta una
+     * vez: si el gestor vuelve a agotar su plazo, el estado desconocido se
+     * conserva y el usuario puede reintentarlo de forma individual.
+     */
+    async function resolveUnknownActions(serial: number): Promise<void> {
+        const attemptedFamilies = new Set<string>();
+        while (serial === loadSerial) {
+            const pending = actions.filter((action) => action.detectionStatus === 'unknown');
+            const anchor = pending.find((action) => !attemptedFamilies.has(unknownFamilyKey(action)));
+            if (!anchor) return;
+            attemptedFamilies.add(unknownFamilyKey(anchor));
+            await checkEntry({
+                name: anchor.label,
+                description: anchor.description,
+                installed: false,
+                actions: [anchor],
+                children: [],
+                isSubgroup: false,
+            });
+        }
     }
 
     /** Consulta si hay una versión nueva publicada. Un fallo de red no es un
@@ -395,6 +813,11 @@
                 error = result.error ?? app.t('deps.actionFailed', 'No se pudo preparar la acción.');
                 return;
             }
+            // La shell puede tardar en completar la instalación, pero la
+            // respuesta ya invalida cualquier detección anterior. Al volver a
+            // abrir el panel se fuerza una sonda nueva en vez de servir la
+            // lista de hace un minuto.
+            refreshedAt = 0;
             panels.close();
             // Desde un REPL la acción se manda a una shell de verdad: hay que
             // traer al frente la pestaña donde de verdad corre, que puede ser
@@ -412,7 +835,8 @@
     const autoOpenFirst = $derived(app.preferences?.autoOpenFirstGroup ?? false);
 
     function shouldAutoOpen(group: Group): boolean {
-        return autoOpenFirst && groups[0]?.name === group.name;
+        return autoOpenFirst
+            && (groups[0]?.key ?? groups[0]?.name) === (group.key ?? group.name);
     }
 
     function accordionKey(kind: 'group' | 'subgroup', group: Group, entry?: Entry): string {
@@ -420,6 +844,15 @@
         return entry
             ? `${kind}:${groupKey}:${entry.name}`
             : `${kind}:${groupKey}`;
+    }
+
+    /** Las filas sin acordeón también se detectan al abrir su grupo. Sin este
+     *  paso podían quedarse indefinidamente en «Comprobar», porque solo los
+     *  subgrupos emiten un evento `toggle`. */
+    function checkDirectEntries(group: Group): void {
+        for (const entry of group.entries) {
+            if (!entry.isSubgroup) checkEntry(entry);
+        }
     }
 
     function accordionIsOpen(key: string, fallback = false): boolean {
@@ -476,11 +909,50 @@
             ? app.t('deps.loading', 'Detectando…')
             : app.t('deps.onlyApplicable', 'Solo se muestran acciones aplicables a este sistema.'))}
     error={Boolean(error)}
-    count={loading ? undefined : visibleComponentCount}
+    count={loading || hasPendingDetection ? undefined : visibleComponentCount}
     countLabel={app
         .t('deps.visibleComponents', '{count} visible components')
         .replace('{count}', String(visibleComponentCount))}
 >
+    <div
+        class="detection-toolbar"
+        data-testid="dependency-detection-toolbar"
+        data-catalog-action-count={catalogTotalActions}
+        data-catalog-action-ids={catalogActionKeys.join('|')}
+        data-catalog-complete={catalogComplete ? 'true' : 'false'}
+    >
+        <span class="detection-status" aria-live="polite">
+            {#if detecting}
+                {app.t('deps.detectingAgain', 'Comprobando instalaciones…')}
+            {:else}
+                {app.t('deps.detectionHint', 'Si acabas de instalar algo, vuelve a comprobarlo.')}
+            {/if}
+        </span>
+        <button
+            type="button"
+            class="detect"
+            data-testid="dependency-refresh"
+            disabled={detecting || loading}
+            aria-busy={detecting}
+            onclick={repeatDetection}
+        >
+            {detecting
+                ? app.t('deps.detectingAgainButton', 'Comprobando…')
+                : app.t('deps.repeatDetection', 'Repetir detección')}
+        </button>
+    </div>
+    {#if loading && confirmedSectionIds.length === 0}
+        <div class="detection-placeholder" data-testid="dependency-detection-placeholder" aria-live="polite">
+            {app.t('deps.detectingAll', 'Comprobando todas las secciones antes de mostrarlas…')}
+        </div>
+    {:else}
+    {#if loading}
+        <div class="detection-progress" data-testid="dependency-detection-progress" aria-live="polite">
+            {app.t('deps.detectingSection', 'Secciones confirmadas: {done}/{total}')
+                .replace('{done}', String(confirmedSectionIds.length))
+                .replace('{total}', String(sections.length))}
+        </div>
+    {/if}
     <div class="filters" role="search">
         <input
             type="search"
@@ -494,14 +966,14 @@
             <option value="missing">{app.t('deps.filterMissing', 'No instaladas')}</option>
         </select>
     </div>
-    {#if !loading && actions.length === 0}
+    {#if actions.length === 0}
         <div class="empty">
             {app.t('deps.allReady', 'Todo lo detectado está listo; no hay instalaciones pendientes.')}
         </div>
     {/if}
 
     <div class="sections" data-testid="dependency-sections">
-        {#each sections as section (section.id)}
+        {#each visibleSections as section (section.id)}
             <details
                 class="section"
                 data-testid="dependency-section"
@@ -523,15 +995,21 @@
                     </span>
                 </summary>
 
-                {#each section.groups as group (group.name)}
+                {#each section.groups as group (group.key ?? group.name)}
                     <details
                         class="group"
+                        class:updates-group={section.id === 'updates'}
                         data-testid="dependency-group"
                         data-group-key={group.key ?? undefined}
                         data-accordion-key={accordionKey('group', group)}
                         class:languages={group.key === 'group.languages'}
-                        open={accordionIsOpen(accordionKey('group', group), shouldAutoOpen(group))}
-                        ontoggle={onAccordionToggle}
+                        open={group.key === 'group.updates'
+                            ? sectionIsOpen(section.id)
+                            : accordionIsOpen(accordionKey('group', group), shouldAutoOpen(group))}
+                        ontoggle={(event) => {
+                            onAccordionToggle(event);
+                            if ((event.currentTarget as HTMLDetailsElement).open) checkDirectEntries(group);
+                        }}
                     >
                         <summary class="group-title">
                             <span class="group-heading">
@@ -549,27 +1027,97 @@
                         {/if}
 
                         <div class:compact-grid={group.key === 'group.languages'}>
-                        {#each group.entries as entry (entry.name)}
-                            {#if entry.actions.length === 1}
-                                <!-- Una herramienta con una sola acción disponible no gana
-                                     nada con un plegable propio: se muestra directamente.
-                                     Pero conserva su nombre y su sangrado, para que se lea
-                                     en la misma columna que sus vecinas y en el sitio en el
-                                     que el orden alfabético la ha puesto. Sin esto, la fila
-                                     decía "Instalar Visual Studio Code (winget)" y parecía
-                                     archivada bajo la «I». -->
+                        {#each group.entries as entry (entry.actions[0]?.id ?? entry.name)}
+                            {#if !entry.isSubgroup}
+                                <!-- Las acciones que no declaran ecosistema siguen siendo
+                                     filas directas. Las que sí lo declaran conservan siempre
+                                     su cabecera, aunque el inventario solo deje visible
+                                     «Instalar»; así no se pierde la categoría padre cuando
+                                     falta la herramienta. -->
                                 <div class="tool" class:installed={entry.installed}>
                                     {@render item(entry.actions[0], false, entry.name, entry.description)}
                                 </div>
+                            {:else if entry.children.length > 0}
+                                {@const parentKey = accordionKey('subgroup', group, entry)}
+                                <details
+                                    class="subgroup subgroup-parent"
+                                    class:installed={entry.installed}
+                                    data-testid="dependency-subgroup"
+                                    data-subgroup-level="parent"
+                                    data-accordion-key={parentKey}
+                                    open={accordionIsOpen(parentKey)}
+                                    ontoggle={(event) => {
+                                        onAccordionToggle(event);
+                                        if ((event.currentTarget as HTMLDetailsElement).open) {
+                                            // Los hijos pueden aparecer abiertos por la
+                                            // preferencia de acordeón sin emitir su propio
+                                            // `toggle` al montar el árbol. Compruébalos aquí
+                                            // para que una tarjeta visible nunca conserve
+                                            // «Comprobar» por falta de evento.
+                                            if (entry.children.length > 0) {
+                                                for (const child of entry.children) {
+                                                    const childKey = accordionKey('subgroup', group, child);
+                                                    if (accordionIsOpen(childKey, true)) checkEntry(child);
+                                                }
+                                            } else {
+                                                checkEntry(entry);
+                                            }
+                                        }
+                                    }}
+                                >
+                                    <summary class="subgroup-title">
+                                        <span class="subgroup-heading">
+                                            <span>{entry.name}</span>
+                                            {#if entry.description}
+                                                <small>{entry.description}</small>
+                                            {/if}
+                                        </span>
+                                        <span class="count">{entry.children.length}</span>
+                                    </summary>
+                                    <div class="subgroup-children">
+                                        {#each entry.children as child (child.actions[0]?.id ?? child.name)}
+                                            {@const childKey = accordionKey('subgroup', group, child)}
+                                            <details
+                                                class="subgroup subgroup-child"
+                                                class:installed={child.installed}
+                                                data-testid="dependency-subgroup"
+                                                data-subgroup-level="child"
+                                                data-accordion-key={childKey}
+                                                open={accordionIsOpen(childKey, true)}
+                                                ontoggle={(event) => {
+                                                    onAccordionToggle(event);
+                                                    if ((event.currentTarget as HTMLDetailsElement).open) checkEntry(child);
+                                                }}
+                                            >
+                                                <summary class="subgroup-title">
+                                                    <span class="subgroup-heading">
+                                                        <span>{child.name}</span>
+                                                        {#if child.description}
+                                                            <small>{child.description}</small>
+                                                        {/if}
+                                                    </span>
+                                                    <span class="count">{child.actions.length}</span>
+                                                </summary>
+                                                {#each child.actions as action (action.id)}
+                                                    {@render item(action, true, undefined, undefined, !child.description)}
+                                                {/each}
+                                            </details>
+                                        {/each}
+                                    </div>
+                                </details>
                             {:else}
                                 {@const subgroupKey = accordionKey('subgroup', group, entry)}
                                 <details
                                     class="subgroup"
                                     class:installed={entry.installed}
                                     data-testid="dependency-subgroup"
+                                    data-subgroup-level="legacy"
                                     data-accordion-key={subgroupKey}
                                     open={accordionIsOpen(subgroupKey)}
-                                    ontoggle={onAccordionToggle}
+                                    ontoggle={(event) => {
+                                        onAccordionToggle(event);
+                                        if ((event.currentTarget as HTMLDetailsElement).open) checkEntry(entry);
+                                    }}
                                 >
                                     <summary class="subgroup-title">
                                         <span class="subgroup-heading">
@@ -592,6 +1140,7 @@
             </details>
         {/each}
     </div>
+    {/if}
 </Panel>
 
 <!-- La actualización de la propia terminal. No pasa por `item`: no es una
@@ -611,7 +1160,7 @@
             <button
                 type="button"
                 class="run"
-                data-testid="dependency-action"
+                data-testid="dependency-self-update"
                 disabled={updating || checking}
                 onclick={() => (puedeActualizar ? installSelf() : checkSelf())}
             >
@@ -675,6 +1224,13 @@
     description?: string | null,
     showDescription: boolean = !compact
 )}
+    {@const detectionState = action.detectionStatus === 'unknown'
+        ? 'unknown'
+        : action.installed === true
+        ? 'installed'
+        : action.installed === false
+        ? 'absent'
+        : 'not-applicable'}
     <div class="item">
         <div class="item-row">
             <span class="label">
@@ -685,10 +1241,19 @@
                 class="run"
                 data-testid="dependency-action"
                 data-action-id={action.id}
-                disabled={running !== '' || !app.activeTabId}
-                onclick={() => run(action)}
+                data-detection-state={detectionState}
+                data-installed={action.installed === true ? 'true' : action.installed === false ? 'false' : 'unknown'}
+                data-detection-status={action.detectionStatus ?? 'confirmed'}
+                disabled={running !== '' || !app.activeTabId || checkingActions.has(action.id)}
+                onclick={() => action.detectionStatus === 'unknown'
+                    ? checkEntry({ name: action.label, description: action.description, installed: false, actions: [action], children: [], isSubgroup: false })
+                    : run(action)}
             >
-                {running === action.id
+                {checkingActions.has(action.id)
+                    ? app.t('deps.detectingAction', 'Comprobando…')
+                    : action.detectionStatus === 'unknown'
+                    ? app.t('deps.check', 'Comprobar')
+                    : running === action.id
                     ? app.t('deps.preparing', 'Preparando…')
                     : (action.verb ?? app.t('verb.install', 'Instalar'))}
             </button>
@@ -698,6 +1263,11 @@
         {/if}
         {#if action.hint}
             <div class="hint">{action.hint}</div>
+        {/if}
+        {#if action.detectionStatus === 'unknown'}
+            <div class="hint detection-unknown">
+                {app.t('deps.detectionUnknownHint', 'No se ofrece instalar hasta confirmar el estado. Repite la detección.')}
+            </div>
         {/if}
     </div>
 {/snippet}
@@ -709,6 +1279,64 @@
         gap: 6px;
         padding: 6px;
         border-bottom: 1px solid var(--border);
+    }
+
+    .detection-placeholder {
+        min-height: 96px;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 11px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .detection-progress {
+        padding: 6px 9px;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.25;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .detection-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .detection-status {
+        min-width: 0;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.25;
+        overflow-wrap: anywhere;
+    }
+
+    .detect {
+        flex: 0 0 auto;
+        padding: 6px 9px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: var(--surface-hover);
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+    }
+
+    .detect:hover:not(:disabled),
+    .detect:focus-visible:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .detect:disabled {
+        cursor: wait;
+        opacity: 0.7;
     }
 
     .filters input,
@@ -731,6 +1359,15 @@
     }
 
     @container (max-width: 360px) {
+        .detection-toolbar {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .detect {
+            align-self: flex-start;
+        }
+
         .filters {
             grid-template-columns: minmax(0, 1fr);
         }
@@ -752,6 +1389,16 @@
         border-radius: 6px;
         background: rgba(0, 0, 0, 0.2);
         overflow: hidden;
+    }
+
+    /* Actualizaciones ya es el apartado superior: no repite el nombre del
+       grupo interno ni deja una segunda flecha para la misma lista. */
+    .updates-group {
+        margin-top: 0;
+    }
+
+    .updates-group > .group-title {
+        display: none;
     }
 
     .sections {
@@ -978,6 +1625,24 @@
 
     .subgroup .item {
         margin: 4px 6px 6px 6px;
+    }
+
+    /* Los frameworks tienen dos niveles legibles: ecosistema y herramienta.
+       El segundo queda ligeramente más sangrado para que no parezca otra
+       lista plana de acciones repetidas. */
+    .subgroup-children {
+        padding: 2px 4px 4px;
+        background: color-mix(in srgb, var(--surface-alt) 72%, transparent);
+    }
+
+    .subgroup-child {
+        margin: 5px 2px;
+        background: var(--surface);
+    }
+
+    .subgroup-child .subgroup-title {
+        padding: 7px 9px;
+        font-size: 10.5px;
     }
 
     /* Una herramienta con una sola acción: tarjeta con borde e identidad propia */

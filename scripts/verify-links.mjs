@@ -16,6 +16,13 @@ const retries = Math.max(1, Number(process.env.LTERMINAL_LINK_CHECK_RETRIES ?? 2
 // no debe compartir el timeout corto de una petición HTTP HEAD/GET.
 const gitTimeoutMs = Math.max(timeoutMs, Number(process.env.LTERMINAL_GIT_LINK_CHECK_TIMEOUT_MS ?? 15000));
 const gitRetries = Math.max(1, Number(process.env.LTERMINAL_GIT_LINK_CHECK_RETRIES ?? 1));
+// Un repositorio que no existe (o privado) hace que GitHub pida credenciales:
+// sin esto Git abría Git Credential Manager y su inicio de sesión en el
+// navegador en mitad del build, y al vencer el timeout GCM quedaba huérfano con
+// «El enlace de cadenas no es válido». La sonda nunca pide credenciales: sin
+// ayudantes ni preguntas, Git falla al instante y el enlace cuenta como roto.
+const gitNoPromptArgs = ['-c', 'credential.helper=', '-c', 'core.askPass='];
+const gitNoPromptEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_ASKPASS: '', SSH_ASKPASS: '' };
 const sourceRoots = ['README.md', 'package.json', 'src-tauri', 'scripts', 'linux', 'windows'];
 const ignoredDirectories = new Set(['target', 'node_modules', 'dist', '.git', 'vendor', 'gen']);
 // El verificador de registros tiene sus propios reintentos y modo warn; si se
@@ -66,6 +73,12 @@ function skipReason(url) {
             || hostname.endsWith('.example')
             || url.includes('@')
             || parsed.port !== '') return 'host local o URL no verificable';
+        // Dominios reservados para ejemplos y pruebas (RFC 2606 y 6761): los
+        // tests de enlaces clicables los usan como URL de muestra.
+        if (/(?:^|\.)example\.(?:com|net|org)$/u.test(hostname) || hostname.endsWith('.test')) return 'dominio reservado para ejemplos';
+        // Fragmentos que no llegan a un dominio completo («https://ex» o
+        // «https://xn--» en los tests que trocean una URL): no son enlaces.
+        if (!hostname.includes('.') || hostname.endsWith('-')) return 'fragmento sin dominio completo';
         // Valores deliberadamente falsos usados por los tests de
         // validación de GitHub, no enlaces de producción.
         if (hostname === 'github.com' && (/^\/(x|owner)(\/|$)/.test(parsed.pathname))) return 'fixture de validación';
@@ -132,7 +145,8 @@ async function checkUrl(url) {
         let lastError = 'git ls-remote falló';
         for (let attempt = 1; attempt <= gitRetries; attempt += 1) {
             try {
-                await execFileAsync('git', ['ls-remote', '--exit-code', url, 'HEAD'], { timeout: gitTimeoutMs });
+                await execFileAsync('git', [...gitNoPromptArgs, 'ls-remote', '--exit-code', url, 'HEAD'],
+                    { timeout: gitTimeoutMs, env: gitNoPromptEnv, windowsHide: true });
                 return { ok: true, status: 200, method: 'git ls-remote', finalUrl: url, attempt };
             } catch (error) {
                 lastError = error?.killed ? `timeout de ${gitTimeoutMs} ms` : 'git ls-remote falló';
@@ -168,6 +182,18 @@ async function checkUrl(url) {
     // compilación reproducible por un incidente remoto.
     const status = Number(lastError.match(/^HTTP (5\d\d)$/)?.[1] ?? 0);
     return { ok: false, warning: status >= 500, status, error: lastError };
+}
+
+// Autocomprobación de las reglas de omisión: los ejemplos se omiten y un
+// enlace real se sigue comprobando.
+for (const [url, skipped] of [
+    ['https://example.com/a?b=1', true], ['https://docs.example.org/x', true], ['https://app.test/', true],
+    ['https://ex', true], ['https://xn--', true], ['https://github.com/Darkeiser003/Tools', false],
+]) {
+    if (Boolean(skipReason(url)) !== skipped) {
+        console.error(`verify-links: la regla de omisión falla con ${url}`);
+        process.exit(1);
+    }
 }
 
 const files = (await Promise.all(sourceRoots.map(filesUnder))).flat();

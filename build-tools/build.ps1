@@ -6,11 +6,12 @@ $ErrorActionPreference = 'Stop'
 $script:LastMenuActionStatus = 0
 $Root = Split-Path -Parent $PSScriptRoot
 $script:OnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+$script:AppName = if ($script:OnWindows) { 'WTerminal' } else { 'L' + 'Terminal' }
 $script:PowerShellExe = if ($script:OnWindows -and -not (Get-Command 'pwsh' -ErrorAction SilentlyContinue)) { 'powershell' } else { 'pwsh' }
 Set-Location $Root
 
 if ($Help) {
-    Write-Host 'Menú de desarrollo y compilación de LTerminal'
+    Write-Host "Menú de desarrollo y compilación de $script:AppName"
     Write-Host 'Uso: powershell -ExecutionPolicy Bypass -File build-tools/build.ps1'
     Write-Host 'Abre submenús para desarrollo/preview, compilación, pruebas y limpieza.'
     exit 0
@@ -136,15 +137,18 @@ function Show-DevelopmentMenu {
         Write-Host '  4. Compilar solo el frontend'
         Write-Host '  5. Compilar solo el frontend (rápido)'
         Write-Host '  6. Generar el preview web funcional (sin Tauri)'
+        Write-Host '  7. Ejecutar cualquier script npm/pnpm del proyecto'
+        Write-Host '  8. Suites E2E estandarizadas sobre un ejecutable ya compilado'
         Write-Host '  0. Volver'
         $choice = Read-MenuChoice 'Elige una opción'
         switch ($choice) {
-            '1' { Invoke-MenuAction 'Iniciando Vite en http://localhost:1420' 'npm' @('run', 'dev', '--', '--host', '127.0.0.1') }
-            '2' { Invoke-MenuAction 'Previsualizando dist/ en http://localhost:4173' 'npm' @('run', 'preview', '--', '--host', '127.0.0.1') }
-            '3' { Invoke-MenuAction 'Iniciando la aplicación Tauri en desarrollo' 'npm' @('start') }
-            '4' { Invoke-MenuAction 'Compilando únicamente el frontend' 'npm' @('run', 'build') }
-            '5' { Invoke-MenuAction 'Compilando únicamente el frontend en modo rápido' 'npm' @('run', 'build:fast') }
-            '6' { Invoke-MenuAction 'Generando el preview web funcional en dist-preview/' 'npm' @('run', 'build:preview') }
+            '1' { Invoke-MenuAction 'Iniciando Vite en http://localhost:1420' 'node' @('scripts/package-scripts.mjs', 'run', 'dev', '--', '--host', '127.0.0.1') }
+            '2' { Invoke-MenuAction 'Previsualizando dist/ en http://localhost:4173' 'node' @('scripts/package-scripts.mjs', 'run', 'preview', '--', '--host', '127.0.0.1') }
+            '3' { Invoke-MenuAction 'Iniciando la aplicación Tauri en desarrollo' 'node' @('scripts/package-scripts.mjs', 'run', 'start') }
+            '4' { Invoke-MenuAction 'Compilando únicamente el frontend' 'node' @('scripts/package-scripts.mjs', 'run', 'build') }
+            '5' { Invoke-MenuAction 'Compilando únicamente el frontend en modo rápido' 'node' @('scripts/package-scripts.mjs', 'run', 'build:fast') }
+            '6' { Invoke-MenuAction 'Generando el preview web funcional en dist-preview/' 'node' @('scripts/package-scripts.mjs', 'run', 'build:preview') }
+            '7' { Invoke-MenuAction 'Abriendo el selector dinámico de scripts' 'node' @('scripts/package-scripts.mjs', 'menu') }
             '0' { return }
             default { Write-Host 'Opción no válida.' }
         }
@@ -175,7 +179,9 @@ function Show-BuildMenu {
             Write-Host '  5. Generar release Windows y validar también Linux en WSL'
             Write-Host '  6. Compilar frontend y backend juntos sin empaquetar'
             Write-Host '  7. Generar release Linux sin pruebas ampliadas'
-            Write-Host '  8. Generar Windows sin pruebas ampliadas'
+        Write-Host '  8. Generar Windows sin pruebas ampliadas'
+        Write-Host '  9. Abrir el asistente interactivo completo del builder Windows'
+            Write-Host ' 10. Generar release Windows con validación completa (vídeo, descargas, auditoría e instalador)'
         } else {
             Write-Host '  2. Generar AppImage Linux (release completa)'
             Write-Host '  3. Generar AppImage Linux (iteración rápida)'
@@ -185,22 +191,37 @@ function Show-BuildMenu {
             Write-Host '  7. Generar AppImage y validar también Windows bajo Wine'
             Write-Host '  8. Compilar frontend y backend juntos sin empaquetar'
             Write-Host '  9. Generar Linux y Windows sin pruebas ampliadas'
+            Write-Host ' 10. Abrir el asistente interactivo completo del builder Linux'
         }
         Write-Host '  0. Volver'
         $choice = Read-MenuChoice 'Elige una opción'
         if ($choice -eq '1') { Show-BackendMenu; continue }
         if ($choice -eq '6' -and $script:OnWindows) {
             $tauriConfig = if ($script:OnWindows) { 'src-tauri/tauri.windows.conf.json' } else { 'src-tauri/tauri.linux.conf.json' }
-            Invoke-MenuAction 'Compilando frontend y aplicación de escritorio sin empaquetar' 'npm' @('run', 'tauri', '--', 'build', '--config', $tauriConfig, '--no-bundle')
+            Invoke-MenuAction 'Compilando frontend y aplicación de escritorio sin empaquetar' 'node' @('scripts/package-scripts.mjs', 'run', 'tauri', '--', 'build', '--config', $tauriConfig, '--no-bundle')
             continue
         }
         if ($choice -eq '6' -and -not $script:OnWindows) { Invoke-WindowsWineTests; continue }
         if ($choice -eq '7' -and -not $script:OnWindows) { Invoke-LinuxAndWindowsBuild; continue }
         if ($choice -eq '7' -and $script:OnWindows) { Invoke-LinuxBuildWithoutExtendedTests; continue }
         if ($choice -eq '8' -and $script:OnWindows) { Invoke-WindowsCrossBuildWithoutExtendedTests; continue }
+        if ($choice -eq '9' -and $script:OnWindows) {
+            Invoke-MenuAction 'Asistente interactivo del builder Windows' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1')
+            continue
+        }
+        if ($choice -eq '10' -and $script:OnWindows) {
+            if (Confirm-MenuAction 'Incluye la batería completa, vídeo, descargas reales, la auditoría del catálogo y una instalación real del NSIS (pide UAC y lo desinstala al terminar). ¿Continuar?') {
+                Invoke-MenuAction 'Generando la release Windows con validación completa' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-ReleaseValidation')
+            }
+            continue
+        }
+        if ($choice -eq '10' -and -not $script:OnWindows) {
+            Invoke-MenuAction 'Asistente interactivo del builder Linux' 'bash' @('linux/build.sh')
+            continue
+        }
         if ($choice -eq '8' -and -not $script:OnWindows) {
             $tauriConfig = 'src-tauri/tauri.linux.conf.json'
-            Invoke-MenuAction 'Compilando frontend y aplicación de escritorio Linux sin empaquetar' 'npm' @('run', 'tauri', '--', 'build', '--config', $tauriConfig, '--no-bundle')
+            Invoke-MenuAction 'Compilando frontend y aplicación de escritorio Linux sin empaquetar' 'node' @('scripts/package-scripts.mjs', 'run', 'tauri', '--', 'build', '--config', $tauriConfig, '--no-bundle')
             continue
         }
         if ($choice -eq '0') { return }
@@ -259,18 +280,19 @@ function Show-TestsMenu {
         if (-not $script:OnWindows) { Write-Host '  4. Smoke de un AppImage existente' }
         Write-Host '  5. Batería E2E sobre un ejecutable ya compilado'
         if (-not $script:OnWindows) { Write-Host '  6. Comprobar herramientas/shells disponibles en el host' }
+        Write-Host '  7. Ejecutar cualquier script npm/pnpm del proyecto'
         Write-Host '  0. Volver'
         $choice = Read-MenuChoice 'Elige una opción'
         switch ($choice) {
-            '1' { Invoke-MenuAction 'Ejecutando validaciones locales' 'npm' @('run', 'check:local') }
-            '2' { Invoke-MenuAction 'Ejecutando validaciones completas' 'npm' @('run', 'check') }
+            '1' { Invoke-MenuAction 'Ejecutando validaciones locales' 'node' @('scripts/package-scripts.mjs', 'run', 'check:local') }
+            '2' { Invoke-MenuAction 'Ejecutando validaciones completas' 'node' @('scripts/package-scripts.mjs', 'run', 'check') }
             '3' { Invoke-MenuAction 'Ejecutando pruebas Rust' 'cargo' @('test', '--manifest-path', 'src-tauri/Cargo.toml') }
             '4' {
                 if ($script:OnWindows) { Write-Host 'Opción no disponible en Windows.' }
                 else { Invoke-MenuAction 'Validando la aplicación ya empaquetada' 'bash' @('linux/validate-release.sh') }
             }
             '5' {
-                $defaultBinary = if ($script:OnWindows) { Join-Path $Root 'src-tauri\target\release\wterminal.exe' } else { Join-Path $Root 'src-tauri/target/release/lterminal' }
+                $defaultBinary = if ($script:OnWindows) { Join-Path $Root 'src-tauri\target\release\wterminal.exe' } else { Join-Path $Root ('src-tauri/target/release/l' + 'terminal') }
                 $binary = Read-Host "Ruta al ejecutable compilado [$defaultBinary]"
                 if ([string]::IsNullOrWhiteSpace($binary)) { $binary = $defaultBinary }
                 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
@@ -280,12 +302,27 @@ function Show-TestsMenu {
                     $driver = Read-Host 'Ruta a WebKitWebDriver/EdgeDriver (Enter para autodetectar o usar la variable actual)'
                     $environment = @{ E2E_BINARY = (Resolve-Path -LiteralPath $binary).Path }
                     if (-not [string]::IsNullOrWhiteSpace($driver)) { $environment.TAURI_NATIVE_DRIVER = $driver.Trim() }
-                    Invoke-MenuAction 'Ejecutando la batería E2E sin recompilar la app' 'npm' @('run', 'e2e') $environment
+                    Invoke-MenuAction 'Ejecutando la batería E2E sin recompilar la app' 'node' @('scripts/package-scripts.mjs', 'run', 'e2e') $environment
                 }
             }
             '6' {
                 if ($script:OnWindows) { Write-Host 'Opción no disponible en Windows.' }
                 else { Invoke-MenuAction 'Probando las herramientas del host' 'bash' @('linux/exercise-host.sh') }
+            }
+            '7' { Invoke-MenuAction 'Abriendo el selector dinámico de scripts' 'node' @('scripts/package-scripts.mjs', 'menu') }
+            '8' {
+                $defaultBinary = if ($script:OnWindows) { Join-Path $Root 'src-tauri\target\release\wterminal.exe' } else { Join-Path $Root ('src-tauri/target/release/l' + 'terminal') }
+                $binary = Read-Host "Ruta al ejecutable compilado [$defaultBinary]"
+                if ([string]::IsNullOrWhiteSpace($binary)) { $binary = $defaultBinary }
+                if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+                    Write-Host "No se encontró el ejecutable: $binary"
+                    Pause-Menu
+                } else {
+                    Invoke-MenuAction 'Suites disponibles' 'node' @('scripts/run-e2e-suite.mjs', '--list')
+                    $suites = Read-Host 'Suites separadas por comas [focused]'
+                    if ([string]::IsNullOrWhiteSpace($suites)) { $suites = 'focused' }
+                    Invoke-MenuAction 'Ejecutando las suites E2E estandarizadas' 'node' @('scripts/run-e2e-suite.mjs', '--binary', (Resolve-Path -LiteralPath $binary).Path, '--suite', $suites.Trim())
+                }
             }
             '0' { return }
             default { Write-Host 'Opción no válida.' }
@@ -306,7 +343,7 @@ function Show-CleanMenu {
 }
 
 while ($true) {
-    Write-Host "`nLTerminal — desarrollo y compilación"
+    Write-Host "`n$script:AppName — desarrollo y compilación"
     Write-Host '  1. Desarrollo y preview'
     Write-Host '  2. Compilar'
     Write-Host '  3. Pruebas y smoke sin recompilar'

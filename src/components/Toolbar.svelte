@@ -4,6 +4,7 @@
     // proyectos y ajustes se añaden en las fases siguientes de la migración.
 
     import { app } from '../lib/appState.svelte';
+    import { environmentGroupLabel, environmentLabel } from '../lib/command-palette';
     import { includesLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
     import type { Environment } from '../lib/types';
@@ -114,19 +115,16 @@
         await app.savePreferences({ favoriteReplIds: [...next].join(',') });
     }
 
+    // La paleta de comandos nombra los entornos igual que este selector: la
+    // traducción de grupos y etiquetas vive en un único sitio.
+    const translate = (key: string, fallback: string) => app.t(key, fallback);
+
     function translateGroup(group: string): string {
-        if (group === 'Shells del sistema' || group === 'Shells') return app.t('group.system', 'Shells del sistema');
-        if (group.startsWith('Lenguajes')) return app.t('group.languages', 'Lenguajes · intérprete interactivo');
-        if (group.startsWith('WSL')) return app.t('group.wsl', 'WSL · distribuciones Linux');
-        if (group.startsWith('Docker')) return app.t('group.docker', 'Docker · contenedores e imágenes');
-        if (group.startsWith('Android')) return app.t('group.android', 'Android · dispositivos ADB');
-        return group;
+        return environmentGroupLabel(group, translate);
     }
 
     function translateLabel(label: string): string {
-        return label
-            .replace('(sin comprobar)', app.t('env.unverified', '(sin comprobar)'))
-            .replace('(no instalada)', app.t('env.notInstalled', '(no instalada)'));
+        return environmentLabel(label, translate);
     }
 
     const currentEnvironment = $derived(
@@ -244,9 +242,26 @@
             title={app.t('env.refresh', 'Volver a detectar entornos')}
             onclick={() => app.refreshEnvironments()}
         >⟳</button>{/if}
-        {#if app.preferences?.showEnvironmentSelector !== false}{#each favoriteRepls as environment (environment.id)}
+        {#if app.appInfo?.processElevated}
+            <!-- Solo el escudo, junto al selector de entorno: dice de dónde
+                 salen las pestañas sin meterse entre los botones de paneles
+                 (allí desplazaba «Ajustes»). El título de la ventana también
+                 empieza por «Administrador:». -->
+            <span
+                class="admin-badge"
+                data-testid="toolbar-admin-badge"
+                role="img"
+                aria-label={app.t('toolbar.adminBadge', 'Administrador')}
+                title={app.t('toolbar.adminBadgeHint', 'WTerminal se ejecuta como administrador: todas sus pestañas lo son.')}
+            >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M8 1.5 2.5 3.6v4.1c0 3.2 2.3 5.9 5.5 6.8 3.2-.9 5.5-3.6 5.5-6.8V3.6z" fill="currentColor" />
+                </svg>
+            </span>
+        {/if}
+        {#if app.preferences?.showEnvironmentSelector !== false && favoriteRepls.length > 0}<div class="repl-favorites">{#each favoriteRepls as environment (environment.id)}
             <button type="button" class="repl-favorite" title={`Abrir ${environment.label}`} onclick={() => app.createTab(environment.id)}>★ {environment.label.replace(' · REPL', '')}</button>
-        {/each}{/if}
+        {/each}</div>{/if}
     </div>
 
     <div class="toolbar-group">
@@ -254,6 +269,7 @@
             type="button"
             data-panel-toggle
             data-testid="toolbar-projects"
+            title={app.t('toolbar.projects', 'Proyectos')}
             class:active={panels.isOpen('projects')}
             onclick={() => {
                 if (panels.toggle('projects')) onOpenProjects();
@@ -266,6 +282,7 @@
             type="button"
             data-panel-toggle
             data-testid="toolbar-library"
+            title={app.t('toolbar.scripts', 'Biblioteca')}
             class:active={panels.isOpen('scripts')}
             onclick={() => {
                 if (panels.toggle('scripts')) onOpenScripts();
@@ -278,6 +295,7 @@
             type="button"
             data-panel-toggle
             data-testid="toolbar-dependencies"
+            title={app.t('toolbar.deps', 'Entorno y dependencias')}
             class:active={panels.isOpen('deps')}
             onclick={() => {
                 if (panels.toggle('deps')) onOpenDeps();
@@ -290,6 +308,7 @@
             type="button"
             data-panel-toggle
             data-testid="toolbar-settings"
+            title={app.t('toolbar.settings', 'Ajustes')}
             class:active={panels.isOpen('settings')}
             onclick={() => {
                 if (panels.toggle('settings')) onOpenSettings();
@@ -348,6 +367,22 @@
 </div>
 
 <style>
+    .admin-badge {
+        display: inline-flex;
+        flex: none;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        color: var(--warning, #e0a030);
+        cursor: default;
+    }
+
+    .admin-badge svg {
+        width: 14px;
+        height: 14px;
+    }
+
     .toolbar {
         display: flex;
         /* Es una fila estructural del layout, no contenido flexible. Con el
@@ -365,8 +400,8 @@
         font-size: 12px;
     }
 
-    /* Los botones no se encogen ni se salen de la ventana: el que cede espacio
-       al estrechar la ventana es el selector de entorno. */
+    /* El selector y las etiquetas ceden espacio al estrechar la ventana;
+       cada grupo conserva el mínimo que necesitan sus controles. */
     .toolbar-group {
         display: flex;
         align-items: center;
@@ -380,7 +415,9 @@
        se salía de la ventana empujando el resto fuera de la pantalla. */
     .toolbar-group.grow {
         flex: 1 1 0;
-        min-width: 0;
+        /* El selector y refrescar tienen un tamaño mínimo real. El grupo
+           debe reservarlo para no pintar esos controles sobre Proyectos. */
+        min-width: min-content;
         /* El texto ya se recorta dentro de `.env-current`; dejar visible el
            desbordamiento permite que la lista flotante salga bajo la barra. */
         overflow: visible;
@@ -408,7 +445,8 @@
         position: relative;
         display: flex;
         flex: 1 1 0;
-        min-width: 0;
+        width: 0;
+        min-width: 40px;
     }
 
     .env-current {
@@ -546,7 +584,22 @@
 
     .env-favorite.selected { color: var(--favorite); }
 
+    .repl-favorites {
+        display: flex;
+        flex: 1 1 0;
+        width: 0;
+        gap: 6px;
+        min-width: 30px;
+        overflow-x: auto;
+        scrollbar-width: thin;
+    }
+
+    .repl-favorites::-webkit-scrollbar {
+        height: 4px;
+    }
+
     .repl-favorite {
+        flex-shrink: 0;
         max-width: 130px;
         overflow: hidden;
         text-overflow: ellipsis;

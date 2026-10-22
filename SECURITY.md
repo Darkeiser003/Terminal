@@ -24,6 +24,16 @@ guarantee; reports will be acknowledged and coordinated when possible. Do not
 publicly disclose exploit details until a publication date has been agreed with
 the maintainer.
 
+## Release verification
+
+Self-updates are fail-closed. A release must provide `SHA256SUMS.txt`, the
+detached Ed25519 signature `SHA256SUMS.txt.sig`, and the OpenSSH/SSHSIG
+signature `SHA256SUMS.txt.sshsig`. WTerminal/LTerminal embeds the trusted
+Ed25519 public key plus the trusted OpenSSH public key and identity at build
+time. If either signature is missing or invalid, the release is not offered or
+installed. Local unsigned builds therefore cannot silently promote an
+untrusted GitHub artifact into an update.
+
 ## Tracked transitive dependency advisories
 
 The Linux Tauri/Wry GTK 3 and WebKitGTK dependency chain resolves `glib 0.18.5`,

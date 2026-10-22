@@ -1,3 +1,4 @@
+pub mod elevation;
 mod path;
 pub mod webview2;
 
@@ -22,14 +23,83 @@ impl ProcessPlatform for WindowsPlatform {
     }
 
     fn sideloaded_conpty(&self) -> Option<PathBuf> {
-        let exe = std::env::current_exe().ok()?;
-        let folder = exe.parent()?;
-        let dll = folder.join("conpty.dll");
-        let host = folder.join("OpenConsole.exe");
-        // `conpty.dll` carga este host al crear la pseudoconsola. Devolver la
-        // DLL como válida si falta el ejecutable deja la pestaña sin shell y
-        // oculta la causa real en el arranque.
-        (dll.is_file() && host.is_file()).then_some(dll)
+        static RESOLVED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        RESOLVED.get_or_init(resolve_sideloaded_conpty).clone()
+    }
+}
+
+/// `conpty.dll` junto al ejecutable (carpeta unpacked e instalador) o, en el
+/// portable de un solo archivo, la copia que lleva dentro colocada en la caché
+/// de runtime y ya cargada en el proceso.
+fn resolve_sideloaded_conpty() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let folder = exe.parent()?;
+    let dll = folder.join("conpty.dll");
+    let host = folder.join("OpenConsole.exe");
+    // `conpty.dll` carga este host al crear la pseudoconsola. Devolver la
+    // DLL como válida si falta el ejecutable deja la pestaña sin shell y
+    // oculta la causa real en el arranque.
+    if dll.is_file() && host.is_file() {
+        return Some(dll);
+    }
+    let payload = crate::single_file::current()?;
+    let cache_root = crate::single_file::runtime_cache_root();
+    let runtime = match payload.materialize(&crate::single_file::CONPTY_FILES, &cache_root) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            crate::log_error!(
+                "No se pudo preparar el ConPTY embebido del portable",
+                serde_json::json!({ "cache": cache_root.to_string_lossy(), "error": error })
+            );
+            return None;
+        }
+    };
+    let dll = runtime.join("conpty.dll");
+    if !preload_library(&dll) {
+        crate::log_error!(
+            "No se pudo cargar el ConPTY embebido del portable",
+            serde_json::json!({
+                "dll": dll.to_string_lossy(),
+                "error": std::io::Error::last_os_error().to_string(),
+            })
+        );
+        return None;
+    }
+    let pruned = crate::single_file::prune_runtime_cache(&cache_root, &runtime);
+    crate::log_info!(
+        "ConPTY del portable de un solo archivo listo",
+        serde_json::json!({ "dll": dll.to_string_lossy(), "versionesAntiguasBorradas": pruned })
+    );
+    Some(dll)
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn LoadLibraryExW(
+        name: *const u16,
+        file: *mut std::ffi::c_void,
+        flags: u32,
+    ) -> *mut std::ffi::c_void;
+}
+
+/// Carga `path` para el resto de la vida del proceso. `portable-pty` pide
+/// después `conpty.dll` por nombre, y el cargador de Windows resuelve un
+/// nombre ya cargado al módulo existente sin buscarlo en disco: así usa la
+/// copia de la caché aunque no esté junto al ejecutable. `conpty.dll` busca
+/// `OpenConsole.exe` en su propia carpeta.
+fn preload_library(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` es una ruta UTF-16 terminada en cero que vive durante la
+    // llamada; el módulo no se libera nunca a propósito.
+    unsafe {
+        !LoadLibraryExW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_WITH_ALTERED_SEARCH_PATH,
+        )
+        .is_null()
     }
 }
 

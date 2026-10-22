@@ -8,3 +8,5 @@ pub mod paths;
 pub mod plugins;
 pub mod preferences;
 pub mod settings;
+pub mod single_file;
+pub mod toolchain_store;

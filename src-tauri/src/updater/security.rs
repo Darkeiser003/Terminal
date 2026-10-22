@@ -4,7 +4,9 @@
 //! detached del manifiesto (`SHA256SUMS.txt.sig`). La firma autentica qué hash
 //! es el oficial; el hash autentica los bytes del paquete descargado.
 
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
@@ -17,6 +19,9 @@ const PUBLIC_KEY_BYTES: usize = 32;
 const HASH_BYTES: usize = 32;
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const SSH_SIGNATURE_MAX_BYTES: usize = 16 * 1024;
+const SSH_IDENTITY_MAX_BYTES: usize = 128;
+const SSH_NAMESPACE: &str = "lterminal-release";
 
 /// `tar.exe` de Windows es bsdtar y lee los ZIP de distribución. En Linux, el
 /// binario `tar` suele ser GNU tar y no abre ZIP; si hay bsdtar disponible se
@@ -40,9 +45,171 @@ pub(crate) fn archive_tool() -> &'static str {
 /// lee de preferencias ni de una respuesta de red: permitir eso convertiría
 /// la clave de confianza en configuración mutable.
 const UPDATE_PUBLIC_KEY_HEX: Option<&str> = option_env!("LTERMINAL_UPDATE_PUBLIC_KEY");
+/// La clave OpenSSH se incrusta en las builds oficiales como una línea de
+/// `authorized_keys`. Se comprueba además con `ssh-keygen -Y verify`: una
+/// release necesita las dos firmas, Ed25519 y SSHSIG.
+const UPDATE_SSH_PUBLIC_KEY: Option<&str> = option_env!("LTERMINAL_SSH_UPDATE_PUBLIC_KEY");
+const UPDATE_SSH_IDENTITY: Option<&str> = option_env!("LTERMINAL_SSH_UPDATE_IDENTITY");
 
 pub fn signing_key_configured() -> bool {
     public_key().is_ok()
+}
+
+pub fn release_signing_configured() -> bool {
+    signing_key_configured() && ssh_public_key().is_ok() && ssh_keygen_path().is_some()
+}
+
+fn ssh_public_key() -> Result<(&'static str, &'static str), String> {
+    let key = UPDATE_SSH_PUBLIC_KEY
+        .ok_or_else(|| {
+            "Esta compilación no trae una clave pública SSH de actualizaciones.".to_string()
+        })?
+        .trim();
+    let identity = UPDATE_SSH_IDENTITY
+        .ok_or_else(|| "Esta compilación no trae la identidad SSH de actualizaciones.".to_string())?
+        .trim();
+    if identity.is_empty()
+        || identity.len() > SSH_IDENTITY_MAX_BYTES
+        || !identity
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._@+-".contains(&byte))
+    {
+        return Err("La identidad SSH de actualizaciones no es válida.".into());
+    }
+    let mut fields = key.split_whitespace();
+    let key_type = fields.next().unwrap_or_default();
+    let key_data = fields.next().unwrap_or_default();
+    if key_data.is_empty()
+        || fields.next().is_some_and(|field| field.starts_with('#'))
+        || !matches!(key_type, value if value.starts_with("ssh-") || value.starts_with("sk-ssh-") || value.starts_with("ecdsa-"))
+    {
+        return Err("La clave pública SSH de actualizaciones no tiene formato OpenSSH.".into());
+    }
+    Ok((key, identity))
+}
+
+fn ssh_keygen_path() -> Option<String> {
+    if let Some(path) = crate::path_env::which("ssh-keygen") {
+        return Some(path.to_string_lossy().into_owned());
+    }
+    #[cfg(windows)]
+    {
+        let candidates = [
+            std::env::var_os("ProgramW6432")
+                .map(|root| Path::new(&root).join("Git/usr/bin/ssh-keygen.exe")),
+            std::env::var_os("ProgramFiles")
+                .map(|root| Path::new(&root).join("Git/usr/bin/ssh-keygen.exe")),
+            std::env::var_os("LOCALAPPDATA")
+                .map(|root| Path::new(&root).join("Programs/Git/usr/bin/ssh-keygen.exe")),
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Comprueba una firma SSHSIG del mismo `SHA256SUMS.txt` que ya autentica la
+/// firma Ed25519. La clave pública e identidad vienen de la build, nunca de
+/// preferencias ni de la red. Si `ssh-keygen` no está disponible, se rechaza.
+pub fn verify_ssh_signature(manifest: &[u8], encoded_signature: &[u8]) -> Result<(), String> {
+    if manifest.is_empty() || manifest.len() > MANIFEST_MAX_BYTES {
+        return Err("El manifiesto no tiene un tamaño válido para la firma SSH.".into());
+    }
+    if encoded_signature.is_empty() || encoded_signature.len() > SSH_SIGNATURE_MAX_BYTES {
+        return Err("La firma SSH de la release tiene un tamaño inválido.".into());
+    }
+    let (public_key, identity) = ssh_public_key()?;
+    let keygen = ssh_keygen_path()
+        .ok_or_else(|| "No se encontró ssh-keygen para verificar la release.".to_string())?;
+    let temporary = unique_temp_dir("lterminal-ssh-verify")?;
+    let allowed = temporary.join("allowed_signers");
+    let signature = temporary.join("SHA256SUMS.txt.sshsig");
+    let result = (|| {
+        let fields: Vec<&str> = public_key.split_whitespace().collect();
+        if fields.len() < 2 {
+            return Err("La clave pública SSH no contiene tipo y clave.".into());
+        }
+        std::fs::write(
+            &allowed,
+            format!("{} {} {}\n", identity, fields[0], fields[1]),
+        )
+        .map_err(|error| format!("No se pudo preparar la clave SSH de confianza: {error}"))?;
+        std::fs::write(&signature, encoded_signature)
+            .map_err(|error| format!("No se pudo guardar la firma SSH temporal: {error}"))?;
+
+        let mut child = Command::new(keygen)
+            .args([
+                "-Y",
+                "verify",
+                "-f",
+                &allowed.to_string_lossy(),
+                "-I",
+                identity,
+                "-n",
+                SSH_NAMESPACE,
+                "-s",
+                &signature.to_string_lossy(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("No se pudo ejecutar ssh-keygen: {error}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(manifest).map_err(|error| {
+                format!("No se pudo enviar el manifiesto a ssh-keygen: {error}")
+            })?;
+        }
+        let deadline = std::time::Instant::now() + VERIFY_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return Ok(());
+                    }
+                    return Err("La firma SSHSIG del manifiesto no es válida.".into());
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(15))
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("ssh-keygen agotó el tiempo al verificar la firma SSH.".into());
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("No se pudo esperar a ssh-keygen: {error}"));
+                }
+            }
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&temporary);
+    result
+}
+
+fn unique_temp_dir(prefix: &str) -> Result<std::path::PathBuf, String> {
+    let root = std::env::temp_dir();
+    for attempt in 0..8u32 {
+        let path = root.join(format!("{prefix}-{}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "No se pudo crear el temporal de verificación SSH: {error}"
+                ))
+            }
+        }
+    }
+    Err("No se pudo reservar un temporal de verificación SSH único.".into())
 }
 
 fn public_key() -> Result<[u8; PUBLIC_KEY_BYTES], String> {

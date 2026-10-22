@@ -10,6 +10,7 @@ const read = (file) => readFileSync(resolve(root, file), 'utf8');
 const backend = read('src-tauri/src/packages/ltools.rs');
 const api = read('src/lib/api.ts');
 const panel = read('src/components/ScriptsPanel.svelte');
+const settingsPanel = read('src/components/SettingsPanel.svelte');
 const selection = read('src/lib/ltools-selection.ts');
 const catalog = JSON.parse(read('src-tauri/config/project-catalog.json'));
 
@@ -45,6 +46,13 @@ assert.match(api, /ltools_action_run/);
 assert.match(panel, /loadLToolsSelection/);
 assert.match(selection, /lterminal\.ltools\.quick-actions\.v1/);
 assert.match(panel, /runLToolsAction/);
+assert.match(settingsPanel, /async function openLToolsConfiguration/);
+assert.match(settingsPanel, /await saveDraft\(\)/,
+    'Configurar desde Ajustes debe guardar la activación antes de abrir la Biblioteca');
+assert.match(settingsPanel, /ltoolsEnabledAfterSave/,
+    'Configurar desde Ajustes debe comprobar que la activación quedó persistida');
+assert.match(settingsPanel, /disabled=\{saving\} onclick=\{\(\) => void openLToolsConfiguration\(\)\}/,
+    'la acción de configuración no debe competir con un guardado en curso');
 assert.match(panel, /Obtener LTools/);
 assert.match(panel, /installLTools/);
 assert.match(panel, /ltoolsReleaseAsset/);
@@ -63,16 +71,32 @@ assert.match(panel, /data-testid="scripts-ltools-filter"/);
 assert.match(panel, /data-testid="scripts-ltools-action"/);
 assert.match(panel, /data-testid="scripts-ltools-run"/);
 assert.ok(catalog.repositories.includes('Darkeiser003/Tools'));
+// La terminal debe aguantar los cambios de Tools sin tocarse: acciones con
+// otra forma se descartan una a una, un catálogo largo se recorta, gana la
+// copia más reciente y la salida grande del CLI se lee sin bloquearlo.
+assert.match(backend, /una_accion_mal_formada_no_deja_sin_las_demas/);
+assert.match(backend, /un_catalogo_mas_largo_que_el_tope_se_recorta_en_vez_de_rechazarse/);
+assert.match(backend, /los_campos_nuevos_del_catalogo_se_ignoran/);
+assert.match(backend, /fn order_candidates\(/);
+assert.match(backend, /CATALOG_TIMEOUT/);
+assert.doesNotMatch(backend, /supera el límite de acciones permitido/);
+assert.match(read('src-tauri/src/infrastructure/process.rs'), /fn drain_in_background\(/);
+assert.match(read('src-tauri/src/infrastructure/process.rs'), /una_salida_mayor_que_la_tuberia_llega_entera_y_sin_timeout/);
 
 const liveE2e = read('scripts/test-ltools-e2e.mjs');
 const smokeE2e = read('tests/e2e/smoke.mjs');
 const reportVerifier = read('scripts/verify-e2e-report.mjs');
 assert.match(liveE2e, /E2E_LTOOLS_ONLY/);
+assert.match(smokeE2e, /E2E_LTOOLS_SETTINGS_ROUTE_ONLY/);
+assert.match(smokeE2e, /ltools-settings-route/);
 assert.match(liveE2e, /E2E_LTOOLS_INTEGRATION/);
 assert.match(liveE2e, /LTOOLS_PATH/);
 assert.match(liveE2e, /e2eCandidates/);
 assert.match(liveE2e, /existsSync/);
 assert.match(liveE2e, /SKIP: E2E LTools omitida/);
+assert.match(liveE2e, /'wtools-cli\.exe'/, 'la E2E real debe encontrar el CLI que publica WTools');
+assert.match(smokeE2e, /\? \['wtools-cli\.exe'/, 'el smoke debe consultar wtools-cli.exe');
+assert.match(smokeE2e, /missingPickerIds/, 'la E2E real exige que se vean todas las acciones compatibles');
 assert.match(smokeE2e, /findFreePort/);
 assert.match(smokeE2e, /createServer/);
 assert.match(smokeE2e, /nativeResizeSupported/);

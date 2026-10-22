@@ -23,6 +23,17 @@ for (const file of frontendFiles) {
     for (const match of source.matchAll(/(?:app\.t|translated)\(\s*['"]([^'"]+)['"]/g)) usedKeys.add(match[1]);
 }
 
+// Los módulos de `src/lib` reciben el traductor como parámetro (son puros para
+// probarlos en Node) y declaran sus claves como `labelKey`/`descriptionKey` o
+// llamadas `t('…')`. Sin este escaneo una clave de la paleta de comandos o de
+// un atajo podía faltar en el catálogo y verse solo el texto de respaldo.
+for (const relative of ['src/lib/command-palette.ts', 'src/lib/shortcuts.ts']) {
+    const source = fs.readFileSync(path.join(root, relative), 'utf8');
+    for (const match of source.matchAll(/(?:labelKey|descriptionKey):\s*'([^']+)'|\bt\(\s*'([^']+)'/g)) {
+        usedKeys.add(match[1] ?? match[2]);
+    }
+}
+
 const backendKeys = new Set();
 function walkRust(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -86,6 +97,7 @@ for (const [file, catalog] of Object.entries(catalogs)) {
 // hay un contrato exacto: cambiar u omitir un marcador dejaría `{...}` visible
 // o perdería el dato en alguno de los 15 idiomas.
 const placeholderContracts = {
+    'terminal.terminalOnlyGuide': ['shortcut'],
     'terminal.bannerHidden': ['items'],
     'terminal.bannerStatus': ['state'],
     'terminal.hiddenCount': ['count'],
@@ -93,6 +105,17 @@ const placeholderContracts = {
     'terminal.replMissing': ['name'],
     'terminal.helpFallback': ['topic'],
     'update.packagesAvailable': ['manager'],
+    'settings.toolchainStoreTotal': ['size'],
+    'settings.toolchainStoreClearConfirm': ['size'],
+    'settings.toolchainStoreCleared': ['size'],
+    'terminal.linkHover': ['url'],
+    'palette.resultCount': ['count'],
+    'palette.action.panes': ['count'],
+    'palette.action.switchEnvironment': ['name'],
+    'palette.action.openRepl': ['name'],
+    'palette.action.theme': ['name'],
+    'palette.action.font': ['name'],
+    'palette.action.language': ['name'],
 };
 for (const [file, catalog] of Object.entries(catalogs)) {
     for (const [key, expected] of Object.entries(placeholderContracts)) {
@@ -118,6 +141,10 @@ const criticalLocalizedKeys = [
     'terminal.helpFallback',
     'terminal.internalCommands',
     'update.packagesAvailable',
+    // «Paleta de comandos» es igual en portugués: se vigilan frases largas.
+    'palette.placeholder',
+    'palette.rejected.draft',
+    'settings.shortcutCommandPalette',
 ];
 for (const [file, catalog] of Object.entries(catalogs)) {
     if (file === 'es.json') continue;

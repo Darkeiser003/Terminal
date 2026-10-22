@@ -13,6 +13,16 @@ export interface TerminalBufferLine {
     getCell(index: number): TerminalBufferCell | undefined;
 }
 
+/** Recogniza prompts comunes para no confundir el eco del comando con salida. */
+export function isShellInputLine(text: string): boolean {
+    // cmd no añade un espacio después de `>`: el eco real puede empezar
+    // inmediatamente por `powershell`, `echo`, etc. Reconocer ese prompt
+    // completo evita medir las continuaciones de la orden como salida y
+    // ensanchar la matriz durante una barra corta.
+    if (/^[A-Za-z]:[\\/][^>\r\n]*>/u.test(text)) return true;
+    return /^(?:~\s+)?(?:[\w.-]+@[\w.-]+(?::[^#$]*)?[#$]|❯|➜|[$#]|PS\s+[^>]*>)(?:\s|$)/u.test(text);
+}
+
 /**
  * Calcula las columnas mínimas que necesita la rejilla en este momento:
  * el viewport, el contenido lógico que sigue visible y cualquier reserva
@@ -35,11 +45,11 @@ export function requiredTerminalColumns(
 }
 
 /**
- * Reserva solo unas pocas columnas cuando llega entrada nueva. Una línea
- * pegada puede tener cientos de caracteres y debe envolverse dentro del
- * viewport; usar toda su longitud como reserva convierte una orden larga en
- * una rejilla horizontal permanente. El pequeño margen evita que el cursor
- * alcance el borde entre dos eventos de teclado consecutivos.
+ * Reserva las columnas necesarias para la línea que se está editando y para
+ * el margen que el llamador pida. El margen corto sirve para teclas normales;
+ * una línea pegada puede pasar su longitud completa como `lookahead` cuando
+ * necesita llegar al Enter sin que ConPTY la reenvuelva. La reserva se libera
+ * al terminar la salida, así que no convierte el scrollback en ancho fijo.
  */
 export function inputReservationColumns(
     cursorColumn: number,

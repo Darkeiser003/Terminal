@@ -92,7 +92,10 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "rust", label: "Rust", windows_exe: "evcxr", unix_exe: "evcxr", args: &[],
         note: Some("Requiere evcxr, el intérprete interactivo de Rust.") },
     LanguageDef { id: "ipython", label: "IPython", windows_exe: "ipython", unix_exe: "ipython", args: &[], note: None },
-    LanguageDef { id: "typescript", label: "TypeScript", windows_exe: "ts-node", unix_exe: "ts-node", args: &[], note: None },
+    // ts-node hereda el tsconfig del directorio actual. Forzar transpile-only,
+    // CommonJS y resolución Node mantiene utilizable el REPL aunque el
+    // proyecto declare ESNext/Bundler o el usuario tenga TypeScript reciente.
+    LanguageDef { id: "typescript", label: "TypeScript", windows_exe: "ts-node", unix_exe: "ts-node", args: &["--transpile-only", "--compiler-options", "{\"module\":\"CommonJS\",\"moduleResolution\":\"Node\"}"], note: None },
     LanguageDef { id: "luajit", label: "LuaJIT", windows_exe: "luajit", unix_exe: "luajit", args: &[], note: None },
     LanguageDef { id: "raku", label: "Raku", windows_exe: "raku", unix_exe: "raku", args: &[], note: None },
     LanguageDef { id: "tcl", label: "Tcl", windows_exe: "tclsh", unix_exe: "tclsh", args: &[], note: None },
@@ -109,6 +112,8 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     // El ejecutable sin subcomando solo imprime la ayuda; `crystal i` es el REPL.
     LanguageDef { id: "crystal", label: "Crystal", windows_exe: "crystal", unix_exe: "crystal", args: &["i"], note: None },
     LanguageDef { id: "v", label: "V", windows_exe: "v", unix_exe: "v", args: &["repl"], note: None },
+    // Swift se conserva en el catálogo de instalación, pero no se anuncia
+    // como REPL: el runtime Windows termina o falla dentro de ConPTY.
     LanguageDef { id: "swift", label: "Swift", windows_exe: "swift", unix_exe: "swift", args: &[], note: None },
     LanguageDef { id: "standard-ml", label: "Standard ML", windows_exe: "sml", unix_exe: "sml", args: &[], note: None },
     LanguageDef { id: "elm", label: "Elm", windows_exe: "elm", unix_exe: "elm", args: &["repl"], note: None },
@@ -117,14 +122,14 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "idris2", label: "Idris 2", windows_exe: "idris2", unix_exe: "idris2", args: &[], note: None },
     LanguageDef { id: "coq", label: "Coq", windows_exe: "coqtop", unix_exe: "coqtop", args: &[], note: None },
     LanguageDef { id: "sqlite", label: "SQLite", windows_exe: "sqlite3", unix_exe: "sqlite3", args: &[], note: None },
-    LanguageDef { id: "postgresql", label: "PostgreSQL", windows_exe: "psql", unix_exe: "psql", args: &[], note: None },
-    LanguageDef { id: "mysql", label: "MySQL", windows_exe: "mysql", unix_exe: "mysql", args: &[], note: None },
-    LanguageDef { id: "mariadb", label: "MariaDB", windows_exe: "mariadb", unix_exe: "mariadb", args: &[], note: None },
+    LanguageDef { id: "postgresql", label: "PostgreSQL", windows_exe: "psql", unix_exe: "psql", args: &[], note: Some("Requiere un servidor PostgreSQL activo y credenciales." ) },
+    LanguageDef { id: "mysql", label: "MySQL", windows_exe: "mysql", unix_exe: "mysql", args: &[], note: Some("Requiere un servidor MySQL activo y credenciales." ) },
+    LanguageDef { id: "mariadb", label: "MariaDB", windows_exe: "mariadb", unix_exe: "mariadb", args: &[], note: Some("Requiere un servidor MariaDB activo y credenciales." ) },
     // Evita que la CLI consulte el color de fondo del terminal y espere 5 s si
     // el PTY no implementa esa consulta; además el modo oscuro coincide con la UI.
     LanguageDef { id: "duckdb", label: "DuckDB", windows_exe: "duckdb", unix_exe: "duckdb", args: &["-dark-mode"], note: None },
-    LanguageDef { id: "mongodb", label: "MongoDB", windows_exe: "mongosh", unix_exe: "mongosh", args: &[], note: None },
-    LanguageDef { id: "redis", label: "Redis", windows_exe: "redis-cli", unix_exe: "redis-cli", args: &[], note: None },
+    LanguageDef { id: "mongodb", label: "MongoDB", windows_exe: "mongosh", unix_exe: "mongosh", args: &[], note: Some("Requiere un servidor MongoDB activo y credenciales." ) },
+    LanguageDef { id: "redis", label: "Redis", windows_exe: "redis-cli", unix_exe: "redis-cli", args: &[], note: Some("Requiere un servidor Redis activo y credenciales." ) },
     LanguageDef { id: "swi-prolog", label: "Prolog · SWI", windows_exe: "swipl", unix_exe: "swipl", args: &[], note: None },
     LanguageDef { id: "gnu-prolog", label: "Prolog · GNU", windows_exe: "gprolog", unix_exe: "gprolog", args: &[], note: None },
     LanguageDef { id: "forth", label: "Forth", windows_exe: "gforth", unix_exe: "gforth",
@@ -148,6 +153,8 @@ static LANGUAGE_DEFS: &[LanguageDef] = &[
     LanguageDef { id: "neo4j", label: "Neo4j · Cypher", windows_exe: "cypher-shell", unix_exe: "cypher-shell", args: &[], note: None },
     LanguageDef { id: "cassandra", label: "Cassandra · CQL", windows_exe: "cqlsh", unix_exe: "cqlsh", args: &[], note: None },
     LanguageDef { id: "smalltalk", label: "Smalltalk · GNU", windows_exe: "gst", unix_exe: "gst", args: &[], note: None },
+    // `purs repl` solo muestra ayuda y termina; PureScript sigue disponible
+    // como herramienta de instalación, pero no como REPL de una pestaña.
     LanguageDef { id: "purescript", label: "PureScript", windows_exe: "purs", unix_exe: "purs", args: &["repl"], note: None },
     LanguageDef { id: "gambit-scheme", label: "Scheme · Gambit", windows_exe: "gsi", unix_exe: "gsi", args: &[], note: None },
     LanguageDef { id: "gauche", label: "Scheme · Gauche", windows_exe: "gosh", unix_exe: "gosh", args: &[], note: None },
@@ -169,11 +176,22 @@ pub struct Probe<'a> {
     pub resolve_path: &'a dyn Fn(&str) -> Option<String>,
 }
 
+/// Ejecutables que pueden instalarse y usarse desde una shell, pero cuyo
+/// supuesto REPL no ofrece una sesión interactiva fiable dentro de WTerminal.
+/// Mantenerlos fuera del selector evita abrir una pestaña que solo imprime
+/// ayuda o termina inmediatamente.
+fn is_non_interactive_repl(id: &str) -> bool {
+    matches!(id, "swift" | "scala-cli" | "purescript")
+}
+
 pub fn detect_language_environments(platform: &str, probe: &Probe<'_>) -> Vec<Environment> {
     let is_windows = platform == "windows" || platform == "win32";
     let mut detected: Vec<Environment> = LANGUAGE_DEFS
         .iter()
         .filter_map(|definition| {
+            if is_non_interactive_repl(definition.id) {
+                return None;
+            }
             let exe = if is_windows {
                 definition.windows_exe
             } else {
@@ -198,6 +216,9 @@ pub fn detect_language_environments(platform: &str, probe: &Probe<'_>) -> Vec<En
         })
         .collect();
     for definition in CATALOG_DEFS.iter() {
+        if is_non_interactive_repl(&definition.id) {
+            continue;
+        }
         if detected
             .iter()
             .any(|env| env.language.as_deref() == Some(&definition.id))
@@ -229,6 +250,9 @@ pub fn detect_language_environments(platform: &str, probe: &Probe<'_>) -> Vec<En
         });
     }
     for definition in crate::config::plugins::enabled_technologies() {
+        if is_non_interactive_repl(&definition.id) {
+            continue;
+        }
         if detected
             .iter()
             .any(|env| env.language.as_deref() == Some(&definition.id))
@@ -294,9 +318,7 @@ pub fn detect_wsl_language_environments(distro: &str, installed: &[String]) -> V
         if !is_installed(exe) {
             return;
         }
-        let mut command_args = vec!["-d".to_string(), distro.to_string(), "--".to_string()];
-        command_args.push(exe.to_string());
-        command_args.extend(args.iter().cloned());
+        let command_args = crate::wsl_env::repl_launch_args(distro, exe, args);
         detected.push(Environment {
             id: format!("wsl:{distro}:lang:{id}"),
             label: format!("WSL {distro} · {label} · REPL"),
@@ -314,6 +336,9 @@ pub fn detect_wsl_language_environments(distro: &str, installed: &[String]) -> V
     };
 
     for definition in LANGUAGE_DEFS {
+        if is_non_interactive_repl(definition.id) {
+            continue;
+        }
         let args: Vec<String> = definition
             .args
             .iter()
@@ -328,6 +353,9 @@ pub fn detect_wsl_language_environments(distro: &str, installed: &[String]) -> V
         );
     }
     for definition in CATALOG_DEFS.iter() {
+        if is_non_interactive_repl(&definition.id) {
+            continue;
+        }
         push(
             &definition.id,
             &definition.label,
@@ -337,6 +365,9 @@ pub fn detect_wsl_language_environments(distro: &str, installed: &[String]) -> V
         );
     }
     for definition in crate::config::plugins::enabled_technologies() {
+        if is_non_interactive_repl(&definition.id) {
+            continue;
+        }
         let id = format!("plugin:{}", definition.id);
         push(
             &id,
@@ -421,6 +452,24 @@ mod tests {
         assert!(!environments
             .iter()
             .any(|environment| environment.id == "lang:dart"));
+    }
+
+    #[test]
+    fn herramientas_sin_repl_estable_no_aparecen_en_el_selector() {
+        let (is_installed, resolve_path) = probe_with(&["swift", "scala-cli", "purs"]);
+        let environments = detect_language_environments(
+            "windows",
+            &Probe {
+                is_installed: &is_installed,
+                resolve_path: &resolve_path,
+            },
+        );
+        assert!(environments.iter().all(|environment| {
+            !matches!(
+                environment.language.as_deref(),
+                Some("swift" | "scala-cli" | "purescript")
+            )
+        }));
     }
 
     #[test]
@@ -543,7 +592,11 @@ mod tests {
             .expect("Python debe detectarse dentro de WSL");
         assert_eq!(python.transport, Transport::Wsl);
         assert_eq!(python.exe, "wsl.exe");
-        assert_eq!(python.args, vec!["-d", "Ubuntu", "--", "python3"]);
+        assert_eq!(
+            python.args,
+            crate::wsl_env::repl_launch_args("Ubuntu", "python3", &[])
+        );
+        assert_eq!(python.args[6], "python3");
         assert_eq!(python.id, "wsl:Ubuntu:lang:python");
     }
 

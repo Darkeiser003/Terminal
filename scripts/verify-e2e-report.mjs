@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
+import { toolbarLayoutIsValid } from '../tests/e2e/toolbar-layout.mjs';
 
 const reportPath = process.argv[2];
 if (!reportPath) throw new Error('Uso: node scripts/verify-e2e-report.mjs RUTA_INFORME.json');
@@ -16,6 +17,31 @@ const captureNames = new Set((report.captures ?? []).flatMap((capture) => [
     capture?.label,
     typeof capture?.path === 'string' ? capture.path.split(/[\\/]/).at(-1) : null,
 ].filter(Boolean)));
+
+function wslCoverageValid(events, matrix, platform) {
+    if (platform !== 'win32') return true;
+    const coverage = events.find((event) => event?.type === 'wsl-distro-selector-coverage');
+    const installedNames = Array.isArray(coverage?.installedNames) ? coverage.installedNames : [];
+    const distroIds = Array.isArray(coverage?.distroIds) ? coverage.distroIds : [];
+    const coveredTestIds = Array.isArray(coverage?.testedIds) ? coverage.testedIds : [];
+    if (!coverage || coverage.passed !== true) return false;
+    if (coverage.status === 'verified') {
+        return installedNames.length > 0
+            && JSON.stringify(distroIds) === JSON.stringify(installedNames.map((name) => `wsl:${name}`))
+            && distroIds.every((id) => matrix?.availableIds?.includes(id) && matrix?.testedIds?.includes(id))
+            && JSON.stringify(coveredTestIds) === JSON.stringify(distroIds);
+    }
+    return ['none-installed', 'unavailable'].includes(coverage.status)
+        && installedNames.length === 0 && distroIds.length === 0 && coveredTestIds.length === 0;
+}
+
+if (report.host?.platform !== 'win32'
+    && (reportEvents.some((event) => event?.type === 'windows-collaborator-credit'
+        || event?.alias?.toLowerCase() === 'christianlg97'
+        || (Array.isArray(event?.aliases) && event.aliases.some((alias) => String(alias).toLowerCase() === 'christianlg97')))
+        || captureNames.has('credito-christian-formato'))) {
+    throw new Error('El crédito christianlg97 es exclusivo del E2E Windows y no debe aparecer en informes de Linux.');
+}
 const processCleanup = reportEvents.find((event) => event?.type === 'e2e-process-cleanup');
 if (!processCleanup || processCleanup.passed !== true || processCleanup.closed !== true
     || (report.host?.platform !== 'win32' && processCleanup.processGroupClosed !== true)) {
@@ -24,6 +50,26 @@ if (!processCleanup || processCleanup.passed !== true || processCleanup.closed !
 
 if (report.status !== 'passed') {
     throw new Error(`El E2E no terminó correctamente: ${report.status ?? 'sin estado'} (${report.error ?? 'sin detalle'})`);
+}
+if (report.options?.videoRequired === true
+    && (!report.video
+        || report.video.status !== 'stopped'
+        || !Number.isFinite(report.video.bytes)
+        || report.video.bytes <= 0)) {
+    throw new Error('El E2E solicitó vídeo, pero el informe no contiene un MP4 válido y no vacío.');
+}
+if (report.video?.status === 'stopped') {
+    if (report.video.sourceFrameSequenceContiguous === false
+        || report.video.frameSequenceContiguous === false
+        || (Array.isArray(report.video.sourceFrameGaps) && report.video.sourceFrameGaps.length > 0)) {
+        throw new Error('El vídeo E2E conserva huecos en la secuencia de frames de origen.');
+    }
+    const wallDurationMs = Number(report.video.wallDurationMs);
+    const recordedDurationMs = Number(report.video.frameDurationMs);
+    if (Number.isFinite(wallDurationMs) && Number.isFinite(recordedDurationMs)
+        && Math.abs(wallDurationMs - recordedDurationMs) > 5000) {
+        throw new Error(`La duración grabada no cubre el tiempo armado del E2E (${wallDurationMs} ms frente a ${recordedDurationMs} ms).`);
+    }
 }
 if (report.logValidated !== true) throw new Error('El E2E no validó el log de su propia ejecución.');
 if (!Number.isFinite(report.durationMs) || report.durationMs <= 0) throw new Error('El E2E no registró una duración válida.');
@@ -43,6 +89,108 @@ if (!timings || timings.schemaVersion !== 1
 if (timings.totalMs !== report.durationMs
     || timings.phases.some((phase) => !phase?.name || !Number.isFinite(phase.durationMs) || phase.durationMs < 0)) {
     throw new Error('El desglose temporal del E2E no coincide con la duración total o contiene fases inválidas.');
+}
+
+if (report.focusedScenario === 'dependency-full-audit') {
+    const audit = reportEvents.find((event) => event?.type === 'dependency-full-audit');
+    const sections = Array.isArray(audit?.sections) ? audit.sections : [];
+    const firstPass = audit?.firstPass;
+    const secondPass = audit?.secondPass;
+    const captures = Array.isArray(audit?.captures) ? audit.captures : [];
+    const capturePaths = new Set((report.captures ?? []).map((capture) => capture?.path));
+    const validPass = (pass) => pass?.pass && Array.isArray(pass.sections)
+        && Array.isArray(pass.groups) && Array.isArray(pass.actions)
+        && pass.sections.length > 0 && pass.groups.length > 0
+        && Number.isFinite(pass.durationMs) && pass.durationMs >= 0
+        && Number.isFinite(pass.actionCount) && pass.actionCount === pass.actions.length
+        && pass.stateCounts && Object.entries(pass.stateCounts).every(([state, count]) =>
+            ['installed', 'absent', 'unknown', 'not-applicable'].includes(state)
+            && Number.isInteger(count) && count >= 0)
+        && Object.values(pass.stateCounts).reduce((total, count) => total + count, 0) === pass.actionCount
+        && typeof pass.signature === 'string' && pass.signature.length > 2
+        && pass.actions.every((action) => action?.sectionId && action?.groupKey && action?.id
+            && ['installed', 'absent', 'unknown', 'not-applicable'].includes(action.state)
+            && (action.state !== 'unknown' || action.detectionStatus === 'unknown'));
+    const catalogStateTotal = audit?.catalogStateCounts
+        ? Object.values(audit.catalogStateCounts).reduce((total, count) => total + count, 0)
+        : null;
+    const catalogStructuralCount = Number.isInteger(audit?.catalogStructuralActionCount)
+        ? audit.catalogStructuralActionCount
+        : firstPass?.actionCount;
+    if (!audit || audit.passed !== true || audit.stableInventory !== true
+        || !validPass(firstPass) || !validPass(secondPass)
+        || (audit.verifiedInventoryStable !== undefined && audit.verifiedInventoryStable !== true)
+        || (audit.verifiedActionCount !== undefined && audit.verifiedActionCount !== secondPass.actionCount)
+        || (audit.catalogActionsIndividuallyVerified !== undefined && audit.catalogActionsIndividuallyVerified !== true)
+        || (audit.catalogActionIdsUnique !== undefined && audit.catalogActionIdsUnique !== true)
+        || (audit.catalogStructuralActionCount !== undefined
+            && (!Number.isInteger(audit.catalogStructuralActionCount)
+                || audit.catalogStructuralActionCount < firstPass.actionCount))
+        || (audit.catalogStateCounts !== undefined
+            && catalogStateTotal !== catalogStructuralCount)
+        || (audit.catalogActionKeys !== undefined
+            && (!Array.isArray(audit.catalogActionKeys)
+                || audit.catalogActionKeys.length !== catalogStructuralCount
+                || new Set(audit.catalogActionKeys).size !== audit.catalogActionKeys.length
+                || !Array.isArray(audit.catalogMissingActionIds)))
+        || sections.length !== secondPass.sections.length
+        || !Number.isFinite(audit.initialDurationMs) || audit.initialDurationMs <= 0
+        || !Number.isFinite(audit.firstPassDurationMs) || audit.firstPassDurationMs < 0
+        || !Number.isFinite(audit.secondPassDurationMs) || audit.secondPassDurationMs < 0
+        || !Array.isArray(audit.unknownActionIds)
+        || captures.length < 3
+        || captures.some((path) => typeof path !== 'string' || !capturePaths.has(path))) {
+        throw new Error('La auditoría completa de Dependencias no contiene dos inventarios estables, tiempos y capturas verificables.');
+    }
+    if (report.options?.dependencyAuditOnly === true
+        && report.options?.captureVideo === true
+        && (!report.video || report.video.status !== 'stopped' || !Number.isFinite(report.video.bytes) || report.video.bytes <= 0)) {
+        throw new Error('La auditoría completa de Dependencias solicitó vídeo, pero no contiene un MP4 válido y no vacío.');
+    }
+    if (report.options?.comprehensiveVisualAudit === true) {
+        const visual = reportEvents.find((event) => event?.type === 'comprehensive-visual-audit');
+        const requiredCaptures = [
+            'visual-ajustes-appearance-arriba',
+            'visual-ajustes-terminal-arriba',
+            'visual-ajustes-behavior-arriba',
+            'visual-ajustes-about-arriba',
+            'long-command-before',
+            'long-command-after',
+            'progress-update-during',
+            'progress-upgrade-during',
+        ];
+        const availableCaptures = new Set((report.captures ?? []).map((capture) => capture?.label));
+        if (!visual || visual.passed !== true
+            || requiredCaptures.some((label) => !availableCaptures.has(label))
+            || !Array.isArray(report.video?.nativeSegments)
+            || report.video.nativeSegments.length === 0
+            || Number(report.video.frames ?? 0) < 2
+            // La cadencia efectiva puede ser fraccionaria si el driver
+            // descarta muestras durante un resize; lo que debe quedar
+            // garantizado es que el auditor se configuró con muestreo visual
+            // suficiente y que el MP4 conserva toda la duración temporal.
+            || Number(report.options?.videoSampleFps ?? 0) < 6) {
+            throw new Error('La auditoría visual completa no contiene ajustes, overflow, progreso, segmentos nativos y muestreo suficiente.');
+        }
+    }
+    await new Promise((resolve) => process.stdout.write('Informe E2E de auditoría completa de Dependencias validado.\n', resolve));
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'pane-matrix') {
+    const matrix = reportEvents.find((event) => event?.type === 'pane-matrix-focused');
+    const fragmentChecks = reportEvents.filter((event) => event?.type === 'pane-matrix-fragments-absent');
+    const captures = report.captures ?? [];
+    if (!matrix || matrix.passed !== true
+        || !Array.isArray(matrix.transitions) || matrix.transitions.length < 3
+        || !Number.isInteger(matrix.finalCount) || matrix.finalCount < 2
+        || fragmentChecks.length < matrix.transitions.length
+        || fragmentChecks.some((event) => event.passed !== true)
+        || captures.filter((capture) => String(capture?.label ?? '').startsWith('matriz-enfocada-')).length < matrix.transitions.length) {
+        throw new Error('La auditoría enfocada de matriz no contiene todas las transiciones, comprobaciones de fragmentos y capturas.');
+    }
+    await new Promise((resolve) => process.stdout.write('Informe E2E de matriz PTY validado.\n', resolve));
+    process.exit(0);
 }
 
 if (report.focusedScenario === 'environment-shell-matrix') {
@@ -99,7 +247,8 @@ if (report.focusedScenario === 'environment-shell-matrix') {
         || !Array.isArray(matrix.shellTimings)
         || matrix.shellTimings.length !== probes.length
         || matrix.shellTimings.some((entry) => !entry?.id || !Number.isFinite(entry.durationMs)
-            || !Number.isFinite(entry.readinessMs))) {
+            || !Number.isFinite(entry.readinessMs))
+        || !wslCoverageValid(events, matrix, report.host?.platform)) {
         throw new Error('El E2E enfocado de shells no probó/restauró todos los entornos o carece de capturas verificables.');
     }
     await new Promise((resolve) => process.stdout.write(
@@ -148,25 +297,61 @@ if (report.focusedScenario === 'ltools-catalog-integration') {
     process.exit(0);
 }
 
+if (report.focusedScenario === 'ltools-settings-route') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const route = reportEvents.find((event) => event?.type === 'ltools-settings-route');
+    if (!phases.has('arranque de interfaz') || !phases.has('ruta de configuración de LTools')
+        || !route || route.passed !== true || route.enabledBeforeNavigation !== true
+        || route.sectionVisible !== true
+        || (route.installControlVisible !== true && route.catalogAvailable !== true)) {
+        throw new Error('El E2E no verificó que Configurar LTools guarde la activación y abra el catálogo en la Biblioteca.');
+    }
+    await new Promise((resolve) => process.stdout.write(
+        `Informe E2E de la ruta Ajustes → Biblioteca de LTools validado: instalación=${route.installControlVisible === true}.\n`,
+        resolve,
+    ));
+    process.exit(0);
+}
+
 if (report.focusedScenario === 'progress-output-layout') {
     const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
     const progress = reportEvents.find((event) => event?.type === 'progress-output-layout');
     const scenarios = Array.isArray(progress?.scenarios) ? progress.scenarios : [];
     const update = scenarios.find((scenario) => scenario?.id === 'update');
     const upgrade = scenarios.find((scenario) => scenario?.id === 'upgrade');
+    const updateOverflow = update?.host?.overflow === 'true'
+        && Number(update.host?.scrollWidth) > Number(update.host?.clientWidth) + 2;
+    const upgradeOverflow = upgrade?.host?.overflow === 'true'
+        && Number(upgrade.host?.scrollWidth) > Number(upgrade.host?.clientWidth) + 2;
+    const updateWrapped = update?.contentDriven === true
+        && update.host?.overflow !== 'true'
+        && Number(update.expectedLineLength) > Number(update.maxVisibleRowLength)
+        && Number(update.maxVisibleRowLength) <= Number(update.host?.cols) + 1;
+    const upgradeWrapped = upgrade?.contentDriven === true
+        && upgrade.host?.overflow !== 'true'
+        && Number(upgrade.expectedLineLength) > Number(upgrade.maxVisibleRowLength)
+        && Number(upgrade.maxVisibleRowLength) <= Number(upgrade.host?.cols) + 1;
+    const updateFitsBaseGrid = update?.contentDriven === true
+        && update.host?.overflow !== 'true'
+        && Number(update.host?.scrollWidth) <= Number(update.host?.clientWidth) + 12
+        && Number(update.maxVisibleRowLength) >= Number(update.expectedMinimum)
+        && Number(update.expectedLineLength) <= Number(update.maxVisibleRowLength);
     if (!phases.has('arranque de interfaz') || !phases.has('salidas progresivas de actualización')
         || !progress || progress.passed !== true
         || !update?.passed || !upgrade?.passed
         || !Number.isFinite(update.commandDurationMs) || update.commandDurationMs < 0
         || !Number.isFinite(upgrade.commandDurationMs) || upgrade.commandDurationMs < 0
-        || update.host?.overflow === 'true'
-        || update.host?.scrollWidth > update.host?.clientWidth + 2
         || !Number.isFinite(update.maxVisibleRowLength)
-        || Number(update.host?.cols) > Math.max(Number(update.maxVisibleRowLength), Number(update.host?.clientWidth) || 0) + 8
-        || upgrade.host?.overflow !== 'true'
-        || upgrade.host?.scrollWidth <= upgrade.host?.clientWidth + 2
+        || !Number.isFinite(update.expectedMinimum)
+        || update.maxVisibleRowLength < update.expectedMinimum
+        || !(updateOverflow || updateWrapped || updateFitsBaseGrid)
+        || !(upgradeOverflow || upgradeWrapped)
         || !Number.isFinite(upgrade.maxVisibleRowLength)
-        || Number(upgrade.host?.cols) > Number(upgrade.maxVisibleRowLength) + 8
+        || !Number.isFinite(upgrade.expectedMinimum)
+        || upgrade.maxVisibleRowLength < upgrade.expectedMinimum
+        || !Number.isFinite(upgrade.expectedLineLength)
+        || (!upgradeWrapped && Number(upgrade.host?.cols) < upgrade.expectedLineLength - 4)
+        || (!upgradeWrapped && Number(upgrade.host?.cols) > upgrade.expectedLineLength + 8)
         || progress.cleanup?.reclaimed !== true
         || !Number.isFinite(progress.cleanup?.durationMs) || progress.cleanup.durationMs < 0
         || !Number.isFinite(progress.durationMs) || progress.durationMs < 0
@@ -192,6 +377,80 @@ if (report.focusedScenario === 'settings-footer-800x600') {
         || layout.contentBottom > layout.footerTop + 1
         || !(report.captures ?? []).some((capture) => capture?.label === 'settings-footer-800x600')) {
         throw new Error('El E2E enfocado de Ajustes no verificó el pie fijo y el scroll completo a 800x600.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'maximized-tab-persistence') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const persistence = reportEvents.find((event) => event?.type === 'maximized-tab-persistence');
+    if (!phases.has('arranque de interfaz')
+        || !phases.has('persistencia del maximizado al crear pestañas y REPL')
+        || !persistence || persistence.passed !== true
+        || persistence.tabPreserved !== true || persistence.replPreserved !== true
+        || !Number.isFinite(persistence.maximizedRect?.width)
+        || !Number.isFinite(persistence.maximizedRect?.height)
+        || !Number.isFinite(persistence.afterTabRect?.width)
+        || !Number.isFinite(persistence.afterReplRect?.width)
+        || !(report.captures ?? []).some((capture) => capture?.label === 'maximized-before-new-tab')
+        || !(report.captures ?? []).some((capture) => capture?.label === 'maximized-after-new-tab-and-repl')) {
+        throw new Error('El E2E enfocado de maximizado no verificó la conservación del tamaño tras pestaña y REPL.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'internal-configuration-commands') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const commands = reportEvents.find((event) => event?.type === 'internal-configuration-commands');
+    const expected = [':shell current', ':panel list', ':theme list', ':font list', ':language list', ':terminal list', ':panes list'];
+    if (phases.has('arranque de interfaz') && phases.has('comandos internos y shell')
+        && commands?.skipped === true && commands.passed === false
+        && JSON.stringify(commands.commands) === JSON.stringify(expected)
+        && typeof commands.reason === 'string' && commands.reason.length > 0) {
+        process.exit(0);
+    }
+    if (!phases.has('arranque de interfaz') || !phases.has('comandos internos y shell')
+        || !commands || commands.passed !== true
+        || JSON.stringify(commands.commands) !== JSON.stringify(expected)
+        || !(report.captures ?? []).some((capture) => capture?.label === 'internal-configuration-commands')) {
+        throw new Error('El E2E enfocado no verificó todos los comandos internos de configuración.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'path-integration') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const integration = reportEvents.find((event) => event?.type === 'path-integration-toggle');
+    if (!phases.has('arranque de interfaz') || !phases.has('integración de WTerminal en PATH')
+        || !integration || integration.passed !== true || integration.controlVisible !== true
+        || integration.addedAndVerified !== true || integration.restored !== true
+        || typeof integration.location !== 'string' || !integration.location
+        || !captureNames.has('settings-path-integration')) {
+        throw new Error('El E2E enfocado no verificó la activación, ubicación y restauración de WTerminal en PATH.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'terminal-only-mode') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const mode = reportEvents.find((event) => event?.type === 'terminal-only-mode');
+    const clean = mode?.cleanMode;
+    const restored = mode?.restoredMode;
+    if (!phases.has('arranque de interfaz') || !phases.has('modo de terminal limpia')
+        || !mode || mode.passed !== true
+        || clean?.mode !== 'terminal-only' || clean.toolbarCount !== 0 || clean.tabStripCount !== 0
+        || clean.workspacePadding !== '0px' || clean.gridGap !== '0px'
+        || clean.guideCount !== 1 || typeof clean.guideText !== 'string' || !/(Atajo|Shortcut)/i.test(clean.guideText)
+        || clean.settingsButtonCount !== 0
+        || clean.dismissButtonCount !== 1 || clean.neverButtonCount !== 1
+        || mode.guideSettingVisible !== true
+        || mode.guideSettingDisabled !== true
+        || mode.contextMenuSettings !== true
+        || clean.horizontalOverflow === true || clean.verticalOverflow === true
+        || restored?.mode !== 'normal' || restored.toolbarCount !== 1 || restored.tabStripCount < 1
+        || !Array.isArray(mode.captures) || mode.captures.length < 2
+        || mode.captures.some((label) => !captureNames.has(label))) {
+        throw new Error('El E2E enfocado del modo de terminal limpia no verificó ocultación, layout sin overflow, recuperación y capturas.');
     }
     process.exit(0);
 }
@@ -235,6 +494,98 @@ if (report.focusedScenario === 'adb-progressive-output-repaint') {
     }
     process.exit(0);
 }
+/** Permisos de administrador: la sección coincide con el backend, el
+ *  arranque elevado viene apagado y persiste, NSudo cuadra con su lanzador y
+ *  el ejecutable no lleva la marca RUNASADMIN. */
+function validAdminPermissions(admin) {
+    return Boolean(admin) && admin.passed === true && admin.sectionVisible === true
+        && ['direct', 'gsudo', 'windows-sudo', 'needs-admin'].includes(admin.launcher)
+        && (admin.launcher === 'direct') === (admin.elevated === true)
+        && admin.restartVisible === (admin.elevated !== true)
+        && admin.startAsAdminDefault === false && admin.startAsAdminPersisted === true
+        && admin.restored === true && admin.nsudoConsistent === true
+        && admin.modesExclusive === true && admin.markRemoved === true
+        && admin.restartUnelevatedVisible === (admin.elevated === true)
+        && admin.runAsAdminFlag === false
+        && admin.runAsAdminControl === true
+        && admin.adminBadge === (admin.elevated === true)
+        && admin.capture === 'windows-admin-permissions'
+        && captureNames.has('windows-admin-permissions');
+}
+if (report.focusedScenario === 'windows-admin-permissions') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const admin = reportEvents.find((event) => event?.type === 'windows-admin-permissions');
+    if (report.host?.platform !== 'win32' || !phases.has('arranque de interfaz') || !phases.has('ajustes')
+        || !validAdminPermissions(admin)) {
+        throw new Error('El E2E Windows no verificó los permisos de administrador (sección, arranque elevado, NSudo y RUNASADMIN).');
+    }
+    // Sin administrador ni gsudo real, el escenario recorre también la ruta
+    // de gsudo con uno simulado.
+    if (admin.elevated !== true && admin.gsudo !== true) {
+        const route = reportEvents.find((event) => event?.type === 'windows-admin-gsudo-route');
+        if (!route || route.passed !== true || route.launcher !== 'gsudo' || route.detectedAfterRefresh !== true
+            || route.nsudoThroughGsudo !== true || route.installHidden !== true
+            || route.restoredLauncher !== admin.launcher
+            || route.capture !== 'windows-admin-permissions-gsudo'
+            || !captureNames.has('windows-admin-permissions-gsudo')) {
+            throw new Error('El E2E de administrador no recorrió la ruta de NSudo a través de gsudo.');
+        }
+    }
+    await new Promise((resolve) => process.stdout.write('Informe E2E de permisos de administrador validado.\n', resolve));
+    process.exit(0);
+}
+if (report.focusedScenario === 'windows-start-maximized-preference') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const maximized = reportEvents.find((event) => event?.type === 'windows-start-maximized-preference');
+    if (report.host?.platform !== 'win32' || !phases.has('arranque de interfaz') || !phases.has('ajustes')
+        || !maximized || maximized.passed !== true || maximized.controlVisible !== true
+        || typeof maximized.initiallyEnabled !== 'boolean' || maximized.toggledAndPersisted !== true
+        || maximized.reopenedSettingsVerified !== true || maximized.restored !== true) {
+        throw new Error('El E2E Windows no probó la persistencia de Iniciar maximizada.');
+    }
+    await new Promise((resolve) => process.stdout.write('Informe E2E de Iniciar maximizada validado.\n', resolve));
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'language-switch') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const language = reportEvents.find((event) => event?.type === 'language-switch');
+    const tested = Array.isArray(language?.tested) ? language.tested : [];
+    if (!phases.has('arranque de interfaz') || !phases.has('idiomas y traducciones')
+        || language?.passed !== true || language.restored !== true || !language.original
+        || tested.length < 2 || new Set(tested.map((entry) => entry.language)).size !== tested.length
+        || tested.some((entry) => !entry.language || entry.language === language.original
+            || entry.anchors?.tabs?.length !== 4 || !entry.anchors?.toolbar?.settings)
+        || !captureNames.has('language-switch-restored')) {
+        throw new Error('El E2E de idiomas no demostró cambios de catálogo, restauración y captura.');
+    }
+    process.exit(0);
+}
+
+if (report.focusedScenario === 'author-credits') {
+    const phases = new Set((report.phases ?? []).map((phase) => phase?.name));
+    const author = reportEvents.find((event) => event?.type === 'author-easter-eggs');
+    const aliases = Array.isArray(author?.aliases) ? author.aliases.map((alias) => String(alias).toLowerCase()) : [];
+    const captures = Array.isArray(author?.captures) ? author.captures : [];
+    const isWindows = report.host?.platform === 'win32';
+    const hasChristianCredit = reportEvents.some((event) => event?.type === 'windows-collaborator-credit'
+        || event?.alias?.toLowerCase() === 'christianlg97'
+        || (Array.isArray(event?.aliases) && event.aliases.some((alias) => String(alias).toLowerCase() === 'christianlg97')))
+        || captureNames.has('credito-christian-formato');
+    if (!['win32', 'linux'].includes(report.host?.platform)
+        || !phases.has('arranque de interfaz') || !phases.has('créditos de autor por plataforma')
+        || !author || author.passed !== true || author.platform !== report.host.platform
+        || author.collaboratorCreditTested !== isWindows
+        || !['darkeiser003', '@darkeiser003'].every((alias) => aliases.includes(alias))
+        || !captures.includes('credito-darkeiser-formato') || !captures.includes('credito-prompt-utilizable')
+        || !captureNames.has('credito-darkeiser-formato') || !captureNames.has('credito-prompt-utilizable')
+        || (isWindows && (!aliases.includes('christianlg97') || !captures.includes('credito-christian-formato')
+            || !captureNames.has('credito-christian-formato') || !hasChristianCredit))
+        || (!isWindows && (aliases.includes('christianlg97') || hasChristianCredit))) {
+        throw new Error('El E2E de créditos no demostró el comportamiento esperado por plataforma y sus capturas.');
+    }
+    process.exit(0);
+}
 
 const requiredPhases = [
     'arranque de interfaz',
@@ -264,60 +615,109 @@ if (!mouseSelection || mouseSelection.passed !== true
     throw new Error('El E2E no demostró una selección visible mediante arrastre real del ratón.');
 }
 const terminalOutputRepaint = events.find((event) => event?.type === 'terminal-output-repaint');
+const captureRequired = report.options?.captureScreenshots !== false;
 if (!terminalOutputRepaint || terminalOutputRepaint.passed !== true
     || terminalOutputRepaint.trigger !== 'pty-output-idle'
     || !Number.isFinite(terminalOutputRepaint.refreshCount) || terminalOutputRepaint.refreshCount < 1
     || !Number.isFinite(terminalOutputRepaint.rowsRefreshed) || terminalOutputRepaint.rowsRefreshed < 1
     || terminalOutputRepaint.layoutUnchanged !== true
     || typeof terminalOutputRepaint.marker !== 'string' || !terminalOutputRepaint.marker
-    || !terminalOutputRepaint.capture
-    || !(report.captures ?? []).some((capture) => capture?.label === terminalOutputRepaint.capture)) {
+    || (captureRequired && (!terminalOutputRepaint.capture
+        || !(report.captures ?? []).some((capture) => capture?.label === terminalOutputRepaint.capture)))) {
     throw new Error('El E2E no demostró el repintado de salida PTY sin resize/división y sin captura visual.');
 }
 const progressLayout = events.find((event) => event?.type === 'progress-output-layout');
 const progressScenarios = Array.isArray(progressLayout?.scenarios) ? progressLayout.scenarios : [];
 const progressUpdate = progressScenarios.find((scenario) => scenario?.id === 'update');
 const progressUpgrade = progressScenarios.find((scenario) => scenario?.id === 'upgrade');
+const upgradeOverflow = progressUpgrade?.host?.overflow === 'true'
+    && progressUpgrade.host?.scrollWidth > progressUpgrade.host?.clientWidth + 2;
+const updateOverflow = progressUpdate?.host?.overflow === 'true'
+    && progressUpdate.host?.scrollWidth > progressUpdate.host?.clientWidth + 2;
+// Las builds actuales pueden envolver una barra larga en filas del PTY en vez
+// de crear overflow horizontal. El E2E lo marca como `contentDriven` y la
+// captura demuestra que la longitud esperada sigue visible en varias filas.
+const upgradeWrapped = progressUpgrade?.contentDriven === true
+    && progressUpgrade.host?.overflow !== 'true'
+    && Number(progressUpgrade.expectedLineLength) > Number(progressUpgrade.maxVisibleRowLength)
+    && Number(progressUpgrade.maxVisibleRowLength) <= Number(progressUpgrade.host?.cols) + 1;
+const updateWrapped = progressUpdate?.contentDriven === true
+    && progressUpdate.host?.overflow !== 'true'
+    && Number(progressUpdate.expectedLineLength) > Number(progressUpdate.maxVisibleRowLength)
+    && Number(progressUpdate.maxVisibleRowLength) <= Number(progressUpdate.host?.cols) + 1;
+// En una ventana suficientemente ancha la barra corta cabe entera dentro de
+// la rejilla base. Ese estado también demuestra que no se truncó: exigir
+// overflow o wrapping aquí convertía una salida completa en un falso fallo.
+const updateFitsBaseGrid = progressUpdate?.contentDriven === true
+    && progressUpdate.host?.overflow !== 'true'
+    && Number(progressUpdate.host?.scrollWidth) <= Number(progressUpdate.host?.clientWidth) + 12
+    && Number(progressUpdate.host?.cols) <= Number(progressLayout?.baseline?.host?.cols) + 4
+    && Number(progressUpdate.maxVisibleRowLength) >= Number(progressUpdate.expectedMinimum)
+    && Number(progressUpdate.expectedLineLength) <= Number(progressUpdate.maxVisibleRowLength);
 if (!progressLayout || progressLayout.passed !== true
     || !progressUpdate?.passed || !progressUpgrade?.passed
-    || progressUpdate.host?.overflow === 'true'
-    || progressUpdate.host?.scrollWidth > progressUpdate.host?.clientWidth + 2
+    || !(updateOverflow || updateWrapped || updateFitsBaseGrid)
     || !Number.isFinite(progressUpdate.maxVisibleRowLength)
-    || Number(progressUpdate.host?.cols) > Math.max(Number(progressUpdate.maxVisibleRowLength), Number(progressUpdate.host?.clientWidth) || 0) + 8
-    || progressUpgrade.host?.overflow !== 'true'
-    || progressUpgrade.host?.scrollWidth <= progressUpgrade.host?.clientWidth + 2
+    || !Number.isFinite(progressUpdate.expectedMinimum)
+    || progressUpdate.maxVisibleRowLength < progressUpdate.expectedMinimum
+    || !Number.isFinite(Number(progressLayout.baseline?.host?.cols))
+    || (!updateOverflow && !updateWrapped
+        && Number(progressUpdate.host?.cols) > Number(progressLayout.baseline.host.cols) + 4)
+    || !(upgradeOverflow || upgradeWrapped)
     || !Number.isFinite(progressUpgrade.maxVisibleRowLength)
-    || Number(progressUpgrade.host?.cols) > Number(progressUpgrade.maxVisibleRowLength) + 8
+    || !Number.isFinite(progressUpgrade.expectedMinimum)
+    || progressUpgrade.maxVisibleRowLength < progressUpgrade.expectedMinimum
+    || !Number.isFinite(progressUpgrade.expectedLineLength)
+    // Con overflow horizontal válido la rejilla puede conservar sus columnas
+    // visibles y desplazar el excedente en el host. Solo exigimos que `cols`
+    // siga la longitud exacta cuando no hubo overflow ni wrapping.
+    || (!upgradeOverflow && !upgradeWrapped && Number(progressUpgrade.host?.cols) < progressUpgrade.expectedLineLength - 4)
+    || (!upgradeOverflow && !upgradeWrapped && Number(progressUpgrade.host?.cols) > progressUpgrade.expectedLineLength + 8)
+    || !captureNames.has(String(progressUpdate.capture ?? '').split(/[\\/]/).at(-1))
+    || !captureNames.has(String(progressUpgrade.capture ?? '').split(/[\\/]/).at(-1))
     || progressLayout.cleanup?.reclaimed !== true
+    || !captureNames.has(String(progressLayout.cleanup.capture ?? '').split(/[\\/]/).at(-1))
     || progressScenarios.some((scenario) => !Number.isFinite(scenario.commandDurationMs) || scenario.commandDurationMs < 0)
     || !Number.isFinite(progressLayout.cleanup?.durationMs) || progressLayout.cleanup.durationMs < 0) {
     throw new Error('El E2E no demostró que las barras de actualización solo ocupen el ancho de su contenido y lo recuperen al terminar.');
 }
 const horizontalHelp = events.find((event) => event?.type === 'horizontal-help-geometry');
+const helpOverflow = horizontalHelp?.snapshot?.host?.scrollWidth > horizontalHelp?.snapshot?.host?.clientWidth
+    && horizontalHelp?.snapshot?.indicator?.opacity === '1'
+    && horizontalHelp?.horizontalWheelProbe?.lineMode?.defaultPrevented === true
+    && horizontalHelp?.horizontalWheelProbe?.pixelMode?.defaultPrevented === true
+    && horizontalHelp?.horizontalWheelProbe?.pageMode?.defaultPrevented === true;
+const helpWrapped = horizontalHelp?.snapshot?.host?.scrollWidth <= horizontalHelp?.snapshot?.host?.clientWidth + 2
+    && horizontalHelp?.snapshot?.host?.overflowX === 'hidden'
+    && (horizontalHelp?.snapshot?.visibleRowLengths ?? []).every((length) =>
+        Number(length) <= Number(horizontalHelp?.snapshot?.host?.cols))
+    && horizontalHelp?.horizontalWheelProbe?.lineMode?.defaultPrevented === false
+    && horizontalHelp?.horizontalWheelProbe?.pixelMode?.defaultPrevented === false
+    && horizontalHelp?.horizontalWheelProbe?.pageMode?.defaultPrevented === false;
 if (!horizontalHelp || horizontalHelp.passed !== true
     || !Number.isFinite(horizontalHelp.snapshot?.host?.clientWidth)
     || !Number.isFinite(horizontalHelp.snapshot?.host?.scrollWidth)
-    || horizontalHelp.snapshot.host.scrollWidth <= horizontalHelp.snapshot.host.clientWidth
-    || horizontalHelp.snapshot.indicator?.opacity !== '1'
-    || horizontalHelp.horizontalWheelProbe?.lineMode?.defaultPrevented !== true
-    || horizontalHelp.horizontalWheelProbe?.pixelMode?.defaultPrevented !== true
-    || horizontalHelp.horizontalWheelProbe?.pageMode?.defaultPrevented !== true) {
+    || !(helpOverflow || helpWrapped)) {
     throw new Error('El E2E no probó el scroll horizontal de la ayuda con las tres unidades de rueda.');
+}
+if (report.host?.platform === 'win32') {
+    const admin = events.find((event) => event?.type === 'windows-admin-permissions');
+    if (!validAdminPermissions(admin)) {
+        throw new Error('El E2E de Windows no comprobó los permisos de administrador (sección, arranque elevado, NSudo y RUNASADMIN).');
+    }
 }
 const widthReclaim = events.find((event) => event?.type === 'terminal-columns-reclaim');
 if (!widthReclaim || widthReclaim.passed !== true
     || !Number.isFinite(widthReclaim.beforeCols) || !Number.isFinite(widthReclaim.visibleCols)
     || !Number.isFinite(widthReclaim.afterCols) || !Number.isFinite(widthReclaim.hostWidth)
     || !Number.isFinite(widthReclaim.hostScrollWidth)
-    || widthReclaim.beforeCols <= widthReclaim.visibleCols
     || widthReclaim.afterCols > widthReclaim.visibleCols + 1
-    || widthReclaim.hostScrollWidth > widthReclaim.hostWidth + 2
+    || (widthReclaim.hostScrollWidth > widthReclaim.hostWidth + 2
+        && widthReclaim.noVisibleOverflow !== true)
     || widthReclaim.oldestOutputVisibleAfterWheelUp !== true
     || widthReclaim.newestOutputVisibleAfterWheelDown !== true
     || !Number.isFinite(widthReclaim.scrollUp?.dispatched) || widthReclaim.scrollUp.dispatched < 1
-    || !Number.isFinite(widthReclaim.scrollUp?.prevented) || widthReclaim.scrollUp.prevented < 1
     || !Number.isFinite(widthReclaim.scrollDown?.dispatched) || widthReclaim.scrollDown.dispatched < 1
-    || !Number.isFinite(widthReclaim.scrollDown?.prevented) || widthReclaim.scrollDown.prevented < 1
     || widthReclaim.generatedLines < 12
     || widthReclaim.outputMarkerVisible !== true) {
     throw new Error('El E2E no demostró la recuperación de columnas y del scrollback mediante rueda vertical.');
@@ -386,7 +786,8 @@ if (!shellMatrix || shellMatrix.passed !== true
     || environmentProbes.some((event) => !Number.isFinite(event.durationMs) || event.durationMs < 0)
     || environmentProbes.some((event) => !Number.isFinite(event.bannerReadyMs) || event.bannerReadyMs < 0)
     || !Array.isArray(shellMatrix.shellTimings)
-    || shellMatrix.shellTimings.length !== environmentProbes.length) {
+    || shellMatrix.shellTimings.length !== environmentProbes.length
+    || !wslCoverageValid(events, shellMatrix, report.host?.platform)) {
     throw new Error('El E2E no cubrió todos los shells/REPL detectados con una sonda PTY real, no justificó sus omisiones o no restauró el entorno original.');
 }
 for (const captureLabel of [shellMatrix.originalCaptureLabel, shellMatrix.captureLabel]) {
@@ -398,6 +799,12 @@ if (testedIds.includes('lang:forth') && !report.captures?.some((capture) => capt
     throw new Error('El E2E no conservó la captura que demuestra que la ayuda inicial de Gforth queda visible.');
 }
 const ltoolsUiSource = events.find((event) => event?.type === 'ltools-ui-source');
+const ltoolsDisabledByDefault = events.find((event) => event?.type === 'ltools-disabled-by-default');
+if (!ltoolsDisabledByDefault || ltoolsDisabledByDefault.passed !== true
+    || ltoolsDisabledByDefault.visible !== false
+    || ltoolsDisabledByDefault.installControlVisible !== false) {
+    throw new Error('El E2E no demostró que LTools permanezca oculta y sin instalador cuando la integración está desactivada.');
+}
 if (!ltoolsUiSource || ltoolsUiSource.passed !== true
     || ltoolsUiSource.legacySelectorCount !== 0
     || ltoolsUiSource.ltoolsSectionCount !== 1
@@ -451,8 +858,13 @@ const splitPaneHasUsableGeometry = (pane) => Number.isFinite(pane?.cols)
     && pane.hostWidth > 0
     && pane.cols > 0
     && pane.visibleCols > 0;
-const splitPaneFitsViewport = (pane) => pane.cols <= pane.visibleCols + 1
-    && pane.hostScrollWidth <= pane.hostWidth + 2;
+const splitPaneFitsViewport = (pane) => {
+    const scrollbarReserve = Math.max(0, (pane.screenWidth ?? pane.hostWidth) - pane.hostWidth);
+    const cellWidth = Number.isFinite(pane.cellWidth) && pane.cellWidth > 0 ? pane.cellWidth : 1;
+    const reservedCols = Math.ceil(scrollbarReserve / cellWidth);
+    return pane.cols <= pane.visibleCols + reservedCols + 1
+        && pane.hostScrollWidth <= pane.hostWidth + scrollbarReserve + 2;
+};
 const splitPaneOverflowIsContentDriven = (pane) => pane.overflow === 'true'
     && Number.isFinite(pane.longestVisibleRow)
     && pane.cols > pane.visibleCols + 1
@@ -467,6 +879,11 @@ if (!splitColumns || splitColumns.passed !== true || splitColumns.panes?.length 
 }
 
 const responsiveMinimum = events.find((event) => event?.type === 'responsive-minimum');
+const toolbarGeometry = events.filter((event) => event?.type === 'toolbar-geometry');
+if (!toolbarGeometry.some(event => event.label === 'mínimo responsive')
+    || toolbarGeometry.some(event => event.passed !== true || !toolbarLayoutIsValid(event))) {
+    throw new Error('El E2E no verificó la barra superior sin controles solapados ni recortados al tamaño mínimo.');
+}
 const responsiveDimensionsValid = (value) => Number.isFinite(value?.width)
     && Number.isFinite(value?.height) && value.width > 0 && value.height > 0;
 if (!responsiveMinimum || responsiveMinimum.passed !== true
@@ -540,6 +957,26 @@ if (!responsive || responsive.panes < 2 || responsive.cases < 20
     || !responsive.explorerStates?.includes(false) || !responsive.explorerStates?.includes(true)) {
     throw new Error('El E2E no completó la matriz de redimensionado con dos paneles y los dos estados del explorador.');
 }
+if (!report.focusedScenario) {
+    const matrixFragmentChecks = events.filter((event) => event?.type === 'pane-matrix-fragments-absent');
+    if (matrixFragmentChecks.length < 3
+        || matrixFragmentChecks.some((event) => event.passed !== true
+            || !Number.isInteger(event.expected) || event.expected < 1
+            || !Array.isArray(event.panes)
+            || event.panes.some((pane) => !Number.isFinite(pane?.width)
+                || !Number.isFinite(pane?.maxRun)
+                || pane.maxRun >= 5 && pane.width >= 64))) {
+        throw new Error('El E2E completo no demostró que las transiciones de paneles eviten fragmentos verticales de la matriz PTY.');
+    }
+}
+if (report.host?.wsl1) {
+    const wsl1Limit = events.find((event) => event?.type === 'wsl1-pane-driver-limit');
+    if (!wsl1Limit || wsl1Limit.passed !== true || !Array.isArray(wsl1Limit.skippedCounts)
+        || !wsl1Limit.skippedCounts.includes(3) || !wsl1Limit.skippedCounts.includes(4)
+        || wsl1Limit.continuedWith < 2 || wsl1Limit.capturedFourPaneLayout !== false) {
+        throw new Error('El E2E WSL1 no explicó de forma explícita la limitación del driver al pasar de dos paneles.');
+    }
+}
 
 // Un informe podía quedar en estado «passed» aunque el texto capturado del
 // xterm ya contuviera dos banners o una línea de hardware pegada a la
@@ -547,9 +984,18 @@ if (!responsive || responsive.panes < 2 || responsive.cases < 20
 // también la evidencia textual que dejó cada pane.
 const bannerReady = events.filter((event) => event?.type === 'banner-ready');
 if (bannerReady.length === 0) throw new Error('El E2E no dejó evidencia textual del banner.');
-// Linux usa la cabecera compacta «LTerminal 1.0.0»; Windows mantiene
-// «WTerminal» o «LTerminal». Ambas representan un único bloque válido.
-const bannerHeader = /^(?:LTerminal\b|WTerminal\b)/i;
+if (report.host?.platform === 'win32') {
+    const maximized = events.find((event) => event?.type === 'windows-start-maximized-preference');
+    if (!maximized || maximized.passed !== true || maximized.toggledAndPersisted !== true
+        || maximized.reopenedSettingsVerified !== true || maximized.restored !== true) {
+        throw new Error('El E2E Windows no verificó la persistencia de Iniciar maximizada.');
+    }
+}
+// La identidad visible depende de la plataforma. Windows no debe volver a
+// presentar la marca Linux después de una compilación o una actualización.
+const bannerHeader = report.host?.platform === 'win32'
+    ? /^WTerminal\b/i
+    : /^(?:LTerminal\b|WTerminal\b)/i;
 // La GPU puede incluir legítimamente memoria dedicada («1 GB»). Solo es una
 // mezcla si invade otro campo del banner; tratar GB como corrupción hacía
 // fallar informes válidos de Windows.

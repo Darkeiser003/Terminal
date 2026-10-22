@@ -3,7 +3,15 @@ const shellIds = new Set([
 ]);
 
 const interactiveReplShellIds = new Set(['nu', 'xonsh', 'elvish']);
-const nonInteractiveLanguageTools = new Set(['dart']);
+// Swift en Windows expone el compilador y `swift --version`, pero su proceso
+// sin argumentos no mantiene un REPL utilizable dentro de ConPTY (termina o
+// devuelve un error de JIT). Se prueba como herramienta en el builder y se
+// omite aquí para no confundir esa limitación del runtime con un fallo de la
+// terminal. PureScript instala `purs`, pero `purs repl` solo muestra ayuda y
+// termina; su flujo oficial (`pulp psci`) necesita un proyecto Pulp y no es
+// un REPL autónomo reproducible en esta matriz. La instalación y el binario
+// siguen cubiertos por los probes de entorno.
+const nonInteractiveLanguageTools = new Set(['dart', 'swift', 'scala-cli', 'purescript']);
 
 const serviceBackedRepls = new Set([
     'postgresql', 'mysql', 'mariadb', 'mongodb', 'redis',
@@ -13,7 +21,9 @@ const serviceBackedRepls = new Set([
 const replCommands = {
     python: (m) => `print('${m}')`,
     ipython: (m) => `print('${m}')`,
-    node: (m) => `console.log('${m}')`,
+    // La notación de corchetes evita el punto que perdía la primera letra
+    // en la ruta Windows WebDriver/PTY (`console.log` llegaba como `console.og`).
+    node: (m) => `console['log']('${m}')`,
     deno: (m) => `console.log('${m}')`,
     bun: (m) => `console.log('${m}')`,
     typescript: (m) => `console.log('${m}')`,
@@ -79,7 +89,6 @@ const replCommands = {
     sicstus: (m) => `writeln('${m}').`,
     picat: (m) => `writeln('${m}').`,
     logtalk: (m) => `write('${m}'), nl.`,
-    mercury: (m) => `io.write_string("${m}\\n", !IO).`,
     forth: (m) => `1 2 + . cr ." ${m}" cr`,
     fennel: (m) => `(print "${m}")`,
     janet: (m) => `(print "${m}")`,
@@ -105,7 +114,18 @@ export function probeOutputMarkerRows(output, command, marker) {
         // WebDriver can flatten all xterm rows into one string. Eliminar el
         // comando completo (incluidos sus ecos en errores de compilación)
         // antes de buscar el marcador distingue la salida real del eco.
-        const outputOnly = command ? clean.split(command).join(' ') : clean;
+        // Algunos REPL (Ruby incluido) incluyen el marcador dentro del
+        // comando enviado. WebView2 puede aplanar el eco y la línea resultante
+        // en una sola fila accesible. Protegemos los marcadores antes de
+        // retirar todas las copias del comando: así un error que repita el
+        // código no cuenta como salida, pero una línea de salida independiente
+        // conserva su marcador aunque las filas se fusionen.
+        const markerToken = marker ? `\u0000${marker}\u0000` : '';
+        const protectedClean = marker ? clean.split(marker).join(markerToken) : clean;
+        const protectedCommand = marker ? String(command ?? '').split(marker).join(markerToken) : command;
+        const outputOnly = command
+            ? protectedClean.split(protectedCommand).join(' ').split(markerToken).join(marker)
+            : clean;
         const line = outputOnly.trim();
         return {
             length: clean.length,
@@ -120,6 +140,19 @@ export function probeOutputMarkerRows(output, command, marker) {
 export function probeOutputContainsMarker(output, command, marker) {
     return probeOutputMarkerRows(output, command, marker)
         .some((row) => row.markerAfterEchoRemoval);
+}
+
+/** The expected identity must come from executed output, after removing echo. */
+export function probeOutputContainsExpectedText(output, command, expectedText) {
+    const rows = Array.isArray(output) ? output : String(output ?? '').split('\n');
+    const clean = rows.map((row) => String(row ?? '')
+        .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+        .replace(/\r/g, '')
+        .normalize('NFKC'))
+        .map((row) => command ? row.split(command).join(' ') : row)
+        .join('\n');
+    return clean.toLowerCase().includes(String(expectedText ?? '').toLowerCase());
 }
 
 /** True when an evaluated result appears immediately before its unique marker. */
@@ -146,19 +179,36 @@ export function languageIdForEnvironment(id) {
     return wslLanguage?.[1] ?? null;
 }
 
-export function environmentProbe(option, marker) {
+export function environmentProbe(option, marker, { allowNsudo = false } = {}) {
     const id = String(option?.id ?? '');
     if (!id || !/^[A-Z0-9_]+$/.test(marker)) {
         return { kind: 'skip', reason: 'identificador o marcador inválido' };
     }
-    if (id.startsWith('nsudo:')) return { kind: 'skip', reason: 'requiere elevación de privilegios' };
+    if (id.startsWith('nsudo:')) {
+        if (!allowNsudo) return { kind: 'skip', reason: 'requiere el runner E2E elevado' };
+        const command = id === 'nsudo:cmd'
+            ? `whoami /user & echo ${marker}`
+            : `whoami /user; echo ${marker}`;
+        return { kind: 'shell', language: null, command, expectedIdentity: 'TrustedInstaller' };
+    }
     if (id.startsWith('adb:')) return { kind: 'skip', reason: 'dispositivo real; no se envían comandos automáticamente' };
     if (id.startsWith('docker:')) return { kind: 'skip', reason: 'arrancaría o ejecutaría un contenedor externo' };
+    // Las CLIs de IA necesitan la sesión de quien las usa y los chats de
+    // Ollama cargan un modelo de varios GB: no tienen un prompt que sondear.
+    // Su apertura se valida aparte con herramientas simuladas.
+    if (id.startsWith('ai:')) return { kind: 'skip', reason: 'asistente de IA: necesita sesión o un modelo cargado; lo cubre el escenario enfocado de IA' };
 
     const language = languageIdForEnvironment(id);
     if (language) {
         if (nonInteractiveLanguageTools.has(language)) {
-            return { kind: 'skip', language, reason: 'el SDK de Dart es una CLI de proyectos y no ofrece un REPL interactivo' };
+            const reason = language === 'swift'
+                ? 'Swift para Windows se valida como compilador; su proceso sin argumentos no ofrece un REPL estable dentro de ConPTY'
+                : language === 'scala-cli'
+                    ? 'Scala CLI necesita resolver artefactos Maven en el primer arranque y no ofrece una sonda interactiva determinista'
+                    : language === 'purescript'
+                        ? 'PureScript `purs repl` solo muestra ayuda; `pulp psci` requiere un proyecto Pulp y no es un REPL autónomo reproducible'
+                        : 'el SDK de Dart es una CLI de proyectos y no ofrece un REPL interactivo';
+            return { kind: 'skip', language, reason };
         }
         if (serviceBackedRepls.has(language)) {
             return { kind: 'skip', language, reason: 'necesita un servicio externo y credenciales' };
@@ -195,4 +245,49 @@ export function safeEnvironmentMarker(id) {
         .replace(/^_+|_+$/g, '')
         .slice(0, 48);
     return `LTERMINAL_ENV_${normalized || 'UNKNOWN'}`;
+}
+
+/**
+ * Convierte la salida UTF-16LE que `wsl.exe --list --quiet` devuelve en
+ * Windows a nombres de distribuciones. WSL no abre shells en sus distros
+ * internas de Docker Desktop, así que se excluyen igual que en el backend.
+ */
+export function parseWslDistroList(output) {
+    const text = Buffer.isBuffer(output) ? output.toString('utf16le') : String(output ?? '');
+    return text
+        .replace(/^\uFEFF/u, '')
+        .replaceAll('\0', '')
+        .split(/\r?\n/u)
+        .map((name) => name.trim())
+        .filter((name) => name && !['docker-desktop', 'docker-desktop-data'].includes(name.toLowerCase()));
+}
+
+/** Wine cannot create its fixed-address mappings on the legacy WSL1 kernel. */
+export function wineProbeSkipReason(platform, kernelRelease) {
+    if (platform !== 'linux') return null;
+    const release = String(kernelRelease ?? '');
+    if (!/microsoft/i.test(release)) return null;
+    const major = Number(release.match(/^(\d+)\./)?.[1]);
+    const hasWsl2Marker = /wsl2|microsoft-standard/i.test(release);
+    return Number.isFinite(major) && major < 5 && !hasWsl2Marker
+        ? 'Wine no puede mapear sus direcciones fijas en el kernel WSL1 de este host; se omite la sonda interactiva.'
+        : null;
+}
+
+/** Use X11's native capture for WSL1/Xvfb, where WebKitWebDriver can hang on wide xterm canvases. */
+export function shouldUseWsl1X11Capture(platform, kernelRelease, display, imagemagickAvailable = true) {
+    return Boolean(display)
+        && imagemagickAvailable
+        && wineProbeSkipReason(platform, kernelRelease) !== null;
+}
+
+/** Quote one argument for POSIX shells used by the E2E fixture runner. */
+export function quotePosixShellArgument(value) {
+    return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+/** Build a POSIX fixture that emits each marker on its own PTY output line. */
+export function posixPrintfLinesScript(lines) {
+    const values = Array.from(lines ?? [], String);
+    return `printf '%s\\n' ${values.map(quotePosixShellArgument).join(' ')}\n`;
 }

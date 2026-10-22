@@ -17,7 +17,10 @@
     import { compareLocalized } from '../lib/localization';
     import { panels } from '../lib/panels.svelte';
     import {
-        LTOOLS_SELECTION_KEY,
+        ltoolsActionLabel as catalogActionLabel,
+        ltoolsActionMeta,
+        ltoolsActionNeedsConfirmation,
+        ltoolsSelectionStorageKey,
         reconcileLToolsSelection,
     } from '../lib/ltools-selection';
     import type { LToolsAction, LToolsActionList, ScriptEntry, ScriptsPanel as PanelData } from '../lib/types';
@@ -148,6 +151,15 @@
     const FILTER_LEAVES = FILTER_GROUPS.flatMap(leavesOf);
     const autoOpenFirst = $derived(app.preferences?.autoOpenFirstGroup ?? false);
     const exclusiveGroups = $derived(app.preferences?.exclusiveAccordionGroups ?? false);
+    // `open={autoOpenFirst}` compartía efecto con el contador «n/total» del
+    // resumen: cada casilla marcada volvía a escribir `open = false` y la
+    // lista de tipos se cerraba. El estado propio solo sigue a la preferencia
+    // cuando esta cambia; el resto del tiempo manda el usuario.
+    let typesOpen = $state(false);
+    $effect(() => {
+        typesOpen = autoOpenFirst;
+    });
+    const ltoolsEnabled = $derived(app.preferences?.ltoolsEnabled === true);
     // Los subtipos no se abren en cascada aunque esté activa la opción de
     // abrir la primera lista: esa opción solo afecta al primer acordeón
     // principal del panel (Tipos de archivo).
@@ -160,7 +172,7 @@
 
     const NIVELES = [0, 1, 2, 3, 4, 5, 6, 8, 10];
     function ltoolsSelectionKey(): string {
-        return `${LTOOLS_SELECTION_KEY}.${app.appInfo?.platform ?? 'unknown'}`;
+        return ltoolsSelectionStorageKey(app.appInfo?.platform);
     }
 
     function loadLToolsSelection(actions: LToolsAction[]): void {
@@ -226,39 +238,10 @@
         return selectedLToolsIds.map((id) => actions.get(id)).filter((action): action is LToolsAction => Boolean(action));
     });
 
-    function normalizedActionLabel(action: LToolsAction): string {
-        return actionBaseLabel(action).toLocaleLowerCase();
-    }
-
-    function actionBaseLabel(action: LToolsAction): string {
-        return action.shortLabel?.trim() || action.label.trim() || action.id;
-    }
-
-    function actionScope(action: LToolsAction): string {
-        return action.scope || action.group || action.actionKey || action.id;
-    }
-
-    /**
-     * El catálogo puede ser perfectamente válido y aun así publicar varios
-     * «Status» o «Inventory». Conservamos el texto del catálogo, pero solo
-     * añadimos el ámbito/ID cuando hace falta para que cada atajo sea
-     * reconocible sin abrir el tooltip.
-     */
+    /** El nombre del catálogo, desambiguado solo si se repite (lo comparte
+     *  con la paleta de comandos en `ltools-selection.ts`). */
     function ltoolsActionLabel(action: LToolsAction): string {
-        const base = actionBaseLabel(action);
-        const sameLabel = (ltools?.actions ?? []).filter(
-            (candidate) => normalizedActionLabel(candidate) === normalizedActionLabel(action),
-        );
-        if (sameLabel.length < 2) return base;
-        const scope = actionScope(action);
-        const sameScope = sameLabel.some(
-            (candidate) => candidate.id !== action.id && actionScope(candidate) === scope,
-        );
-        return `${base} · ${sameScope ? action.id : scope}`;
-    }
-
-    function ltoolsActionMeta(action: LToolsAction): string {
-        return `${action.group || action.scope} · ${action.operation || action.actionKey || action.id}`;
+        return catalogActionLabel(action, ltools?.actions ?? []);
     }
 
     const filteredLToolsActions = $derived.by(() => {
@@ -303,7 +286,7 @@
         const serial = ++loadSerial;
         loading = true;
         statusError = false;
-        if (mode === 'library' && (!ltools || modeChanged)) void loadLToolsActions();
+        if (mode === 'library' && ltoolsEnabled && (!ltools || modeChanged)) void loadLToolsActions();
         try {
             const requestedCategories = selected === null
                 ? undefined
@@ -437,7 +420,7 @@
         const tabId = app.activeTabId;
         if (!tabId || running || ltoolsRunning) return;
         if (!action.requirementsAvailable) return;
-        if (action.mutating || action.confirmation !== 'none') {
+        if (ltoolsActionNeedsConfirmation(action)) {
             const details = `${action.label}\n\n${action.description}\n\n${app.t('scripts.ltools.confirm', 'Esta acción puede cambiar el sistema. ¿Quieres continuar?')}`;
             if (!window.confirm(details)) return;
         }
@@ -457,19 +440,6 @@
             status = String(cause);
         } finally {
             ltoolsRunning = '';
-        }
-    }
-
-    async function openLToolsProject(): Promise<void> {
-        try {
-            const error = await api.openInGithub('Darkeiser003/Tools');
-            if (error) {
-                statusError = true;
-                status = error;
-            }
-        } catch (cause) {
-            statusError = true;
-            status = String(cause);
         }
     }
 
@@ -517,8 +487,8 @@
                 return;
             }
             if (!result.release) {
-                status = 'LTools todavía no tiene una release publicada en GitHub.';
-                await openLToolsProject();
+                statusError = true;
+                status = 'GitHub no devolvió una release descargable de LTools.';
                 return;
             }
             const asset = ltoolsReleaseAsset(result.release.assets);
@@ -537,8 +507,13 @@
                 status = downloaded.error ?? 'No se pudo descargar LTools.';
                 return;
             }
-            status = `LTools descargado en ${downloaded.path ?? 'la carpeta de proyectos'}.`;
             await loadLToolsActions();
+            if (!ltools?.available) {
+                statusError = true;
+                status = `El archivo se descargó en ${downloaded.path ?? 'la carpeta de proyectos'}, pero WTerminal no pudo iniciar el CLI. Revisa la arquitectura y los permisos del archivo.`;
+                return;
+            }
+            status = `LTools instalado y listo en ${downloaded.path ?? 'la carpeta de proyectos'}.`;
         } catch (cause) {
             statusError = true;
             status = String(cause);
@@ -769,7 +744,7 @@
     </div>
 
     {#if data}
-        <details class="types" open={autoOpenFirst} ontoggle={onDetailsToggle}>
+        <details class="types" data-testid="scripts-types" bind:open={typesOpen} ontoggle={onDetailsToggle}>
             <summary>
                 {app.t('scripts.fileTypes', 'Tipos de archivo')}
                 <span class="count">{(selected ?? []).length}/{FILTER_LEAVES.length}</span>
@@ -874,12 +849,12 @@
         </details>
     {/if}
 
-    {#if mode === 'library'}
+    {#if mode === 'library' && ltoolsEnabled}
         <details class="operations ltools-operations" data-testid="scripts-ltools" aria-label={app.t('scripts.ltools.title', 'Acciones fijadas de LTools')} ontoggle={onDetailsToggle}>
             <summary class="operations-title">
                 <span>{app.t('scripts.ltools.title', 'Acciones fijadas de LTools')}</span>
                 <small>{app.t('scripts.ltools.note', 'Las acciones se descubren desde el catálogo de LTools / WinSlim Tools y se ejecutan en una shell visible.')}</small>
-                <span class="operations-chevron" aria-hidden="true">⌄</span>
+                <span class="operations-chevron" aria-hidden="true"></span>
             </summary>
             {#if ltoolsLoading}
                 <div class="ltools-empty">{app.t('scripts.ltools.detecting', 'Detectando LTools…')}</div>
@@ -887,12 +862,12 @@
                 <div class="ltools-empty ltools-error">
                     <span>{ltools.error}</span>
                     <button type="button" onclick={() => void loadLToolsActions()}>{app.t('scripts.refresh', 'Reintentar')}</button>
-                    <button type="button" class="run-direct" onclick={() => void installLTools()}>{app.t('scripts.ltools.get', 'Obtener LTools')}</button>
+                    <button type="button" class="run-direct" data-testid="scripts-ltools-install" onclick={() => void installLTools()}>{app.t('scripts.ltools.get', 'Obtener LTools')}</button>
                 </div>
             {:else if !ltools?.available}
                 <div class="ltools-empty">
                     <span>{app.t('scripts.ltools.notInstalled', 'LTools no está instalado en este equipo.')}</span>
-                    <button type="button" class="run-direct" onclick={() => void installLTools()}>
+                    <button type="button" class="run-direct" data-testid="scripts-ltools-install" onclick={() => void installLTools()}>
                         {app.t('scripts.ltools.get', 'Obtener LTools')}
                     </button>
                 </div>
@@ -1109,9 +1084,8 @@
 
 <style>
     .modes {
-        position: sticky;
-        top: 38px;
-        z-index: 3;
+        /* La navegación se renderiza en la cabecera fija del panel, fuera del
+           contenido desplazable. */
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 4px;
@@ -1362,16 +1336,20 @@
     }
 
     .operations-chevron {
-        margin-left: auto;
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 400;
-        line-height: 1;
-        transition: transform 120ms ease;
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        margin: -2px 3px 0 auto;
+        border-right: 1px solid var(--muted);
+        border-bottom: 1px solid var(--muted);
+        transform: rotate(45deg);
+        transform-origin: center;
+        transition: border-color 120ms ease, transform 120ms ease;
     }
 
     .operations[open] .operations-chevron {
-        transform: rotate(180deg);
+        border-color: var(--accent);
+        transform: rotate(225deg);
     }
 
     .operations-title small {

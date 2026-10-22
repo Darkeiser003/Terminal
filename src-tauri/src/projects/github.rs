@@ -21,6 +21,30 @@ pub use github_target::{
 
 pub const GITHUB_ORIGIN: &str = "https://github.com";
 const GITHUB_API_ORIGIN: &str = "https://api.github.com";
+
+/// Origen de la API para el E2E: solo con `LTERMINAL_E2E_TESTING=1` y solo un
+/// servidor local (`http://127.0.0.1:<puerto>`), para probar Proyectos sin
+/// red. Cualquier otro valor se ignora y se usa api.github.com.
+pub fn e2e_api_origin(testing: Option<&str>, value: Option<&str>) -> Option<String> {
+    if testing != Some("1") {
+        return None;
+    }
+    let value = value?.trim().trim_end_matches('/');
+    let port = value.strip_prefix("http://127.0.0.1:")?;
+    let valid = !port.is_empty()
+        && port.len() <= 5
+        && port.chars().all(|character| character.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|number| number > 0);
+    valid.then(|| value.to_string())
+}
+
+fn api_origin() -> String {
+    e2e_api_origin(
+        std::env::var("LTERMINAL_E2E_TESTING").ok().as_deref(),
+        std::env::var("LTERMINAL_E2E_GITHUB_API").ok().as_deref(),
+    )
+    .unwrap_or_else(|| GITHUB_API_ORIGIN.to_string())
+}
 const MAX_API_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const API_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -706,6 +730,38 @@ pub fn build_git_command(
     Some(GitPlan { state, command })
 }
 
+/// Subir, traer o publicar en una copia local ya clonada: `git -C <copia>` y
+/// argumentos fijos, citados para la shell, para escribirlo en una pestaña
+/// visible (pueden pedir credenciales). `None` si esa shell no ve la carpeta
+/// de proyectos o el repositorio no está clonado.
+pub fn build_git_sync_command(
+    repository: &Repository,
+    projects_folder: &str,
+    env: &Environment,
+    args: &[&str],
+) -> Option<String> {
+    if matches!(env.transport, Transport::Docker | Transport::Android) {
+        return None;
+    }
+    let state = local_repository_state(projects_folder, repository)?;
+    if !state.repository_exists {
+        return None;
+    }
+    let windows_shell = is_windows_shell(env.kind);
+    let local_path = if windows_shell {
+        state.local_path.clone()
+    } else {
+        unix_path_for(&state.local_path, env.transport)
+    };
+    let quote = if windows_shell { q_win } else { q_unix };
+    let rest = args
+        .iter()
+        .map(|arg| quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!("git -C {} {rest}", quote(&local_path)))
+}
+
 /// Comando para desempaquetar lo descargado. Se escribe en la terminal visible
 /// como cualquier otra acción: el usuario ve qué se ejecuta sobre su disco.
 ///
@@ -995,7 +1051,7 @@ impl GithubClient {
         }
         let response = self
             .client
-            .get(format!("{GITHUB_API_ORIGIN}{api_path}"))
+            .get(format!("{}{api_path}", api_origin()))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", &self.user_agent)
@@ -1133,6 +1189,31 @@ impl GithubClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn el_origen_de_la_api_solo_cambia_en_el_e2e_y_hacia_un_servidor_local() {
+        assert_eq!(
+            e2e_api_origin(Some("1"), Some("http://127.0.0.1:41234/")).as_deref(),
+            Some("http://127.0.0.1:41234")
+        );
+        for (testing, value) in [
+            (None, Some("http://127.0.0.1:41234")),
+            (Some("0"), Some("http://127.0.0.1:41234")),
+            (Some("1"), None),
+            (Some("1"), Some("https://evil.example")),
+            (Some("1"), Some("http://127.0.0.1.evil.example:80")),
+            (Some("1"), Some("http://127.0.0.1:")),
+            (Some("1"), Some("http://127.0.0.1:0")),
+            (Some("1"), Some("http://127.0.0.1:99999")),
+            (Some("1"), Some("http://localhost:41234")),
+        ] {
+            assert_eq!(
+                e2e_api_origin(testing, value),
+                None,
+                "{testing:?} {value:?}"
+            );
+        }
+    }
 
     fn env(kind: ShellKind, transport: Transport) -> Environment {
         Environment {
@@ -1480,6 +1561,44 @@ mod tests {
         let plan = build_git_command(&repo, &folder, &shell).unwrap();
         assert!(plan.command.starts_with("git -C \""));
         assert!(plan.command.ends_with(" pull --ff-only"));
+    }
+
+    #[test]
+    fn subir_y_traer_solo_en_una_copia_clonada_y_con_todo_citado() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().to_string_lossy().to_string();
+        let repo = repository_from_full_name("owner/demo").unwrap();
+        let cmd = env(ShellKind::Cmd, Transport::Native);
+        assert_eq!(
+            build_git_sync_command(&repo, &folder, &cmd, &["push"]),
+            None
+        );
+        std::fs::create_dir_all(dir.path().join("owner").join("demo").join(".git")).unwrap();
+        let push =
+            build_git_sync_command(&repo, &folder, &cmd, &["push", "-u", "origin", "feature/x"])
+                .unwrap();
+        assert!(push.starts_with("git -C \""), "{push}");
+        assert!(
+            push.ends_with("\"push\" \"-u\" \"origin\" \"feature/x\""),
+            "{push}"
+        );
+        let bash = build_git_sync_command(
+            &repo,
+            &folder,
+            &env(ShellKind::Bash, Transport::Native),
+            &["pull", "--ff-only"],
+        )
+        .unwrap();
+        assert!(bash.ends_with("'pull' '--ff-only'"), "{bash}");
+        assert_eq!(
+            build_git_sync_command(
+                &repo,
+                &folder,
+                &env(ShellKind::Bash, Transport::Docker),
+                &["push"]
+            ),
+            None
+        );
     }
 
     #[test]

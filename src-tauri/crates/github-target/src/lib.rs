@@ -137,7 +137,10 @@ mod tests {
         // A clone URL for a repository literally named `linux.git` ends in
         // `.git.git`; exactly one suffix is transport syntax, the other is
         // part of the repository's valid name.
-        assert_eq!(parse_full_name("torvalds/linux.git.git").unwrap().name, "linux.git");
+        assert_eq!(
+            parse_full_name("torvalds/linux.git.git").unwrap().name,
+            "linux.git"
+        );
         assert_eq!(
             parse_github_target("https://github.com/torvalds/linux?tab=readme"), // link-check: ignore
             Some(expected)

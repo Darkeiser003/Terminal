@@ -18,6 +18,10 @@
 //! nada.
 
 use serde::Serialize;
+use std::sync::Mutex;
+
+static CACHE: once_cell::sync::Lazy<Mutex<Option<Virtualization>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
 
 /// Qué se sabe de la virtualización de esta máquina. `None` en cada campo
 /// significa "no se ha podido averiguar", que no es lo mismo que "no".
@@ -73,15 +77,34 @@ pub fn parse_probe(output: &str) -> Virtualization {
     }
 }
 
-/// Pregunta al sistema UNA vez por arranque.
+/// Pregunta al sistema y conserva el resultado hasta una recarga explícita.
 ///
 /// La consulta cuesta ~2,3 s (arrancar PowerShell y dos consultas a CIM) y el
-/// panel de dependencias la pedía en cada apertura. Cachearla es correcto
-/// además de barato: activar o desactivar Hyper-V exige reiniciar Windows, así
-/// que la respuesta no puede cambiar mientras el proceso siga vivo.
+/// panel de dependencias la pedía en cada apertura. Se mantiene cacheada entre
+/// aperturas, pero el botón de recarga debe poder invalidarla: componentes
+/// como Hyper-V, VMP, Sandbox o un backend de virtualización pueden cambiar
+/// mientras la aplicación sigue abierta (por ejemplo después de otro
+/// instalador o de un reinicio del servicio).
 pub fn detect() -> Virtualization {
-    static CACHE: once_cell::sync::Lazy<Virtualization> = once_cell::sync::Lazy::new(probe);
-    *CACHE
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(value) = *cache {
+        return value;
+    }
+
+    let value = probe();
+    *cache = Some(value);
+    value
+}
+
+/// Invalida la sonda para que la siguiente detección consulte de nuevo el
+/// estado real del sistema. Solo se llama desde una recarga explícita; abrir
+/// el panel sigue reutilizando la caché.
+pub fn reset_cache() {
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = None;
+    }
 }
 
 fn probe() -> Virtualization {

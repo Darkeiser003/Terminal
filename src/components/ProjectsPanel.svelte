@@ -6,17 +6,23 @@
     // la carpeta de proyectos. Ese modo no consulta a GitHub, así que funciona
     // sin red y sin gastar el límite de consultas públicas.
     //
-    // Los tres modos comparten la misma fila de repositorio, y las acciones se
+    // Los modos comparten la misma fila de repositorio, y las acciones se
     // reparten entre las dos habituales (visibles) y el resto (en un plegable):
     // cinco botones por fila no caben cuando el panel se estrecha.
+    //
+    // «Mi GitHub» trabaja con la cuenta de GitHub CLI (`gh`): iniciar sesión
+    // con el navegador en una terminal visible, crear repositorios y cambiar
+    // su visibilidad, archivarlos, renombrarlos o borrarlos. WTerminal no
+    // guarda tokens: la sesión es la de `gh`.
 
     import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
     import { panels } from '../lib/panels.svelte';
-    import type { LocalRepository, ProjectsState, PublicRepository, Release } from '../lib/types';
+    import type { GhRepositoryChange, GhResult, GhStatus, GhTerminalAction, LocalRepository, OwnRepository, ProjectsState, PublicRepository, Release } from '../lib/types';
+    import GithubRepoManager from './GithubRepoManager.svelte';
     import Panel from './Panel.svelte';
 
-    type Mode = 'pinned' | 'downloaded' | 'explore';
+    type Mode = 'pinned' | 'downloaded' | 'explore' | 'github';
 
     let mode = $state<Mode>('pinned');
     /** No se puede llamar `state`: en Svelte `$state` pasaria a ser la
@@ -36,12 +42,29 @@
      *  se aplica también aquí: con exclusividad se conserva una sola; si se
      *  desactiva, varias filas pueden permanecer abiertas. */
     let expanded = $state<string[]>([]);
+    /** «Mi GitHub»: sesión de `gh`, repositorios de la cuenta y formularios. */
+    let gh = $state<GhStatus | null>(null);
+    let own = $state<OwnRepository[]>([]);
+    let createOpen = $state(false);
+    let newName = $state('');
+    let newDescription = $state('');
+    let newVisibility = $state<'private' | 'public'>('private');
+    let newReadme = $state(true);
+    let newClone = $state(false);
+    let renameTarget = $state('');
+    let renameValue = $state('');
+    let deleteTarget = $state('');
+    /** El repositorio de la cuenta con «Gestionar…» abierto (uno a la vez). */
+    let manageTarget = $state('');
+    let deleteConfirm = $state('');
+    let needsDeleteScope = $state(false);
     const exclusiveGroups = $derived(app.preferences?.exclusiveAccordionGroups ?? false);
     let loadSerial = 0;
 
     function toggleExpanded(fullName: string): void {
         if (expanded.includes(fullName)) {
             expanded = expanded.filter((value) => value !== fullName);
+            if (release?.fullName === fullName) release = null;
         } else {
             expanded = exclusiveGroups ? [fullName] : [...expanded, fullName];
         }
@@ -50,11 +73,24 @@
     export async function load(next?: Mode): Promise<void> {
         if (next) mode = next;
         const serial = ++loadSerial;
+        // Cambiar de pestaña o volver a mirar cierra la release abierta: antes
+        // se quedaba al pie del panel en todas las pestañas. Lo mismo con
+        // «Gestionar…».
+        release = null;
+        manageTarget = '';
         loading = true;
         statusError = false;
         status = '';
         try {
-            if (mode === 'downloaded') {
+            if (mode === 'github') {
+                const nextStatus = await api.githubCliStatus();
+                const nextOwn = nextStatus.loggedIn ? await api.githubCliRepositories() : [];
+                const nextProjects = projects ?? await api.getProjectsState();
+                if (serial !== loadSerial) return;
+                gh = nextStatus;
+                own = nextOwn;
+                projects = nextProjects;
+            } else if (mode === 'downloaded') {
                 const nextDownloaded = await api.listDownloadedProjects();
                 // El estado hace falta igualmente: de ahí sale la carpeta que se
                 // enseña en la cabecera.
@@ -78,6 +114,7 @@
 
     async function search(): Promise<void> {
         if (!target.trim() || loading) return;
+        release = null;
         loading = true;
         statusError = false;
         try {
@@ -132,13 +169,18 @@
     const exploreVisible = $derived(
         found.filter((repo) => matches(`${repo.fullName} ${repo.description} ${repo.language}`))
     );
+    const ownVisible = $derived(
+        own.filter((repo) => matches(`${repo.fullName} ${repo.description} ${repo.language}`))
+    );
 
     const count = $derived(
         mode === 'pinned'
             ? ownersVisible.length + pinnedVisible.length
             : mode === 'downloaded'
               ? downloadedVisible.length
-              : exploreVisible.length
+              : mode === 'github'
+                ? ownVisible.length
+                : exploreVisible.length
     );
 
     async function act(
@@ -167,8 +209,15 @@
         }
     }
 
+    /** «Release» abre la última release del repositorio bajo su fila; volver a
+     *  pulsarlo la cierra (y abrir la de otro repositorio cierra esta). */
     async function showRelease(fullName: string): Promise<void> {
         if (busy) return;
+        if (release?.fullName === fullName) {
+            release = null;
+            return;
+        }
+        release = null;
         busy = fullName;
         statusError = false;
         try {
@@ -193,6 +242,82 @@
         }
     }
 
+    /** Lo que se hace con `gh` sin terminal: crear, cambiar, renombrar y
+     *  borrar. Con éxito se vuelve a listar la cuenta. */
+    async function runGh(label: string, operation: () => Promise<GhResult>, done: string): Promise<boolean> {
+        if (busy) return false;
+        busy = label;
+        statusError = false;
+        try {
+            const result = await operation();
+            needsDeleteScope = result.needsDeleteScope;
+            statusError = !result.ok;
+            status = result.ok ? done : result.message;
+            if (result.ok) own = await api.githubCliRepositories();
+            return result.ok;
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+            return false;
+        } finally {
+            busy = '';
+        }
+    }
+
+    /** Iniciar o cerrar sesión, o pedir el permiso de borrar: en una pestaña
+     *  nueva, a la vista, porque `gh` abre el navegador y pregunta. */
+    async function ghTerminal(action: GhTerminalAction): Promise<void> {
+        if (!app.activeTabId) return;
+        await act('github', () => api.githubCliTerminal(app.activeTabId!, action));
+    }
+
+    function installGh(): void {
+        window.dispatchEvent(new CustomEvent('winslim:open-panel', { detail: { panel: 'deps', query: 'GitHub CLI' } }));
+    }
+
+    async function createRepository(): Promise<void> {
+        const name = newName.trim();
+        const owner = gh?.account;
+        const created = await runGh(
+            'create',
+            () => api.githubCliCreate(name, newDescription, newVisibility === 'private', newReadme),
+            app.t('projects.ghCreated', 'Repositorio {name} creado.').replace('{name}', name),
+        );
+        if (!created) return;
+        createOpen = false;
+        newName = '';
+        newDescription = '';
+        if (newClone && owner && app.activeTabId) {
+            await act(`${owner}/${name}`, () => api.runProject(app.activeTabId!, `${owner}/${name}`));
+        }
+    }
+
+    async function changeRepository(fullName: string, change: GhRepositoryChange): Promise<void> {
+        await runGh(fullName, () => api.githubCliChange(fullName, change), app.t('projects.ghChanged', '{name} actualizado.').replace('{name}', fullName));
+    }
+
+    async function renameRepository(fullName: string): Promise<void> {
+        const value = renameValue.trim();
+        if (await runGh(fullName, () => api.githubCliRename(fullName, value), app.t('projects.ghRenamed', '{name} ahora se llama {new}.').replace('{name}', fullName).replace('{new}', value))) {
+            renameTarget = '';
+        }
+    }
+
+    async function deleteRepository(fullName: string): Promise<void> {
+        if (await runGh(fullName, () => api.githubCliDelete(fullName, deleteConfirm), app.t('projects.ghDeleted', '{name} borrado de GitHub.').replace('{name}', fullName))) {
+            deleteTarget = '';
+            deleteConfirm = '';
+        }
+    }
+
+    function ownMeta(repo: OwnRepository): string {
+        return [
+            repo.private ? app.t('projects.ghPrivate', 'Privado') : app.t('projects.ghPublic', 'Público'),
+            repo.archived ? app.t('projects.ghArchivedTag', 'Archivado') : '',
+            repo.description || repo.language,
+        ].filter(Boolean).join(' · ');
+    }
+
     /** Fecha corta y local. Un ISO crudo en una lista no lo lee nadie. */
     function fecha(millis: number): string {
         return new Date(millis).toLocaleDateString(app.catalog.language, {
@@ -205,7 +330,8 @@
     const modes: { id: Mode; label: string }[] = $derived([
         { id: 'pinned', label: app.t('projects.pinned', 'Anclados') },
         { id: 'downloaded', label: app.t('projects.downloaded', 'Descargados') },
-        { id: 'explore', label: app.t('projects.explore', 'Explorar GitHub') }
+        { id: 'explore', label: app.t('projects.explore', 'Explorar GitHub') },
+        { id: 'github', label: app.t('projects.myGithub', 'Mi GitHub') }
     ]);
 </script>
 
@@ -216,7 +342,7 @@
         ? status
         : loading
           ? app.t('projects.loading', 'Consultando…')
-          : status || (projects?.projectsFolder ?? '')}
+          : status || app.t('projects.subtitle', 'Tus repositorios: anclados, descargados y de GitHub.')}
     error={statusError}
     {count}
     width={480}
@@ -227,6 +353,7 @@
                 <button
                     type="button"
                     role="tab"
+                    data-testid={`projects-mode-${tab.id}`}
                     aria-selected={mode === tab.id}
                     class:active={mode === tab.id}
                     onclick={() => load(tab.id)}
@@ -344,7 +471,8 @@
                 repo.description || repo.language,
                 repo.local,
                 repo.localConflict,
-                repo.localPath
+                repo.localPath,
+                null
             )}
         {:else}
             {#if ownersVisible.length === 0}
@@ -363,7 +491,8 @@
                 `${fecha(repo.modified)} · ${repo.path}`,
                 true,
                 false,
-                repo.path
+                repo.path,
+                null
             )}
         {:else}
             <div class="empty">
@@ -373,6 +502,93 @@
                 )}
             </div>
         {/each}
+    {:else if mode === 'github'}
+        <div
+            class="gh-account"
+            data-testid="projects-gh-account"
+            data-state={!gh?.installed ? 'missing' : gh.loggedIn ? 'logged-in' : 'logged-out'}
+        >
+            {#if !gh?.installed}
+                <span class="hint">{app.t('projects.ghMissing', 'Para gestionar tu cuenta y tus repositorios hace falta GitHub CLI (gh).')}</span>
+                <button type="button" class="run" data-testid="projects-gh-install" onclick={installGh}>
+                    {app.t('projects.ghInstall', 'Instalar GitHub CLI')}
+                </button>
+            {:else if !gh.loggedIn}
+                <span class="hint">{gh.error ?? app.t('projects.ghLoggedOut', 'Sin sesión en GitHub. Inicia sesión con el navegador: WTerminal no guarda tokens, usa la sesión de gh.')}</span>
+                <div class="actions">
+                    <button type="button" class="run" data-testid="projects-gh-login" disabled={busy !== '' || !app.activeTabId} onclick={() => ghTerminal('login')}>
+                        {app.t('projects.ghLogin', 'Iniciar sesión')}
+                    </button>
+                    <button type="button" data-testid="projects-gh-check" onclick={() => load()}>
+                        {app.t('projects.ghCheck', 'Comprobar de nuevo')}
+                    </button>
+                </div>
+            {:else}
+                <span class="name">
+                    <strong data-testid="projects-gh-user">@{gh.account}</strong>
+                    <small>{app.t('projects.ghSession', 'Sesión de GitHub CLI')}{gh.version ? ` · ${gh.version}` : ''}</small>
+                </span>
+                <div class="actions">
+                    <button type="button" class="run" data-testid="projects-gh-new" onclick={() => (createOpen = !createOpen)}>
+                        {app.t('projects.ghNew', 'Nuevo repositorio')}
+                    </button>
+                    <button type="button" data-testid="projects-gh-logout" disabled={busy !== '' || !app.activeTabId} onclick={() => ghTerminal('logout')}>
+                        {app.t('projects.ghLogout', 'Cerrar sesión')}
+                    </button>
+                </div>
+            {/if}
+        </div>
+        {#if gh?.loggedIn && createOpen}
+            <form
+                class="gh-form"
+                data-testid="projects-gh-create-form"
+                onsubmit={(event) => {
+                    event.preventDefault();
+                    void createRepository();
+                }}
+            >
+                <label>
+                    <span>{app.t('projects.ghNewName', 'Nombre')}</span>
+                    <input data-testid="projects-gh-new-name" bind:value={newName} maxlength="100" spellcheck="false" autocomplete="off" />
+                </label>
+                <label>
+                    <span>{app.t('projects.ghNewDescription', 'Descripción (opcional)')}</span>
+                    <input data-testid="projects-gh-new-description" bind:value={newDescription} maxlength="350" />
+                </label>
+                <label>
+                    <span>{app.t('projects.ghVisibility', 'Visibilidad')}</span>
+                    <select data-testid="projects-gh-new-visibility" bind:value={newVisibility}>
+                        <option value="private">{app.t('projects.ghPrivate', 'Privado')}</option>
+                        <option value="public">{app.t('projects.ghPublic', 'Público')}</option>
+                    </select>
+                </label>
+                <label class="check">
+                    <input type="checkbox" data-testid="projects-gh-new-readme" bind:checked={newReadme} />
+                    <span>{app.t('projects.ghReadme', 'Empezar con un README')}</span>
+                </label>
+                <label class="check">
+                    <input type="checkbox" data-testid="projects-gh-new-clone" bind:checked={newClone} />
+                    <span>{app.t('projects.ghCloneAfter', 'Clonarlo en la carpeta de proyectos')}</span>
+                </label>
+                <div class="actions">
+                    <button type="submit" class="run" data-testid="projects-gh-create" disabled={busy !== '' || !newName.trim()}>
+                        {app.t('projects.ghCreate', 'Crear')}
+                    </button>
+                    <button type="button" onclick={() => (createOpen = false)}>{app.t('common.cancel', 'Cancelar')}</button>
+                </div>
+            </form>
+        {/if}
+        {#each ownVisible as repo (repo.fullName)}
+            {@render row(repo.fullName, ownMeta(repo), repo.local, repo.localConflict, repo.localPath, repo)}
+        {:else}
+            {#if gh?.loggedIn}
+                <div class="empty">
+                    {own.length
+                        ? app.t('projects.noFilterMatch', 'Ningún repositorio coincide con el filtro.')
+                        : app.t('projects.ghEmpty', 'Tu cuenta todavía no tiene repositorios.')}
+                </div>
+            {/if}
+        {/each}
     {:else}
         {#each exploreVisible as repo (repo.fullName)}
             {@render row(
@@ -380,7 +596,8 @@
                 repo.description || repo.language,
                 repo.local,
                 repo.localConflict,
-                repo.localPath
+                repo.localPath,
+                null
             )}
         {:else}
             <div class="empty">
@@ -391,26 +608,6 @@
         {/each}
     {/if}
 
-    {#if release?.release}
-        <div class="release">
-            <strong>{release.fullName} · {release.release.tag}</strong>
-            {#each release.release.assets as asset (asset.name)}
-                <button
-                    type="button"
-                    disabled={busy !== ''}
-                    onclick={() =>
-                        app.activeTabId &&
-                        act(release!.fullName, () =>
-                            api.downloadRelease(app.activeTabId!, release!.fullName, asset.name)
-                        )}
-                >
-                    {asset.name}
-                </button>
-            {:else}
-                <span class="hint">{app.t('projects.noAssets', 'Esta release no trae adjuntos.')}</span>
-            {/each}
-        </div>
-    {/if}
 </Panel>
 
 {#snippet row(
@@ -418,9 +615,10 @@
     meta: string,
     local: boolean,
     conflict: boolean,
-    localPath: string
+    localPath: string,
+    ownRepo: OwnRepository | null
 )}
-    <div class="item">
+    <div class="item" data-testid="projects-row" data-full-name={fullName}>
         <div class="item-row">
             <span class="name">
                 <strong>{fullName}</strong>
@@ -459,6 +657,7 @@
                 <button
                     type="button"
                     class="icon"
+                    data-testid="projects-row-more"
                     title={app.t('projects.more', 'Más acciones')}
                     onclick={() => toggleExpanded(fullName)}
                 >⋯</button>
@@ -470,9 +669,60 @@
                 <button type="button" onclick={() => api.openInGithub(fullName)}>
                     {app.t('projects.github', 'GitHub')}
                 </button>
-                <button type="button" disabled={busy !== ''} onclick={() => showRelease(fullName)}>
+                <button type="button" data-testid="projects-row-release" class:active={release?.fullName === fullName} aria-pressed={release?.fullName === fullName} disabled={busy !== ''} onclick={() => showRelease(fullName)}>
                     {app.t('projects.release', 'Release')}
                 </button>
+                {#if ownRepo}
+                    <button
+                        type="button"
+                        class="run"
+                        data-testid="projects-gh-manage"
+                        class:active={manageTarget === fullName}
+                        aria-pressed={manageTarget === fullName}
+                        onclick={() => (manageTarget = manageTarget === fullName ? '' : fullName)}
+                    >
+                        {app.t('ghm.manage', 'Gestionar…')}
+                    </button>
+                    <button
+                        type="button"
+                        data-testid="projects-gh-visibility"
+                        disabled={busy !== ''}
+                        onclick={() => changeRepository(fullName, ownRepo.private ? 'make-public' : 'make-private')}
+                    >
+                        {ownRepo.private ? app.t('projects.ghMakePublic', 'Hacer público') : app.t('projects.ghMakePrivate', 'Hacer privado')}
+                    </button>
+                    <button
+                        type="button"
+                        data-testid="projects-gh-archive"
+                        disabled={busy !== ''}
+                        onclick={() => changeRepository(fullName, ownRepo.archived ? 'unarchive' : 'archive')}
+                    >
+                        {ownRepo.archived ? app.t('projects.ghUnarchive', 'Desarchivar') : app.t('projects.ghArchive', 'Archivar')}
+                    </button>
+                    <button
+                        type="button"
+                        data-testid="projects-gh-rename"
+                        onclick={() => {
+                            renameTarget = fullName;
+                            renameValue = ownRepo.name;
+                            deleteTarget = '';
+                        }}
+                    >
+                        {app.t('projects.ghRename', 'Renombrar')}
+                    </button>
+                    <button
+                        type="button"
+                        class="danger"
+                        data-testid="projects-gh-delete"
+                        onclick={() => {
+                            deleteTarget = fullName;
+                            deleteConfirm = '';
+                            renameTarget = '';
+                        }}
+                    >
+                        {app.t('projects.ghDelete', 'Borrar…')}
+                    </button>
+                {/if}
                 {#if mode !== 'downloaded'}
                     <button
                         type="button"
@@ -509,16 +759,80 @@
                 {/if}
             </div>
         {/if}
+        {#if release?.release && release.fullName === fullName}
+            <!-- Bajo la fila a la que pertenece. Se cierra con «Cerrar», con
+                 «Release» otra vez, al plegar la fila o al cambiar de pestaña. -->
+            <div class="release" data-testid="projects-release">
+                <div class="release-head">
+                    <strong>{release.fullName} · {release.release.tag}</strong>
+                    <button type="button" class="icon" data-testid="projects-release-close" title={app.t('common.close', 'Cerrar')} onclick={() => (release = null)}>✕</button>
+                </div>
+                {#each release.release.assets as asset (asset.name)}
+                    <button
+                        type="button"
+                        disabled={busy !== ''}
+                        onclick={() =>
+                            app.activeTabId &&
+                            act(fullName, () =>
+                                api.downloadRelease(app.activeTabId!, fullName, asset.name)
+                            )}
+                    >
+                        {asset.name}
+                    </button>
+                {:else}
+                    <span class="hint">{app.t('projects.noAssets', 'Esta release no trae adjuntos.')}</span>
+                {/each}
+            </div>
+        {/if}
+        {#if ownRepo && manageTarget === fullName}
+            <GithubRepoManager
+                {fullName}
+                cloned={local}
+                onClose={() => (manageTarget = '')}
+                onTerminal={async (result) => {
+                    if (!result.tabId) return;
+                    panels.close();
+                    await app.adoptTab(result.tabId, result.created === true);
+                }}
+            />
+        {/if}
+        {#if ownRepo && renameTarget === fullName}
+            <div class="gh-inline">
+                <input data-testid="projects-gh-rename-input" bind:value={renameValue} maxlength="100" spellcheck="false" />
+                <button type="button" class="run" data-testid="projects-gh-rename-confirm" disabled={busy !== '' || !renameValue.trim()} onclick={() => renameRepository(fullName)}>
+                    {app.t('projects.ghRename', 'Renombrar')}
+                </button>
+                <button type="button" onclick={() => (renameTarget = '')}>{app.t('common.cancel', 'Cancelar')}</button>
+            </div>
+        {/if}
+        {#if ownRepo && deleteTarget === fullName}
+            <div class="gh-inline gh-danger">
+                <small>{app.t('projects.ghDeleteHint', 'Se borra de GitHub y no se puede deshacer. Escribe {name} para confirmar.').replace('{name}', fullName)}</small>
+                <input data-testid="projects-gh-delete-input" bind:value={deleteConfirm} spellcheck="false" autocomplete="off" />
+                <button
+                    type="button"
+                    class="danger"
+                    data-testid="projects-gh-delete-confirm"
+                    disabled={busy !== '' || deleteConfirm.trim() !== fullName}
+                    onclick={() => deleteRepository(fullName)}
+                >
+                    {app.t('projects.ghDeleteForever', 'Borrar definitivamente')}
+                </button>
+                <button type="button" onclick={() => (deleteTarget = '')}>{app.t('common.cancel', 'Cancelar')}</button>
+                {#if needsDeleteScope}
+                    <button type="button" data-testid="projects-gh-grant-delete" onclick={() => ghTerminal('grant-delete')}>
+                        {app.t('projects.ghGrantDelete', 'Dar permiso para borrar')}
+                    </button>
+                {/if}
+            </div>
+        {/if}
     </div>
 {/snippet}
 
 <style>
     .modes {
-        position: sticky;
-        top: 38px;
-        z-index: 3;
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 4px;
         padding: 7px 0;
         border-bottom: 1px solid var(--border);
@@ -676,6 +990,73 @@
         padding-top: 2px;
     }
 
+    .gh-account,
+    .gh-form,
+    .gh-inline {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 8px;
+        padding: 8px;
+        border-top: 1px solid var(--border);
+    }
+
+    .gh-account {
+        justify-content: space-between;
+    }
+
+    .gh-form {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .gh-form label {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        font-size: 11px;
+        color: var(--muted);
+    }
+
+    .gh-form label.check {
+        flex-direction: row;
+        align-items: center;
+        gap: 6px;
+        color: var(--text);
+    }
+
+    .gh-form input:not([type='checkbox']),
+    .gh-form select,
+    .gh-inline input {
+        min-width: 0;
+        padding: 4px 6px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font: inherit;
+        font-size: 11px;
+    }
+
+    .gh-inline input {
+        flex: 1 1 160px;
+    }
+
+    .gh-danger {
+        border-left: 2px solid var(--danger);
+    }
+
+    .gh-danger small {
+        flex-basis: 100%;
+        color: var(--warning);
+        font-size: 10px;
+    }
+
+    button.danger {
+        border-color: var(--danger);
+        color: var(--danger);
+    }
+
     .release {
         display: flex;
         flex-direction: column;
@@ -689,6 +1070,19 @@
 
     .release strong {
         font-size: 11px;
+    }
+
+    .release-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+    }
+
+    /* «Release» abierta: el botón se queda marcado, como un interruptor. */
+    .more button.active {
+        border-color: var(--accent);
+        color: var(--accent);
     }
 
     button {

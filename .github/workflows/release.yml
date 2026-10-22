@@ -44,6 +44,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
           LTERMINAL_REQUIRE_SIGNING: '0'
           LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
+          LTERMINAL_SSH_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_SSH_UPDATE_PUBLIC_KEY }}
+          LTERMINAL_SSH_UPDATE_IDENTITY: ${{ secrets.LTERMINAL_SSH_SIGNING_IDENTITY }}
         run: npm run dist:linux -- --version "${RELEASE_TAG#v}" --no-run --no-extended-tests --no-install
       - name: Guardar artefactos Linux para publicación conjunta
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -76,6 +78,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
           LTERMINAL_REQUIRE_SIGNING: '0'
           LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
+          LTERMINAL_SSH_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_SSH_UPDATE_PUBLIC_KEY }}
+          LTERMINAL_SSH_UPDATE_IDENTITY: ${{ secrets.LTERMINAL_SSH_SIGNING_IDENTITY }}
         run: ./windows/build.ps1 -Version ($env:RELEASE_TAG -replace '^v', '') -NoRun -NonInteractive -FullTests
       - name: Guardar artefactos Windows para publicación conjunta
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -110,10 +114,26 @@ jobs:
         env:
           LTERMINAL_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SIGNING_PRIVATE_KEY }}
           LTERMINAL_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_UPDATE_PUBLIC_KEY }}
+          LTERMINAL_SSH_SIGNING_PRIVATE_KEY: ${{ secrets.LTERMINAL_SSH_SIGNING_PRIVATE_KEY }}
+          LTERMINAL_SSH_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_SSH_UPDATE_PUBLIC_KEY }}
+          LTERMINAL_SSH_SIGNING_IDENTITY: ${{ secrets.LTERMINAL_SSH_SIGNING_IDENTITY }}
         run: |
+          set -euo pipefail
+          test -n "$LTERMINAL_SSH_SIGNING_PRIVATE_KEY" || { echo 'Falta el secreto de firma SSH de releases.' >&2; exit 1; }
+          test -n "$LTERMINAL_SSH_UPDATE_PUBLIC_KEY" || { echo 'Falta la clave pública SSH de releases.' >&2; exit 1; }
+          test -n "$LTERMINAL_SSH_SIGNING_IDENTITY" || { echo 'Falta la identidad SSH de releases.' >&2; exit 1; }
+          ssh_private="$RUNNER_TEMP/lterminal-release-signing"
+          ssh_public="$RUNNER_TEMP/lterminal-release-signing.pub"
+          printf '%s\n' "$LTERMINAL_SSH_SIGNING_PRIVATE_KEY" > "$ssh_private"
+          printf '%s\n' "$LTERMINAL_SSH_UPDATE_PUBLIC_KEY" > "$ssh_public"
+          chmod 600 "$ssh_private" "$ssh_public"
+          export LTERMINAL_SSH_SIGNING_KEY_FILE="$ssh_private"
+          export LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE="$ssh_public"
           node scripts/create-release-manifest.mjs --directory release
           node scripts/sign-release-manifest.mjs --manifest release/SHA256SUMS.txt --signature release/SHA256SUMS.txt.sig
           node scripts/sign-release-manifest.mjs --manifest release/SHA256SUMS.txt --signature release/SHA256SUMS.txt.sig --verify
+          node scripts/sign-release-ssh.mjs --manifest release/SHA256SUMS.txt --signature release/SHA256SUMS.txt.sshsig
+          node scripts/sign-release-ssh.mjs --manifest release/SHA256SUMS.txt --signature release/SHA256SUMS.txt.sshsig --verify
       - name: Publicar artefactos
         env:
           GH_TOKEN: ${{ github.token }}

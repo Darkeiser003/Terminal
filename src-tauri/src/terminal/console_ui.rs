@@ -42,10 +42,23 @@ use crate::i18n::Translator;
 /// carácter ESC. La define el script de inicialización.
 pub const CMD_ESC_VAR: &str = "WSTERM_ESC";
 
+/// Variable de entorno de cada pestaña con la carpeta de sesión, donde se
+/// escriben la cabecera y el cierre de las acciones de cmd.
+pub const CMD_FRAME_DIR_VAR: &str = "WSTERM_UI";
+
+/// Numera los pares cabecera/cierre de cmd de esta ejecución.
+static CMD_FRAME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Ancho de las reglas. 60 columnas caben en cualquier terminal que alguien use
 /// de verdad, y dejan sitio de sobra para la etiqueta del verbo.
 const RULE_WIDTH: usize = 60;
-
+/// Longitud máxima de una orden de decoración que se entrega a `cmd.exe`.
+/// Además del texto visible, la línea contiene dos variables ANSI y el prompt
+/// de la shell; mantenerla corta evita que el propio eco de cmd parta la
+/// cabecera antes de que xterm pueda pintarla.
+/// El cierre lleva además `if errorlevel 1`/`if not errorlevel 1`; necesita
+/// dejar espacio para ese prefijo y para el prompt que cmd pinta delante.
+///
 /// Qué se está haciendo. El verbo va en la cabecera, en mayúsculas y con color;
 /// el asunto es lo que el usuario reconoce ("Node.js LTS", "deploy.ps1").
 pub struct Notice {
@@ -148,16 +161,24 @@ fn line(tone: Tone, text: impl Into<String>) -> Line {
 /// PowerShell de instalación de ADB ocupa quince líneas: enseñarlo entero en la
 /// cabecera taparía justo lo que la cabecera intenta destacar.
 fn ellipsize(text: &str, max: usize) -> String {
-    let flat: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flatten_text(text);
     if flat.chars().count() <= max {
         return flat;
     }
     let cut: String = flat.chars().take(max.saturating_sub(1)).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// Normaliza saltos de línea y controles sin recortar el contenido. CMD ya
+/// envuelve visualmente las líneas que no caben en la rejilla; fabricar
+/// fragmentos aquí convertiría una única cabecera en varias órdenes `echo` y
+/// haría que el texto pareciera perdido.
+fn flatten_text(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    flat.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// La regla superior lleva el verbo incrustado: `┌─ INSTALAR ─────…`
@@ -194,6 +215,31 @@ fn header_lines(notice: &Notice) -> Vec<Line> {
         ));
     }
     lines.push(line(Tone::Frame, bottom_rule()));
+    lines
+}
+
+/// En `cmd.exe` cada orden se entrega en su propia línea, pero nunca se parte
+/// el texto visible en órdenes artificiales. El propio xterm/ConPTY se ocupa
+/// del wrap y conserva la línea completa en el scrollback y en el scroll
+/// horizontal; dividir a 24 o 12 columnas hacía que el usuario viera varias
+/// cabeceras incompletas y perdiera la relación entre el comando y su estado.
+fn cmd_header_lines(notice: &Notice) -> Vec<Line> {
+    let mut lines = vec![line(
+        Tone::Frame,
+        format!("┌─ {}", flatten_text(&notice.verb).to_uppercase()),
+    )];
+    lines.push(line(
+        Tone::Subject,
+        format!("│ {}", flatten_text(&notice.subject)),
+    ));
+    lines.push(line(
+        Tone::Muted,
+        format!("│ {}", flatten_text(&notice.command_preview)),
+    ));
+    if let Some(note) = &notice.note {
+        lines.push(line(Tone::Muted, format!("│ {}", flatten_text(note))));
+    }
+    lines.push(line(Tone::Frame, "└"));
     lines
 }
 
@@ -292,6 +338,83 @@ fn cmd_echo(line: &Line) -> String {
     )
 }
 
+/// Una línea de la decoración para un `.cmd`: aquí sí cabe un ESC literal (el
+/// editor de línea de la consola no interviene al leer un archivo) y el `@`
+/// evita que cmd repita la orden. `%` se dobla porque dentro de un archivo
+/// por lotes un `%` suelto desaparece.
+fn cmd_file_echo(line: &Line) -> String {
+    let texto = line
+        .text
+        .replace('%', "%%")
+        .replace('^', "^^")
+        .replace('"', "^\"")
+        .replace('&', "^&")
+        .replace('|', "^|")
+        .replace('<', "^<")
+        .replace('>', "^>")
+        .replace('(', "^(")
+        .replace(')', "^)");
+    format!("@echo \x1b[{}m{texto}\x1b[0m", line.tone.sgr())
+}
+
+/// Los dos archivos que rodean una acción en cmd: la cabecera (`ini`) y el
+/// cierre (`fin`). No llevan `echo off`: al terminar un `call` desde el
+/// prompt, cmd no siempre restaura el eco, y cada línea ya empieza por `@`.
+fn cmd_frame_scripts(notice: &Notice, pause: Option<&str>, t: &Translator) -> (String, String) {
+    let mut ini = vec!["@echo.".to_string()];
+    ini.extend(cmd_header_lines(notice).iter().map(cmd_file_echo));
+    ini.push("@echo.".to_string());
+    let mut fin = vec![
+        "@echo.".to_string(),
+        // `if errorlevel` lee el código que dejó la orden: ni `call` ni `echo`
+        // lo cambian.
+        "@if errorlevel 1 goto wsterm_fail".to_string(),
+    ];
+    fin.extend(
+        footer_lines(notice, true, pause, t)
+            .iter()
+            .map(cmd_file_echo),
+    );
+    fin.push("@goto wsterm_end".to_string());
+    fin.push(":wsterm_fail".to_string());
+    fin.extend(
+        footer_lines(notice, false, pause, t)
+            .iter()
+            .map(cmd_file_echo),
+    );
+    fin.push(":wsterm_end".to_string());
+    if pause.is_some() {
+        fin.push("@pause >nul".to_string());
+    }
+    (ini.join("\r\n") + "\r\n", fin.join("\r\n") + "\r\n")
+}
+
+/// La única línea que se teclea en cmd: la orden real, tal cual, entre la
+/// cabecera y el cierre. `&&`, `||` y `|` atan más fuerte que `&`, así que una
+/// orden compuesta sigue siendo un solo bloque entre las dos llamadas.
+fn cmd_one_line(command: &str, seq: u64) -> String {
+    format!(
+        "call \"%{CMD_FRAME_DIR_VAR}%\\ui-{seq}-ini.cmd\" & {command} & call \"%{CMD_FRAME_DIR_VAR}%\\ui-{seq}-fin.cmd\""
+    )
+}
+
+/// Escribe la cabecera y el cierre en `dir` y devuelve la línea que los usa.
+/// `None` si no se pudieron escribir: entonces se vuelve al formato de varias
+/// líneas, que no necesita archivos.
+fn cmd_framed(
+    command: &str,
+    notice: &Notice,
+    pause: Option<&str>,
+    t: &Translator,
+    dir: &std::path::Path,
+) -> Option<String> {
+    let seq = CMD_FRAME_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (ini, fin) = cmd_frame_scripts(notice, pause, t);
+    std::fs::write(dir.join(format!("ui-{seq}-ini.cmd")), ini).ok()?;
+    std::fs::write(dir.join(format!("ui-{seq}-fin.cmd")), fin).ok()?;
+    Some(cmd_one_line(command, seq))
+}
+
 /// Envuelve el comando con su cabecera y su cierre, en la sintaxis de esta
 /// shell. `pause` es el mensaje de "pulsa Enter"; sin él el comando termina y
 /// devuelve el prompt directamente.
@@ -306,7 +429,31 @@ pub fn decorate(
     pause: bool,
     t: &Translator,
 ) -> String {
+    // Las pruebas de unidad no escriben en la carpeta de sesión real.
+    let frame_dir = if cfg!(test) || kind != ShellKind::Cmd {
+        None
+    } else {
+        crate::session_files::dir()
+    };
+    decorate_in(command, notice, kind, pause, t, frame_dir.as_deref())
+}
+
+fn decorate_in(
+    command: &str,
+    notice: &Notice,
+    kind: ShellKind,
+    pause: bool,
+    t: &Translator,
+    cmd_frame_dir: Option<&std::path::Path>,
+) -> String {
     let pause_text = pause.then(|| t.t("console.pause", "Pulsa Enter para volver a la terminal"));
+    if kind == ShellKind::Cmd {
+        if let Some(line) =
+            cmd_frame_dir.and_then(|dir| cmd_framed(command, notice, pause_text.as_deref(), t, dir))
+        {
+            return line;
+        }
+    }
     let header = header_lines(notice);
     let ok = footer_lines(notice, true, pause_text.as_deref(), t);
     let fail = footer_lines(notice, false, pause_text.as_deref(), t);
@@ -314,21 +461,31 @@ pub fn decorate(
     match kind {
         ShellKind::Cmd => {
             let mut parts: Vec<String> = vec!["echo.".to_string()];
-            parts.extend(header.iter().map(cmd_echo));
+            parts.extend(cmd_header_lines(notice).iter().map(cmd_echo));
             parts.push("echo.".to_string());
             parts.push(command.to_string());
             parts.push("echo.".to_string());
             // `%ERRORLEVEL%` se expandiría al ANALIZAR la línea, o sea antes de
             // que el comando corra. `if errorlevel` sí se evalúa en su momento.
-            let bien = ok.iter().map(cmd_echo).collect::<Vec<_>>().join("& ");
-            let mal = fail.iter().map(cmd_echo).collect::<Vec<_>>().join("& ");
-            parts.push(format!("if errorlevel 1 ({mal}) else ({bien})"));
+            // Un bloque `if (...) else (...)` vuelve a juntar todos los
+            // mensajes en una sola línea física. Emitir una condición por
+            // línea conserva ERRORLEVEL y mantiene corto el eco de cmd.
+            parts.extend(
+                fail.iter()
+                    .map(|item| format!("if errorlevel 1 {}", cmd_echo(item))),
+            );
+            parts.extend(
+                ok.iter()
+                    .map(|item| format!("if not errorlevel 1 {}", cmd_echo(item))),
+            );
             if pause {
                 parts.push("pause >nul".to_string());
             }
-            // Sin espacio antes del `&`: `echo X & echo Y` hace que echo
-            // imprima "X " con el espacio pegado al final de la línea.
-            parts.join("& ")
+            // Cada bloque se entrega como una línea propia. No se trocean los
+            // mensajes: cmd/ConPTY y xterm pueden envolverlos visualmente,
+            // pero el scrollback conserva cada cabecera y cada estado como una
+            // línea completa.
+            parts.join("\r")
         }
         ShellKind::Powershell => {
             let mut parts: Vec<String> = vec!["Write-Host ''".to_string()];
@@ -466,16 +623,53 @@ mod tests {
         // `%ERRORLEVEL%` en una línea encadenada con `&` se sustituye ANTES de
         // que el comando corra, así que siempre daría el código anterior.
         let salida = decorate("x", &aviso(), ShellKind::Cmd, false, &t());
-        assert!(salida.contains("if errorlevel 1 ("));
+        assert!(salida.contains("if errorlevel 1 echo "));
+        assert!(salida.contains("if not errorlevel 1 echo "));
         assert!(!salida.contains("%ERRORLEVEL%"));
     }
 
     #[test]
-    fn cmd_encadena_sin_espacio_delante_del_ampersand() {
-        // `echo X & echo Y` imprime "X " con el espacio pegado: echo se lleva
-        // todo lo que hay hasta el separador, espacio incluido.
+    fn cmd_separa_los_bloques_para_no_recortar_lineas_largas() {
+        // Una línea por bloque deja que cmd y ConPTY envuelvan la entrada; el
+        // errorlevel se conserva hasta la condición de cierre.
         let salida = decorate("x", &aviso(), ShellKind::Cmd, false, &t());
-        assert!(!salida.contains("%[0m & "), "queda un espacio antes del &");
+        assert!(salida.contains("\r"));
+        assert!(!salida.contains("%[0m & "), "cmd volvió a una línea única");
+    }
+
+    #[test]
+    fn cmd_usa_un_marco_compacto_que_no_se_desborda() {
+        let salida = decorate(
+            "powershell -NoProfile -Command \"winget upgrade --all --include-unknown\"",
+            &aviso(),
+            ShellKind::Cmd,
+            false,
+            &t(),
+        );
+        assert!(salida.contains("┌─ INSTALAR"));
+        assert!(salida.contains("\r"));
+        assert!(!salida.contains("┌─ INSTALAR ─"));
+        assert!(salida.contains("\r"));
+    }
+
+    #[test]
+    fn cmd_conserva_cada_cabecera_completa_en_una_orden() {
+        let notice = Notice::new(
+            "Desinstalar del sistema completo",
+            "Una herramienta con un nombre suficientemente largo para envolver",
+            "powershell -NoProfile -Command \"winget uninstall --id ejemplo\"",
+        );
+        let lines = cmd_header_lines(&notice);
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().any(|item| item.text.contains(&notice.subject)));
+        assert!(lines
+            .iter()
+            .any(|item| item.text.contains(&notice.command_preview)));
+        let salida = decorate("echo x", &notice, ShellKind::Cmd, false, &t());
+        assert!(!salida.contains("if errorlevel 1 ("));
+        assert!(!salida.contains(" else ("));
+        assert!(salida.contains("terminó con error"));
+        assert!(salida.contains("completado"));
     }
 
     #[test]
@@ -487,7 +681,8 @@ mod tests {
         );
         let salida = decorate("winget install x", &aviso, ShellKind::Cmd, true, &t());
 
-        assert!(salida.contains("Editor de código ^(VS Code^)"));
+        assert!(salida.contains("^("));
+        assert!(salida.contains("^)"));
         assert!(!salida.contains("Editor de código (VS Code)"));
     }
 
@@ -530,24 +725,16 @@ mod tests {
     }
 
     #[test]
-    fn cmd_no_deja_una_comilla_abierta_al_recortar_una_ruta_larga() {
+    fn cmd_conserva_comillas_y_rutas_largas_en_la_cabecera() {
         let comando = concat!(
             "git clone -- \"https://github.com/owner/project.git\" ",
             "\"C:\\Users\\Usuario\\Documents\\Una carpeta de proyectos muy larga\\project\""
         );
         let notice = Notice::new("Clonar", "owner/project", comando);
         let salida = decorate(comando, &notice, ShellKind::Cmd, false, &t());
-        let cabecera = salida
-            .split_once(comando)
-            .map(|(header, _)| header)
-            .expect("el comando real sigue intacto tras la cabecera");
-
-        assert!(cabecera.contains('…'), "la ruta de prueba no se recortó");
-        assert!(cabecera.contains("^\""), "la comilla visible no se escapó");
-        assert!(
-            !cabecera.replace("^\"", "").contains('"'),
-            "queda una comilla capaz de absorber los separadores de cmd"
-        );
+        assert!(salida.contains(comando), "el comando real se recortó");
+        assert!(salida.contains("owner/project"), "se perdió el asunto");
+        assert!(salida.contains("^\""), "la comilla no se escapó en el eco");
     }
 
     #[test]
@@ -619,6 +806,91 @@ mod tests {
         );
         assert!(salida.contains("$? "));
         assert!(salida.contains("$LASTEXITCODE -eq 0"));
+    }
+
+    #[test]
+    fn cmd_teclea_una_sola_linea_con_la_orden_real_entre_cabecera_y_cierre() {
+        let dir = tempfile::tempdir().unwrap();
+        let notice = Notice::new("Instalar", "Editor (VS Code) 100%", "winget install x");
+        let linea = decorate_in(
+            "winget install x",
+            &notice,
+            ShellKind::Cmd,
+            true,
+            &t(),
+            Some(dir.path()),
+        );
+        assert!(!linea.contains('\r') && !linea.contains('\n'), "{linea}");
+        assert!(linea.starts_with("call \"%WSTERM_UI%\\ui-"), "{linea}");
+        assert!(
+            linea.contains(" & winget install x & call \"%WSTERM_UI%\\ui-"),
+            "{linea}"
+        );
+        let seq: String = linea["call \"%WSTERM_UI%\\ui-".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let ini = std::fs::read_to_string(dir.path().join(format!("ui-{seq}-ini.cmd"))).unwrap();
+        let fin = std::fs::read_to_string(dir.path().join(format!("ui-{seq}-fin.cmd"))).unwrap();
+        // Sin `echo off` (cmd no restaura el eco del prompt tras un `call`),
+        // con ESC literal y los metacaracteres neutralizados.
+        assert!(!ini.to_ascii_lowercase().contains("echo off"));
+        assert!(ini.contains("\x1b[36m┌─ INSTALAR"));
+        assert!(ini.contains("Editor ^(VS Code^) 100%%"));
+        assert!(ini.lines().all(|line| line.starts_with('@')), "{ini}");
+        assert!(fin.contains("@if errorlevel 1 goto wsterm_fail"));
+        assert!(fin.contains("@pause >nul"));
+        assert!(fin.contains("✔") && fin.contains("✘"));
+        // Si no se pueden escribir los archivos se vuelve al formato antiguo.
+        let sin_dir = decorate_in("x", &aviso(), ShellKind::Cmd, false, &t(), None);
+        assert!(sin_dir.contains('\r'));
+        let roto = decorate_in(
+            "x",
+            &aviso(),
+            ShellKind::Cmd,
+            false,
+            &t(),
+            Some(&dir.path().join("no-existe")),
+        );
+        assert!(roto.contains('\r'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_ejecuta_la_linea_y_el_cierre_sigue_el_codigo_de_salida_real() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |command: &str| {
+            let linea = decorate_in(
+                command,
+                &aviso(),
+                ShellKind::Cmd,
+                false,
+                &t(),
+                Some(dir.path()),
+            );
+            let salida = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c"])
+                .raw_arg(&linea)
+                .env(CMD_FRAME_DIR_VAR, dir.path())
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&salida.stdout).to_string()
+        };
+        use std::os::windows::process::CommandExt;
+        let bien = run("echo orden-real");
+        assert!(
+            bien.contains("orden-real") && bien.contains("INSTALAR"),
+            "{bien}"
+        );
+        assert!(bien.contains("[32m") && !bien.contains("[31m"), "{bien}");
+        let mal = run("cmd /c exit 3");
+        assert!(mal.contains("[31m") && !mal.contains("[32m"), "{mal}");
+        // `&&` ata más que `&`: la segunda parte no corre y el cierre ve el fallo.
+        let compuesta = run("cmd /c exit 1 && echo no-debe-salir");
+        assert!(
+            !compuesta.contains("no-debe-salir") && compuesta.contains("[31m"),
+            "{compuesta}"
+        );
     }
 
     #[test]

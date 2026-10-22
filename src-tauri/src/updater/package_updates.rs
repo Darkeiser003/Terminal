@@ -57,7 +57,13 @@ pub fn check(manager: &str) -> PackageUpdateStatus {
 
 fn query(manager: &str) -> Option<bool> {
     let (program, args) = query_command(manager)?;
-    let output = crate::process::run_with_timeout_env(program, args, CHECK_TIMEOUT, C_LOCALE)?;
+    // WinGet comparte el cerrojo con la precarga de Dependencias: lanzados a
+    // la vez, uno de los dos fallaba al arrancar la app.
+    let output = if manager == "winget" {
+        crate::process::winget_run_env(args, CHECK_TIMEOUT, C_LOCALE)?
+    } else {
+        crate::process::run_with_timeout_env(program, args, CHECK_TIMEOUT, C_LOCALE)?
+    };
     let code = output.status.code()?;
     match manager {
         "dnf" => dnf_has_updates(code),

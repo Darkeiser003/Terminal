@@ -217,10 +217,12 @@ static GROUP_KEYS: &[(&str, &str)] = &[
     ("Sistema y herramientas",               "group.tools"),
     ("Lenguajes",                            "group.languages"),
     ("Frameworks",                            "group.frameworks"),
+    ("Inteligencia artificial",              "group.ai"),
     ("Visores de archivos",                  "group.viewers"),
     ("Virtualización",                        "group.virt"),
     ("Compatibilidad Windows",               "group.windowsCompat"),
     ("WSL",                                  "group.wsl"),
+    ("Contenedores y Kubernetes",            "group.containers"),
     ("Docker",                               "group.docker"),
     ("Android · ADB",                        "group.android"),
     ("Red y acceso remoto",                  "group.network"),
@@ -401,6 +403,10 @@ mod tests {
     #[test]
     fn cada_apartado_del_panel_y_del_selector_lleva_su_clave_de_traduccion() {
         assert_eq!(group_key_for("Docker"), Some("group.docker"));
+        assert_eq!(
+            group_key_for("Contenedores y Kubernetes"),
+            Some("group.containers")
+        );
         assert_eq!(group_key_for("Shells del sistema"), Some("env.groupShells"));
         // Un apartado que nadie ha declarado se queda en español, que es el
         // idioma en el que lo escribe el módulo que lo produce.

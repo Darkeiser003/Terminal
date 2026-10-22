@@ -11,8 +11,10 @@
 //! `filter_available_actions` en `commands_panels.rs`):
 //!   - `check_cmd` -> se OCULTA si ese comando ya está instalado ("Instalar X"
 //!     no tiene sentido cuando X ya está);
-//!   - `requires_cmd` -> se MUESTRA solo si ese comando está instalado
-//!     (actualizar, verificar o usar algo que todavía no existe en el sistema).
+//!   - `requires_cmd` -> las acciones de ciclo de vida se muestran solo si
+//!     ese comando está instalado (actualizar, verificar o usar algo que
+//!     todavía no existe en el sistema). Las instalaciones base permanecen
+//!     visibles para poder preparar el runtime que les falta.
 //!
 //! Así, para cada herramienta se ofrece "Instalar" antes y
 //! "Actualizar"/"Ver" después, nunca las dos cosas a la vez.
@@ -24,12 +26,21 @@
 //! identificar una acción.
 
 use once_cell::sync::Lazy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::i18n::Translator;
 use crate::wsl_env::WslContext;
 
 use super::descriptions::action_description;
+
+/// Estado de una sonda que no pudo concluir. Se serializa para que el panel
+/// pueda dejar la acción visible, pero deshabilitada, sin presentarla como una
+/// instalación pendiente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DetectionStatus {
+    Unknown,
+}
 
 /// Orden en el que se pintan los apartados del panel. Es fijo a propósito:
 /// depende solo de qué apartados existen en este sistema, no del orden en que
@@ -42,6 +53,7 @@ pub static GROUP_ORDER: &[&str] = &[
     "Sistema y herramientas",
     "Lenguajes",
     "Frameworks",
+    "Inteligencia artificial",
     "Visores de archivos",
     "Virtualización",
     "Compatibilidad Windows",
@@ -62,6 +74,7 @@ const DOCKER_GROUP: &str = "Contenedores y Kubernetes";
 const WSL_GROUP: &str = "WSL";
 const VIEWER_GROUP: &str = "Visores de archivos";
 const CODE_EDITORS_SUBGROUP: &str = "Editores de código";
+const BLESH_SUBGROUP: &str = "ble.sh · sugerencias y colores en bash";
 const UPDATES_GROUP: &str = "Actualizaciones";
 const SHELLS_GROUP: &str = "Shells";
 const TOOLS_GROUP: &str = "Sistema y herramientas";
@@ -69,11 +82,16 @@ const LANGUAGES_GROUP: &str = "Lenguajes";
 const FRAMEWORKS_GROUP: &str = "Frameworks";
 const VIRTUALIZATION_GROUP: &str = "Virtualización";
 const WINDOWS_COMPAT_GROUP: &str = "Compatibilidad Windows";
+/// Asistentes de IA y modelos locales. El mismo nombre agrupa sus entornos
+/// en el selector de pestañas (`environments::ai`).
+const AI_GROUP: &str = crate::environments::ai::AI_GROUP;
+const AI_CLI_SUBGROUP: &str = "Asistentes de IA en la terminal";
+const AI_MODELS_SUBGROUP: &str = "Modelos locales (Ollama)";
 
 /// Una acción del panel. `shell` es la shell que el comando necesita para
 /// funcionar (`powershell` o ninguna en particular); quien la ejecuta se
 /// encarga de adaptarla a la shell de la pestaña.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallAction {
     pub id: String,
@@ -99,12 +117,18 @@ pub struct InstallAction {
     /// `check_cmd`/`requires_cmd` (las distros WSL, que vienen del inventario
     /// de la sonda). El resto lo deduce el filtro.
     pub installed: Option<bool>,
+    /// `Unknown` cuando el comando de detección agotó el plazo o no pudo
+    /// consultarse. Nunca debe interpretarse como «no instalado».
+    pub detection_status: Option<DetectionStatus>,
     /// La clave de traducción del apartado. La rellena `translated`, en la
     /// frontera con el frontend: el catálogo no conoce los idiomas.
-    pub group_key: Option<&'static str>,
+    pub group_key: Option<String>,
     /// Explica qué hace la herramienta del acordeón. Solo se usa en los
     /// apartados que necesitan distinguir varias utilidades parecidas.
     pub subgroup_description: Option<String>,
+    /// Nombre del framework dentro de un ecosistema padre (por ejemplo,
+    /// `Paket` dentro de `.NET`).
+    pub subgroup_item: Option<String>,
 }
 
 impl InstallAction {
@@ -128,8 +152,10 @@ impl InstallAction {
             check_cmd: None,
             requires_cmd: None,
             installed: None,
+            detection_status: None,
             group_key: None,
             subgroup_description: None,
+            subgroup_item: None,
         }
     }
 
@@ -188,6 +214,9 @@ impl InstallAction {
                     fallback,
                 )
             });
+        let subgroup_item = self.subgroup_item.as_deref().map(|item| {
+            crate::i18n::translate(language, &format!("action.subgroup.{item}"), &[], item)
+        });
         InstallAction {
             label: campo("label", &Some(self.label.clone())).unwrap_or_default(),
             short_label: campo("shortLabel", &self.short_label),
@@ -208,8 +237,9 @@ impl InstallAction {
                     subgroup,
                 )
             }),
-            group_key: crate::i18n::group_key_for(&self.group),
+            group_key: crate::i18n::group_key_for(&self.group).map(str::to_string),
             subgroup_description,
+            subgroup_item,
             ..self.clone()
         }
     }
@@ -231,6 +261,11 @@ impl InstallAction {
 
     fn subgroup_description(mut self, description: impl Into<String>) -> Self {
         self.subgroup_description = Some(description.into());
+        self
+    }
+
+    fn subgroup_item(mut self, item: impl Into<String>) -> Self {
+        self.subgroup_item = Some(item.into());
         self
     }
 
@@ -342,7 +377,11 @@ static ADB_INSTALL_PS: Lazy<String> = Lazy::new(|| {
         // adb.exe bloquea su propio archivo mientras el servidor está vivo.
         "Get-Process adb -ErrorAction SilentlyContinue | Stop-Process -Force",
         "$dest = Join-Path $env:LOCALAPPDATA 'Android'",
-        "$zip = Join-Path $env:TEMP 'platform-tools-latest.zip'",
+        // La carpeta de descargas de WTerminal (`entornos\descargas`) si está
+        // activa; si no, el temporal de siempre.
+        "$downloads = if ($env:WTERMINAL_DOWNLOADS) { $env:WTERMINAL_DOWNLOADS } else { $env:TEMP }",
+        "New-Item -ItemType Directory -Force -Path $downloads | Out-Null",
+        "$zip = Join-Path $downloads 'platform-tools-latest.zip'",
         "New-Item -ItemType Directory -Force -Path $dest | Out-Null",
         "Invoke-WebRequest -Uri 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip' -OutFile $zip",
         "Expand-Archive -Path $zip -DestinationPath $dest -Force",
@@ -430,9 +469,8 @@ fn sh_single(value: &str) -> String {
 ///
 /// `no_detect` es para aplicaciones de escritorio que no dejan ningún
 /// ejecutable en el PATH (ImageGlass, VLC, SumatraPDF...). Ahí no se puede
-/// saber si están instaladas mirando el sistema, así que se ofrecen siempre
-/// las cuatro acciones y la de "versión" pregunta directamente a winget, en
-/// vez de fingir una detección que daría siempre "no instalado".
+/// saber si están instaladas mirando el PATH. La sonda usa el inventario de
+/// WinGet por identificador y no vuelve a ofrecer «Instalar» si ya figuran.
 struct WindowsTool {
     /// Se conserva tal cual porque `command_not_found` apunta a él para
     /// sugerir la instalación cuando la shell responde "comando no encontrado".
@@ -494,11 +532,97 @@ const MSYS2_OCAML_DETECT: &str = "powershell:$roots = @('C:\\msys64', (Join-Path
 const GHCUP_TOOLCHAIN_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghci.exe'), 'C:\\ghcup\\bin\\ghci.exe'); if ((Get-Command ghci.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
 const GHCUP_MANAGER_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghcup.exe'), 'C:\\ghcup\\bin\\ghcup.exe'); if ((Get-Command ghcup.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
 const ERLANG_WINGET_ID: &str = "Erlang.ErlangOTP";
+// El instalador de Clink no siempre añade su carpeta al PATH: se busca en las
+// rutas de instalación habituales (las mismas que usa la inicialización de cmd).
+const CLINK_DETECT: &str = "powershell:$paths = @((Join-Path ${env:ProgramFiles(x86)} 'clink\\clink.bat'), (Join-Path $env:ProgramFiles 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'Programs\\clink\\clink.bat')); if ((Get-Command clink -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
+const CLINK_VERSION: &str = "$paths = @((Join-Path ${env:ProgramFiles(x86)} 'clink\\clink.bat'), (Join-Path $env:ProgramFiles 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'Programs\\clink\\clink.bat')); $clink = Get-Command clink -ErrorAction SilentlyContinue; if ($clink) { & $clink.Source --version } else { $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { & $path --version } else { throw 'Clink no está instalado.' } }";
+// Windows PowerShell 5.1 trae PSReadLine 2.0, sin predicciones. La versión
+// actual se instala para el usuario en Windows PowerShell aunque la acción se
+// lance desde una pestaña de PowerShell 7 (que ya la incluye y tiene su
+// propia carpeta de módulos).
+const PSREADLINE_INSTALL_BLOCK: &str = "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null; Install-Module PSReadLine -Scope CurrentUser -Force -SkipPublisherCheck -AllowClobber; Write-Host ('PSReadLine ' + (Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Select-Object -First 1).Version)";
+const PSREADLINE_DETECT: &str = "powershell:$m = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Select-Object -First 1; if ($m -and $m.Version -ge [version]'2.2.0') { exit 0 } else { exit 1 }";
+const OLLAMA_HINT: &str = "Ejecuta modelos de IA en tu equipo, sin conexión y sin cuenta. Descarga modelos desde «Modelos locales (Ollama)»; para cualquier otro (incluidas las variantes de la comunidad), escribe `ollama pull <nombre>` en una pestaña. Cada modelo descargado aparece en el selector de pestañas como un chat.";
+const CLAUDE_CODE_HINT: &str = "CLI oficial de Anthropic. Se abre como una pestaña más; inicia sesión con tu cuenta de Claude (Pro o Max) o usa una clave de API de Anthropic. No tiene nivel gratuito.";
+const OPENSSH_CLIENT_CAPABILITY: &str = "windowscapability:OpenSSH.Client~~~~0.0.1.0|ssh";
+const ZSH_PLUGIN_HINT: &str = "WTerminal lo carga en sus pestañas de zsh si está instalado y la opción «Sugerencias y colores en la línea de órdenes» (y la de zsh) está activa. No hace falta tocar tu .zshrc.";
+
+// ble.sh no está en los repositorios de las distribuciones: se instala para el
+// usuario, sin sudo, desde una versión fijada de su repositorio oficial y
+// comprobando su SHA-256. «Actualizar» vuelve a instalar la versión fijada de
+// esta versión de WTerminal con el mismo script: el actualizador propio de
+// ble.sh (`ble-update`) extrae con `tar`, que falla en Ubuntu sobre WSL 1.
+const BLESH_URL: &str = "https://github.com/akinomyoga/ble.sh/releases/download/nightly/ble-nightly-20260908%2Bd81fd54.tar.xz";
+const BLESH_SHA256: &str = "7a2445f138e7f099dd5dee749391a8b045646d1b8a605975885be5b34b6b5f7e";
+const BLESH_DIR_IN_TARBALL: &str = "ble-nightly-20260908+d81fd54";
+const BLESH_HINT: &str = "Se instala solo para tu usuario, sin sudo, en ~/.local/share/blesh, desde la versión fijada del repositorio oficial y comprobando su SHA-256. Necesita curl o wget y tar con xz, o Python 3 (de serie en Ubuntu, Debian y Arch). WTerminal lo carga en sus pestañas de bash si la opción «Sugerencias y colores en la línea de órdenes» (y la de bash) está activa; no toca tu .bashrc.";
+
+/// Script de instalación de ble.sh en una sola línea, sin comillas de ningún
+/// tipo: se escribe tal cual dentro de `bash -c '…'` (Linux) y de
+/// `wsl.exe … --exec bash -lc '…'` (Windows PowerShell 5.1 no sabe pasar
+/// comillas dobles a un programa). `$tmp` sale de `mktemp` y no tiene
+/// espacios; `~` se expande como una sola palabra aunque la carpeta personal
+/// los tenga.
+///
+/// Si `tar` falla se extrae con `python3 -m tarfile`: el GNU tar 1.35 de
+/// Ubuntu no puede crear subcarpetas en WSL 1 («Cannot mkdir: Function not
+/// implemented»), y el de Arch sí. Comprobado en las dos distros.
+fn blesh_install_script() -> String {
+    format!(
+        "tmp=$(mktemp -d) && {{ if command -v curl >/dev/null 2>&1; then curl -fsSL -o $tmp/ble.tar.xz {BLESH_URL}; else wget -qO $tmp/ble.tar.xz {BLESH_URL}; fi; }} && sha256sum $tmp/ble.tar.xz | grep -q ^{BLESH_SHA256} && {{ tar -xJf $tmp/ble.tar.xz -C $tmp 2>/dev/null || python3 -m tarfile -e $tmp/ble.tar.xz $tmp; }} && bash $tmp/{BLESH_DIR_IN_TARBALL}/ble.sh --install ~/.local/share; status=$?; rm -rf $tmp; if [ $status -eq 0 ]; then echo ble.sh instalado en ~/.local/share/blesh; else echo No se pudo instalar ble.sh: revisa la descarga, la suma SHA-256 o tar/xz >&2; fi; exit $status"
+    )
+}
+
+/// La instalación, su caché y su estado (historial propio de ble.sh).
+const BLESH_UNINSTALL_SCRIPT: &str =
+    "rm -rf ~/.local/share/blesh ~/.cache/blesh ~/.local/state/blesh && echo ble.sh desinstalado";
+
+/// gsudo es opcional: solo hace de puente para NSudo (y para `gsudo <orden>`)
+/// cuando WTerminal no es administrador.
+const GSUDO_HINT: &str = "Opcional. Con gsudo, las shells TrustedInstaller de NSudo se abren en la misma pestaña sin reiniciar WTerminal como administrador: Windows pide el UAC solo para esa pestaña. También sirve para `gsudo <orden>` en cualquier shell. Es lo mismo que el sudo de Windows en modo «En línea»; si ese ya está activo, no hace falta.";
 
 #[rustfmt::skip]
 static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-pwsh",   "PowerShell 7",    "pwsh",   "Microsoft.PowerShell",           Some("pwsh -v"),                      SHELLS_GROUP),
     win("winget-nushell", "Nushell",        "nu",     "Nushell.Nushell",                Some("nu --version"),                  SHELLS_GROUP),
+    WindowsTool {
+        detect: Some(CLINK_DETECT),
+        hint: Some("Añade a cmd sugerencias del historial en gris (→ para aceptarlas), colores para órdenes y argumentos y autocompletado. WTerminal lo carga en sus pestañas de cmd si está instalado y la opción «Sugerencias y colores en la línea de órdenes» está activa."),
+        ..win("winget-clink", "Clink · sugerencias y colores en cmd", "clink", "chrisant996.Clink", Some(CLINK_VERSION), SHELLS_GROUP)
+    },
+    WindowsTool {
+        hint: Some(GSUDO_HINT),
+        ..win("winget-gsudo", "gsudo · administrador en la misma pestaña", "gsudo", "gerardog.gsudo", Some("gsudo --version"), SHELLS_GROUP)
+    },
+    WindowsTool {
+        hint: Some(OLLAMA_HINT),
+        ..win("winget-ollama", "Ollama · modelos de IA locales", "ollama", "Ollama.Ollama", Some("ollama --version"), AI_GROUP)
+    },
+    WindowsTool {
+        hint: Some(CLAUDE_CODE_HINT),
+        ..win("winget-claude-code", "Claude Code", "claude", "Anthropic.ClaudeCode", Some("claude --version"), AI_GROUP)
+    },
+    WindowsTool {
+        no_detect: true,
+        hint: Some("Aplicación de escritorio para descargar y ejecutar modelos locales con interfaz gráfica; también ofrece un servidor compatible con la API de OpenAI."),
+        ..win("winget-lmstudio", "LM Studio", "lms", "ElementLabs.LMStudio", None, AI_GROUP)
+    },
+    WindowsTool {
+        hint: Some("Agente de programación de Charm para la terminal. Funciona con muchos proveedores y con modelos locales (Ollama, LM Studio)."),
+        ..win("winget-crush", "Crush", "crush", "charmbracelet.crush", Some("crush --version"), AI_GROUP)
+    },
+    WindowsTool {
+        hint: Some("Chat y prompts desde la terminal, también con tuberías (`git diff | mods 'resume los cambios'`). Admite muchos proveedores y Ollama."),
+        ..win("winget-mods", "mods", "mods", "charmbracelet.mods", Some("mods --version"), AI_GROUP)
+    },
+    WindowsTool {
+        hint: Some("Chat, REPL y ejecución de órdenes con más de 20 proveedores, incluidos Ollama y servidores compatibles con OpenAI."),
+        ..win("winget-aichat", "AIChat", "aichat", "sigoden.AIChat", Some("aichat --version"), AI_GROUP)
+    },
+    WindowsTool {
+        hint: Some("El motor en el que se basa Ollama: ejecuta modelos GGUF directamente (`llama-cli -m modelo.gguf`) y ofrece `llama-server`, compatible con la API de OpenAI."),
+        ..win("winget-llamacpp", "llama.cpp", "llama-cli", "ggml.llamacpp", Some("llama-cli --version"), AI_GROUP)
+    },
     WindowsTool { label_key: Some("tool.gitBash"), ..win("winget-git", "Git + Git Bash", "git", "Git.Git", Some("git --version"), TOOLS_GROUP) },
     win("winget-git-lfs", "Git LFS", "git-lfs", "GitHub.GitLFS", Some("git lfs version"), TOOLS_GROUP),
     win("winget-gh", "GitHub CLI", "gh", "GitHub.cli", Some("gh --version"), TOOLS_GROUP),
@@ -598,8 +722,8 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
 /// esperar a que algo falle; los ids los referencia `file_viewers`.
 #[rustfmt::skip]
 static WINDOWS_VIEWERS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
-    // Aplicaciones de escritorio: no dejan ejecutable en el PATH, así que no
-    // se puede detectar si están instaladas (no_detect).
+    // Aplicaciones de escritorio: se detectan por el inventario de WinGet
+    // porque normalmente no dejan ejecutable en el PATH.
     WindowsTool { label_key: Some("tool.viewerImage"),       no_detect: true, ..win("viewer-image",    "ImageGlass (imágenes, SVG)",           "", "DuongDieuPhap.ImageGlass", None, VIEWER_GROUP) },
     WindowsTool { label_key: Some("tool.viewerMediaWin"),    no_detect: true, ..win("viewer-media",    "VLC (audio y vídeo)",                  "", "VideoLAN.VLC",             None, VIEWER_GROUP) },
     WindowsTool { label_key: Some("tool.viewerDocumentWin"), no_detect: true, ..win("viewer-document", "SumatraPDF (PDF y libros)",            "", "SumatraPDF.SumatraPDF",    None, VIEWER_GROUP) },
@@ -652,6 +776,7 @@ fn chocolatey_command(arguments: &str) -> String {
 
 fn chocolatey_tool_actions(tool: &ChocolateyTool, t: &Translator) -> Vec<InstallAction> {
     let subgroup = tool.label;
+    let capability = format!("chocolatey:{}|{}", tool.pkg, tool.cmd);
     let install = InstallAction::new(
         tool.install_id,
         t.tp(
@@ -672,7 +797,7 @@ fn chocolatey_tool_actions(tool: &ChocolateyTool, t: &Translator) -> Vec<Install
     .subgroup(subgroup)
     .powershell()
     .group(tool.group)
-    .check(Some(tool.cmd))
+    .check(Some(&capability))
     .hint(
         "Usa un paquete de la comunidad de Chocolatey porque este componente no tiene un \
          manifiesto actual de WinGet. Revisa el comando y acepta la instalación solo si \
@@ -692,7 +817,7 @@ fn chocolatey_tool_actions(tool: &ChocolateyTool, t: &Translator) -> Vec<Install
     .powershell()
     .group(tool.group)
     .verb("Actualizar")
-    .requires(Some(tool.cmd));
+    .requires(Some(&capability));
     let uninstall = InstallAction::new(
         format!("{}-uninstall", tool.install_id),
         t.tp(
@@ -707,7 +832,7 @@ fn chocolatey_tool_actions(tool: &ChocolateyTool, t: &Translator) -> Vec<Install
     .powershell()
     .group(tool.group)
     .verb("Desinstalar")
-    .requires(Some(tool.cmd))
+    .requires(Some(&capability))
     .hint(
         "Quita el paquete de Chocolatey. Si lo instalaste por otra vía, revisa el origen antes \
          de confirmar.",
@@ -726,7 +851,7 @@ fn chocolatey_tool_actions(tool: &ChocolateyTool, t: &Translator) -> Vec<Install
     .powershell()
     .group(tool.group)
     .verb("Versión")
-    .requires(Some(tool.cmd));
+    .requires(Some(&capability));
     vec![install, update, uninstall, version]
 }
 
@@ -736,6 +861,24 @@ const WINGET_QUERY_FLAGS: &str =
 
 fn winget_install_command(pkg: &str) -> String {
     format!("winget install --id {pkg} {WINGET_INSTALL_FLAGS}")
+}
+
+/// RubyGems compila extensiones nativas de muchas gemas (Rails, Nokogiri,
+/// Jekyll, etc.) y en Windows necesita `make`.  La acción de Ruby prepara
+/// ese requisito en la misma terminal antes de invocar WinGet; así una
+/// instalación desde el catálogo no queda a medias por depender de una
+/// herramienta que el usuario no sabía que debía instalar.
+fn ruby_install_command() -> String {
+    let make = winget_install_command("GnuWin32.Make");
+    let ruby = winget_install_command("RubyInstallerTeam.Ruby.3.3");
+    format!(
+        "$make = Get-Command make.exe -ErrorAction SilentlyContinue; \
+         if (-not $make) {{ Write-Host 'Ruby necesita make para compilar gemas nativas; se instala GnuWin32.Make.'; {make}; \
+         $make = Get-Command make.exe -ErrorAction SilentlyContinue }}; \
+         if (-not $make) {{ $makePath = 'C:\\Program Files (x86)\\GnuWin32\\bin'; \
+         if (Test-Path (Join-Path $makePath 'make.exe')) {{ $env:Path = \"$makePath;$env:Path\" }} }}; \
+         {ruby}",
+    )
 }
 
 /// `winget upgrade` solo reconoce instalaciones que puede asociar con su
@@ -758,10 +901,22 @@ fn winget_update_command(pkg: &str) -> String {
 
 fn winget_uninstall_command(pkg: &str) -> String {
     format!(
-        "$wingetInstalled = winget list --id {pkg} {WINGET_QUERY_FLAGS} | Out-String; \
-         if ($wingetInstalled -match [regex]::Escape('{pkg}')) {{ winget uninstall --id {pkg} \
-         -e --source winget --disable-interactivity }} else {{ Write-Host \
-         '{pkg}: no está registrado en winget; no se ha desinstalado.' }}"
+        r#"$wingetInstalled = winget list --id {pkg} {WINGET_QUERY_FLAGS} | Out-String;
+         if ($wingetInstalled -match [regex]::Escape('{pkg}')) {{
+         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);
+         $userInstalled = winget list --id {pkg} --scope user --accept-source-agreements --disable-interactivity | Out-String;
+         if ($isAdmin -and $userInstalled -match [regex]::Escape('{pkg}')) {{
+         $base = Join-Path $env:TEMP ('wsterm-winget-uninstall-' + [guid]::NewGuid().ToString());
+         $script = $base + '.ps1'; $log = $base + '.log'; $result = $base + '.rc';
+         $child = "& winget uninstall --id {pkg} -e --accept-source-agreements --disable-interactivity *> '$log'; Set-Content -LiteralPath '$result' -Value `$LASTEXITCODE; exit `$LASTEXITCODE";
+         Set-Content -LiteralPath $script -Value $child -Encoding UTF8;
+         (New-Object -ComObject Shell.Application).ShellExecute('powershell.exe', ('-NoProfile -ExecutionPolicy Bypass -File "' + $script + '"'), '', 'open', 0);
+         $until = (Get-Date).AddMinutes(10); while (!(Test-Path -LiteralPath $result) -and (Get-Date) -lt $until) {{ Start-Sleep -Milliseconds 250 }};
+         if (Test-Path -LiteralPath $log) {{ Get-Content -LiteralPath $log }};
+         if (Test-Path -LiteralPath $result) {{ $global:LASTEXITCODE = [int](Get-Content -LiteralPath $result | Select-Object -First 1) }} else {{ Write-Error 'La desinstalación de usuario no terminó dentro del tiempo esperado.'; $global:LASTEXITCODE = 1 }};
+         Remove-Item -LiteralPath $script,$log,$result -Force -ErrorAction SilentlyContinue
+         }} else {{ winget uninstall --id {pkg} -e --accept-source-agreements --disable-interactivity }}
+         }} else {{ Write-Host '{pkg}: no está registrado en winget; no se ha desinstalado.' }}"#
     )
 }
 
@@ -769,9 +924,18 @@ fn winget_uninstall_command(pkg: &str) -> String {
 /// falta), y actualizar, desinstalar y ver versión (solo si ya está).
 fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction> {
     let detect = if tool.no_detect || tool.cmd.is_empty() {
-        None
+        Some(format!("winget:{}|__package__", tool.pkg))
+    } else if tool.detect.is_none() {
+        // WinGet registra correctamente muchas instalaciones por usuario,
+        // aunque su ejecutable no haya quedado en el PATH heredado por la
+        // aplicación (WindowsApps, enlaces de WinGet o aplicaciones que solo
+        // exponen una GUI). La sonda interna conserva primero la comprobación
+        // del ejecutable y usa `winget list` como respaldo.
+        Some(format!("winget:{}|{}", tool.pkg, tool.cmd))
     } else {
-        tool.detect.or(Some(tool.cmd))
+        tool.detect
+            .map(str::to_string)
+            .or_else(|| Some(tool.cmd.to_string()))
     };
     // Nombres como "VLC (audio y vídeo)" llevan una coletilla descriptiva que
     // sí se traduce; el nombre propio de dentro, no.
@@ -783,7 +947,9 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
     // herramienta; `short_label` es cómo se lee dentro de ese subgrupo, donde
     // repetir el nombre en cada línea sobra.
     let subgroup = label.clone();
-    let install_command = if let Some(choco_pkg) = tool.choco_fallback {
+    let install_command = if tool.install_id == "winget-ruby" {
+        ruby_install_command()
+    } else if let Some(choco_pkg) = tool.choco_fallback {
         let fallback = chocolatey_command(&format!("install {choco_pkg} -y --no-progress"));
         format!(
             "{}; if ($LASTEXITCODE -ne 0) {{ Write-Host 'WinGet no pudo instalar PostgreSQL 18; se prueba Chocolatey.'; {} }}",
@@ -811,7 +977,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
         .subgroup(&subgroup)
         .powershell()
         .group(tool.group)
-        .check(detect),
+        .check(detect.as_deref()),
         InstallAction::new(
             format!("{}-update", tool.install_id),
             t.tp(
@@ -826,7 +992,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
         .powershell()
         .group(tool.group)
         .verb("Actualizar")
-        .requires(detect),
+        .requires(detect.as_deref()),
         InstallAction::new(
             format!("{}-uninstall", tool.install_id),
             t.tp(
@@ -841,7 +1007,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
         .powershell()
         .group(tool.group)
         .verb("Desinstalar")
-        .requires(detect)
+        .requires(detect.as_deref())
         .hint(
             "Elimina la herramienta del sistema. El comando se escribe en la \
              terminal: revísalo antes de confirmarlo.",
@@ -884,7 +1050,7 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
             .powershell()
             .group(tool.group)
             .verb(verb)
-            .requires(detect),
+            .requires(detect.as_deref()),
         );
     }
     actions
@@ -978,6 +1144,9 @@ struct PkgTool {
     /// Medio sistema depende de él: su desinstalación no se automatiza.
     core: bool,
     hint: Option<&'static str>,
+    /// Complemento de esa shell: dentro de WSL solo se ofrece en las distros
+    /// que la tienen.
+    requires_shell: Option<&'static str>,
 }
 
 const fn pkg(
@@ -999,6 +1168,7 @@ const fn pkg(
         group,
         core: false,
         hint: None,
+        requires_shell: None,
     }
 }
 
@@ -1022,11 +1192,22 @@ static LINUX_TOOLS: Lazy<Vec<PkgTool>> = Lazy::new(|| vec![
     PkgTool { core: true, ..pkg("pkg-bash", "bash", "bash", &[("default", "bash")], Some("bash --version"), SHELLS_GROUP) },
     pkg("pkg-zsh",    "zsh",    "zsh",     &[("default", "zsh")],    Some("zsh --version"),    SHELLS_GROUP),
     pkg("pkg-fish",   "fish",   "fish",    &[("default", "fish")],   Some("fish --version"),   SHELLS_GROUP),
+    PkgTool {
+        requires_shell: Some("zsh"),
+        hint: Some(ZSH_PLUGIN_HINT),
+        ..pkg("pkg-zsh-autosuggestions", "zsh-autosuggestions · sugerencias del historial en zsh", crate::terminal::shell_assist::ZSH_AUTOSUGGESTIONS.marker, &[("default", "zsh-autosuggestions")], None, SHELLS_GROUP)
+    },
+    PkgTool {
+        requires_shell: Some("zsh"),
+        hint: Some(ZSH_PLUGIN_HINT),
+        ..pkg("pkg-zsh-syntax-highlighting", "zsh-syntax-highlighting · colores en zsh", crate::terminal::shell_assist::ZSH_SYNTAX_HIGHLIGHTING.marker, &[("default", "zsh-syntax-highlighting")], None, SHELLS_GROUP)
+    },
     pkg("pkg-nushell", "Nushell", "nu", &[("pacman", "nushell")], Some("nu --version"), SHELLS_GROUP),
     pkg("pkg-xonsh", "Xonsh", "xonsh", &[("default", "xonsh")], Some("xonsh --version"), SHELLS_GROUP),
     pkg("pkg-elvish", "Elvish", "elvish", &[("default", "elvish")], Some("elvish --version"), SHELLS_GROUP),
     pkg("pkg-git",    "Git",    "git",     &[("default", "git")],    Some("git --version"),    TOOLS_GROUP),
     pkg("pkg-git-lfs", "Git LFS", "git-lfs", &[("default", "git-lfs")], Some("git lfs version"), TOOLS_GROUP),
+    pkg("pkg-ollama", "Ollama · modelos de IA locales", "ollama", &[("pacman", "ollama"), ("dnf", "ollama"), ("zypper", "ollama")], Some("ollama --version"), AI_GROUP),
     pkg("pkg-gh", "GitHub CLI", "gh", &[("apt", "gh"), ("dnf", "gh"), ("pacman", "github-cli"), ("zypper", "gh"), ("apk", "github-cli")], Some("gh --version"), TOOLS_GROUP),
     pkg("pkg-ripgrep", "ripgrep", "rg", &[("default", "ripgrep")], Some("rg --version"), TOOLS_GROUP),
     pkg("pkg-fzf", "fzf", "fzf", &[("default", "fzf")], Some("fzf --version"), TOOLS_GROUP),
@@ -1550,6 +1731,16 @@ fn windows_code_editor_actions(_t: &Translator) -> Vec<InstallAction> {
         .into_iter()
         .map(|(id, label, package, _command, check)| {
             let is_official_download = package.is_empty();
+            // Los editores de escritorio suelen no registrar su ejecutable en
+            // PATH. Consultar solo `code`, `subl` o `devenv` los deja como no
+            // instalados aunque WinGet sí los tenga instalados. La capacidad
+            // usa el inventario de WinGet como fuente principal y conserva el
+            // comando como respaldo cuando el editor sí lo publica.
+            let check_spec = if is_official_download {
+                None
+            } else {
+                Some(format!("winget:{package}|{}", check.unwrap_or("__package__")))
+            };
             InstallAction::new(
                 id,
                 if is_official_download {
@@ -1571,7 +1762,7 @@ fn windows_code_editor_actions(_t: &Translator) -> Vec<InstallAction> {
             .group(VIEWER_GROUP)
             .subgroup(CODE_EDITORS_SUBGROUP)
             .powershell()
-            .check(check)
+            .check(check_spec.as_deref())
             .hint(if is_official_download {
                 "Abre la página oficial para elegir el instalador de Windows. No se descarga ni instala nada en segundo plano."
             } else {
@@ -1671,8 +1862,10 @@ fn in_subgroup(group: &str, subgroup: &str, actions: Vec<InstallAction>) -> Vec<
 /// Ecosistemas que se instalan encima de un intérprete. No son shells ni
 /// lenguajes nuevos: se muestran en su propio apartado para que, por ejemplo,
 /// Pyramid no quede mezclado con Python ni TypeScript se confunda con Node.
-/// Las acciones requieren el runtime correspondiente y siguen escribiendo el
-/// comando visible en la pestaña activa, igual que el resto del catálogo.
+/// Las acciones declaran el runtime correspondiente y siguen escribiendo el
+/// comando visible en la pestaña activa, igual que el resto del catálogo. La
+/// acción de instalación se mantiene visible aunque ese runtime falte, para
+/// que el usuario pueda ver qué debe preparar y ejecutarlo cuando corresponda.
 fn ecosystem_action(
     id: &str,
     label: &str,
@@ -1681,9 +1874,9 @@ fn ecosystem_action(
     hint: &str,
 ) -> InstallAction {
     // El primer ejecutable es el runtime real del ecosistema (`python3`,
-    // `npm`, `composer`, `luarocks`, etc.). Declararlo aquí evita que una acción
-    // intente instalar una herramienta sobre un runtime que todavía no existe;
-    // al refrescar el panel reaparecerá después de instalarlo.
+    // `npm`, `composer`, `luarocks`, etc.). Declararlo aquí permite confirmar
+    // la dependencia y ocultar actualizar/desinstalar hasta que exista, sin
+    // perder la instalación base del framework.
     let runtime = command.split_whitespace().next().map(str::to_string);
     let requires = if command
         .split_whitespace()
@@ -1698,10 +1891,15 @@ fn ecosystem_action(
         runtime
     };
     let probe = ecosystem_probe(&command);
+    let item = label
+        .split_once(" (")
+        .map(|(name, _)| name)
+        .unwrap_or(label);
     let mut action = InstallAction::new(id.to_string(), label.to_string(), command)
         .short(format!("Instalar {label}"))
         .group(FRAMEWORKS_GROUP)
         .subgroup(subgroup)
+        .subgroup_item(item)
         .hint(hint);
     if let Some(description) = action_description(id) {
         action = action.description(description);
@@ -1854,6 +2052,7 @@ fn ecosystem_lifecycle_actions(actions: Vec<InstallAction>) -> Vec<InstallAction
         };
         let label = install.label.clone();
         let subgroup = install.subgroup.clone();
+        let subgroup_item = install.subgroup_item.clone();
         let group = install.group.clone();
         let hint = install.hint.clone();
         let description = install.description.clone();
@@ -1870,6 +2069,7 @@ fn ecosystem_lifecycle_actions(actions: Vec<InstallAction>) -> Vec<InstallAction
         .verb("Actualizar")
         .requires(Some(&probe));
         update.subgroup = subgroup.clone();
+        update.subgroup_item = subgroup_item.clone();
         update.hint = hint.clone();
         update.description = description.clone();
         lifecycle.push(update);
@@ -1890,6 +2090,7 @@ fn ecosystem_lifecycle_actions(actions: Vec<InstallAction>) -> Vec<InstallAction
             .verb("Desinstalar")
             .requires(Some(&probe));
             remove.subgroup = subgroup;
+            remove.subgroup_item = subgroup_item;
             remove.description = description;
             remove.hint = Some("Elimina este framework del gestor correspondiente; revisa el comando antes de confirmarlo.".to_string());
             lifecycle.push(remove);
@@ -1951,6 +2152,184 @@ fn elixir_otp_action(platform: &str, pkg_manager: Option<&str>) -> InstallAction
         .hint(
             "Mix necesita la aplicación OTP public_key para descargar paquetes Hex. Si ya está instalada, refresca el panel para que aparezcan Credo, ExDoc y el resto.",
         )
+}
+
+/// Apartado «Inteligencia artificial»: las CLIs de asistentes, que se instalan
+/// con npm o pip y se abren como pestañas (`environments::ai`), y una
+/// selección de modelos locales de Ollama con sus requisitos de memoria
+/// comparados con los de este equipo. Claude Code usa su instalador nativo de
+/// WinGet en Windows (`winget-claude-code`) y npm en el resto.
+fn ai_actions(
+    platform: &str,
+    python_cmd: &'static str,
+    npm_cmd: &'static str,
+) -> Vec<InstallAction> {
+    let mut npm_tools: Vec<(&str, &str, &str, &str)> = vec![
+        ("ai-gemini-cli", "Gemini CLI", "@google/gemini-cli", "CLI oficial de Google. Iniciando sesión con una cuenta de Google tiene un nivel gratuito con límites; también admite una clave de API."),
+        ("ai-codex-cli", "Codex CLI", "@openai/codex", "CLI oficial de OpenAI. Inicia sesión con tu cuenta de ChatGPT o usa una clave de API de OpenAI."),
+        ("ai-copilot-cli", "GitHub Copilot CLI", "@github/copilot", "CLI de GitHub Copilot. Inicia sesión con una cuenta de GitHub que tenga Copilot (incluido el plan gratuito, con límites)."),
+        ("ai-qwen-code", "Qwen Code", "@qwen-code/qwen-code", "CLI de Qwen (Alibaba). Inicia sesión con Qwen para usar su acceso gratuito con límites, o configura una clave de API compatible con OpenAI."),
+        ("ai-opencode", "opencode", "opencode-ai", "Agente de programación de código abierto que funciona con muchos proveedores, incluidos los modelos locales de Ollama."),
+        ("ai-amp", "Amp", "@sourcegraph/amp", "Agente de programación de Sourcegraph. Inicia sesión con una cuenta de Amp; tiene un modo gratuito con anuncios y límites."),
+        ("ai-continue-cli", "Continue CLI", "@continuedev/cli", "Agente de Continue (orden `cn`). Funciona con muchos proveedores y con modelos locales de Ollama o LM Studio."),
+        ("ai-grok-cli", "Grok CLI", "@vibe-kit/grok-cli", "CLI de la comunidad para los modelos Grok de xAI. Necesita una clave de API de xAI."),
+    ];
+    // En Windows, Crush llega por WinGet (abajo, con el resto de binarios).
+    if platform != "windows" {
+        npm_tools.push((
+            "ai-crush",
+            "Crush",
+            "@charmland/crush",
+            "Agente de programación de Charm para la terminal. Funciona con muchos proveedores y con modelos locales (Ollama, LM Studio).",
+        ));
+    }
+    if platform != "windows" {
+        npm_tools.insert(
+            0,
+            (
+                "ai-claude-code",
+                "Claude Code",
+                "@anthropic-ai/claude-code",
+                CLAUDE_CODE_HINT,
+            ),
+        );
+    }
+    let mut clis = Vec::new();
+    for (id, label, package, hint) in npm_tools {
+        let mut action = ecosystem_action(
+            id,
+            label,
+            format!("{npm_cmd} install --global {package}"),
+            AI_CLI_SUBGROUP,
+            &format!("{hint} Necesita Node.js y npm (Lenguajes)."),
+        );
+        action.group = AI_GROUP.to_string();
+        clis.push(action);
+    }
+    let mut aider = ecosystem_action(
+        "ai-aider",
+        "aider",
+        format!("{python_cmd} -m pip install --user aider-chat"),
+        AI_CLI_SUBGROUP,
+        "Asistente de programación que edita tu repositorio desde la terminal. Funciona con APIs de pago o con modelos locales de Ollama (por ejemplo `aider --model ollama_chat/qwen3.8:27b`). Necesita Python con pip.",
+    );
+    aider.group = AI_GROUP.to_string();
+    clis.push(aider);
+    for (id, label, packages, hint) in [
+        ("ai-llm", "llm (con Ollama)", "llm llm-ollama", "Herramienta de Simon Willison para chatear y lanzar prompts desde la terminal (`llm chat -m qwen3:8b`). Se instala con su complemento de Ollama para usar los modelos locales; también admite APIs con clave."),
+        ("ai-shell-gpt", "ShellGPT", "shell-gpt", "Pregunta, genera órdenes de shell (`sgpt --shell`) y chatea (`sgpt --repl temp`). Usa una clave de OpenAI o un servidor compatible, como Ollama."),
+    ] {
+        let mut action = ecosystem_action(
+            id,
+            label,
+            format!("{python_cmd} -m pip install --user {packages}"),
+            AI_CLI_SUBGROUP,
+            &format!("{hint} Necesita Python con pip."),
+        );
+        action.group = AI_GROUP.to_string();
+        clis.push(action);
+    }
+    let mut actions = ecosystem_lifecycle_actions(clis);
+    actions.extend(ollama_tool_actions(platform));
+
+    let total_memory = crate::environments::ai::total_memory_gb();
+    for model in crate::environments::ai::OLLAMA_MODELS {
+        let slug = model.tag.replace([':', '.', '/'], "-");
+        let probe = format!("ollama-model:{}", model.tag);
+        let item = format!("{} · {}", model.vendor, model.label);
+        actions.push(
+            InstallAction::new(
+                format!("ai-model-{slug}"),
+                format!("Descargar {}", model.label),
+                format!("ollama pull {}", model.tag),
+            )
+            .short(format!("Descargar {} con Ollama", model.label))
+            .group(AI_GROUP)
+            .subgroup(AI_MODELS_SUBGROUP)
+            .subgroup_item(item.clone())
+            .verb("Instalar")
+            .description(crate::environments::ai::model_description(model))
+            .hint(crate::environments::ai::requirements_hint(
+                model,
+                total_memory,
+            ))
+            .requires(Some("ollama"))
+            .check(Some(&probe)),
+        );
+        actions.push(
+            InstallAction::new(
+                format!("ai-model-{slug}-uninstall"),
+                format!("Borrar {}", model.label),
+                format!("ollama rm {}", model.tag),
+            )
+            .short("Borrar el modelo descargado y liberar su espacio")
+            .group(AI_GROUP)
+            .subgroup(AI_MODELS_SUBGROUP)
+            .subgroup_item(item)
+            .verb("Desinstalar")
+            .description(crate::environments::ai::model_description(model))
+            .requires(Some(&probe)),
+        );
+    }
+    // Cada subgrupo reúne muchas herramientas: su cabecera describe la
+    // lista, no hereda la descripción de la primera (Gemini o Qwen 3.8).
+    for action in &mut actions {
+        action.subgroup_description = match action.subgroup.as_deref() {
+            Some(AI_CLI_SUBGROUP) => Some(
+                "Asistentes que se abren como pestañas y trabajan con tu propia sesión o tus tokens."
+                    .to_string(),
+            ),
+            Some(AI_MODELS_SUBGROUP) => Some(
+                "Modelos que se ejecutan en tu equipo con Ollama; cada uno indica la memoria que necesita."
+                    .to_string(),
+            ),
+            _ => action.subgroup_description.take(),
+        };
+    }
+    actions
+}
+
+/// Órdenes de Ollama que no son un modelo concreto: descargar o abrir
+/// cualquiera por su nombre (también las variantes de la comunidad y las de
+/// Hugging Face), ver lo descargado y lo cargado, arrancar el servidor y
+/// actualizar todos. Las que preguntan un nombre lo hacen en la propia pestaña.
+fn ollama_tool_actions(platform: &str) -> Vec<InstallAction> {
+    let windows = platform == "windows";
+    let ask = |verb: &str| {
+        if windows {
+            format!("$wtModel = Read-Host 'Modelo (por ejemplo qwen3:8b, huihui_ai/qwen3-abliterated:8b o hf.co/usuario/repo)'; if ($wtModel) {{ ollama {verb} $wtModel }}")
+        } else {
+            format!("printf 'Modelo (por ejemplo qwen3:8b o hf.co/usuario/repo): '; read -r wt_model; [ -n \"$wt_model\" ] && ollama {verb} \"$wt_model\"")
+        }
+    };
+    let update_all = if windows {
+        "ollama list | Select-Object -Skip 1 | ForEach-Object { $wtName = ($_ -split '\\s+')[0]; if ($wtName) { ollama pull $wtName } }".to_string()
+    } else {
+        "ollama list | tail -n +2 | awk '{print $1}' | while read -r wt_model; do ollama pull \"$wt_model\"; done".to_string()
+    };
+    let item = "Ollama · gestión de modelos";
+    let action = |id: &str, label: &str, command: String, verb: &str, hint: &str, script: bool| {
+        let action = InstallAction::new(id, label, command)
+            .group(AI_GROUP)
+            .subgroup(AI_MODELS_SUBGROUP)
+            .subgroup_item(item)
+            .verb(verb)
+            .description(hint)
+            .requires(Some("ollama"));
+        if script && windows {
+            action.powershell()
+        } else {
+            action
+        }
+    };
+    vec![
+        action("ai-ollama-pull-any", "Descargar un modelo por su nombre", ask("pull"), "Instalar", "Pregunta el nombre en la terminal y lo descarga: cualquier modelo de ollama.com, de la comunidad o de Hugging Face (hf.co/…).", true),
+        action("ai-ollama-run-any", "Chatear con un modelo por su nombre", ask("run"), "Abrir", "Pregunta el nombre y abre el chat; si no está descargado, Ollama lo descarga primero.", true),
+        action("ai-ollama-list", "Ver los modelos descargados", "ollama list".to_string(), "Ver", "Nombre, tamaño y fecha de cada modelo descargado.", false),
+        action("ai-ollama-ps", "Ver los modelos cargados en memoria", "ollama ps".to_string(), "Ver", "Qué modelos ocupan ahora RAM o VRAM y cuánto.", false),
+        action("ai-ollama-update-all", "Actualizar todos los modelos descargados", update_all, "Actualizar", "Vuelve a descargar cada modelo para traer su última versión; solo baja lo que cambió.", true),
+        action("ai-ollama-serve", "Arrancar el servidor de Ollama", "ollama serve".to_string(), "Abrir", "Solo hace falta si Ollama no se está ejecutando ya (la aplicación de escritorio lo arranca sola). Ciérralo con Ctrl+C.", false),
+    ]
 }
 
 fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<InstallAction> {
@@ -2044,7 +2423,10 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
         (
             "tool-typescript",
             "TypeScript + ts-node",
-            "typescript ts-node",
+            // ts-node 10.x no es compatible con TypeScript 7 todavía. Fijar
+            // el compilador estable evita que una actualización global rompa
+            // el REPL con `ts.sys.fileExists` indefinido.
+            "typescript@5.9.3 ts-node@10.9.2",
         ),
         ("framework-vite", "Vite", "vite"),
         ("framework-nest", "NestJS CLI", "@nestjs/cli"),
@@ -2152,6 +2534,11 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
         ));
     }
 
+    // Paket 10.x solo publica DotnetToolSettings.xml para net9.0. La mayoría
+    // de instalaciones Windows soportan .NET 8, y la versión flotante falla
+    // antes de crear el comando `paket`. 9.0.2 incluye el manifiesto
+    // netcoreapp3.1 y funciona también bajo SDK modernos.
+    const PAKET_COMMAND: &str = "dotnet tool install --global paket --version 9.0.2";
     for (id, label, command) in [
         (
             "framework-cargo-leptos",
@@ -2392,11 +2779,7 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
             "NSwag",
             "dotnet tool install --global NSwag.ConsoleCore",
         ),
-        (
-            "framework-paket",
-            "Paket",
-            "dotnet tool install --global paket",
-        ),
+        ("framework-paket", "Paket", PAKET_COMMAND),
     ] {
         actions.push(ecosystem_action(
             id,
@@ -2614,14 +2997,30 @@ fn wsl_aur_remove(distro: &str, helper: &str, package: &str) -> String {
     )
 }
 
-/// Ejecuta una comprobación dentro de WSL usando bash como intérprete único.
-/// Esto evita que `;`, redirecciones o expresiones de REPL se interpreten en
+/// Ejecuta un script dentro de WSL usando bash como intérprete único. Esto
+/// evita que `;`, redirecciones o expresiones de REPL se interpreten en
 /// PowerShell antes de llegar a la distro.
+///
+/// Con `--exec`: con `--`, WSL entrega la orden a la login shell de la
+/// distro como una cadena y esa shell expande `$tmp`, `$(…)`… antes que
+/// bash (`x=5; echo [$x]` imprimía `[]`). Windows PowerShell 5.1, además,
+/// no sabe pasar comillas dobles a un programa: un script que las lleve viaja
+/// en base64 y bash lo lee de una sustitución de proceso, de modo que la
+/// entrada estándar sigue siendo la terminal (por si pide la contraseña).
 fn wsl_script(distro: &str, script: &str) -> String {
+    let script = if script.contains('"') {
+        use base64::Engine;
+        format!(
+            "bash <(echo {} | base64 -d)",
+            base64::engine::general_purpose::STANDARD.encode(script)
+        )
+    } else {
+        script.to_string()
+    };
     format!(
-        "wsl.exe -d {} -- bash -lc {}",
+        "wsl.exe -d {} --exec bash -lc {}",
         ps_single(distro),
-        ps_single(script)
+        ps_single(&script)
     )
 }
 
@@ -2802,11 +3201,103 @@ fn wsl_tool_actions(
     actions
 }
 
+/// ble.sh dentro de una distro: instalar si la sonda no encontró su marcador;
+/// si lo encontró, actualizar y desinstalar.
+fn wsl_blesh_actions(distro: &crate::wsl_env::InstalledDistro) -> Vec<InstallAction> {
+    let blesh = crate::terminal::shell_assist::BLESH;
+    let present = distro.tools.iter().any(|tool| tool == blesh.marker);
+    let id = format!("wsl-{}-blesh", safe_id(&distro.name));
+    let subgroup = BLESH_SUBGROUP;
+    let mut actions = Vec::new();
+    if present {
+        actions.push(
+            InstallAction::new(
+                format!("{id}-update"),
+                format!("Actualizar ble.sh en {}", distro.name),
+                wsl_script(distro.name.as_str(), &blesh_install_script()),
+            )
+            .short("Actualizar ble.sh")
+            .verb("Actualizar")
+            .installed(true),
+        );
+        actions.push(
+            InstallAction::new(
+                format!("{id}-uninstall"),
+                format!("Desinstalar ble.sh de {}", distro.name),
+                wsl_script(distro.name.as_str(), BLESH_UNINSTALL_SCRIPT),
+            )
+            .short("Desinstalar ble.sh")
+            .verb("Desinstalar")
+            .installed(true),
+        );
+    } else {
+        actions.push(
+            InstallAction::new(
+                id,
+                format!("Instalar ble.sh en {}", distro.name),
+                wsl_script(distro.name.as_str(), &blesh_install_script()),
+            )
+            .short("Instalar ble.sh")
+            .installed(false),
+        );
+    }
+    actions
+        .into_iter()
+        .map(|action| {
+            action
+                .powershell()
+                .group(WSL_GROUP)
+                .subgroup(subgroup)
+                .hint(BLESH_HINT)
+                .description(action_description("blesh").unwrap_or_default())
+        })
+        .collect()
+}
+
+/// ble.sh en Linux: el mismo script, dentro de `bash -c` para que funcione
+/// aunque la pestaña sea zsh o fish.
+fn linux_blesh_actions() -> Vec<InstallAction> {
+    let marker = crate::terminal::shell_assist::BLESH.marker;
+    vec![
+        InstallAction::new(
+            "blesh",
+            "Instalar ble.sh (sugerencias y colores en bash)",
+            format!("bash -c '{}'", blesh_install_script()),
+        )
+        .short("Instalar en tu usuario")
+        .check(Some(marker)),
+        InstallAction::new(
+            "blesh-update",
+            "Actualizar ble.sh",
+            format!("bash -c '{}'", blesh_install_script()),
+        )
+        .short("Reinstalar la versión verificada")
+        .verb("Actualizar")
+        .requires(Some(marker)),
+        InstallAction::new(
+            "blesh-uninstall",
+            "Desinstalar ble.sh",
+            BLESH_UNINSTALL_SCRIPT,
+        )
+        .short("Desinstalar de tu usuario")
+        .verb("Desinstalar")
+        .requires(Some(marker)),
+    ]
+    .into_iter()
+    .map(|action| {
+        action
+            .group(SHELLS_GROUP)
+            .subgroup(BLESH_SUBGROUP)
+            .hint(BLESH_HINT)
+    })
+    .collect()
+}
+
 fn wsl_aur_bootstrap_action(
     distro: &crate::wsl_env::InstalledDistro,
     subgroup: &str,
 ) -> InstallAction {
-    let script = "sudo pacman -S --needed --noconfirm base-devel git && tmp=$(mktemp -d) && git clone https://aur.archlinux.org/paru-bin.git \"$tmp/paru-bin\" && cd \"$tmp/paru-bin\" && makepkg -si --noconfirm; status=$?; rm -rf \"$tmp\"; exit $status";
+    let script = "sudo pacman -S --needed --noconfirm base-devel git && tmp=$(mktemp -d) && git clone https://aur.archlinux.org/paru-bin.git $tmp/paru-bin && cd $tmp/paru-bin && makepkg -si --noconfirm; status=$?; rm -rf $tmp; exit $status";
     InstallAction::new(
         format!("wsl-{}-aur-helper", safe_id(&distro.name)),
         format!("Instalar ayudante AUR (paru) en {}", distro.name),
@@ -2933,6 +3424,12 @@ fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
             actions.push(wsl_aur_bootstrap_action(distro, &subgroup));
         }
         for tool in LINUX_TOOLS.iter() {
+            if tool
+                .requires_shell
+                .is_some_and(|shell| !distro.shells.iter().any(|present| present == shell))
+            {
+                continue;
+            }
             let tool_subgroup = match tool.label_key {
                 Some(key) => t.t(key, tool.label),
                 None => tool.label.to_string(),
@@ -2944,6 +3441,9 @@ fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
                 aur_helper,
                 t,
             ));
+        }
+        if distro.shells.iter().any(|shell| shell == "bash") {
+            actions.extend(wsl_blesh_actions(distro));
         }
         /* Legacy implementation replaced by the shared catalog above.
             // clave,    etiqueta,        paquete,       ya presente,                                   es una shell
@@ -3163,11 +3663,11 @@ fn windows_actions(
             .short("Instalar como capacidad de Windows")
             .powershell()
             .hint("En Windows 10 (1809+)/11 casi siempre ya viene instalado.")
-            .check(Some("ssh")),
+            .check(Some(OPENSSH_CLIENT_CAPABILITY)),
             InstallAction::new("ssh-check", "Ver versión de SSH instalada", "ssh -V")
                 .short("Ver versión instalada")
                 .verb("Versión")
-                .requires(Some("ssh")),
+                .requires(Some(OPENSSH_CLIENT_CAPABILITY)),
             InstallAction::new(
                 "winget-ssh-uninstall",
                 "Desinstalar cliente SSH (OpenSSH)",
@@ -3176,7 +3676,7 @@ fn windows_actions(
             .short("Desinstalar del sistema")
             .powershell()
             .verb("Desinstalar")
-            .requires(Some("ssh"))
+            .requires(Some(OPENSSH_CLIENT_CAPABILITY))
             .hint(
                 "OpenSSH es una capacidad opcional de Windows; quitarla requiere permisos de \
                  administrador.",
@@ -3187,6 +3687,23 @@ fn windows_actions(
     actions.push(python_pip_action("windows", None, "python"));
     actions.push(elixir_otp_action("windows", None));
     actions.extend(ecosystem_actions("python", "npm"));
+    actions.extend(ai_actions("windows", "python", "npm"));
+    actions.push(
+        InstallAction::new(
+            "psreadline-predictions",
+            "PSReadLine con predicciones (Windows PowerShell)",
+            format!(
+                "if ($PSVersionTable.PSEdition -eq 'Core') {{ & (Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe') -NoProfile -ExecutionPolicy Bypass -Command {{ {PSREADLINE_INSTALL_BLOCK} }} }} else {{ {PSREADLINE_INSTALL_BLOCK} }}"
+            ),
+        )
+        .short("Actualizar PSReadLine de Windows PowerShell")
+        .group(SHELLS_GROUP)
+        .subgroup("PSReadLine · sugerencias y colores")
+        .verb("Instalar")
+        .hint("Windows PowerShell 5.1 trae PSReadLine 2.0, sin sugerencias del historial. La versión actual las muestra en gris mientras escribes (→ para aceptarlas). PowerShell 7 ya la incluye. Se instala solo para tu usuario.")
+        .powershell()
+        .check(Some(PSREADLINE_DETECT)),
+    );
 
     actions.push(
         // --include-unknown alcanza también a los programas cuya versión
@@ -3276,14 +3793,14 @@ fn windows_msys2_toolchain_actions() -> Vec<InstallAction> {
 /// GFortran y GDB.
 fn windows_msys2_ocaml_actions() -> Vec<InstallAction> {
     let install = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar OCaml.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; $env:Path = $bin + ';' + $env:Path",
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar OCaml.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; [Environment]::SetEnvironmentVariable('OCAMLLIB', $lib, 'User'); $env:Path = $bin + ';' + $env:Path; $env:OCAMLLIB = $lib",
         winget_install_command("MSYS2.MSYS2")
     );
     let update = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar OCaml.' }}"
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar OCaml.' }}; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; [Environment]::SetEnvironmentVariable('OCAMLLIB', $lib, 'User')"
     );
     let uninstall = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar OCaml.' }}"
+        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar OCaml.' }}; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; if ([Environment]::GetEnvironmentVariable('OCAMLLIB', 'User') -eq $lib) {{ [Environment]::SetEnvironmentVariable('OCAMLLIB', $null, 'User') }}"
     );
     let version = "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $ocaml = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin\\ocaml.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($ocaml) { & $ocaml -version } else { throw 'OCaml de MSYS2 no está instalado.' }";
     vec![
@@ -3377,12 +3894,12 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
     // una expresión PowerShell que imprime False sigue terminando con código 0.
     // Las sondas deben convertir explícitamente el estado en exit 0/1 para que
     // el panel no oculte la acción de activar una característica deshabilitada.
-    const HYPERV: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
-    const VMP: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
-    const SANDBOX: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -eq 'Enabled') { exit 0 } else { exit 1 }";
+    const HYPERV: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
+    const VMP: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
+    const SANDBOX: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
     let enable_feature = |feature: &str| {
         format!(
-            "$elevated = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','$feature = Get-WindowsOptionalFeature -Online -FeatureName {feature} -ErrorAction SilentlyContinue; if (-not $feature) {{ exit 2 }}; if ($feature.State -eq ''Enabled'') {{ exit 0 }}; Enable-WindowsOptionalFeature -Online -FeatureName {feature} -All -NoRestart -ErrorAction Stop; if (-not $?) {{ exit 3 }}'); if ($elevated.ExitCode -eq 2) {{ Write-Error 'La característica de Windows {feature} no está disponible en esta edición.' }} elseif ($elevated.ExitCode -ne 0) {{ Write-Error ('La activación de {feature} terminó con el código ' + $elevated.ExitCode) }} else {{ Write-Host 'La característica está activada; puede ser necesario reiniciar Windows.' }} }}",
+            "$script = '$ErrorActionPreference = ''Stop''; $feature = Get-WindowsOptionalFeature -Online -FeatureName {feature} -ErrorAction SilentlyContinue; if (-not $feature) {{ exit 2 }}; if ($feature.State -in @(''Enabled'',''EnablePending'')) {{ exit 0 }}; try {{ Enable-WindowsOptionalFeature -Online -FeatureName {feature} -All -NoRestart -ErrorAction Stop | Out-Null; exit 0 }} catch {{ exit 3 }}'; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script)); try {{ $elevated = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded) -ErrorAction Stop; if ($elevated.ExitCode -eq 2) {{ throw 'La característica de Windows {feature} no está disponible en esta edición.' }} elseif ($elevated.ExitCode -ne 0) {{ throw ('La activación de {feature} terminó con el código ' + $elevated.ExitCode) }} else {{ Write-Host 'La característica está activada; puede ser necesario reiniciar Windows.' }} }} catch {{ throw ('No se pudo solicitar la elevación o activar {feature}: ' + $_.Exception.Message) }}",
         )
     };
     vec![
@@ -3421,7 +3938,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         .subgroup("Windows Sandbox")
         .subgroup_description("Entorno desechable y aislado para probar software sin tocar el sistema.")
         .check(Some(SANDBOX))
-        .hint("Requiere Windows Pro/Enterprise/Education y virtualización habilitada; necesita reinicio."),
+        .hint("Requiere Windows Pro, Enterprise, Education o IoT Enterprise, virtualización de hardware habilitada en BIOS/UEFI y reinicio de Windows."),
         InstallAction::new(
             "windows-hyperv-check",
             "Comprobar Hyper-V y virtualización",
@@ -3580,6 +4097,7 @@ fn mac_actions(projects_folder: &str, t: &Translator) -> Vec<InstallAction> {
     actions.push(python_pip_action("macos", None, "python3"));
     actions.push(elixir_otp_action("macos", None));
     actions.extend(ecosystem_actions("python3", "npm"));
+    actions.extend(ai_actions("macos", "python3", "npm"));
     actions.push(
         InstallAction::new(
             "brew-update",
@@ -4306,10 +4824,12 @@ fn linux_actions(
             }),
     );
     actions.extend(linux_code_editor_actions(pm, commands, t));
+    actions.extend(linux_blesh_actions());
     actions.push(posix_sh_action());
     actions.push(python_pip_action("linux", Some(pm), "python3"));
     actions.push(elixir_otp_action("linux", Some(pm)));
     actions.extend(ecosystem_actions("python3", "npm"));
+    actions.extend(ai_actions("linux", "python3", "npm"));
 
     // En Linux "Compatibilidad Windows" es lo que en Windows es WSL: la forma
     // de ejecutar lo del otro sistema. PowerShell y Wine son dos herramientas
@@ -4699,6 +5219,7 @@ mod tests {
             tools: vec![],
             detailed: true,
             probe_error: false,
+            unrunnable: vec![],
         }
     }
 
@@ -4712,6 +5233,117 @@ mod tests {
                 "falta la accion '{id}'"
             );
         }
+    }
+
+    #[test]
+    fn inteligencia_artificial_reune_clis_y_modelos_locales_con_requisitos() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "winget-ollama",
+            "winget-claude-code",
+            "winget-lmstudio",
+            "ai-gemini-cli",
+            "ai-codex-cli",
+            "ai-copilot-cli",
+            "ai-qwen-code",
+            "ai-opencode",
+            "ai-aider",
+        ] {
+            assert_eq!(buscar(&actions, id).group, AI_GROUP, "{id}");
+        }
+        // En Windows Claude Code usa su instalador nativo, no npm.
+        assert!(!actions.iter().any(|action| action.id == "ai-claude-code"));
+        assert_eq!(
+            buscar(&actions, "ai-gemini-cli").command,
+            "npm install --global @google/gemini-cli"
+        );
+        assert!(buscar(&actions, "ai-gemini-cli-uninstall")
+            .command
+            .contains("@google/gemini-cli"));
+        assert_eq!(
+            buscar(&actions, "ai-aider").command,
+            "python -m pip install --user aider-chat"
+        );
+
+        let model = buscar(&actions, "ai-model-qwen3-8-27b");
+        assert_eq!(model.command, "ollama pull qwen3.8:27b");
+        assert_eq!(model.check_cmd.as_deref(), Some("ollama-model:qwen3.8:27b"));
+        assert_eq!(model.requires_cmd.as_deref(), Some("ollama"));
+        assert_eq!(model.subgroup.as_deref(), Some(AI_MODELS_SUBGROUP));
+        assert!(model
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Necesita ≈ 20 GB"));
+        let remove = buscar(&actions, "ai-model-qwen3-8-27b-uninstall");
+        assert_eq!(remove.command, "ollama rm qwen3.8:27b");
+        assert_eq!(
+            remove.requires_cmd.as_deref(),
+            Some("ollama-model:qwen3.8:27b")
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.id.starts_with("ai-model-")
+                    && !action.id.ends_with("-uninstall"))
+                .count(),
+            crate::environments::ai::OLLAMA_MODELS.len()
+        );
+        // Clink va con las shells: es lo que da sugerencias y colores a cmd.
+        let clink = buscar(&actions, "winget-clink");
+        assert_eq!(clink.group, SHELLS_GROUP);
+        assert_eq!(clink.check_cmd.as_deref(), Some(CLINK_DETECT));
+        // gsudo también: es el puente opcional para abrir NSudo sin ser
+        // administrador, y explica que es lo mismo que el sudo de Windows.
+        let gsudo = buscar(&actions, "winget-gsudo");
+        assert_eq!(gsudo.group, SHELLS_GROUP);
+        assert!(gsudo.command.contains("gerardog.gsudo"));
+        assert!(gsudo.hint.as_deref().unwrap_or_default().contains("NSudo"));
+        assert!(gsudo.description.is_some());
+        assert!(actions
+            .iter()
+            .any(|action| action.id == "winget-gsudo-uninstall"));
+        assert!(GROUP_ORDER.contains(&AI_GROUP));
+        assert_eq!(crate::i18n::group_key_for(AI_GROUP), Some("group.ai"));
+        // Las cabeceras de las listas describen la lista, no su primer elemento.
+        for action in actions.iter().filter(|action| {
+            matches!(
+                action.subgroup.as_deref(),
+                Some(AI_CLI_SUBGROUP | AI_MODELS_SUBGROUP)
+            )
+        }) {
+            let subgroup_description = action.subgroup_description.as_deref().unwrap_or_default();
+            assert_ne!(
+                Some(subgroup_description),
+                action.description.as_deref(),
+                "{}",
+                action.id
+            );
+            assert!(subgroup_description.len() > 30, "{}", action.id);
+        }
+    }
+
+    #[test]
+    fn en_linux_claude_code_y_las_clis_llegan_por_npm_y_ollama_por_la_distribucion() {
+        let mut context = contexto("linux");
+        context.pkg_manager = Some("pacman".to_string());
+        let actions = get_install_actions(&context, &t());
+        assert_eq!(
+            buscar(&actions, "ai-claude-code").command,
+            "npm install --global @anthropic-ai/claude-code"
+        );
+        assert_eq!(buscar(&actions, "pkg-ollama").group, AI_GROUP);
+        assert_eq!(
+            buscar(&actions, "ai-model-gpt-oss-20b").command,
+            "ollama pull gpt-oss:20b"
+        );
+        let mut apt = contexto("linux");
+        apt.pkg_manager = Some("apt".to_string());
+        let sin_paquete = get_install_actions(&apt, &t());
+        assert!(
+            !sin_paquete.iter().any(|action| action.id == "pkg-ollama"),
+            "apt no empaqueta Ollama"
+        );
     }
 
     #[test]
@@ -4811,11 +5443,11 @@ mod tests {
         // si está. Las dos condiciones son excluyentes sobre el mismo comando.
         assert_eq!(
             buscar(&actions, "winget-go").check_cmd.as_deref(),
-            Some("go")
+            Some("winget:GoLang.Go|go")
         );
         assert_eq!(
             buscar(&actions, "winget-go-update").requires_cmd.as_deref(),
-            Some("go")
+            Some("winget:GoLang.Go|go")
         );
         assert!(buscar(&actions, "winget-go").requires_cmd.is_none());
         assert!(buscar(&actions, "winget-go-update").check_cmd.is_none());
@@ -4824,10 +5456,13 @@ mod tests {
     #[test]
     fn una_aplicacion_de_escritorio_no_se_detecta_y_pregunta_a_winget_por_su_version() {
         let actions = get_install_actions(&contexto("windows"), &t());
-        // ImageGlass no deja ejecutable en el PATH: fingir una detección daría
-        // siempre "no instalado" y la acción de instalar no desaparecería nunca.
+        // ImageGlass no deja ejecutable en el PATH: la detección se hace por
+        // el inventario de WinGet.
         let instalar = buscar(&actions, "viewer-image");
-        assert!(instalar.check_cmd.is_none());
+        assert_eq!(
+            instalar.check_cmd.as_deref(),
+            Some("winget:DuongDieuPhap.ImageGlass|__package__")
+        );
         let version = buscar(&actions, "viewer-image-version");
         assert_eq!(
             version.command,
@@ -4849,6 +5484,17 @@ mod tests {
     }
 
     #[test]
+    fn desinstalar_winget_desde_admin_reenvia_paquetes_de_usuario_a_shell_no_elevada() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let command = &buscar(&actions, "winget-bun-uninstall").command;
+        assert!(command.contains("--scope user"));
+        assert!(command.contains("WindowsBuiltInRole]::Administrator"));
+        assert!(command.contains("Shell.Application"));
+        assert!(command.contains("wsterm-winget-uninstall-"));
+        assert!(command.contains("LASTEXITCODE"));
+    }
+
+    #[test]
     fn instalar_con_winget_acepta_contratos_y_fija_el_origen() {
         let actions = get_install_actions(&contexto("windows"), &t());
         let command = &buscar(&actions, "winget-git").command;
@@ -4856,6 +5502,15 @@ mod tests {
         assert!(command.contains("--accept-package-agreements"));
         assert!(command.contains("--source winget"));
         assert!(command.contains("--disable-interactivity"));
+    }
+
+    #[test]
+    fn ruby_prepara_make_antes_de_instalarse() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let command = &buscar(&actions, "winget-ruby").command;
+        assert!(command.contains("GnuWin32.Make"));
+        assert!(command.contains("RubyInstallerTeam.Ruby.3.3"));
+        assert!(command.contains("Get-Command make.exe"));
     }
 
     #[test]
@@ -4872,7 +5527,7 @@ mod tests {
         let actions = get_install_actions(&contexto("windows"), &t());
         assert_eq!(
             buscar(&actions, "viewer-code").check_cmd.as_deref(),
-            Some("code")
+            Some("winget:Microsoft.VisualStudioCode|code")
         );
         assert_eq!(
             buscar(&actions, "viewer-code").subgroup.as_deref(),
@@ -4886,6 +5541,29 @@ mod tests {
                     .iter()
                     .any(|a| a.id == id && a.subgroup.as_deref() == Some("Editores de código")),
                 "falta {id} en el submenú de IDE"
+            );
+        }
+        for (id, package, command) in [
+            ("editor-vscodium-win", "VSCodium.VSCodium", "codium"),
+            ("editor-zed-win", "ZedIndustries.Zed", "zed"),
+            ("editor-notepadpp-win", "Notepad++.Notepad++", "notepad++"),
+            ("editor-sublime-win", "SublimeHQ.SublimeText.4", "subl"),
+            ("editor-cursor-win", "Anysphere.Cursor", "cursor"),
+            (
+                "editor-visualstudio-win",
+                "Microsoft.VisualStudio.2022.Community",
+                "devenv",
+            ),
+            (
+                "editor-jetbrains-toolbox-win",
+                "JetBrains.Toolbox",
+                "jetbrains-toolbox",
+            ),
+        ] {
+            assert_eq!(
+                buscar(&actions, id).check_cmd.as_deref(),
+                Some(format!("winget:{package}|{command}").as_str()),
+                "{id} debe detectar la instalación de escritorio por WinGet y PATH",
             );
         }
     }
@@ -5094,7 +5772,7 @@ mod tests {
             assert_eq!(buscar(&actions, id).group, VIRTUALIZATION_GROUP, "{id}");
             assert_eq!(
                 buscar(&actions, id).translated("es").group_key,
-                Some("group.virt"),
+                Some("group.virt".to_string()),
                 "{id} sin traducción de virtualización"
             );
         }
@@ -5208,6 +5886,10 @@ mod tests {
                 check.contains("exit 0") && check.contains("exit 1"),
                 "{id}: {check}"
             );
+            assert!(
+                check.contains("EnablePending"),
+                "{id}: la sonda debe aceptar una activación pendiente de reinicio: {check}"
+            );
         }
     }
 
@@ -5226,14 +5908,77 @@ mod tests {
                     .contains("Start-Process -FilePath powershell.exe -Verb RunAs")
                     && action.command.contains("-Wait -PassThru")
                     && action.command.contains(feature)
+                    && action.command.contains("-EncodedCommand")
+                    && action.command.contains("Text.Encoding]::Unicode.GetBytes")
+                    && action.command.contains("-WindowStyle Hidden")
                     && action
                         .command
                         .contains("no está disponible en esta edición")
-                    && action.command.contains("Write-Error")
+                    && action.command.contains("throw 'La característica")
+                    && action.command.contains("throw ('La activación")
+                    && action.command.contains("throw ('No se pudo solicitar")
+                    && action.command.contains("EnablePending")
+                    // Los `exit` quedan únicamente dentro del script
+                    // codificado que ejecuta el proceso elevado. La shell
+                    // interactiva nunca debe cerrarse al terminar la acción.
+                    && !action.command.contains("; Write-Error")
+                    && !action.command.contains("; exit 1 }}")
+                    && !action.command.contains("; exit 0 }}")
                     && !action.command.contains('"')
                     && !action.command.contains("exit $elevated.ExitCode"),
                 "{id} no prepara una elevación segura para {feature}: {}",
                 action.command
+            );
+        }
+        let sandbox = buscar(&actions, "windows-sandbox-enable");
+        let hint = sandbox.hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("IoT Enterprise"));
+        assert!(hint.contains("BIOS/UEFI"));
+        assert!(hint.contains("reinicio"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn los_comandos_de_virtualizacion_y_sus_scripts_elevados_tienen_sintaxis_powershell_valida() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let parser = r#"
+$ErrorActionPreference = 'Stop'
+$source = [Environment]::GetEnvironmentVariable('LTERMINAL_SANDBOX_SYNTAX_SOURCE')
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors) | Out-Null
+if ($errors.Count -gt 0) {
+    $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }
+    exit 1
+}
+$prefixEnd = $source.IndexOf('$encoded =')
+if ($prefixEnd -lt 0) { throw 'Falta la creación de -EncodedCommand.' }
+Invoke-Expression $source.Substring(0, $prefixEnd)
+$innerTokens = $null
+$innerErrors = $null
+[System.Management.Automation.Language.Parser]::ParseInput($script, [ref]$innerTokens, [ref]$innerErrors) | Out-Null
+if ($innerErrors.Count -gt 0) {
+    $innerErrors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }
+    exit 1
+}
+exit 0
+"#;
+        for id in [
+            "windows-hyperv-enable",
+            "windows-vmp-enable",
+            "windows-sandbox-enable",
+        ] {
+            let action = buscar(&actions, id);
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", parser])
+                .env("LTERMINAL_SANDBOX_SYNTAX_SOURCE", &action.command)
+                .output()
+                .expect("Windows incluye Windows PowerShell para validar estas acciones");
+            assert!(
+                output.status.success(),
+                "{id} contiene sintaxis PowerShell inválida:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
         }
     }
@@ -5244,6 +5989,25 @@ mod tests {
         let command = &buscar(&actions, "winget-postgresql").command;
         assert!(command.contains("ChocolateyInstall + '\\bin;'"));
         assert!(!command.contains("$env:Path = \""));
+    }
+
+    #[test]
+    fn chocolatey_sondea_el_paquete_y_no_solo_un_shim_del_path() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for (id, capability) in [
+            ("choco-elixir", "chocolatey:elixir|elixir"),
+            ("choco-dart", "chocolatey:dart-sdk|dart"),
+        ] {
+            let action = buscar(&actions, id);
+            assert_eq!(action.check_cmd.as_deref(), Some(capability), "{id}");
+            assert_eq!(
+                buscar(&actions, &format!("{id}-update"))
+                    .requires_cmd
+                    .as_deref(),
+                Some(capability),
+                "{id}-update"
+            );
+        }
     }
 
     #[test]
@@ -5531,6 +6295,134 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|action| action.id == "wsl-arch-aur-helper"));
+    }
+
+    #[test]
+    fn los_scripts_de_wsl_llegan_intactos_a_bash() {
+        // --exec: la login shell de la distro no expande nada antes de bash.
+        assert_eq!(
+            wsl_script("Ubuntu", "x=5; echo [$x]"),
+            "wsl.exe -d 'Ubuntu' --exec bash -lc 'x=5; echo [$x]'"
+        );
+        // Las comillas dobles viajan en base64 y no por la línea de órdenes.
+        let quoted = wsl_script("Ubuntu", "echo \"$HOME\"");
+        assert!(quoted.starts_with("wsl.exe -d 'Ubuntu' --exec bash -lc 'bash <(echo "));
+        assert!(quoted.ends_with(" | base64 -d)'"));
+        assert!(!quoted.contains('"'));
+        // Ninguna orden del catálogo de WSL pasa por la login shell con un
+        // script: o es un gestor de paquetes directo o va con --exec.
+        let mut ubuntu = distro("Ubuntu", "apt");
+        ubuntu.tools = vec!["git".to_string()];
+        let mut arch = distro("Arch", "pacman");
+        arch.shells.push("zsh".to_string());
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![ubuntu, arch],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        for action in get_install_actions(&context, &t()).iter().filter(|action| {
+            action.command.starts_with("wsl.exe") && action.command.contains("bash -lc")
+        }) {
+            assert!(action.command.contains("--exec bash -lc"), "{}", action.id);
+            assert!(!action.command.contains('"'), "{}", action.id);
+        }
+    }
+
+    #[test]
+    fn ble_sh_se_instala_en_cada_distro_sin_sudo_y_con_la_suma_fijada() {
+        let mut ubuntu = distro("Ubuntu", "apt");
+        let context = |ubuntu: InstalledDistro| InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![ubuntu],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context(ubuntu.clone()), &t());
+        let install = buscar(&actions, "wsl-ubuntu-blesh");
+        assert_eq!(install.group, WSL_GROUP);
+        assert_eq!(install.subgroup.as_deref(), Some(BLESH_SUBGROUP));
+        assert!(install
+            .command
+            .starts_with("wsl.exe -d 'Ubuntu' --exec bash -lc 'tmp=$(mktemp -d)"));
+        assert!(install.command.contains(BLESH_URL));
+        assert!(install
+            .command
+            .contains(&format!("grep -q ^{BLESH_SHA256}")));
+        assert!(install.command.contains("--install ~/.local/share;"));
+        assert!(!install.command.contains("sudo"));
+        assert!(install.description.is_some());
+        assert!(!actions.iter().any(|a| a.id == "wsl-ubuntu-blesh-update"));
+
+        // Con el marcador de la sonda: actualizar y desinstalar, no instalar.
+        ubuntu.tools = vec![crate::terminal::shell_assist::BLESH.marker.to_string()];
+        let actions = get_install_actions(&context(ubuntu), &t());
+        assert!(!actions.iter().any(|a| a.id == "wsl-ubuntu-blesh"));
+        assert!(buscar(&actions, "wsl-ubuntu-blesh-update")
+            .command
+            .contains(&format!("grep -q ^{BLESH_SHA256}")));
+        assert!(buscar(&actions, "wsl-ubuntu-blesh-uninstall")
+            .command
+            .contains("rm -rf ~/.local/share/blesh"));
+    }
+
+    #[test]
+    fn el_script_de_ble_sh_no_lleva_comillas_y_cabe_en_una_linea() {
+        let script = blesh_install_script();
+        assert!(!script.contains('\'') && !script.contains('"') && !script.contains('\n'));
+        assert!(script.contains(&format!("$tmp/{BLESH_DIR_IN_TARBALL}/ble.sh --install")));
+        // Ubuntu sobre WSL 1: su tar no crea subcarpetas; Python sí.
+        assert!(script.contains("2>/dev/null || python3 -m tarfile -e $tmp/ble.tar.xz $tmp;"));
+        let linux = linux_blesh_actions();
+        let install = linux.iter().find(|action| action.id == "blesh").unwrap();
+        assert!(install.command.starts_with("bash -c 'tmp=$(mktemp -d)"));
+        assert_eq!(install.check_cmd.as_deref(), Some("wterminal-blesh"));
+        assert_eq!(install.group, SHELLS_GROUP);
+        for action in &linux[1..] {
+            assert_eq!(action.requires_cmd.as_deref(), Some("wterminal-blesh"));
+        }
+    }
+
+    #[test]
+    fn los_plugins_de_zsh_solo_se_ofrecen_en_las_distros_con_zsh() {
+        let ubuntu = distro("Ubuntu", "apt");
+        let mut arch = distro("Arch", "pacman");
+        arch.shells.push("zsh".to_string());
+        arch.tools = vec![crate::terminal::shell_assist::ZSH_AUTOSUGGESTIONS
+            .marker
+            .to_string()];
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![ubuntu, arch],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context, &t());
+        assert!(!actions.iter().any(|a| a.id.starts_with("wsl-ubuntu-zsh-")));
+        // Arch ya tiene las sugerencias (marcador de la sonda); falta el resaltado.
+        assert!(!actions
+            .iter()
+            .any(|a| a.id == "wsl-arch-zsh-autosuggestions"));
+        assert!(actions
+            .iter()
+            .any(|a| a.id == "wsl-arch-zsh-autosuggestions-uninstall"));
+        assert!(buscar(&actions, "wsl-arch-zsh-syntax-highlighting")
+            .command
+            .contains("sudo pacman -S --noconfirm zsh-syntax-highlighting"));
+        // En Linux se detectan por el mismo marcador que en WSL.
+        let linux = get_install_actions(&contexto("linux"), &t());
+        assert_eq!(
+            buscar(&linux, "pkg-zsh-autosuggestions")
+                .check_cmd
+                .as_deref(),
+            Some("wterminal-zsh-autosuggestions")
+        );
     }
 
     #[test]
@@ -6102,6 +6994,82 @@ mod tests {
     }
 
     #[test]
+    fn los_frameworks_conservan_un_hijo_estable_dentro_de_su_ecosistema() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "framework-django",
+            "framework-django-update",
+            "framework-paket",
+        ] {
+            let action = buscar(&actions, id);
+            assert!(action.subgroup.is_some(), "{id} perdió el ecosistema padre");
+            assert!(
+                action.subgroup_item.is_some(),
+                "{id} perdió su categoría hija"
+            );
+        }
+        assert_eq!(
+            buscar(&actions, "framework-django")
+                .subgroup_item
+                .as_deref(),
+            Some("Django")
+        );
+        assert_eq!(
+            buscar(&actions, "framework-paket").subgroup_item.as_deref(),
+            Some("Paket")
+        );
+        assert_eq!(
+            buscar(&actions, "framework-django-update")
+                .subgroup_item
+                .as_deref(),
+            Some("Django")
+        );
+    }
+
+    #[test]
+    fn paket_usa_una_version_con_manifiesto_compatible_con_dotnet_8() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let paket = buscar(&actions, "framework-paket");
+        assert_eq!(
+            paket.command,
+            "dotnet tool install --global paket --version 9.0.2"
+        );
+        assert_eq!(
+            paket.subgroup.as_deref(),
+            Some(".NET · herramientas y frameworks")
+        );
+        assert_eq!(
+            paket.check_cmd.as_deref(),
+            Some("ecosystem:dotnet|dotnet|paket")
+        );
+        assert!(paket.requires_cmd.as_deref() == Some("dotnet"));
+    }
+
+    #[test]
+    fn todas_las_acciones_de_frameworks_conservan_su_categoria_padre() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let frameworks: Vec<&InstallAction> = actions
+            .iter()
+            .filter(|action| action.group == FRAMEWORKS_GROUP)
+            .collect();
+        assert!(frameworks.len() >= 100, "faltan frameworks en el catálogo");
+        assert!(frameworks.iter().all(|action| action.subgroup.is_some()));
+        for subgroup in [
+            "Python · frameworks y librerías",
+            "JavaScript / TypeScript · herramientas y frameworks",
+            ".NET · herramientas y frameworks",
+            "Rust · frameworks y herramientas",
+        ] {
+            assert!(
+                frameworks
+                    .iter()
+                    .any(|action| action.subgroup.as_deref() == Some(subgroup)),
+                "falta el padre de frameworks '{subgroup}'"
+            );
+        }
+    }
+
+    #[test]
     fn pip_usa_el_paquete_de_la_distribucion_y_no_un_nombre_generico() {
         for (pm, expected) in [
             ("apt", "python3-pip"),
@@ -6376,7 +7344,7 @@ mod tests {
         let adb = buscar(&actions, "adb-check").translated("en");
         assert_eq!(adb.label, "Show connected ADB devices");
         assert_eq!(adb.verb.as_deref(), Some("View"));
-        assert_eq!(adb.group_key, Some("group.android"));
+        assert_eq!(adb.group_key, Some("group.android".to_string()));
     }
 
     #[test]

@@ -4,6 +4,13 @@ param(
     # intencionada y se puede revisar antes de borrar artefactos del proyecto,
     # temporales E2E, logs y cachés privadas.
     [switch]$Apply,
+    # Solo restos: logs sueltos de la raíz, dist, releases anteriores apartadas,
+    # evidencias de artifacts/ con más de -KeepDays días, temporales de pruebas,
+    # sesiones muertas y entradas muertas del PATH de usuario. Conserva
+    # node_modules, target y los logs de la app para que el siguiente build siga
+    # siendo rápido.
+    [switch]$Light,
+    [ValidateRange(0, 3650)][int]$KeepDays = 3,
     [Alias('h')][switch]$Help
 )
 
@@ -39,8 +46,9 @@ $AppDataRoot = Get-NormalizedDirectoryPath $appDataPath
 $LocalAppDataRoot = Get-NormalizedDirectoryPath $localAppDataPath
 
 if ($Help) {
-    Write-Host 'Uso: powershell -ExecutionPolicy Bypass -File scripts\clean-repository.ps1 [-Apply]' -ForegroundColor Cyan
+    Write-Host 'Uso: powershell -ExecutionPolicy Bypass -File scripts\clean-repository.ps1 [-Light [-KeepDays N]] [-Apply]' -ForegroundColor Cyan
     Write-Host 'Sin -Apply solo muestra las rutas.'
+    Write-Host 'Con -Light solo quita restos (logs sueltos, dist, releases anteriores, evidencias de artifacts/ con más de -KeepDays días, temporales y entradas muertas del PATH) y conserva node_modules y target.'
     Write-Host 'Con -Apply elimina salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas; release\ y releases\ se conservan.'
     exit 0
 }
@@ -109,13 +117,22 @@ function Test-ExternalPathHasReparseParent {
 # Solo salidas reproducibles, cachés e informes locales. No se usa git clean:
 # así no se borran configuraciones personales ni archivos no versionados que no
 # sean una salida conocida del proyecto.
-$generatedDirectories = @(
-    'node_modules', 'dist', 'artifacts',
+$fullGeneratedDirectories = @(
+    'node_modules', '.pnpm-store', 'dist', 'dist-preview', 'artifacts',
     '.cache', '.parcel-cache', '.turbo', '.svelte-kit', '.scala-build',
     'coverage', '.nyc_output', 'test-results', 'playwright-report',
     'allure-results', 'AppDir', 'target', 'build', 'tmp', 'temp',
-    'src-tauri/target', 'src-tauri/gen'
+    'src-tauri/target', 'src-tauri/gen',
+    'src-tauri/crates/github-target/target', 'fuzz/target'
 )
+# El modo ligero deja las dependencias y las cachés de compilación: solo salidas
+# que no hacen falta para el siguiente build y las releases anteriores que la
+# build completa aparta en src-tauri/target/dist/release-anterior.
+$generatedDirectories = if ($Light) {
+    @('dist', 'dist-preview', 'src-tauri/target/dist/release-anterior')
+} else {
+    $fullGeneratedDirectories
+}
 
 $directoryTargets = [Collections.Generic.List[string]]::new()
 foreach ($relativePath in $generatedDirectories) {
@@ -138,6 +155,24 @@ foreach ($candidate in Get-ChildItem -LiteralPath $ProjectRoot -Force -Directory
         continue
     }
     $directoryTargets.Add($safeCandidate)
+}
+
+# Archivos sueltos: logs que algunas builds dejan en la raíz y, en modo ligero,
+# las evidencias de artifacts/ más antiguas que -KeepDays.
+$fileTargets = [Collections.Generic.List[string]]::new()
+foreach ($log in Get-ChildItem -LiteralPath $ProjectRoot -Force -File -Filter '*.log' -ErrorAction SilentlyContinue) {
+    if (Test-ReparsePoint $log.FullName) { continue }
+    $fileTargets.Add((Assert-ProjectPath $log.FullName))
+}
+if ($Light) {
+    $artifactsRoot = Join-Path $ProjectRoot 'artifacts'
+    if ((Test-Path -LiteralPath $artifactsRoot -PathType Container) -and -not (Test-ReparsePoint $artifactsRoot)) {
+        $cutoff = (Get-Date).AddDays(-$KeepDays)
+        foreach ($entry in Get-ChildItem -LiteralPath $artifactsRoot -Force -ErrorAction SilentlyContinue) {
+            if ($entry.LastWriteTime -ge $cutoff) { continue }
+            $fileTargets.Add((Assert-ProjectPath $entry.FullName))
+        }
+    }
 }
 
 $skippedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -169,7 +204,7 @@ function Find-NonReadmeMarkdown {
             Find-NonReadmeMarkdown $entryPath
             continue
         }
-        if ($entry.Extension -ieq '.md' -and $entry.Name -match '^(AUDIT-|audit-|build-).+\.md$|-(audit|report)\.md$') {
+        if ($entry.Extension -ieq '.md' -and ($entry.Name -eq 'AUDITORIA-WINDOWS-2026-09-23.md' -or $entry.Name -match '^(AUDIT-|audit-|build-).+\.md$|-(audit|report)\.md$')) {
             $markdownTargets.Add($entryPath)
         }
     }
@@ -255,7 +290,11 @@ $tempPatterns = @(
     'winslim-release-hash-*', 'lterminal-node-download.*',
     'lterminal-rustup-installer.*', 'lterminal-build-smoke.*', 'lterminal-build-smoke-app.*',
     'lterminal-release-validation.*', 'lterminal-wine-*',
-    'lterminal-appimage-*', 'lterminal-e2e-*', 'winslim-terminal-build-*'
+    'lterminal-appimage-*', 'lterminal-e2e-*', 'winslim-terminal-build-*',
+    # Nombres actuales de los E2E y pruebas de WTerminal (perfiles aislados,
+    # gh/gsudo simulados, imagen del banner, E2E elevado) y las reproducciones
+    # del PATH de WTools.
+    'wterminal-e2e-*', 'wterminal-elevated-e2e-*', 'wterminal-banner-image-*', 'wtools-path-repro*'
 )
 Add-ExternalPatternTargets $TempRoot $tempPatterns
 
@@ -278,10 +317,11 @@ foreach ($candidate in Get-ChildItem -LiteralPath $TempRoot -Force -Directory -F
 # se elimina una sesión cuyo proceso siga vivo para no romper una terminal en
 # uso; las demás son restos recuperables de ejecuciones anteriores.
 $activePids = @(
-    Get-Process -Name 'winslim-terminal', 'lterminal' -ErrorAction SilentlyContinue |
+    Get-Process -Name 'wterminal', 'winslim-terminal', 'lterminal' -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Id
 )
 foreach ($sessionRoot in @(
+    (Join-Path $TempRoot 'wterminal'),
     (Join-Path $TempRoot 'winslim-terminal'),
     (Join-Path $TempRoot 'lterminal')
 )) {
@@ -299,11 +339,15 @@ foreach ($sessionRoot in @(
 # El logger de smoke/E2E comparte el directorio de logs con la app instalada.
 # Se borran los logs actuales y rotados, pero se conservan settings, scripts,
 # plugins y demás datos de usuario.
-foreach ($dataRoot in @(
+# El modo ligero conserva los logs de la app: pueden hacer falta para
+# diagnosticar lo último que pasó.
+$dataRoots = if ($Light) { @() } else { @(
+    (Join-Path $AppDataRoot 'wterminal'),
     (Join-Path $AppDataRoot 'winslim-terminal'),
     (Join-Path $AppDataRoot 'WinSlim Terminal'),
     (Join-Path $AppDataRoot 'lterminal')
-)) {
+) }
+foreach ($dataRoot in $dataRoots) {
     $logsRoot = Join-Path $dataRoot 'logs'
     if (Test-Path -LiteralPath $logsRoot -PathType Container) {
         Add-ExternalTarget $logsRoot
@@ -312,10 +356,11 @@ foreach ($dataRoot in @(
 
 # Cachés privadas de LTerminal (AppImage y WebKitWebDriver). No se toca la
 # caché global de Tauri ni ninguna carpeta de otros proyectos.
-foreach ($cacheRoot in @(
+$cacheRoots = if ($Light) { @() } else { @(
     (Join-Path $LocalAppDataRoot 'lterminal'),
     (Join-Path $AppDataRoot 'lterminal')
-)) {
+) }
+foreach ($cacheRoot in $cacheRoots) {
     if (Test-Path -LiteralPath $cacheRoot -PathType Container) {
         foreach ($cacheName in @('cache', 'e2e', 'appimage')) {
             $cachePath = Join-Path $cacheRoot $cacheName
@@ -326,13 +371,40 @@ foreach ($cacheRoot in @(
     }
 }
 
-$targets = @($directoryTargets) + @($markdownTargets) + @($externalTargets)
-if ($targets.Count -eq 0) {
+# Entradas del PATH de usuario que apuntan a carpetas que ya no existen dentro
+# de %TEMP% o de release\ de este repositorio: restos de pruebas y de builds
+# anteriores. Las demás entradas, aunque no existan, son del usuario y no se
+# tocan. Se leen sin expandir para conservar las %VARIABLES% al reescribir.
+$pathTargets = [Collections.Generic.List[string]]::new()
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    $rawUserPath = if ($environmentKey) {
+        [string]$environmentKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } else { '' }
+    if ($environmentKey) { $environmentKey.Close() }
+    $releasePrefix = (Join-Path $ProjectRoot 'release') + [IO.Path]::DirectorySeparatorChar
+    $tempPrefix = $TempRoot + [IO.Path]::DirectorySeparatorChar
+    foreach ($entry in ($rawUserPath -split ';')) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+        try {
+            $expanded = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($entry.Trim()))
+        } catch {
+            continue
+        }
+        $ours = $expanded.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            $expanded.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)
+        if ($ours -and -not (Test-Path -LiteralPath $expanded)) { $pathTargets.Add($entry) }
+    }
+}
+
+$targets = @($directoryTargets) + @($fileTargets) + @($markdownTargets) + @($externalTargets)
+if ($targets.Count -eq 0 -and $pathTargets.Count -eq 0) {
     Write-Host 'Repositorio ya limpio: no hay salidas generadas ni informes Markdown.' -ForegroundColor Green
     exit 0
 }
 
 $mode = if ($Apply) { 'LIMPIEZA' } else { 'VISTA PREVIA' }
+if ($Light) { $mode = "$mode LIGERA (conserva node_modules y target; artifacts/ de más de $KeepDays días)" }
 Write-Host "$mode - $($targets.Count) ruta(s) bajo $ProjectRoot" -ForegroundColor Cyan
 foreach ($target in $targets) {
     $relative = if ($target.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -342,9 +414,15 @@ foreach ($target in $targets) {
     }
     Write-Host "  $relative"
 }
+foreach ($entry in $pathTargets) {
+    Write-Host "  PATH de usuario (no existe): $entry"
+}
 
 if (-not $Apply) {
-    Write-Host 'No se ha borrado nada. Ejecuta: powershell -ExecutionPolicy Bypass -File scripts/clean-repository.ps1 -Apply' -ForegroundColor Yellow
+    # La orden sugerida repite el modo de la vista previa: en modo ligero,
+    # sugerir solo -Apply llevaba a la limpieza completa (node_modules y target).
+    $applyHint = if ($Light) { "-Light -KeepDays $KeepDays -Apply" } else { '-Apply' }
+    Write-Host "No se ha borrado nada. Ejecuta: powershell -ExecutionPolicy Bypass -File scripts/clean-repository.ps1 $applyHint" -ForegroundColor Yellow
     exit 0
 }
 
@@ -416,11 +494,33 @@ function Remove-DirectoryTreeSafely {
 foreach ($target in $directoryTargets) {
     Remove-CleanupDirectory $target
 }
+foreach ($target in $fileTargets) {
+    try {
+        Remove-DirectoryTreeSafely (Assert-ProjectPath $target)
+    } catch {
+        Add-FailedTarget $target $_.Exception.Message
+    }
+}
 foreach ($target in $markdownTargets) {
     try {
         Remove-Item -LiteralPath (Assert-ProjectPath $target) -Force
     } catch {
         Add-FailedTarget $target $_.Exception.Message
+    }
+}
+if ($pathTargets.Count -gt 0) {
+    try {
+        $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        $kind = $environmentKey.GetValueKind('Path')
+        $rawUserPath = [string]$environmentKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $kept = @($rawUserPath -split ';' | Where-Object { $_ -and ($pathTargets -notcontains $_) })
+        $environmentKey.SetValue('Path', ($kept -join ';'), $kind)
+        $environmentKey.Close()
+        # Avisa a Windows del cambio (WM_SETTINGCHANGE) sin dejar ninguna variable nueva.
+        [Environment]::SetEnvironmentVariable('WTERMINAL_CLEANUP_NOTIFY', '1', 'User')
+        [Environment]::SetEnvironmentVariable('WTERMINAL_CLEANUP_NOTIFY', $null, 'User')
+    } catch {
+        Add-FailedTarget 'PATH de usuario' $_.Exception.Message
     }
 }
 foreach ($target in $externalTargets) {
@@ -433,4 +533,4 @@ foreach ($target in $externalTargets) {
 if ($failedTargets.Count -gt 0) {
     throw "Limpieza incompleta: $($failedTargets.Count) ruta(s) sigue(n) bloqueada(s)."
 }
-Write-Host ('Limpieza terminada: {0} directorio(s), {1} Markdown y {2} rastro(s) externo(s) eliminados. release/ se conservó.' -f $directoryTargets.Count, $markdownTargets.Count, $externalTargets.Count) -ForegroundColor Green
+Write-Host ('Limpieza terminada: {0} directorio(s), {1} archivo(s) sueltos, {2} Markdown, {3} rastro(s) externo(s) y {4} entrada(s) muertas del PATH eliminados. release/ se conservó.' -f $directoryTargets.Count, $fileTargets.Count, $markdownTargets.Count, $externalTargets.Count, $pathTargets.Count) -ForegroundColor Green

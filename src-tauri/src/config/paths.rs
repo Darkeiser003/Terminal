@@ -22,7 +22,30 @@ use crate::identity;
 
 /// `appData`: la raíz de configuración del usuario.
 pub fn app_data_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| home_dir().join(".config"))
+    app_data_dir_from(
+        std::env::var("LTERMINAL_E2E_TESTING").ok().as_deref() == Some("1"),
+        if std::env::var("LTERMINAL_E2E_TESTING").ok().as_deref() == Some("1") {
+            std::env::var_os("LTERMINAL_E2E_APP_DATA_DIR").map(PathBuf::from)
+        } else {
+            None
+        },
+        dirs::config_dir(),
+        home_dir(),
+    )
+}
+
+fn app_data_dir_from(
+    e2e_enabled: bool,
+    e2e_override: Option<PathBuf>,
+    system_config_dir: Option<PathBuf>,
+    home: PathBuf,
+) -> PathBuf {
+    if e2e_enabled {
+        if let Some(path) = e2e_override.filter(|path| path.is_absolute()) {
+            return path;
+        }
+    }
+    system_config_dir.unwrap_or_else(|| home.join(".config"))
 }
 
 /// Ruta estable de los datos de la app: `appData/<slug>`. No depende del
@@ -100,6 +123,54 @@ mod tests {
         assert_eq!(
             USER_DATA_DIR.file_name().and_then(|n| n.to_str()),
             Some(identity::current().slug)
+        );
+    }
+
+    #[test]
+    fn la_ruta_de_datos_e2e_aisla_el_perfil_solo_con_rutas_absolutas() {
+        let isolated = PathBuf::from(if cfg!(windows) {
+            r"C:\temp\wterminal-e2e"
+        } else {
+            "/tmp/wterminal-e2e"
+        });
+        let system = PathBuf::from(if cfg!(windows) {
+            r"C:\Users\test\AppData\Roaming"
+        } else {
+            "/home/test/.config"
+        });
+        let home = PathBuf::from(if cfg!(windows) {
+            r"C:\Users\test"
+        } else {
+            "/home/test"
+        });
+        let selected = app_data_dir_from(
+            true,
+            Some(isolated.clone()),
+            Some(system.clone()),
+            home.clone(),
+        );
+        assert_eq!(selected, isolated);
+        assert_eq!(
+            app_data_dir_from(
+                false,
+                Some(PathBuf::from(r"C:\must-not-be-used")),
+                Some(system.clone()),
+                home.clone()
+            ),
+            system
+        );
+        assert_eq!(
+            app_data_dir_from(
+                true,
+                Some(PathBuf::from("relative")),
+                Some(system.clone()),
+                home.clone()
+            ),
+            system
+        );
+        assert_eq!(
+            app_data_dir_from(false, None, None, home.clone()),
+            home.join(".config")
         );
     }
 

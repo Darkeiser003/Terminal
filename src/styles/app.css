@@ -4,6 +4,17 @@
 
 @import '@xterm/xterm/css/xterm.css';
 
+/* Iconos Nerd Font (fastfetch, starship, oh-my-posh, eza…) como respaldo de
+   cualquier fuente de la terminal: es la primera de `SYMBOL_FALLBACKS` en
+   preferences.rs. `unicode-range` limita su uso (y su descarga) a las zonas
+   de iconos: los emoji como ⚡ o ♥ siguen en la fuente de emoji en color. */
+@font-face {
+    font-family: 'WTerminal Symbols';
+    src: url('../assets/fonts/SymbolsNerdFontMono-Regular.ttf') format('truetype');
+    font-display: swap;
+    unicode-range: U+23FB-23FE, U+2B58, U+E000-F8FF, U+F0000-FFFFD;
+}
+
 :root {
     /* WebKitGTK, usado por Tauri en Linux, elige de aquí los colores de los
        controles nativos (incluidos los botones de los campos numéricos). */
@@ -30,6 +41,31 @@
     --terminal-cursor-width: 1px;
     --terminal-padding: 10px;
     --terminal-font: 'Cascadia Code', Consolas, 'Courier New', monospace;
+    /* La densidad cambia separaciones y alturas, no la tipografía. */
+    --density-panel-padding-x: 6px;
+    --density-panel-padding-y: 9px;
+    --density-section-gap: 8px;
+    --density-control-gap: 6px;
+    --density-control-height: 32px;
+    --density-grid-gap: 12px;
+}
+
+body[data-density='comfortable'] {
+    --density-panel-padding-x: 9px;
+    --density-panel-padding-y: 12px;
+    --density-section-gap: 12px;
+    --density-control-gap: 8px;
+    --density-control-height: 36px;
+    --density-grid-gap: 16px;
+}
+
+body[data-density='compact'] {
+    --density-panel-padding-x: 4px;
+    --density-panel-padding-y: 6px;
+    --density-section-gap: 5px;
+    --density-control-gap: 4px;
+    --density-control-height: 28px;
+    --density-grid-gap: 8px;
 }
 
 /* Los dos WebView (WebKitGTK y WebView2) dejan que el sistema pinte una parte
@@ -123,4 +159,48 @@ body {
 ::-webkit-scrollbar-thumb:hover,
 .xterm-viewport::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.35);
+}
+
+/* La preferencia de densidad se aplica a los dos paneles que concentran la
+   mayor parte de los controles. Mantener los selectores aquí evita que cada
+   componente duplique una variante y hace visible el cambio al instante. */
+body[data-density] .panel .panel-header {
+    gap: var(--density-control-gap);
+    padding: var(--density-panel-padding-y) var(--density-panel-padding-x);
+}
+
+body[data-density] .panel .panel-scroll {
+    --panel-scroll-bottom: calc(var(--density-control-gap) * 2);
+    padding: var(--density-control-gap) var(--density-panel-padding-x) var(--panel-scroll-bottom);
+}
+
+body[data-density] .settings-form .grid,
+body[data-density] .settings-form .themes {
+    gap: var(--density-grid-gap);
+}
+
+body[data-density] .settings-form .field {
+    gap: var(--density-control-gap);
+}
+
+body[data-density] .settings-form .field input:not([type='color']),
+body[data-density] .settings-form .field select {
+    min-height: var(--density-control-height);
+    padding-top: calc(var(--density-control-height) / 5);
+    padding-bottom: calc(var(--density-control-height) / 5);
+}
+
+body[data-density] .settings-form section + section {
+    margin-top: var(--density-section-gap);
+}
+
+body[data-density] .footer {
+    gap: var(--density-control-gap);
+    margin-top: var(--density-section-gap);
+    padding-top: var(--density-panel-padding-y);
+    padding-bottom: var(--density-panel-padding-y);
+}
+
+body[data-density] .sections {
+    padding: var(--density-grid-gap);
 }

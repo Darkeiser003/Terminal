@@ -28,8 +28,8 @@ fi
 case "$(uname -s 2>/dev/null || printf '')" in
     MINGW*|MSYS*|CYGWIN*)
         echo "ERROR: linux/build.sh solo compila la release Linux y no se puede usar como builder nativo de Windows." >&2
-        echo "       Ejecuta desde PowerShell: windows\\build.ps1 -NonInteractive -NoRun" >&2
-        echo "       O desde CMD: windows\\build.bat -NonInteractive -NoRun" >&2
+        printf '%s\n' '       Ejecuta desde PowerShell: windows\build.ps1 -NonInteractive -NoRun' >&2
+        printf '%s\n' '       O desde CMD: windows\build.bat -NonInteractive -NoRun' >&2
         echo "       Si estás usando WSL, ejecuta este script dentro de WSL, no desde Git Bash." >&2
         exit 2
         ;;
@@ -312,7 +312,31 @@ load_local_signing_material() {
         export LTERMINAL_UPDATE_PUBLIC_KEY
     fi
 
-    if [ -n "${LTERMINAL_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${LTERMINAL_UPDATE_PUBLIC_KEY:-}" ]; then
+    local ssh_private_path="${LTERMINAL_SSH_SIGNING_KEY_FILE:-${HOME:-}/.ssh/lterminal-release-signing}"
+    local ssh_public_path="${LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE:-${ssh_private_path}.pub}"
+    if [ ! -r "$ssh_private_path" ] && [ -r "${HOME:-}/.ssh/ltools-release-signing" ]; then
+        ssh_private_path="${HOME}/.ssh/ltools-release-signing"
+    fi
+    if [ ! -r "$ssh_public_path" ] && [ -r "${HOME:-}/.ssh/ltools-release-signing.pub" ]; then
+        ssh_public_path="${HOME}/.ssh/ltools-release-signing.pub"
+    fi
+    if [ -z "${LTERMINAL_SSH_SIGNING_KEY_FILE:-}" ] && [ -r "$ssh_private_path" ]; then
+        export LTERMINAL_SSH_SIGNING_KEY_FILE="$ssh_private_path"
+    fi
+    if [ -z "${LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE:-}" ] && [ -r "$ssh_public_path" ]; then
+        export LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE="$ssh_public_path"
+    fi
+    if [ -z "${LTERMINAL_SSH_SIGNING_IDENTITY:-}" ]; then
+        export LTERMINAL_SSH_SIGNING_IDENTITY="${GIT_AUTHOR_EMAIL:-lterminal-release@local}"
+    fi
+    if [ -z "${LTERMINAL_SSH_UPDATE_IDENTITY:-}" ]; then
+        export LTERMINAL_SSH_UPDATE_IDENTITY="$LTERMINAL_SSH_SIGNING_IDENTITY"
+    fi
+    if [ -z "${LTERMINAL_SSH_UPDATE_PUBLIC_KEY:-}" ] && [ -r "$ssh_public_path" ]; then
+        export LTERMINAL_SSH_UPDATE_PUBLIC_KEY="$(tr -d '\r\n' < "$ssh_public_path")"
+    fi
+
+    if [ -n "${LTERMINAL_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${LTERMINAL_UPDATE_PUBLIC_KEY:-}" ] || [ -n "${LTERMINAL_SSH_SIGNING_KEY_FILE:-}" ]; then
         ok "Material de firma local cargado automáticamente"
     fi
 }
@@ -609,6 +633,7 @@ wait_for_pacman_lock() {
     local lock_file=/var/lib/pacman/db.lck
     local attempt=0
     while [ -e "$lock_file" ] && [ "$attempt" -lt 30 ]; do
+        # shellcheck disable=SC2009
         if ps -eo comm= 2>/dev/null | grep -Eq '^(pacman|yay|paru|pamac)$'; then
             warn "pacman está ocupado; esperando a que termine (intento $((attempt + 1))/30)..."
             sleep 2
@@ -655,17 +680,20 @@ install_system_dependencies() {
         return 1
     }
     warn "Faltan dependencias nativas; se instalarán automáticamente con $manager."
+    # `npm run check` ejercita la prevalidación del builder Windows cruzado,
+    # que comprueba `zip` aunque la build Linux no vaya a generar ese paquete.
+    # Instalarlo aquí mantiene también autocontenido el perfil --no-extended-tests.
     case "$manager" in
         apt-get)
             run_as_root apt-get update
             run_as_root apt-get install -y --no-install-recommends \
-                build-essential curl wget file pkg-config ca-certificates xz-utils \
+                build-essential curl wget file zip xdg-utils pkg-config ca-certificates xz-utils \
                 libwebkit2gtk-4.1-dev libsoup-3.0-dev libxdo-dev libssl-dev \
                 libayatana-appindicator3-dev librsvg2-dev ibus
             ;;
         dnf)
             run_as_root dnf install -y \
-                gcc gcc-c++ make curl wget file pkgconf-pkg-config ca-certificates xz \
+                gcc gcc-c++ make curl wget file zip xdg-utils pkgconf-pkg-config ca-certificates xz \
                 webkit2gtk4.1-devel libsoup3-devel openssl-devel \
                 libappindicator-gtk3-devel librsvg2-devel libxdo-devel ibus
             ;;
@@ -673,7 +701,7 @@ install_system_dependencies() {
             # No se actualiza el sistema completo desde una build. La vía
             # explícita sigue disponible con LTERMINAL_ALLOW_SYSTEM_UPGRADE=1.
             pacman_install \
-                base-devel curl wget file pkgconf ca-certificates xz \
+                base-devel curl wget file zip xdg-utils pkgconf ca-certificates xz \
                 webkit2gtk-4.1 libsoup3 openssl appmenu-gtk-module \
                 libappindicator-gtk3 librsvg xdotool ibus
             ;;
@@ -681,12 +709,12 @@ install_system_dependencies() {
             run_as_root zypper --non-interactive install -y \
                 -t pattern devel_basis
             run_as_root zypper --non-interactive install -y \
-                curl wget file pkg-config ca-certificates xz \
+                curl wget file zip xdg-utils pkg-config ca-certificates xz \
                 webkit2gtk3-devel libopenssl-devel libappindicator3-1 librsvg-devel ibus
             ;;
         apk)
             run_as_root apk add \
-                build-base curl wget file pkgconf ca-certificates xz \
+                build-base curl wget file zip xdg-utils pkgconf ca-certificates xz \
                 webkit2gtk-4.1-dev libsoup3-dev openssl-dev \
                 libayatana-appindicator-dev librsvg-dev xdotool-dev font-dejavu ibus
             ;;
@@ -907,7 +935,7 @@ ensure_download_tools() {
 install_node_22() {
     [ "$AUTO_INSTALL" -eq 1 ] || return 1
     ensure_download_tools || return 1
-    local machine node_arch sums archive tmp install_root current
+    local machine node_arch sums archive tmp install_root current extract_root extract_name
     machine="$(uname -m)"
     case "$machine" in
         x86_64|amd64) node_arch="x64" ;;
@@ -930,8 +958,68 @@ install_node_22() {
     (cd "$tmp" && grep "  $archive\$" SHASUMS256.txt | sha256sum -c -)
     install_root="$HOME/.local/lib"
     mkdir -p "$install_root" "$HOME/.local/bin"
-    tar -xJf "$tmp/$archive" -C "$install_root"
-    current="$install_root/${archive%.tar.xz}"
+    extract_name="${archive%.tar.xz}"
+    extract_root="$tmp/extracted"
+    mkdir -p "$extract_root"
+    # WSL1 no implementa algunas operaciones de extracción usadas por GNU tar
+    # moderno (openat2): tar puede dejar un árbol parcial y devolver error.
+    # Como esta función se invoca dentro de un `||`, errexit no protege sus
+    # comandos; capturar el estado es obligatorio para no anunciar un Node
+    # inexistente como instalado. Se extrae primero fuera de ~/.local y solo
+    # se publica el directorio completo después de verificar los binarios.
+    if ! tar -xJf "$tmp/$archive" -C "$extract_root" >"$tmp/tar-extract.log" 2>&1; then
+        warn "GNU tar no pudo extraer Node.js; se reintentará con Python tarfile."
+        rm -rf "$extract_root"
+        mkdir -p "$extract_root"
+        if ! command -v python3 >/dev/null 2>&1; then
+            cat "$tmp/tar-extract.log" >&2
+            err "No se pudo extraer Node.js y Python 3 no está disponible para el respaldo."
+            return 1
+        fi
+        if ! python3 - "$tmp/$archive" "$extract_root" <<'PY'
+import os
+import pathlib
+import sys
+import tarfile
+
+archive, destination = sys.argv[1:]
+root = os.path.realpath(destination)
+with tarfile.open(archive, "r:xz") as bundle:
+    members = bundle.getmembers()
+    for member in members:
+        name = pathlib.PurePosixPath(member.name)
+        if name.is_absolute() or ".." in name.parts:
+            raise SystemExit(f"Ruta insegura dentro del archivo: {member.name}")
+        target = os.path.realpath(os.path.join(root, *name.parts))
+        if os.path.commonpath((root, target)) != root:
+            raise SystemExit(f"Ruta fuera del destino: {member.name}")
+        if member.issym() or member.islnk():
+            link = pathlib.PurePosixPath(member.linkname)
+            if link.is_absolute():
+                raise SystemExit(f"Enlace inseguro dentro del archivo: {member.name}")
+            link_base = os.path.dirname(target) if member.issym() else root
+            link_target = os.path.realpath(os.path.join(link_base, *link.parts))
+            if os.path.commonpath((root, link_target)) != root:
+                raise SystemExit(f"Enlace fuera del destino: {member.name}")
+    if sys.version_info >= (3, 12):
+        bundle.extractall(root, members=members, filter="data")
+    else:
+        bundle.extractall(root, members=members)
+PY
+        then
+            err "Python tarfile tampoco pudo extraer el archivo de Node.js."
+            return 1
+        fi
+    fi
+    current="$install_root/$extract_name"
+    if [ ! -x "$extract_root/$extract_name/bin/node" ] || \
+        [ ! -x "$extract_root/$extract_name/bin/npm" ]; then
+        cat "$tmp/tar-extract.log" >&2
+        err "La extracción de Node.js terminó sin node y npm ejecutables."
+        return 1
+    fi
+    rm -rf "$current"
+    mv "$extract_root/$extract_name" "$current"
     local tool
     for tool in node npm npx corepack; do
         ln -sfn "$current/bin/$tool" "$HOME/.local/bin/$tool"
@@ -1004,6 +1092,7 @@ if ! command -v node >/dev/null 2>&1; then
     fi
 fi
 recover_tool node \
+    "$HOME/.local/bin" \
     "$HOME/.volta/bin" \
     "$HOME/.local/share/fnm/aliases/default/bin" \
     "$HOME/.asdf/shims" \
@@ -1715,6 +1804,7 @@ fi
 # conserva su soporte HTTPS normal usando el módulo del host.
 rm -f "$APPDIR/usr/lib/gio/modules/libgiognutls.so"
 if ! grep -q 'WEBKIT_DISABLE_DMABUF_RENDERER' "$GTK_HOOK"; then
+    # shellcheck disable=SC2016
     printf '\nexport WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"\n' \
         >> "$GTK_HOOK"
 fi
@@ -1737,6 +1827,7 @@ if [ -n "$GSTREAMER_SCANNER" ] && [ -x "$GSTREAMER_SCANNER" ]; then
 fi
 if [ -x "$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner" ] && \
     ! grep -q 'GST_PLUGIN_SCANNER' "$GTK_HOOK"; then
+    # shellcheck disable=SC2016
     printf '\nexport GST_PLUGIN_SCANNER="${GST_PLUGIN_SCANNER:-$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner}"\n' \
         >> "$GTK_HOOK"
 fi
@@ -1992,6 +2083,23 @@ else
     # a un manifiesto nuevo cuando la build local no tiene material de firma.
     rm -f "$RELEASE_DIR/SHA256SUMS.txt.sig"
     warn "Release local sin firma Ed25519; el actualizador rechazará este artefacto."
+fi
+
+SSH_SIGNATURE_PATH="$RELEASE_DIR/SHA256SUMS.txt.sshsig"
+if [ -n "${LTERMINAL_SSH_SIGNING_KEY_FILE:-}" ] && [ -n "${LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE:-}" ]; then
+    node "$PROJECT_ROOT/scripts/sign-release-ssh.mjs" \
+        --manifest "$RELEASE_DIR/SHA256SUMS.txt" \
+        --signature "$SSH_SIGNATURE_PATH"
+    node "$PROJECT_ROOT/scripts/sign-release-ssh.mjs" \
+        --manifest "$RELEASE_DIR/SHA256SUMS.txt" \
+        --signature "$SSH_SIGNATURE_PATH" --verify
+    ok "Firma SSHSIG del manifiesto verificada"
+elif [[ "$SIGNING_REQUIRED" =~ ^(1|true|yes)$ ]]; then
+    err "Falta LTERMINAL_SSH_SIGNING_KEY_FILE y su clave pública: una release oficial no puede publicarse sin firma SSH."
+    exit 1
+else
+    rm -f "$SSH_SIGNATURE_PATH"
+    warn "Release local sin firma SSHSIG; el actualizador rechazará este artefacto."
 fi
 ok "Release: $RELEASE_DIR/$RELEASE_NAME"
 ok "SHA256: $RELEASE_HASH"

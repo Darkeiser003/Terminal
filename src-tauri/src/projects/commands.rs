@@ -1151,6 +1151,177 @@ pub fn projects_run(
     }
 }
 
+/// Un repositorio de la cuenta («Mi GitHub»): lo que ve el panel más si es
+/// privado.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnRepository {
+    #[serde(flatten)]
+    pub public: PublicRepository,
+    pub private: bool,
+}
+
+/// `projects:githubRepositories`: los repositorios de la cuenta de `gh`, con
+/// su estado en el disco. Se recuerdan como vistos para que Clonar,
+/// Actualizar, cd y Release funcionen igual que con los anclados.
+#[tauri::command]
+pub async fn github_cli_repositories(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<OwnRepository>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let repositories = crate::projects::gh_cli::repositories()?;
+        state.remember_repositories(repositories.iter().map(|own| &own.repository));
+        let projects_folder = github::projects_folder();
+        Ok(repositories
+            .into_iter()
+            .map(|own| OwnRepository {
+                public: public_repository(own.repository, &projects_folder),
+                private: own.private,
+            })
+            .collect())
+    })
+    .await
+    .unwrap_or_else(|_| Err("No se pudieron listar los repositorios.".to_string()))
+}
+
+/// `projects:githubTerminal`: lo de `gh` que necesita al usuario delante
+/// (iniciar sesión con el navegador, cerrarla, dar permiso para borrar) se
+/// escribe en una pestaña nueva, que hereda el PATH ya actualizado aunque `gh`
+/// se acabe de instalar.
+#[tauri::command(async)]
+pub fn github_cli_terminal(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    action: String,
+) -> GitRunResult {
+    let Some(parsed) = crate::projects::gh_cli::TerminalAction::parse(&action) else {
+        return git_failed("Acción de GitHub CLI desconocida.");
+    };
+    if crate::projects::gh_cli::gh_path().is_none() {
+        return GitRunResult {
+            ok: false,
+            error: Some(
+                "GitHub CLI no está instalado. Abre Entorno y dependencias para instalarlo."
+                    .to_string(),
+            ),
+            suggestion: Some(crate::command_not_found::ToolSuggestion {
+                tool: "gh".to_string(),
+                label: "GitHub CLI".to_string(),
+                action_id: crate::platform::host()
+                    .is_windows()
+                    .then(|| "winget-gh".to_string()),
+            }),
+            ..Default::default()
+        };
+    }
+    let Some(env) = preferred_git_environment(&state, &tab_id) else {
+        return git_failed("No hay una shell compatible disponible.");
+    };
+    let command = format!("gh {}", parsed.args().join(" "));
+    let t = translator();
+    let verb = match parsed {
+        crate::projects::gh_cli::TerminalAction::Login => t.t("verb.ghLogin", "Iniciar sesión"),
+        crate::projects::gh_cli::TerminalAction::Logout => t.t("verb.ghLogout", "Cerrar sesión"),
+        crate::projects::gh_cli::TerminalAction::GrantDelete => {
+            t.t("verb.ghGrantDelete", "Permitir borrar repositorios")
+        }
+    };
+    let notice = crate::console_ui::Notice::new(verb, "GitHub", &command);
+    let decorated = crate::console_ui::decorate(&command, &notice, env.kind, false, &t);
+    let target_tab = state.tabs.create_tab(&app, &env, None).id;
+    if !state.tabs.write_command(&target_tab, &decorated) {
+        return git_failed("La terminal terminó antes de poder enviar la orden de GitHub CLI.");
+    }
+    log_info!(
+        "Orden de GitHub CLI enviada a una pestaña nueva",
+        serde_json::json!({ "action": action, "tabId": target_tab, "envId": env.id })
+    );
+    GitRunResult {
+        ok: true,
+        action: Some(match parsed {
+            crate::projects::gh_cli::TerminalAction::Login => "login",
+            crate::projects::gh_cli::TerminalAction::Logout => "logout",
+            crate::projects::gh_cli::TerminalAction::GrantDelete => "grant-delete",
+        }),
+        tab_id: Some(target_tab),
+        created: true,
+        ..Default::default()
+    }
+}
+
+/// `projects:githubGit`: subir (push), traer (pull) o publicar la rama actual
+/// de la copia local de un repositorio de la cuenta. Va a una pestaña nueva y
+/// visible porque puede pedir credenciales; la carpeta y los argumentos los
+/// pone el backend.
+#[tauri::command(async)]
+pub fn github_git_terminal(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    full_name: String,
+    action: String,
+) -> GitRunResult {
+    let Some(own) = crate::projects::gh_cli::own(&full_name) else {
+        return git_failed("El repositorio no está en el listado de tu cuenta.");
+    };
+    let path = match crate::projects::git_local::local_clone(&full_name) {
+        Ok(path) => path,
+        Err(error) => return git_failed(&error),
+    };
+    let (args, label): (Vec<String>, &'static str) = match action.as_str() {
+        "push" => (vec!["push".into()], "push"),
+        "pull" => (vec!["pull".into(), "--ff-only".into()], "pull"),
+        "publish" => {
+            let branch = match crate::projects::git_local::status_at(&path) {
+                Ok(status) => status.branch,
+                Err(error) => return git_failed(&error),
+            };
+            if !crate::projects::gh_manage::valid_ref_name(&branch) {
+                return git_failed("No hay una rama que publicar.");
+            }
+            (
+                vec!["push".into(), "-u".into(), "origin".into(), branch],
+                "publish",
+            )
+        }
+        _ => return git_failed("Acción de git desconocida."),
+    };
+    let Some(env) = preferred_git_environment(&state, &tab_id) else {
+        return git_failed("No hay una shell compatible disponible.");
+    };
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Some(command) =
+        github::build_git_sync_command(&own.repository, &github::projects_folder(), &env, &refs)
+    else {
+        return git_failed("Esa shell no ve la carpeta de proyectos.");
+    };
+    let t = translator();
+    let verb = match label {
+        "push" => t.t("verb.gitPush", "Subir cambios"),
+        "pull" => t.t("verb.gitPull", "Traer cambios"),
+        _ => t.t("verb.gitPublish", "Publicar rama"),
+    };
+    let notice = crate::console_ui::Notice::new(verb, &own.repository.full_name, &command);
+    let decorated = crate::console_ui::decorate(&command, &notice, env.kind, false, &t);
+    let target_tab = state.tabs.create_tab(&app, &env, None).id;
+    if !state.tabs.write_command(&target_tab, &decorated) {
+        return git_failed("La terminal terminó antes de poder enviar la orden de git.");
+    }
+    log_info!(
+        "Orden de git enviada a una pestaña nueva",
+        serde_json::json!({ "action": label, "repository": own.repository.full_name, "tabId": target_tab })
+    );
+    GitRunResult {
+        ok: true,
+        action: Some(label),
+        tab_id: Some(target_tab),
+        created: true,
+        ..Default::default()
+    }
+}
+
 /// Una pestaña ya abierta con este mismo entorno, para no acumular una por cada
 /// acción del panel.
 fn find_tab_for_environment(state: &AppState, env: &Environment) -> Option<String> {

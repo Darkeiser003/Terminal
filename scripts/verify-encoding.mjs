@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { extname } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { extname, join, relative, sep } from 'node:path';
 
 const textExtensions = new Set([
     '.rs', '.json', '.toml', '.mjs', '.js', '.ts', '.svelte', '.css', '.html',
@@ -13,16 +13,36 @@ const utf8 = new TextDecoder('utf-8', { fatal: true });
 const bom = Buffer.from([0xef, 0xbb, 0xbf]);
 const errors = [];
 
-const trackedFilesResult = spawnSync('git', ['ls-files', '-z'], { encoding: 'buffer', windowsHide: true });
-if (trackedFilesResult.status !== 0) {
-    const detail = trackedFilesResult.error?.message || trackedFilesResult.stderr?.toString('utf8').trim();
-    throw new Error(`No se pudieron enumerar los archivos versionados${detail ? `: ${detail}` : ''}`);
+function isTextFile(file) {
+    return textExtensions.has(extname(file).toLowerCase()) || ['.gitignore', '.gitattributes'].includes(file);
 }
-const trackedFiles = trackedFilesResult.stdout
-    .toString('utf8')
-    .split('\0')
-    .filter(Boolean)
-    .filter((file) => textExtensions.has(extname(file).toLowerCase()) || ['.gitignore', '.gitattributes'].includes(file));
+
+function scanSourceFiles(directory = '.') {
+    const ignoredDirectories = new Set(['.git', '.pnpm-store', 'node_modules', 'dist', 'target']);
+    const files = [];
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+            if (!ignoredDirectories.has(entry.name)) files.push(...scanSourceFiles(path));
+        } else if (entry.isFile()) {
+            const normalized = relative('.', path).split(sep).join('/');
+            if (isTextFile(normalized)) files.push(normalized);
+        }
+    }
+    return files;
+}
+
+const trackedFilesResult = spawnSync('git', ['ls-files', '-z'], { encoding: 'buffer', windowsHide: true });
+// Los ZIP de fuentes y los workspaces exportados por algunos IDE no incluyen
+// .git. En ese caso, recorrer solo el código fuente permite mantener el check
+// útil sin inspeccionar node_modules, target ni los artefactos que genera.
+const trackedFiles = trackedFilesResult.status === 0
+    ? trackedFilesResult.stdout
+        .toString('utf8')
+        .split('\0')
+        .filter(Boolean)
+        .filter(isTextFile)
+    : scanSourceFiles();
 const files = [...new Set([
     ...trackedFiles,
     'scripts/verify-encoding.mjs',

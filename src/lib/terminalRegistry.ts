@@ -21,3 +21,31 @@ export function unregisterTerminal(tabId: string): void {
 export function getTerminal(tabId: string): Terminal | undefined {
     return terminals.get(tabId);
 }
+
+/** Por qué una pestaña no aceptó una orden de la paleta de comandos. */
+export type TerminalLineRejection = 'not-ready' | 'busy' | 'draft';
+
+/** Lo que la paleta de comandos puede pedir a una pestaña sin escribir en su
+ *  xterm. Cada TerminalPane registra sus propias funciones al montarse. */
+export interface TerminalControls {
+    openSearch(): void;
+    /** Teclea `line` y Enter por la misma ruta que el teclado: el interceptor
+     *  de `:` y la shell la reciben igual que una orden escrita a mano, y el
+     *  eco lo sigue pintando ConPTY. Si la terminal no está en un prompt
+     *  vacío no escribe nada y devuelve el motivo. */
+    submitLine(line: string): TerminalLineRejection | null;
+}
+
+const controls = new Map<string, TerminalControls>();
+
+export function registerTerminalControls(tabId: string, value: TerminalControls): void {
+    controls.set(tabId, value);
+}
+
+export function unregisterTerminalControls(tabId: string): void {
+    controls.delete(tabId);
+}
+
+export function getTerminalControls(tabId: string): TerminalControls | undefined {
+    return controls.get(tabId);
+}

@@ -27,7 +27,8 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         .to_ascii_lowercase();
     let argument = parts.collect::<Vec<_>>().join(" ");
     let argument = (!argument.is_empty()).then_some(argument);
-    if !prefixed && name != "darkeiser003" {
+    let windows_collaborator_credit = cfg!(windows) && name == "christianlg97";
+    if !prefixed && name != "darkeiser003" && !windows_collaborator_credit {
         return None;
     }
     let action = match name.as_str() {
@@ -52,6 +53,7 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "openhere" => "openDirectory",
         "reveal-here" => "openDirectory",
         "darkeiser003" if argument.is_none() => "darkeiser003",
+        "christianlg97" if cfg!(windows) && !prefixed && argument.is_none() => "christianlg97",
         _ => return None,
     };
     if action == "openDirectory" && argument.is_some() {
@@ -130,8 +132,19 @@ mod tests {
         }
         assert!(parse("@darkeiser003 extra").is_none());
         assert!(parse("@@darkeiser003").is_none());
-        assert!(parse("christianlg97").is_none());
+        assert_eq!(
+            parse("christianlg97").map(|command| command.action),
+            cfg!(windows).then(|| "christianlg97".to_string())
+        );
         assert!(parse(":christianlg97").is_none());
         assert!(parse("echo darkeiser003").is_none());
+    }
+
+    #[test]
+    fn el_credito_de_colaborador_solo_se_acepta_en_windows() {
+        assert_eq!(
+            parse("@Christianlg97").map(|command| command.action),
+            cfg!(windows).then(|| "christianlg97".to_string())
+        );
     }
 }

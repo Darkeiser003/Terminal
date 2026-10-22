@@ -23,3 +23,37 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+------------------------------------------------------------------------
+
+Nerd Fonts - Symbols Nerd Font Mono
+Version: 3.5.1 (NerdFontsSymbolsOnly.zip, SymbolsNerdFontMono-Regular.ttf)
+Source: https://github.com/ryanoasis/nerd-fonts
+Copyright (c) 2014 Ryan L McIntyre
+License: MIT (the same MIT text reproduced above for ConPTY applies, with
+this copyright notice).
+
+The font bundles glyphs from these icon sets, each under its own license:
+- Codicons (Microsoft, https://github.com/microsoft/vscode-codicons): CC BY 4.0
+- Devicons (https://github.com/devicons/devicon): MIT
+- Extra glyphs from Hack (https://github.com/source-foundry/Hack): MIT
+- Font Awesome 6.5.1 (Fonticons, Inc., https://github.com/FortAwesome/Font-Awesome): CC BY 4.0
+- Font Awesome Extension (https://github.com/AndreLZGava/font-awesome-extension): MIT
+- Font Logos (https://github.com/lukas-w/font-logos): logos are trademarks of their owners
+- Material Design Icons (https://github.com/Templarian/MaterialDesign-Font): Apache License 2.0
+- Octicons (GitHub, https://github.com/primer/octicons): MIT
+- Seti UI (https://github.com/jesseweed/seti-ui): MIT
+- Pomicons (https://github.com/gabrielelana/pomicons): SIL Open Font License 1.1
+- Powerline Extra Symbols and Powerline Symbols: MIT
+- Power Symbols IEC (https://github.com/jloughry/Unicode): MIT
+- Weather Icons (https://github.com/erikflowers/weather-icons): SIL Open Font License 1.1
+CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+SIL Open Font License 1.1: https://openfontlicense.org
+
+------------------------------------------------------------------------
+
+xterm.js addons: @xterm/addon-image 0.9.0, @xterm/addon-unicode11 0.9.0, @xterm/addon-web-links 0.12.0
+Source: https://github.com/xtermjs/xterm.js
+Copyright (c) The xterm.js authors
+License: MIT

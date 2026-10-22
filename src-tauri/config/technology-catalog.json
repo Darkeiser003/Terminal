@@ -15,7 +15,6 @@
   {"id":"picat","label":"Picat","category":"logic","windowsExe":"picat","unixExe":"picat","args":[]},
   {"id":"logtalk","label":"Logtalk","category":"logic","windowsExe":"logtalk","unixExe":"logtalk","args":[]},
   {"id":"agda","label":"Agda","category":"functional","windowsExe":"agda","unixExe":"agda","args":[]},
-  {"id":"mercury","label":"Mercury","category":"logic","windowsExe":"mmc","unixExe":"mmc","args":[]},
   {"id":"purescript","label":"PureScript","category":"functional","windowsExe":"purs","unixExe":"purs","args":["repl"]},
   {"id":"gambit-scheme","label":"Scheme · Gambit","category":"functional","windowsExe":"gsi","unixExe":"gsi","args":[]},
   {"id":"gauche","label":"Scheme · Gauche","category":"functional","windowsExe":"gosh","unixExe":"gosh","args":[]},

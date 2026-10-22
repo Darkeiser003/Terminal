@@ -5,6 +5,7 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
+pub mod path_integration;
 pub mod recycle;
 pub mod system_info;
 pub mod traits;
@@ -25,6 +26,12 @@ pub use linux::nsudo_path;
 pub use linux::{open_directory, open_path};
 #[cfg(target_os = "linux")]
 pub use linux::{probe_virtualization, run_wsl};
+#[cfg(windows)]
+pub use windows::elevation::is_process_elevated;
+#[cfg(windows)]
+pub use windows::elevation::{
+    gsudo_path, run_elevated, run_unelevated, windows_sudo, windows_sudo_path, WindowsSudo,
+};
 #[cfg(windows)]
 pub use windows::nsudo_path;
 #[cfg(windows)]

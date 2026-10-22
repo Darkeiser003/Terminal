@@ -73,7 +73,7 @@ fn local_status(app: &AppHandle) -> UpdateStatus {
         current_version: current_version(app),
         can_self_update: crate::github::default_catalog().self_repository.is_some()
             && install_dir::staging().is_some()
-            && security::signing_key_configured(),
+            && security::release_signing_configured(),
         install_path: install.map(|path| path.to_string_lossy().to_string()),
         ..Default::default()
     }
@@ -124,6 +124,14 @@ fn verified_release_manifest(release: &Release) -> Result<(&Asset, Vec<u8>), Str
             "La release no publica la firma de SHA256SUMS.txt; por seguridad no se ofrecerá."
                 .to_string()
         })?;
+    let ssh_signature_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS.txt.sshsig")
+        .ok_or_else(|| {
+            "La release no publica la firma SSHSIG de SHA256SUMS.txt; por seguridad no se ofrecerá."
+                .to_string()
+        })?;
 
     let manifest = crate::commands_projects::download_asset_bytes_limited(
         &manifest_asset.download_url,
@@ -137,8 +145,15 @@ fn verified_release_manifest(release: &Release) -> Result<(&Asset, Vec<u8>), Str
         RELEASE_METADATA_TIMEOUT,
     )
     .map_err(|error| format!("No se pudo descargar la firma de la release: {error}"))?;
+    let ssh_signature = crate::commands_projects::download_asset_bytes_limited(
+        &ssh_signature_asset.download_url,
+        16 * 1024,
+        RELEASE_METADATA_TIMEOUT,
+    )
+    .map_err(|error| format!("No se pudo descargar la firma SSH de la release: {error}"))?;
 
     security::verify_signature(&manifest, &signature)?;
+    security::verify_ssh_signature(&manifest, &ssh_signature)?;
     security::manifest_checksum(&manifest, &asset.name)?;
     Ok((asset, manifest))
 }
@@ -246,8 +261,8 @@ pub fn check(app: &AppHandle) -> UpdateStatus {
     let Some(repo) = crate::github::default_catalog().self_repository else {
         return status;
     };
-    if !security::signing_key_configured() {
-        status.error = Some("Esta compilación no incluye una clave pública de actualizaciones; no se ofrecerá una release sin verificar.".into());
+    if !security::release_signing_configured() {
+        status.error = Some("Esta compilación no incluye las claves de confianza Ed25519 y SSH; no se ofrecerá una release sin verificar.".into());
         return status;
     }
     let release = match client().latest_release(&repo) {
@@ -293,7 +308,7 @@ pub async fn update_check(app: AppHandle) -> UpdateStatus {
 /// seguir usando `update_check` para informar de una release manualmente.
 #[tauri::command]
 pub async fn update_check_on_startup(app: AppHandle) -> UpdateStatus {
-    if install_dir::staging().is_none() || !security::signing_key_configured() {
+    if install_dir::staging().is_none() || !security::release_signing_configured() {
         return local_status(&app);
     }
     update_check(app).await
@@ -424,6 +439,9 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
     let Some(repo) = crate::github::default_catalog().self_repository else {
         return failed("La actualización automática no está configurada para esta compilación.");
     };
+    if !security::release_signing_configured() {
+        return failed("Esta compilación no tiene las claves de confianza Ed25519 y SSH necesarias para actualizarse.");
+    }
 
     let release = match client().latest_release(&repo) {
         Ok((Some(release), _)) => release,
@@ -505,21 +523,24 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
         },
     );
     let binario = self_update::binary_name();
-    // Un AppImage no se extrae: el archivo descargado ES la versión nueva, y se
-    // pone en la carpeta de payload con el nombre que tiene instalado.
-    let raiz = if descarga
+    // Un AppImage o el portable de un solo archivo no se extraen: el archivo
+    // descargado ES la versión nueva, y se pone en la carpeta de payload con
+    // el nombre que tiene instalado.
+    let es_appimage = descarga
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
-    {
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"));
+    let raiz = if es_appimage || self_update::PackageKind::current().is_single_file() {
         if let Err(error) = std::fs::create_dir_all(&extraido) {
-            return failed(format!("No se pudo preparar el AppImage: {error}"));
+            return failed(format!("No se pudo preparar el ejecutable nuevo: {error}"));
         }
-        let appimage = extraido.join(&binario);
-        if let Err(error) = std::fs::rename(&descarga, &appimage) {
-            return failed(format!("No se pudo preparar el AppImage: {error}"));
+        let ejecutable = extraido.join(&binario);
+        if let Err(error) = std::fs::rename(&descarga, &ejecutable) {
+            return failed(format!("No se pudo preparar el ejecutable nuevo: {error}"));
         }
-        if let Err(error) = make_appimage_executable(&appimage) {
-            return failed(error);
+        if es_appimage {
+            if let Err(error) = make_appimage_executable(&ejecutable) {
+                return failed(error);
+            }
         }
         extraido
     } else {

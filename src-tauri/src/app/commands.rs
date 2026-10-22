@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::environments::Environment;
 use crate::preferences::{
@@ -22,6 +22,44 @@ use crate::tabs::{TabList, TabSummary, MAX_PTY_INPUT_CHARS};
 use crate::{i18n, identity, settings};
 
 static SMOKE_EXIT_SCHEDULED: AtomicBool = AtomicBool::new(false);
+/// El frontend revela la ventana cada vez que monta una pestaña o sustituye
+/// su entorno. El tamaño maximizado/restaurado es estado del toplevel nativo y
+/// solo debe aplicarse durante el primer reveal; reaplicar `unmaximize()` al
+/// crear una pestaña hacía que una ventana maximizada volviera al tamaño base.
+static INITIAL_WINDOW_STATE_APPLIED: AtomicBool = AtomicBool::new(false);
+
+/// Aplica el tamaño inicial después de mostrar la ventana nativa.
+///
+/// WebView2 puede aceptar `maximize()` sobre una ventana todavía oculta y
+/// perder ese estado cuando el compositor la revela. Mantener esta operación
+/// junto a `show()` hace que la preferencia se cumpla también después de un
+/// cierre y una nueva apertura de la aplicación.
+fn apply_initial_window_state(window: &WebviewWindow) {
+    if INITIAL_WINDOW_STATE_APPLIED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let start_maximized = preferences::current().start_maximized;
+    let result = if start_maximized {
+        window.maximize()
+    } else {
+        window.unmaximize()
+    };
+    if let Err(error) = result {
+        // Permitir que la siguiente ruta de reveal reintente si el compositor
+        // todavía no acepta la operación durante el primer frame.
+        INITIAL_WINDOW_STATE_APPLIED.store(false, Ordering::Release);
+        log_warn!(
+            "No se pudo aplicar el tamaño inicial de la ventana",
+            serde_json::json!({
+                "startMaximized": start_maximized,
+                "error": error.to_string(),
+            })
+        );
+    }
+}
 
 // ---- Pestañas (`tabs:*`) ----
 
@@ -117,6 +155,7 @@ pub fn frontend_ready(
         window
             .show()
             .map_err(|error| format!("No se pudo mostrar la ventana inicial: {error}"))?;
+        apply_initial_window_state(&window);
     } else {
         // Wine puede devolver BadWindow al hacer show/unmap de una ventana Tao
         // creada inicialmente oculta. El WebView ya se ha inicializado; la
@@ -165,7 +204,9 @@ pub fn frontend_reveal(app: AppHandle) -> Result<(), String> {
     };
     window
         .show()
-        .map_err(|error| format!("No se pudo mostrar la ventana de recuperación: {error}"))
+        .map_err(|error| format!("No se pudo mostrar la ventana de recuperación: {error}"))?;
+    apply_initial_window_state(&window);
+    Ok(())
 }
 
 // ---- pty (`pty-*`) ----
@@ -201,7 +242,7 @@ pub fn pty_resize(
     };
     state
         .tabs
-        .resize(&app, &tab_id, viewport.cols, viewport.rows);
+        .resize_from_frontend(&app, &tab_id, viewport.cols, viewport.rows);
 }
 
 #[tauri::command]
@@ -344,6 +385,7 @@ pub fn settings_save(
     state: State<'_, Arc<AppState>>,
     incoming: Value,
 ) -> Result<PreferencesPayload, String> {
+    log_debug!("Guardando preferencias");
     let sanitized = preferences::sanitize_preferences(&incoming);
     let Value::Object(patch) = serde_json::to_value(&sanitized)
         .map_err(|error| format!("Las preferencias no se pudieron serializar: {error}"))?
@@ -352,8 +394,10 @@ pub fn settings_save(
     };
     let saved = settings::save_settings(&patch)
         .ok_or_else(|| "No se pudieron guardar las preferencias en settings.json".to_string())?;
+    log_debug!("Preferencias escritas; regenerando banners y ayuda");
     state.tabs.refresh_all_banner_files();
     state.tabs.refresh_all_help_files();
+    log_debug!("Preferencias guardadas");
     Ok(payload_for(preferences::sanitize_preferences(
         &Value::Object(saved),
     )))
@@ -595,6 +639,10 @@ pub struct AppInfo {
     pub collaborators: Vec<CollaboratorCredit>,
     /// Dónde vive `settings.json`, para poder abrirlo o respaldarlo a mano.
     pub settings_path: String,
+    /// Token efectivo del proceso que pinta esta ventana. En Windows permite
+    /// distinguir la elevación de la sesión actual de la preferencia para el
+    /// siguiente arranque.
+    pub process_elevated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -609,6 +657,10 @@ pub struct CollaboratorCredit {
 pub fn app_info(app: AppHandle) -> AppInfo {
     let identity = identity::current();
     let catalog = crate::github::default_catalog();
+    #[cfg(windows)]
+    let process_elevated = crate::platform::is_process_elevated();
+    #[cfg(not(windows))]
+    let process_elevated = false;
     AppInfo {
         name: identity.name,
         slug: identity.slug,
@@ -624,6 +676,7 @@ pub fn app_info(app: AppHandle) -> AppInfo {
             }])
             .unwrap_or_default(),
         settings_path: settings::settings_path().to_string_lossy().to_string(),
+        process_elevated,
     }
 }
 

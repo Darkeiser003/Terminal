@@ -79,6 +79,11 @@ pub struct SpawnConfig<'a> {
 pub struct PtySession {
     backend: PtyBackend,
     process_id: Option<u32>,
+    /// Serializa los cambios de geometría y las escrituras que afectan a la
+    /// misma ConPTY. Una acción del panel puede redimensionar y escribir casi
+    /// a la vez; sin esta compuerta cmd podía procesar el comando con la
+    /// anchura anterior y envolverlo antes de que xterm recibiera el resize.
+    operation: Mutex<()>,
 }
 
 enum PtyBackend {
@@ -108,6 +113,7 @@ impl PtySession {
     }
 
     pub fn write(&self, data: &str) -> std::io::Result<()> {
+        let _operation = self.operation.lock();
         match &self.backend {
             PtyBackend::Native { writer, .. } => {
                 let mut writer = writer.lock();
@@ -123,6 +129,7 @@ impl PtySession {
     }
 
     pub fn resize(&self, viewport: Viewport) -> anyhow::Result<()> {
+        let _operation = self.operation.lock();
         match &self.backend {
             PtyBackend::Native { master, .. } => master.lock().resize(viewport.into())?,
             // Las pipes no tienen una geometría que cambiar. El frontend aún
@@ -176,7 +183,34 @@ where
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system.openpty(config.viewport.into())?;
 
-    let mut command = CommandBuilder::new(config.exe);
+    // Windows no puede crear directamente un proceso cuyo módulo sea un
+    // script `.bat`/`.cmd`. Algunos REPL instalados por winget (Groovy,
+    // ts-node y otros launchers) se detectan precisamente como esos scripts;
+    // sin este envoltorio la pestaña se crea vacía aunque el binario exista.
+    // Ejecutarlos bajo cmd conserva el PTY y permite que los argumentos sigan
+    // llegando al launcher como una línea interactiva normal.
+    let is_windows_script = cfg!(windows)
+        && (config.exe.to_ascii_lowercase().ends_with(".bat")
+            || config.exe.to_ascii_lowercase().ends_with(".cmd"));
+    let mut command = if is_windows_script {
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.arg("/d");
+        command.arg("/s");
+        command.arg("/c");
+        // `cmd /c` interpreta una ruta absoluta con espacios como varias
+        // palabras cuando portable-pty compone la línea de CreateProcess.
+        // La ruta procede de `which`, así que el nombre del launcher ya está
+        // disponible en PATH; usar solo el nombre evita que `C:\Program` se
+        // convierta en el supuesto comando. El cwd del usuario se conserva.
+        let launcher = std::path::Path::new(config.exe)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(config.exe);
+        command.arg(launcher);
+        command
+    } else {
+        CommandBuilder::new(config.exe)
+    };
     for arg in config.args {
         command.arg(arg);
     }
@@ -189,7 +223,39 @@ where
         command.env(key, value);
     }
     crate::process::sanitize_pty_child_environment(&mut command);
+    // Windows PowerShell 5.1 no debe heredar el `PSModulePath` de PowerShell
+    // 7: perdería su carpeta de módulos de usuario (y con ella el PSReadLine
+    // actualizado y sus sugerencias).
+    if cfg!(windows) && crate::process::is_windows_powershell(config.exe) {
+        command.env(
+            "PSModulePath",
+            crate::process::current_windows_powershell_module_path(),
+        );
+    }
+    // El paquete OCaml de MSYS2 publica `ocaml.exe` como binario nativo,
+    // pero conserva su biblioteca estándar bajo `ucrt64/lib/ocaml`. Cuando
+    // se inicia desde una aplicación Win32 no recibe el prefijo POSIX que
+    // usa MSYS2 y termina con `Unbound module Stdlib`. Derivar la ruta desde
+    // el ejecutable hace que una instalación recién hecha funcione en la
+    // pestaña actual, sin exigir reiniciar WTerminal.
+    if cfg!(windows) && config.exe.to_ascii_lowercase().ends_with("\\ocaml.exe") {
+        if let Some(prefix) = std::path::Path::new(config.exe)
+            .parent()
+            .and_then(|bin| bin.parent())
+        {
+            let ocaml_lib = prefix.join("lib").join("ocaml");
+            if ocaml_lib.is_dir() {
+                command.env("OCAMLLIB", ocaml_lib);
+            }
+        }
+    }
     command.env("TERM", "xterm-256color");
+    // Carpeta donde `console_ui` deja la cabecera y el cierre de cada acción
+    // de cmd: así la orden que se teclea cabe en una sola línea legible.
+    command.env(
+        crate::console_ui::CMD_FRAME_DIR_VAR,
+        crate::paths::SESSION_DIR.as_os_str(),
+    );
 
     let child = pair.slave.spawn_command(command)?;
     // El esclavo tiene que soltarse aquí: mientras siga abierto en el proceso
@@ -240,6 +306,7 @@ where
             killer: Mutex::new(killer),
         },
         process_id,
+        operation: Mutex::new(()),
     })
 }
 
@@ -339,6 +406,7 @@ where
             child,
         },
         process_id,
+        operation: Mutex::new(()),
     })
 }
 

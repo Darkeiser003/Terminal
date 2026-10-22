@@ -14,29 +14,52 @@ temp_root="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)"
 config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
 cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
 apply=false
+# --light: solo restos (logs sueltos de la raíz, dist, releases anteriores
+# apartadas, evidencias de artifacts/ con más de --keep-days días, temporales de
+# pruebas y sesiones muertas). Conserva node_modules, target y los logs de la
+# app para que el siguiente build siga siendo rápido.
+light=false
+keep_days=3
 
-case "${1:-}" in
-  '') ;;
-  --apply) apply=true ;;
-  -h|--help)
-    printf '%s\n' 'Uso: scripts/clean-repository.sh [--apply]'
-    printf '%s\n' 'Sin --apply solo muestra las rutas; con --apply borra salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas.'
-    printf '%s\n' 'release/ y la configuración de usuario se conservan.'
-    exit 0
-    ;;
-  *)
-    printf 'Argumento no válido: %s\n' "$1" >&2
-    exit 2
-    ;;
-esac
+while (( $# > 0 )); do
+  case "$1" in
+    --apply) apply=true ;;
+    --light) light=true ;;
+    --keep-days)
+      shift
+      if [[ ! "${1:-}" =~ ^[0-9]+$ ]]; then
+        printf 'Valor no válido para --keep-days: %s\n' "${1:-}" >&2
+        exit 2
+      fi
+      keep_days="$1"
+      ;;
+    -h|--help)
+      printf '%s\n' 'Uso: scripts/clean-repository.sh [--light [--keep-days N]] [--apply]'
+      printf '%s\n' 'Sin --apply solo muestra las rutas; con --apply borra salidas y temporales de build/smoke/E2E con nombres propios, además de logs y cachés privadas.'
+      printf '%s\n' 'Con --light solo quita restos (logs sueltos, dist, releases anteriores, evidencias de artifacts/ con más de --keep-days días y temporales) y conserva node_modules y target.'
+      printf '%s\n' 'release/ y la configuración de usuario se conservan.'
+      exit 0
+      ;;
+    *)
+      printf 'Argumento no válido: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
-generated_directories=(
-  node_modules dist artifacts
-  .cache .parcel-cache .turbo .svelte-kit .scala-build
-  coverage .nyc_output test-results playwright-report allure-results
-  AppDir target build tmp temp
-  src-tauri/target src-tauri/gen
-)
+if "$light"; then
+  generated_directories=(dist dist-preview src-tauri/target/dist/release-anterior)
+else
+  generated_directories=(
+    node_modules .pnpm-store dist dist-preview artifacts
+    .cache .parcel-cache .turbo .svelte-kit .scala-build
+    coverage .nyc_output test-results playwright-report allure-results
+    AppDir target build tmp temp
+    src-tauri/target src-tauri/gen
+    src-tauri/crates/github-target/target fuzz/target
+  )
+fi
 
 assert_project_target() {
   local path="$1"
@@ -145,6 +168,21 @@ for candidate in "$project_root"/.node_modules.windows.*; do
 done
 shopt -u nullglob
 
+# Archivos sueltos: logs que algunas builds dejan en la raíz y, en modo ligero,
+# las evidencias de artifacts/ más antiguas que --keep-days.
+file_targets=()
+shopt -s nullglob
+for log_file in "$project_root"/*.log; do
+  [[ -f "$log_file" && ! -L "$log_file" ]] && file_targets+=("$log_file")
+done
+shopt -u nullglob
+if "$light" && [[ -d "$project_root/artifacts" && ! -L "$project_root/artifacts" ]]; then
+  while IFS= read -r -d '' old_entry; do
+    assert_project_target "$old_entry" || exit 1
+    file_targets+=("$old_entry")
+  done < <(find "$project_root/artifacts" -mindepth 1 -maxdepth 1 -mtime "+$keep_days" -print0)
+fi
+
 is_generated_directory() {
   local path="$1"
   [[ "$path" == "$release_root" ]] && return 0
@@ -160,7 +198,7 @@ shopt -s globstar nullglob
 for markdown in "$project_root"/**/*.md; do
   [[ -f "$markdown" ]] || continue
   case "${markdown##*/}" in
-    AUDIT-*.md|audit-*.md|build-*.md|*-audit.md|*-report.md) ;;
+    AUDITORIA-WINDOWS-2026-09-23.md|AUDIT-*.md|audit-*.md|build-*.md|*-audit.md|*-report.md) ;;
     *) continue ;;
   esac
   parent="$markdown"
@@ -222,7 +260,11 @@ for target in \
   "$temp_root"/lterminal-build-smoke-app.* \
   "$temp_root"/lterminal-release-validation.* \
   "$temp_root"/lterminal-wine-* \
-  "$temp_root"/lterminal-appimage-*; do
+  "$temp_root"/lterminal-appimage-* \
+  "$temp_root"/wterminal-e2e-* \
+  "$temp_root"/wterminal-elevated-e2e-* \
+  "$temp_root"/wterminal-banner-image-* \
+  "$temp_root"/wtools-path-repro*; do
   add_external_target "$target"
 done
 shopt -u nullglob
@@ -242,16 +284,19 @@ for target in "$temp_root"/appimage_extracted_*; do
 done
 shopt -u nullglob
 
-for data_root in "$config_root/winslim-terminal" "$config_root/WinSlim Terminal" "$config_root/lterminal"; do
-  [[ -d "$data_root/logs" ]] && add_external_target "$data_root/logs"
-done
-for cache_path in "$cache_root/lterminal/cache" "$cache_root/lterminal/e2e" "$cache_root/lterminal/appimage"; do
-  [[ -e "$cache_path" ]] && add_external_target "$cache_path"
-done
+# El modo ligero conserva los logs y las cachés de la app.
+if ! "$light"; then
+  for data_root in "$config_root/wterminal" "$config_root/winslim-terminal" "$config_root/WinSlim Terminal" "$config_root/lterminal"; do
+    [[ -d "$data_root/logs" ]] && add_external_target "$data_root/logs"
+  done
+  for cache_path in "$cache_root/lterminal/cache" "$cache_root/lterminal/e2e" "$cache_root/lterminal/appimage"; do
+    [[ -e "$cache_path" ]] && add_external_target "$cache_path"
+  done
+fi
 
 # La app crea sesiones temporales por PID. Se limpian las antiguas, pero se
 # conservan las que pertenecen a un proceso lterminal vivo.
-for session_root in "$temp_root/lterminal" "$temp_root/winslim-terminal"; do
+for session_root in "$temp_root/wterminal" "$temp_root/lterminal" "$temp_root/winslim-terminal"; do
   [[ -d "$session_root" ]] || continue
   for session_dir in "$session_root"/*; do
     [[ -d "$session_dir" && "${session_dir##*/}" =~ ^[0-9]+$ ]] || continue
@@ -263,17 +308,16 @@ for session_root in "$temp_root/lterminal" "$temp_root/winslim-terminal"; do
   done
 done
 
-targets=("${directory_targets[@]}" "${markdown_targets[@]}" "${external_targets[@]}")
+targets=("${directory_targets[@]}" "${file_targets[@]}" "${markdown_targets[@]}" "${external_targets[@]}")
 if (( ${#targets[@]} == 0 )); then
   printf '%s\n' 'Repositorio ya limpio: no hay salidas generadas ni informes Markdown.'
   exit 0
 fi
 
-if ! "$apply"; then
-  printf 'VISTA PREVIA — %d ruta(s) bajo %s\n' "${#targets[@]}" "$project_root"
-else
-  printf 'LIMPIEZA — %d ruta(s) bajo %s\n' "${#targets[@]}" "$project_root"
-fi
+mode='LIMPIEZA'
+"$apply" || mode='VISTA PREVIA'
+"$light" && mode="$mode LIGERA (conserva node_modules y target; artifacts/ de más de $keep_days días)"
+printf '%s — %d ruta(s) bajo %s\n' "$mode" "${#targets[@]}" "$project_root"
 for target in "${targets[@]}"; do
   if [[ "$target" == "$project_root"/* ]]; then
     printf '  %s\n' "${target#"$project_root/"}"
@@ -283,12 +327,22 @@ for target in "${targets[@]}"; do
 done
 
 if ! "$apply"; then
-  printf '%s\n' 'No se ha borrado nada. Ejecuta: scripts/clean-repository.sh --apply'
+  # La orden sugerida repite el modo de la vista previa: en modo ligero,
+  # sugerir solo --apply llevaba a la limpieza completa (node_modules y target).
+  if "$light"; then
+    printf '%s\n' "No se ha borrado nada. Ejecuta: scripts/clean-repository.sh --light --keep-days $keep_days --apply"
+  else
+    printf '%s\n' 'No se ha borrado nada. Ejecuta: scripts/clean-repository.sh --apply'
+  fi
   exit 0
 fi
 
 failed_targets=()
 for target in "${directory_targets[@]}"; do
+  assert_project_target "$target"
+  rm -rf -- "$target" || failed_targets+=("$target")
+done
+for target in "${file_targets[@]}"; do
   assert_project_target "$target"
   rm -rf -- "$target" || failed_targets+=("$target")
 done
@@ -308,4 +362,4 @@ if (( ${#failed_targets[@]} > 0 )); then
   printf 'Limpieza incompleta: %d ruta(s) sigue(n) bloqueada(s).\n' "${#failed_targets[@]}" >&2
   exit 1
 fi
-printf 'Limpieza terminada: %d directorio(s), %d Markdown y %d rastro(s) externo(s) eliminados. release/ se conservó.\n' "${#directory_targets[@]}" "${#markdown_targets[@]}" "${#external_targets[@]}"
+printf 'Limpieza terminada: %d directorio(s), %d archivo(s) sueltos, %d Markdown y %d rastro(s) externo(s) eliminados. release/ se conservó.\n' "${#directory_targets[@]}" "${#file_targets[@]}" "${#markdown_targets[@]}" "${#external_targets[@]}"

@@ -52,6 +52,13 @@ export interface Inventory {
     pkgManager: string | null;
 }
 
+/** Marca semántica OSC 133 recibida desde una shell compatible. */
+export interface SemanticZoneEvent {
+    tabId: string;
+    kind: 'prompt-start' | 'prompt-end' | 'input-start' | 'input-end';
+    payload: string | null;
+}
+
 export interface TabSummary {
     id: string;
     label: string;
@@ -84,6 +91,15 @@ export interface ThemePreset {
     palette: ThemePalette;
 }
 
+/** Tema guardado por el usuario («Guardar como tema»). */
+export interface CustomTheme {
+    id: string;
+    label: string;
+    palette: ThemePalette;
+    /** 16 colores ANSI, o vacío para usar los de la terminal. */
+    ansi: string[];
+}
+
 export interface FontFamily {
     id: string;
     label: string;
@@ -105,20 +121,31 @@ export interface Preferences {
     showSystemBanner: boolean;
     clearReprintBanner: boolean;
     bannerHiddenItems: string;
+    /** Imagen a la izquierda del banner (el logo de la app si no hay otra). */
+    bannerImage: boolean;
+    /** Columnas de la imagen, sin la separación (8–40). */
+    bannerImageColumns: number;
+    /** Imagen propia (ruta absoluta); vacío = el logo de la app. */
+    bannerImagePath: string;
     showDependenciesPanel: boolean;
     showProjectsPanel: boolean;
     showScriptsPanel: boolean;
     showQuickActions: boolean;
+    /** Integración experimental de LTools; desactivada de fábrica. */
+    ltoolsEnabled: boolean;
     showExplorerPanel: boolean;
     showTabBar: boolean;
     showEnvironmentSelector: boolean;
     showRefreshButton: boolean;
     showLanguageButton: boolean;
     terminalOnlyMode: boolean;
+    showTerminalOnlyGuide: boolean;
     startMaximized: boolean;
+    startAsAdmin: boolean;
     manualAliasesText: string;
     favoriteReplIds: string;
     hiddenEnvironmentIds: string;
+    shortcutCommandPalette: string;
     shortcutNewTab: string;
     shortcutNextTab: string;
     shortcutPreviousTab: string;
@@ -138,6 +165,7 @@ export interface Preferences {
     shortcutExplorerFollow: string;
     shortcutExplorerCd: string;
     shortcutClearTerminal: string;
+    shortcutSearchTerminal: string;
     shortcutOpenSystemExplorer: string;
     themeId: string;
     accentColor: string;
@@ -152,6 +180,13 @@ export interface Preferences {
     terminalCursorColor: string;
     terminalBackground: string;
     terminalForeground: string;
+    /** El tema recolorea toda la interfaz y no solo el acento. */
+    themeRecolorAll: boolean;
+    customThemes: CustomTheme[];
+    /** 16 colores ANSI (negro… blanco brillante); vacío = los de xterm. */
+    terminalAnsiColors: string[];
+    /** Fuente instalada escrita a mano, delante de la familia elegida. */
+    terminalFontCustom: string;
     terminalFontFamily: string;
     terminalFontSize: number;
     terminalLineHeight: number;
@@ -161,10 +196,35 @@ export interface Preferences {
     terminalPadding: number;
     terminalScrollback: number;
     terminalCursorBlink: boolean;
+    /** Enlaces clicables (Ctrl+clic) en la salida de la terminal. */
+    terminalLinks: boolean;
+    /** Confirmar con el destino a la vista antes de abrir un enlace. */
+    terminalLinksConfirm: boolean;
     terminalScrollSensitivity: number;
     copyOnSelect: boolean;
     uiDensity: 'compact' | 'comfortable';
     defaultEnvironmentId: string;
+    terminalAdminByDefault: boolean;
+    toolchainStoreEnabled: boolean;
+    /** Categorías de la carpeta propia además de las cachés. */
+    toolchainStoreDownloads: boolean;
+    toolchainStoreAiModels: boolean;
+    toolchainStoreTools: boolean;
+    toolchainStoreReplHistory: boolean;
+    shellAssist: boolean;
+    shellAssistCmd: boolean;
+    shellAssistPowershell: boolean;
+    shellAssistBash: boolean;
+    shellAssistZsh: boolean;
+    /** Aspecto de las sugerencias: un color vacío deja el de cada herramienta. */
+    shellAssistSuggestionColor: string;
+    shellAssistSuggestionItalic: boolean;
+    shellAssistSyntax: boolean;
+    shellAssistCommandColor: string;
+    shellAssistArgumentColor: string;
+    shellAssistErrorColor: string;
+    shellAssistListView: boolean;
+    toolchainStoreDir: string;
     fileManagerId: string;
     viewportCols: number;
     viewportRows: number;
@@ -210,10 +270,105 @@ export interface WindowsIntegrationStatus {
     nsudoPath?: string;
     modernDefaultTerminalSupported: boolean;
     note: string;
+    /** WTerminal se ejecuta como administrador. */
+    elevated: boolean;
+    /** Cómo se abre NSudo sin ser administrador. */
+    nsudoLauncher: 'direct' | 'gsudo' | 'windows-sudo' | 'needs-admin';
+    gsudoPath?: string;
+    windowsSudo: 'missing' | 'disabled' | 'new-window' | 'input-disabled' | 'inline';
+    /** El ejecutable lleva la marca RUNASADMIN (escudo en el icono). */
+    runAsAdminFlag: boolean;
+}
+
+export interface PathIntegrationStatus {
+    supported: boolean;
+    enabled: boolean;
+    command: string;
+    location: string | null;
+    note: string;
+}
+
+/** Estado de las sugerencias y colores de cada shell (`terminal::shell_assist`). */
+export interface ShellAssistComponent {
+    label: string;
+    /** Distro WSL en la que se comprobó; null = este sistema. */
+    distro: string | null;
+    /** null = no se sabe (distro sin inventario detallado). */
+    installed: boolean | null;
+    /** Texto para el buscador de Entorno y dependencias. */
+    search: string;
+}
+
+export interface ShellAssistShell {
+    shell: 'cmd' | 'powershell' | 'bash' | 'zsh';
+    components: ShellAssistComponent[];
+}
+
+export interface ShellAssistStatus {
+    shells: ShellAssistShell[];
+}
+
+/** Respuesta de `terminal_open_link` (`terminal::links::LinkOpenResult`). */
+export interface TerminalLinkResult {
+    ok: boolean;
+    /** `browser`, `directory` (carpeta abierta) o `reveal` (archivo mostrado en su carpeta). */
+    action?: 'browser' | 'directory' | 'reveal';
+    /** Código del rechazo (`scheme`, `credentials`, `not-found`…), `disabled` u `open-failed`. */
+    error?: string;
+    /** En E2E se registra la petición en vez de abrirla. */
+    simulated: boolean;
+}
+
+/** Una caché que WTerminal centraliza (`config::toolchain_store`). */
+/** Para qué sirve una carpeta y si se puede borrar
+ *  (`config::toolchain_store::LocationInfo`). */
+export interface StorageLocationInfo {
+    purpose: string;
+    deletion: string;
+    safety: 'safe' | 'regenerates' | 'caution' | 'keep';
+}
+
+export interface ToolchainStoreCache {
+    id: string;
+    name: string;
+    variable: string;
+    path: string;
+    bytes: number;
+    /** El usuario ya define la variable: se usa su carpeta, no la propia. */
+    userDefined: boolean;
+    /** Dónde está lo medido: la carpeta propia, la variable del usuario o la
+     *  ubicación de siempre de la herramienta (sin centralizar). */
+    location: 'own' | 'user' | 'system';
+    /** Categoría de la carpeta propia (ver `toolchain_store::Category`). */
+    category: ToolchainStoreCategory;
+    /** La categoría está activa y se aplica a las terminales nuevas. */
+    active: boolean;
+    info: StorageLocationInfo;
+}
+
+export type ToolchainStoreCategory = 'caches' | 'downloads' | 'aiModels' | 'tools' | 'replHistory';
+
+/** Carpeta de WTerminal (`app`) o de otra herramienta (`external`); solo se
+ *  mide y se explica. */
+export interface ToolchainStoreLocation {
+    id: string;
+    label: string;
+    path: string;
+    bytes: number;
+    group: 'app' | 'external';
+    info: StorageLocationInfo;
+}
+
+export interface ToolchainStoreStatus {
+    enabled: boolean;
+    root: string;
+    defaultRoot: string;
+    caches: ToolchainStoreCache[];
+    cacheBytes: number;
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'ltools' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003';
+    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'ltools' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003' | 'christianlg97';
     argument?: string;
 }
 
@@ -231,6 +386,8 @@ export interface AppInfo {
     collaborators: { login: string; role: string }[];
     /** Dónde vive `settings.json`. */
     settingsPath: string;
+    /** Si la ventana actual usa un token elevado. */
+    processElevated: boolean;
 }
 
 // ---- Panel de scripts ----
@@ -517,12 +674,121 @@ export interface PinResult {
     state?: ProjectsState;
 }
 
+/** «Mi GitHub»: la sesión de GitHub CLI (`gh`). WTerminal no guarda tokens. */
+export interface GhStatus {
+    installed: boolean;
+    path?: string | null;
+    version?: string | null;
+    loggedIn: boolean;
+    account?: string | null;
+    /** Un fallo que no es «sin sesión» (red, versión rara de `gh`…). */
+    error?: string | null;
+}
+
+/** Un repositorio de la cuenta de `gh`, con su estado en el disco. */
+export interface OwnRepository extends PublicRepository {
+    private: boolean;
+}
+
+export interface GhResult {
+    ok: boolean;
+    message: string;
+    url?: string | null;
+    /** Falta el permiso `delete_repo`: el panel ofrece pedirlo. */
+    needsDeleteScope: boolean;
+}
+
+export type GhRepositoryChange = 'make-public' | 'make-private' | 'archive' | 'unarchive';
+
+/** «Mi GitHub» ampliado (`projects/gh_manage.rs`, `projects/git_local.rs`). */
+export interface GhRepoDetails {
+    description: string;
+    homepage: string;
+    topics: string[];
+    defaultBranch: string;
+    issues: boolean;
+    wiki: boolean;
+}
+
+export interface GhRepoEdit extends GhRepoDetails {
+    /** Los temas que tenía al abrir el formulario. */
+    currentTopics: string[];
+}
+
+export interface GhRelease {
+    tag: string;
+    name: string;
+    draft: boolean;
+    prerelease: boolean;
+    latest: boolean;
+    publishedAt: string;
+}
+
+export interface GhAsset {
+    name: string;
+    size: number;
+    downloads: number;
+}
+
+export interface GhReleaseDraft {
+    tag: string;
+    title: string;
+    notes: string;
+    generateNotes: boolean;
+    draft: boolean;
+    prerelease: boolean;
+    target: string;
+    files: string[];
+}
+
+export interface GhPull {
+    number: number;
+    title: string;
+    head: string;
+    base: string;
+    draft: boolean;
+    url: string;
+}
+
+export interface GhIssue {
+    number: number;
+    title: string;
+    url: string;
+}
+
+export interface GhRun {
+    id: number;
+    title: string;
+    workflow: string;
+    branch: string;
+    status: string;
+    conclusion: string;
+    createdAt: string;
+    url: string;
+}
+
+export type GhMergeMethod = 'merge' | 'squash' | 'rebase';
+
+export interface LocalGitStatus {
+    branch: string;
+    upstream: string | null;
+    ahead: number;
+    behind: number;
+    files: { code: string; path: string }[];
+    truncated: boolean;
+    branches: string[];
+}
+
+export type GitBranchAction = 'create' | 'switch' | 'delete';
+export type GitTerminalAction = 'push' | 'pull' | 'publish';
+export type GhTerminalAction = 'login' | 'logout' | 'grant-delete';
+
 export interface GitRunResult {
     ok: boolean;
     error?: string;
     /** Qué herramienta habría que instalar para que esto funcionara. */
     suggestion?: ToolSuggestion;
-    action?: 'clone' | 'pull';
+    action?: 'clone' | 'pull' | GhTerminalAction | GitTerminalAction;
     localPath?: string;
     tabId?: string;
     created: boolean;
@@ -544,6 +810,8 @@ export interface InstallAction {
     subgroup: string | null;
     /** Descripción breve del programa que encabeza el plegable. */
     subgroupDescription: string | null;
+    /** Nombre concreto del framework dentro del ecosistema padre. */
+    subgroupItem: string | null;
     /** Para qué sirve el programa; separado de requisitos y origen. */
     description: string | null;
     verb: string | null;
@@ -558,10 +826,15 @@ export interface InstallAction {
     /** Si la herramienta está instalada, para poner lo instalado arriba. `null`
      *  cuando la acción no dice nada del estado (actualizar todo con winget). */
     installed: boolean | null;
+    /** La sonda no concluyó (por ejemplo, timeout). No se debe tratar como
+     * "no instalada" ni permitir una instalación duplicada. */
+    detectionStatus: 'unknown' | null;
 }
 
 export interface InstallList {
     actions: InstallAction[];
+    /** El backend solo marca completo cuando terminó la pasada global. */
+    complete?: boolean;
 }
 
 export interface InstallRunResult {
@@ -652,6 +925,14 @@ export interface UpdateResult {
 export interface DataEvent {
     tabId: string;
     data: string;
+}
+
+/** Geometría solicitada por una acción de panel antes de escribir su comando. */
+export interface CommandResizeEvent {
+    tabId: string;
+    cols: number;
+    rows: number;
+    reason?: string;
 }
 
 export interface ExitEvent {

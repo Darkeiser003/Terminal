@@ -25,6 +25,15 @@ pub struct AppState {
     /// consultar relojes del sistema ni afectar al comportamiento.
     startup_started: Instant,
     inventory: Mutex<Option<Inventory>>,
+    /// Indica si `inventory` ya contiene la pasada completa (incluye WSL,
+    /// Docker y Android). El arranque primero guarda un inventario rápido;
+    /// el panel de dependencias puede reutilizar la pasada completa que se
+    /// ejecuta en segundo plano en vez de volver a arrancarla al abrirse.
+    inventory_full: Mutex<bool>,
+    /// Serializa las pasadas completas de entornos. El escaneo diferido del
+    /// arranque y el botón de repetir detección podían entrar a WSL/Docker/
+    /// ADB a la vez y dejar la segunda llamada esperando indefinidamente.
+    environment_refresh_lock: Mutex<()>,
     /// Ya se lanzó la detección completa. Solo hace falta una vez por arranque:
     /// las siguientes las pide el usuario con el botón de refrescar.
     full_detection_started: Mutex<bool>,
@@ -45,6 +54,10 @@ pub struct AppState {
     /// ejecuta tiene que ser exactamente lo que el backend generó y filtró para
     /// este sistema.
     install_actions: Mutex<Option<Vec<crate::install_actions::InstallAction>>>,
+    install_actions_complete: Mutex<bool>,
+    /// El catálogo completo se está preparando desde el arranque. El panel
+    /// espera este trabajo en vez de iniciar otra detección concurrente.
+    install_prefetch_in_flight: Mutex<bool>,
     /// Los repositorios que el panel de Proyectos ha llegado a enseñar.
     ///
     /// Es la lista blanca de sobre qué se puede consultar o clonar: el frontend
@@ -81,10 +94,14 @@ impl AppState {
             tabs: Arc::new(TabManager::new(viewport)),
             startup_started: Instant::now(),
             inventory: Mutex::new(None),
+            inventory_full: Mutex::new(false),
+            environment_refresh_lock: Mutex::new(()),
             full_detection_started: Mutex::new(false),
             allowed_items: Mutex::new(HashMap::new()),
             clipboard: Mutex::new(None),
             install_actions: Mutex::new(None),
+            install_actions_complete: Mutex::new(false),
+            install_prefetch_in_flight: Mutex::new(false),
             allowed_repositories: Mutex::new(HashMap::new()),
             pending_release: Mutex::new(None),
             script_scan_lock: Mutex::new(()),
@@ -144,12 +161,112 @@ impl AppState {
         self.pending_release.lock().clone()
     }
 
-    pub fn remember_install_actions(&self, actions: &[crate::install_actions::InstallAction]) {
+    pub fn remember_install_actions(
+        &self,
+        actions: &[crate::install_actions::InstallAction],
+        complete: bool,
+    ) {
         *self.install_actions.lock() = Some(actions.to_vec());
+        *self.install_actions_complete.lock() = complete;
     }
 
     pub fn install_actions(&self) -> Option<Vec<crate::install_actions::InstallAction>> {
         self.install_actions.lock().clone()
+    }
+
+    pub fn install_actions_complete(&self) -> bool {
+        *self.install_actions_complete.lock()
+    }
+
+    pub fn begin_install_prefetch(&self) -> bool {
+        let mut in_flight = self.install_prefetch_in_flight.lock();
+        // `install_catalog` puede haber pintado ya la estructura rápida y
+        // guardado sus acciones desconocidas. Eso no significa que la
+        // precarga completa haya terminado: debe seguir arrancando y sustituir
+        // esa instantánea en memoria y en el caché persistente.
+        if *in_flight {
+            return false;
+        }
+        *in_flight = true;
+        true
+    }
+
+    pub fn finish_install_prefetch(&self) {
+        *self.install_prefetch_in_flight.lock() = false;
+    }
+
+    /// Espera una precarga que ya empezó durante el arranque. No inicia
+    /// trabajo nuevo: si el catálogo no estaba en vuelo, devuelve de inmediato.
+    pub fn wait_for_install_prefetch(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<Vec<crate::install_actions::InstallAction>> {
+        if !*self.install_prefetch_in_flight.lock() {
+            return self
+                .install_actions_complete()
+                .then(|| self.install_actions())
+                .flatten();
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.install_actions_complete() {
+                if let Some(actions) = self.install_actions() {
+                    return Some(actions);
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Espera a que la precarga llegue a ponerse en vuelo y, una vez iniciada,
+    /// espera su resultado. Esto evita que la apertura del panel lance una
+    /// segunda detección completa en paralelo durante los primeros milisegundos
+    /// del arranque, cuando el hilo de inventario aún no ha creado el hilo de
+    /// precarga.
+    /// Espera solo una precarga que siga en vuelo. «Repetir detección» debe
+    /// detectar de nuevo: si la precarga ya terminó, su resultado es lo que
+    /// el usuario quiere sustituir (por ejemplo, tras instalar algo).
+    pub fn wait_for_running_install_prefetch(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<Vec<crate::install_actions::InstallAction>> {
+        if !*self.install_prefetch_in_flight.lock() {
+            return None;
+        }
+        self.wait_for_install_prefetch(timeout)
+    }
+
+    pub fn wait_for_install_prefetch_start(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<Vec<crate::install_actions::InstallAction>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.install_actions_complete() {
+                return self.install_actions();
+            }
+            if *self.install_prefetch_in_flight.lock() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                return self.wait_for_install_prefetch(remaining);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Invalida el catálogo que se mostró antes de ejecutar una acción.
+    ///
+    /// La acción se escribe en una shell visible y puede tardar en terminar.
+    /// Mantener la lista anterior después de eso hace que una instalación ya
+    /// completada siga mostrando «Instalar» hasta que expire la caché.
+    pub fn forget_install_actions(&self) {
+        *self.install_actions.lock() = None;
+        *self.install_actions_complete.lock() = false;
     }
 
     /// Registra lo que el panel acaba de enseñar. Reemplaza la lista anterior:
@@ -205,8 +322,38 @@ impl AppState {
         let mut cache = self.inventory.lock();
         if cache.is_none() {
             *cache = Some(environments::detect_environments(true));
+            *self.inventory_full.lock() = false;
         }
         cache.clone().unwrap_or_default()
+    }
+
+    /// Devuelve la detección completa ya confirmada, si el hilo de arranque
+    /// terminó antes de que el usuario abriera el panel de dependencias.
+    pub fn full_inventory(&self) -> Option<Inventory> {
+        if !*self.inventory_full.lock() {
+            return None;
+        }
+        self.inventory.lock().clone()
+    }
+
+    /// Si la detección completa del arranque ya está en vuelo, espera un
+    /// margen corto para reutilizarla. Esto evita que abrir Dependencias justo
+    /// después de la primera terminal lance una segunda tanda concurrente de
+    /// WSL/Docker/ADB y multiplique el tiempo del panel.
+    pub fn wait_for_full_inventory(&self, timeout: std::time::Duration) -> Option<Inventory> {
+        if !*self.full_detection_started.lock() {
+            return None;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(inventory) = self.full_inventory() {
+                return Some(inventory);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     pub fn environments(&self) -> Vec<Environment> {
@@ -223,9 +370,11 @@ impl AppState {
     /// Vuelve a detectar los entornos desde cero, esta vez con todo: WSL,
     /// Docker, ADB e intérpretes de lenguajes.
     pub fn refresh_environments(&self) -> Inventory {
+        let _refresh_guard = self.environment_refresh_lock.lock();
         crate::path_env::clear_which_cache();
         let detected = environments::detect_environments(false);
         *self.inventory.lock() = Some(detected.clone());
+        *self.inventory_full.lock() = true;
         let hidden = preferences::current().hidden_environment_ids;
         let hidden: std::collections::HashSet<&str> =
             hidden.split(',').filter(|id| !id.is_empty()).collect();
@@ -254,7 +403,7 @@ impl AppState {
         );
         let state = Arc::clone(self);
         let app = app.clone();
-        std::thread::Builder::new()
+        let spawn = std::thread::Builder::new()
             .name("env-detect".into())
             .spawn(move || {
                 // Dar un pequeño margen al WebView para montar el xterm y a
@@ -274,9 +423,24 @@ impl AppState {
                         "durationMs": started.elapsed().as_millis(),
                     })
                 );
-                let _ = app.emit("envs-updated", inventory);
-            })
-            .ok();
+                // Publica los entornos en cuanto están confirmados. La
+                // precarga del catálogo se ejecuta en otro hilo para que no
+                // retrase la interfaz ni el primer uso del panel.
+                let _ = app.emit("envs-updated", inventory.clone());
+                if state.begin_install_prefetch() {
+                    let prefetch_state = Arc::clone(&state);
+                    let prefetch_inventory = inventory;
+                    let _ = std::thread::Builder::new()
+                        .name("install-prefetch".into())
+                        .spawn(move || {
+                            crate::packages::commands::prefetch_install_catalog(
+                                &prefetch_state,
+                                prefetch_inventory,
+                            );
+                        });
+                }
+            });
+        let _ = spawn;
     }
 
     pub fn environment_by_id(&self, env_id: &str) -> Option<Environment> {
@@ -353,5 +517,45 @@ fn maybe_start_docker_on_windows() {
 impl Default for AppState {
     fn default() -> Self {
         AppState::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use std::time::Duration;
+
+    #[test]
+    fn la_precarga_del_catalogo_se_deduplica_y_se_puede_esperar() {
+        let state = AppState::new();
+        assert!(state
+            .wait_for_install_prefetch(Duration::from_millis(1))
+            .is_none());
+        assert!(state.begin_install_prefetch());
+        assert!(!state.begin_install_prefetch());
+        state.finish_install_prefetch();
+        assert!(state
+            .wait_for_install_prefetch(Duration::from_millis(1))
+            .is_none());
+    }
+
+    #[test]
+    fn repetir_deteccion_no_reutiliza_una_precarga_terminada() {
+        let state = AppState::new();
+        assert!(state.begin_install_prefetch());
+        state.remember_install_actions(&[], true);
+        state.finish_install_prefetch();
+        // La espera general sigue devolviendo la lista recordada…
+        assert!(state
+            .wait_for_install_prefetch(Duration::from_millis(1))
+            .is_some());
+        // …pero «Repetir detección» solo se une a una precarga en vuelo.
+        assert!(state
+            .wait_for_running_install_prefetch(Duration::from_millis(1))
+            .is_none());
+        assert!(state.begin_install_prefetch());
+        assert!(state
+            .wait_for_running_install_prefetch(Duration::from_millis(1))
+            .is_some());
     }
 }

@@ -14,10 +14,18 @@ showSystemBanner = true
 clearReprintBanner = true
 # Elementos ocultos del banner, separados por comas. Vacío = información completa.
 bannerHiddenItems = "host,kernel,environment,motherboard,gpu,storage,datetime"
+# Imagen a la izquierda del banner: el logo de la app o una propia (ruta
+# absoluta en bannerImagePath), en bannerImageColumns columnas (8-40).
+bannerImage = true
+bannerImageColumns = 20
+bannerImagePath = ""
 showDependenciesPanel = true
 showProjectsPanel = true
 showScriptsPanel = true
 showQuickActions = true
+# LTools es una integración experimental y permanece oculta hasta que el
+# usuario la habilita explícitamente desde Ajustes.
+ltoolsEnabled = false
 showExplorerPanel = true
 showTabBar = true
 showEnvironmentSelector = true
@@ -26,14 +34,19 @@ showLanguageButton = true
 # Oculta las barras de controles y deja solo la terminal. Se puede recuperar
 # con el atajo configurable de abajo.
 terminalOnlyMode = false
+# Muestra una guía dentro de la terminal limpia para recuperar el modo normal.
+showTerminalOnlyGuide = true
 # Maximiza la ventana al iniciar, sin obligar a usar siempre ese tamaño.
 startMaximized = false
+startAsAdmin = false
 manualAliasesText = ""
 favoriteReplIds = ""
 hiddenEnvironmentIds = ""
 
 # Atajos globales. Se guardan como combinaciones normalizadas para poder
 # reasignarlos sin que el frontend dependa de la distribución del teclado.
+# La paleta de comandos agrupa con búsqueda las acciones de la aplicación.
+shortcutCommandPalette = "Ctrl+Shift+P"
 shortcutNewTab = "Ctrl+Shift+T"
 shortcutNextTab = "Ctrl+Tab"
 shortcutPreviousTab = "Ctrl+Shift+Tab"
@@ -55,21 +68,32 @@ shortcutRefreshEnvironments = ""
 shortcutExplorerFollow = ""
 shortcutExplorerCd = ""
 shortcutClearTerminal = ""
+shortcutSearchTerminal = "Ctrl+Shift+F"
 shortcutOpenSystemExplorer = ""
 
+# Los temas de fábrica comparten la base negra de «Cian técnico» y solo
+# cambian el acento y la selección. themeRecolorAll = true deja que el tema
+# recoloree también fondos, superficies y texto.
 themeId = "silver"
+themeRecolorAll = false
 accentColor = "#b8bec6"
-uiBackgroundColor = "#080808"
-uiSurfaceColor = "#191919"
-uiSurfaceAltColor = "#111111"
-uiBorderColor = "#3b3d40"
-uiTextColor = "#d7d7d7"
-uiMutedColor = "#8b8e92"
+uiBackgroundColor = "#0d0d0d"
+uiSurfaceColor = "#1e1e1e"
+uiSurfaceAltColor = "#161616"
+uiBorderColor = "#333333"
+uiTextColor = "#d4d4d4"
+uiMutedColor = "#888888"
 terminalSelectionColor = "#4b5056"
 fastfetchColor = "#b8bec6"
 terminalCursorColor = "#b8bec6"
-terminalBackground = "#080808"
-terminalForeground = "#d7d7d7"
+terminalBackground = "#0d0d0d"
+terminalForeground = "#d4d4d4"
+# Temas guardados por el usuario («Guardar como tema» en Ajustes).
+customThemes = []
+# 16 colores ANSI de la terminal; vacío = la paleta de xterm.
+terminalAnsiColors = []
+# Fuente instalada escrita a mano, delante de la familia elegida.
+terminalFontCustom = ""
 terminalFontFamily = "ubuntu-mono"
 terminalFontSize = 12
 terminalLineHeight = 1.5
@@ -79,11 +103,47 @@ terminalFontWeight = "normal"
 terminalPadding = 10
 terminalScrollback = 5000
 terminalCursorBlink = true
+# Enlaces clicables en la salida (Ctrl+clic): http, https y file, validados en
+# el backend; con confirmación, el destino se muestra antes de abrirlo.
+terminalLinks = true
+terminalLinksConfirm = true
 terminalScrollSensitivity = 3
 copyOnSelect = false
 uiDensity = "comfortable"
 
 defaultEnvironmentId = ""
+terminalAdminByDefault = false
+# Cachés de lenguajes y gestores de paquetes en una carpeta propia. Vacía = la
+# de fábrica, «WTerminal/entornos» dentro de los datos locales del usuario.
+toolchainStoreEnabled = true
+# Categorías además de las cachés, todas activas: descargas del panel, modelos
+# de IA, herramientas nuevas (npm -g, cargo install, go install, pip --user) e
+# historial de los REPL. Las carpetas bin de las herramientas van delante en el
+# PATH de WTerminal y, con la integración con el PATH, también en el del
+# usuario (`path_integration::sync_tool_bins`), así que se ven en cualquier
+# terminal. Lo ya instalado no se mueve.
+toolchainStoreDownloads = true
+toolchainStoreAiModels = true
+toolchainStoreTools = true
+toolchainStoreReplHistory = true
+# Sugerencias del historial y colores en la línea de órdenes (Clink en cmd,
+# PSReadLine en PowerShell, ble.sh o plugins de zsh) si están instalados.
+shellAssist = true
+# Y shell por shell (solo cuentan con shellAssist activo).
+shellAssistCmd = true
+shellAssistPowershell = true
+shellAssistBash = true
+shellAssistZsh = true
+# Aspecto de las sugerencias y del coloreado en todas las shells. Un color
+# vacío deja el de cada herramienta (Clink, PSReadLine, ble.sh, zsh).
+shellAssistSuggestionColor = ""
+shellAssistSuggestionItalic = false
+shellAssistSyntax = true
+shellAssistCommandColor = ""
+shellAssistArgumentColor = ""
+shellAssistErrorColor = ""
+shellAssistListView = true
+toolchainStoreDir = ""
 defaultScriptEnvironmentId = ""
 fileManagerId = ""
 viewportCols = 80

@@ -346,6 +346,29 @@ load_local_signing_material() {
         LTERMINAL_UPDATE_PUBLIC_KEY="$(tr -d '[:space:]' < "$public_path")"
         export LTERMINAL_UPDATE_PUBLIC_KEY
     fi
+    local ssh_private_path="${LTERMINAL_SSH_SIGNING_KEY_FILE:-${HOME:-}/.ssh/lterminal-release-signing}"
+    local ssh_public_path="${LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE:-${ssh_private_path}.pub}"
+    if [ ! -r "$ssh_private_path" ] && [ -r "${HOME:-}/.ssh/ltools-release-signing" ]; then
+        ssh_private_path="${HOME}/.ssh/ltools-release-signing"
+    fi
+    if [ ! -r "$ssh_public_path" ] && [ -r "${HOME:-}/.ssh/ltools-release-signing.pub" ]; then
+        ssh_public_path="${HOME}/.ssh/ltools-release-signing.pub"
+    fi
+    if [ -z "${LTERMINAL_SSH_SIGNING_KEY_FILE:-}" ] && [ -r "$ssh_private_path" ]; then
+        export LTERMINAL_SSH_SIGNING_KEY_FILE="$ssh_private_path"
+    fi
+    if [ -z "${LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE:-}" ] && [ -r "$ssh_public_path" ]; then
+        export LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE="$ssh_public_path"
+    fi
+    if [ -z "${LTERMINAL_SSH_SIGNING_IDENTITY:-}" ]; then
+        export LTERMINAL_SSH_SIGNING_IDENTITY="${GIT_AUTHOR_EMAIL:-lterminal-release@local}"
+    fi
+    if [ -z "${LTERMINAL_SSH_UPDATE_IDENTITY:-}" ]; then
+        export LTERMINAL_SSH_UPDATE_IDENTITY="$LTERMINAL_SSH_SIGNING_IDENTITY"
+    fi
+    if [ -z "${LTERMINAL_SSH_UPDATE_PUBLIC_KEY:-}" ] && [ -r "$ssh_public_path" ]; then
+        export LTERMINAL_SSH_UPDATE_PUBLIC_KEY="$(tr -d '\r\n' < "$ssh_public_path")"
+    fi
 }
 
 validate_release_signing() {
@@ -881,6 +904,7 @@ done
 # La build cruzada no usa el bundler NSIS, así que replica el árbol de recursos
 # que la build nativa copia a la carpeta portable. La lista sale del manifiesto
 # base, no de una copia paralela que pueda olvidar el siguiente script integrado.
+# shellcheck disable=SC2016 # El código entre comillas simples se ejecuta en Node, no en Bash.
 while IFS=$'\t' read -r source destination; do
     [ -n "$source" ] && [ -n "$destination" ] || continue
     # Tauri resuelve los orígenes relativos desde src-tauri. Normalizar primero
@@ -888,10 +912,11 @@ while IFS=$'\t' read -r source destination; do
     # sin aceptar escapes reales del proyecto ni confiar en prefijos textuales.
     resource_source="$(realpath -e -- "$TAURI_DIR/$source")" || fail "Falta el recurso declarado por Tauri: $source"
     case "$resource_source" in
-        "$PROJECT_ROOT"/*) resource="${resource_source#"$PROJECT_ROOT"/}" ;;
+        "$PROJECT_ROOT"/*) ;;
         *) fail "El recurso Windows del manifiesto sale de la carpeta del proyecto: $source" ;;
     esac
     [ -f "$resource_source" ] || fail "El recurso empaquetable no es un archivo: $resource_source"
+    # shellcheck disable=SC1003 # La barra inversa es el carácter que se rechaza en las rutas Windows.
     case "$destination" in
         ""|/*|..|../*|*/../*|*/..) fail "Destino de recurso Windows no válido: $destination" ;;
         *'\'*) fail "El destino de recurso Windows debe usar rutas relativas: $destination" ;;
@@ -980,6 +1005,22 @@ if [ -n "${LTERMINAL_SIGNING_PRIVATE_KEY:-}" ]; then
 else
     rm -f -- "$release_out/SHA256SUMS.txt.sig"
     warn "Release local sin firma Ed25519; el actualizador rechazará este artefacto."
+fi
+
+ssh_signature_path="$release_out/SHA256SUMS.txt.sshsig"
+if [ -n "${LTERMINAL_SSH_SIGNING_KEY_FILE:-}" ] && [ -n "${LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE:-}" ]; then
+    node "$PROJECT_ROOT/scripts/sign-release-ssh.mjs" \
+        --manifest "$release_out/SHA256SUMS.txt" \
+        --signature "$ssh_signature_path"
+    node "$PROJECT_ROOT/scripts/sign-release-ssh.mjs" \
+        --manifest "$release_out/SHA256SUMS.txt" \
+        --signature "$ssh_signature_path" --verify
+    ok "Firma SSHSIG del manifiesto verificada"
+elif [[ "${LTERMINAL_REQUIRE_SIGNING:-${CI:-0}}" =~ ^(1|true|yes)$ ]]; then
+    fail "Falta LTERMINAL_SSH_SIGNING_KEY_FILE y su clave pública: una release oficial no puede publicarse sin firma SSH."
+else
+    rm -f -- "$ssh_signature_path"
+    warn "Release local sin firma SSHSIG; el actualizador rechazará este artefacto."
 fi
 
 printf '\nBuild Windows cruzada completada.\n  Carpeta portable: %s\n  ZIP portable: %s\n  Ejecutable de trabajo: %s\n' \

@@ -16,6 +16,8 @@ param(
     [switch]$NoRun,
     [switch]$Installer,
     [switch]$NoInstaller,
+    [switch]$SingleFile,
+    [switch]$NoSingleFile,
     [switch]$SkipChecks,
     [switch]$AllowOfflineChecks,
     [string]$Version,
@@ -25,7 +27,13 @@ param(
     [switch]$StrictTests,
     [switch]$NoExtendedTests,
     [switch]$Fast,
-    [switch]$CrossLinux
+    [switch]$CrossLinux,
+    [switch]$ReleaseValidation,
+    [switch]$VideoTest,
+    [switch]$DownloadTests,
+    [switch]$DependencyAudit,
+    [switch]$InstallerTest,
+    [switch]$NoFocusedTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +55,22 @@ if ($versionWasExplicit -and [string]::IsNullOrWhiteSpace($Version)) {
 if ($NoExtendedTests.IsPresent -and ($FullTests.IsPresent -or $StrictTests.IsPresent)) {
     throw '-NoExtendedTests no se puede combinar con -FullTests ni -StrictTests.'
 }
+# -ReleaseValidation es el nivel que permite dar una release por buena: la
+# batería completa más todas las suites estandarizadas (tests/e2e/suites.mjs).
+if ($ReleaseValidation.IsPresent) {
+    $FullTests = [switch]::new($true)
+    $VideoTest = [switch]::new($true)
+    $DownloadTests = [switch]::new($true)
+    $DependencyAudit = [switch]::new($true)
+    $InstallerTest = [switch]::new($true)
+}
+$extraSuiteRequested = $VideoTest.IsPresent -or $DownloadTests.IsPresent -or $DependencyAudit.IsPresent -or $InstallerTest.IsPresent
+if ($NoExtendedTests.IsPresent -and ($extraSuiteRequested -or $ReleaseValidation.IsPresent)) {
+    throw '-NoExtendedTests no se puede combinar con -ReleaseValidation, -VideoTest, -DownloadTests, -DependencyAudit ni -InstallerTest.'
+}
+if ($InstallerTest.IsPresent -and $NoInstaller.IsPresent) {
+    throw '-InstallerTest necesita el instalador: no se puede combinar con -NoInstaller.'
+}
 
 # Resolver las rutas del proyecto al principio permite recoger todos los
 # parámetros interactivos (incluida la versión) antes de tocar dependencias o
@@ -60,6 +84,7 @@ $VendorDir   = Join-Path $TauriDir 'vendor\conpty'
 Set-Location $ProjectRoot
 
 $script:VersionManifestBackupDir = $null
+$script:UsingPnpmNpmShim = $false
 $script:BuildTempDir = Join-Path ([IO.Path]::GetTempPath()) "wterminal-build-$PID-$([guid]::NewGuid().ToString('N'))"
 $script:VersionManifestPaths = @(
     (Join-Path $ProjectRoot 'package.json'),
@@ -119,10 +144,19 @@ function Restore-VersionManifests {
 if ($Installer.IsPresent -and $NoInstaller.IsPresent) {
     throw '-Installer y -NoInstaller no se pueden combinar.'
 }
+if ($SingleFile.IsPresent -and $NoSingleFile.IsPresent) {
+    throw '-SingleFile y -NoSingleFile no se pueden combinar.'
+}
 # Una ejecución sin opciones debe generar una release publicable. El instalador
 # se puede desactivar explícitamente para iteraciones rápidas o portables.
 if (-not $NoInstaller.IsPresent) {
     $Installer = [switch]::new($true)
+}
+# La release completa publica también un portable de un solo archivo. Las
+# builds rápidas no lo generan salvo que se solicite explícitamente para no
+# convertir una iteración de desarrollo en un artefacto de distribución.
+if (-not $NoSingleFile.IsPresent -and ($SingleFile.IsPresent -or -not $Fast.IsPresent)) {
+    $SingleFile = [switch]::new($true)
 }
 
 if ($Help) {
@@ -138,13 +172,53 @@ if ($Help) {
     Write-Host '  -CrossLinux            Ejecuta tambien la build Linux dentro de WSL.'
     Write-Host '  -Installer             Activa el instalador NSIS offline (ya es predeterminado).'
     Write-Host '  -NoInstaller           Desactiva el instalador NSIS predeterminado.'
+    Write-Host '  -SingleFile            Genera también el portable de un solo .exe (sin extraer nada).'
+    Write-Host '  -NoSingleFile          Omite el portable de un solo .exe.'
+    Write-Host '  -NoFocusedTests        Omite la suite de regresiones enfocadas que acompaña a la batería ampliada.'
+    Write-Host '  -VideoTest             Añade el recorrido E2E completo grabando vídeo.'
+    Write-Host '  -DownloadTests         Añade descargas reales (pip, npm, Deno, Bun, Go) a la carpeta de cachés (necesita red).'
+    Write-Host '  -DependencyAudit       Añade la auditoría completa del catálogo de dependencias (larga).'
+    Write-Host '  -InstallerTest         Instala el NSIS (un UAC), ejecuta el E2E sobre lo instalado y desinstala.'
+    Write-Host '  -ReleaseValidation     -FullTests + vídeo + descargas + auditoría + instalador: el nivel para dar una release por buena.'
     Write-Host '  -InstallE2eDriver     Compatibilidad: el E2E ya prepara tauri-driver automáticamente.'
     Write-Host '  -Version X.Y.Z        Sobrescribe la version del paquete.'
     Write-Host '  -NonInteractive        No espera entrada del usuario.'
-    Write-Host '  Sin opciones           Release completa: EXE + NSIS, checks estrictos, smoke, bateria ampliada y E2E.'
+    Write-Host '  Sin opciones           Release completa: EXE + portable de un solo archivo + NSIS, checks estrictos, smoke, bateria ampliada y E2E.'
     Write-Host '                        En modo interactivo, la versión se pide al principio junto al resto de opciones.'
     Write-Host '                        Un fallo de E2E se informa al final sin impedir publicar la release.'
     exit 0
+}
+
+# Los escenarios de restauración de versión no necesitan descargar Node/Rust,
+# sondear WinGet ni inicializar Visual Studio. Mantener este recorrido de prueba
+# junto al backup real hace que el test sea rápido y fiable en CI y en hosts
+# mínimos, y evita cambios temporales mientras busca requisitos externos.
+$runVersionRecoveryTest = $env:LTERMINAL_TEST_FAIL_AFTER_VERSION -eq '1' -or
+    -not [string]::IsNullOrWhiteSpace($env:LTERMINAL_TEST_REMOVE_VERSION_BACKUP) -or
+    $env:LTERMINAL_TEST_EXIT_AFTER_VERSION -eq '1'
+if ($runVersionRecoveryTest) {
+    $testPackage = Get-Content (Join-Path $ProjectRoot 'package.json') -Raw | ConvertFrom-Json
+    if (-not [string]::IsNullOrWhiteSpace($Version) -and $Version -ne $testPackage.version) {
+        Backup-VersionManifests
+        & node 'scripts/set-package-version.mjs' $Version
+        if ($LASTEXITCODE -ne 0) { throw 'La prueba no pudo aplicar la versión de ensayo.' }
+    }
+    if ($env:LTERMINAL_TEST_REMOVE_VERSION_BACKUP) {
+        if ($env:LTERMINAL_TEST_REMOVE_VERSION_BACKUP -notin @('package.json', 'package-lock.json', 'Cargo.toml', 'Cargo.lock')) {
+            throw 'El manifiesto solicitado para la prueba no está permitido.'
+        }
+        $testBackup = Join-Path $script:VersionManifestBackupDir $env:LTERMINAL_TEST_REMOVE_VERSION_BACKUP
+        Remove-Item -LiteralPath $testBackup -Force -ErrorAction Stop
+        Restore-VersionManifests
+    }
+    if ($env:LTERMINAL_TEST_EXIT_AFTER_VERSION -eq '1') {
+        Restore-VersionManifests
+        exit 0
+    }
+    if ($env:LTERMINAL_TEST_FAIL_AFTER_VERSION -eq '1') {
+        Restore-VersionManifests
+        throw 'Fallo de prueba solicitado después de aplicar la versión.'
+    }
 }
 
 try {
@@ -159,6 +233,85 @@ function Add-PostBuildIssue {
     param([Parameter(Mandatory = $true)][string]$Message)
     $script:PostBuildIssues += $Message
     Write-Warn $Message
+}
+
+# Lo que la build deja para revisar después: qué pruebas corrieron y dónde
+# quedaron informes, capturas, vídeos y logs. `Write-BuildSummary` lo enseña
+# todo junto al final; sin esto había que buscar en %TEMP% con nombres
+# aleatorios y el log principal se borraba con el temporal de la build.
+$script:BuildTests = @()
+$script:BuildArtifactsDir = $null
+function Add-BuildTest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Result,
+        [string]$Detail = ''
+    )
+    $script:BuildTests += [pscustomobject]@{ Name = $Name; Result = $Result; Detail = $Detail }
+}
+function Get-BuildArtifactsDir {
+    if (-not $script:BuildArtifactsDir) {
+        $suffix = if ($Fast) { '-dev' } else { '' }
+        $script:BuildArtifactsDir = Join-Path $ProjectRoot ("artifacts\builds\WTerminal-$version$suffix-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        New-Item -ItemType Directory -Force -Path $script:BuildArtifactsDir | Out-Null
+    }
+    return $script:BuildArtifactsDir
+}
+function Format-BuildSize ([long]$Bytes) {
+    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+    return ('{0:N0} KB' -f [Math]::Ceiling($Bytes / 1KB))
+}
+function Write-BuildSummary {
+    $releaseFiles = @()
+    if ($releaseOut -and (Test-Path -LiteralPath $releaseOut -PathType Container)) {
+        $releaseFiles = @(Get-ChildItem -LiteralPath $releaseOut -File -Force | Sort-Object Name)
+    }
+    $artifactsDir = $script:BuildArtifactsDir
+    if ($artifactsDir -and $logPath -and (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        Copy-Item -LiteralPath $logPath -Destination (Join-Path $artifactsDir 'wterminal-main.log') -Force -ErrorAction SilentlyContinue
+    }
+    $evidence = @()
+    $evidenceRoots = @($artifactsDir, $script:SuiteOutDir) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) }
+    foreach ($root in $evidenceRoots) {
+        $evidence += @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction SilentlyContinue)
+    }
+    $videos = @($evidence | Where-Object { $_.Extension -in '.mp4', '.webm' } | Sort-Object FullName)
+    $screenshots = @($evidence | Where-Object { $_.Extension -in '.png', '.jpg', '.jpeg' })
+    $reports = @($evidence | Where-Object { $_.Name -like '*report*.json' -or $_.Name -in 'summary.md', 'summary.json' } | Sort-Object FullName)
+    $logs = @($evidence | Where-Object { $_.Extension -eq '.log' } | Sort-Object FullName)
+
+    Write-Host ''
+    Write-Host '==> Resumen de la build' -ForegroundColor Cyan
+    Write-Host "  Versión: $version$(if ($Fast) { ' (rápida, -dev)' })"
+    Write-Host "  Carpeta desempaquetada: $distDir"
+    Write-Host "  Archivos de release ($releaseOut):"
+    if ($releaseFiles.Count -eq 0) { Write-Host '    (ninguno)' -ForegroundColor Yellow }
+    foreach ($file in $releaseFiles) {
+        Write-Host ('    {0,-48} {1,10}' -f $file.Name, (Format-BuildSize $file.Length))
+    }
+    Write-Host '  Pruebas:'
+    if ($script:BuildTests.Count -eq 0) { Write-Host '    (no se ejecutó ninguna)' -ForegroundColor Yellow }
+    foreach ($test in $script:BuildTests) {
+        $color = switch -Regex ($test.Result) { '^OK' { 'Green' } '^(FALLO|ERROR)' { 'Red' } default { 'Yellow' } }
+        $detail = if ($test.Detail) { " — $($test.Detail)" } else { '' }
+        Write-Host ('    [{0}] {1}{2}' -f $test.Result, $test.Name, $detail) -ForegroundColor $color
+    }
+    if ($evidenceRoots.Count -gt 0) {
+        Write-Host '  Evidencias:'
+        foreach ($root in $evidenceRoots) { Write-Host "    Carpeta: $root" }
+        Write-Host "    Informes E2E ($($reports.Count)):"
+        foreach ($item in $reports) { Write-Host "      $($item.FullName)" }
+        Write-Host "    Vídeos ($($videos.Count)):"
+        foreach ($item in $videos) { Write-Host ('      {0} ({1})' -f $item.FullName, (Format-BuildSize $item.Length)) }
+        $captureFolders = @($screenshots | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique)
+        Write-Host "    Capturas: $($screenshots.Count) en $($captureFolders.Count) carpetas"
+        foreach ($folder in $captureFolders) { Write-Host "      $folder" }
+        Write-Host "    Logs ($($logs.Count)):"
+        foreach ($item in $logs) { Write-Host "      $($item.FullName)" }
+    }
+    $totalSeconds = ([DateTime]::UtcNow - $script:BuildStartedAt).TotalSeconds
+    Write-Host ("  Tiempo total: {0:N1} s" -f $totalSeconds) -ForegroundColor DarkGray
 }
 
 # Windows PowerShell 5.1 necesita el BOM del propio archivo para leer bien sus
@@ -268,7 +421,25 @@ if ($interactiveBuild) {
     $SkipChecks = Read-BuildChoice 'Saltar comprobaciones locales' $SkipChecks
     $AllowOfflineChecks = Read-BuildChoice 'Convertir comprobaciones externas en avisos' $AllowOfflineChecks
     if (-not $FullTests.IsPresent -and -not $StrictTests.IsPresent) {
-        $NoExtendedTests = [switch](-not (Read-BuildChoice 'Ejecutar pruebas ampliadas y E2E' (-not $NoExtendedTests.IsPresent)))
+        $runExtendedTests = Read-BuildChoice 'Ejecutar pruebas ampliadas y E2E' (-not $NoExtendedTests.IsPresent)
+        $NoExtendedTests = [switch](-not $runExtendedTests)
+        if ($runExtendedTests) {
+            $StrictTests = [switch](Read-BuildChoice 'Fallarlas si faltan herramientas opcionales (modo estricto)' $false)
+        }
+    }
+    if (-not $NoExtendedTests.IsPresent) {
+        if (Read-BuildChoice 'Validación completa de release: vídeo, descargas reales, auditoría del catálogo e instalador (pide UAC)' $ReleaseValidation.IsPresent) {
+            $ReleaseValidation = [switch]::new($true)
+            $FullTests = [switch]::new($true)
+            $VideoTest = [switch]::new($true)
+            $DownloadTests = [switch]::new($true)
+            $DependencyAudit = [switch]::new($true)
+            $InstallerTest = [switch]::new($true)
+            if (-not $Installer.IsPresent) {
+                $Installer = [switch]::new($true)
+                Write-Host '  La validación completa prueba el instalador: se generará también.' -ForegroundColor DarkGray
+            }
+        }
     }
     $CrossLinux = Read-BuildChoice 'Ejecutar también la build Linux mediante WSL' $CrossLinux
     $NoRun = [switch](-not (Read-BuildChoice 'Lanzar la aplicación al terminar' (-not $NoRun)))
@@ -500,6 +671,76 @@ function Test-SmokeReady {
 function Test-Command ($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
+
+function Resolve-ProbeExecutable {
+    param([Parameter(Mandatory = $true)][hashtable]$Probe)
+
+    # Algunas aplicaciones Windows no añaden su ejecutable al PATH aunque
+    # estén instaladas. La batería usa las mismas rutas conocidas que la
+    # interfaz para evitar falsos avisos de herramienta ausente.
+    if (Test-Command $Probe.Exe) {
+        $command = Get-Command $Probe.Exe -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($command) { return [string]$command.Source }
+        return [string]$Probe.Exe
+    }
+    $patterns = switch ($Probe.Name) {
+        'MariaDB' { @('C:\Program Files\MariaDB*\bin\mariadb.exe', 'C:\Program Files (x86)\MariaDB*\bin\mariadb.exe') }
+        'MySQL' { @('C:\Program Files\MySQL\MySQL Server*\bin\mysql.exe', 'C:\Program Files (x86)\MySQL\MySQL Server*\bin\mysql.exe') }
+        'PostgreSQL' { @('C:\Program Files\PostgreSQL\*\bin\psql.exe', 'C:\Program Files (x86)\PostgreSQL\*\bin\psql.exe') }
+        'Julia' { @((Join-Path $env:LOCALAPPDATA 'Programs\Julia-*\bin\julia.exe'), 'C:\Julia*\bin\julia.exe', 'C:\Program Files\Julia*\bin\julia.exe') }
+        'R' { @('C:\Program Files\R\R-*\bin\x64\R.exe', 'C:\Program Files\R\R-*\bin\R.exe', 'C:\Program Files (x86)\R\R-*\bin\R.exe') }
+        'OpenVPN' { @('C:\Program Files\OpenVPN\bin\openvpn.exe', 'C:\Program Files (x86)\OpenVPN\bin\openvpn.exe') }
+        'QEMU' { @('C:\Program Files\qemu\qemu-system-x86_64.exe', 'C:\Program Files\QEMU\qemu-system-x86_64.exe') }
+        'VirtualBox' { @('C:\Program Files\Oracle\VirtualBox\VBoxManage.exe', 'C:\Program Files (x86)\Oracle\VirtualBox\VBoxManage.exe') }
+        'NSudo' { @('C:\WSCore\Components\Hooks\NSudo\NSudoLC.exe') }
+        default { @() }
+    }
+    foreach ($pattern in $patterns) {
+        $candidate = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($candidate) { return [string]$candidate.FullName }
+    }
+    return $null
+}
+
+function Initialize-NpmCompatibilityShim {
+    # El ejecutor del proyecto usa `npm` tanto aquí como en beforeBuildCommand
+    # de Tauri. En equipos de desarrollo con pnpm pero sin npm, ofrecer la
+    # compatibilidad mínima que necesita este repo evita fallar antes de
+    # compilar. Si npm está instalado no se cambia la ruta normal de release.
+    if (Test-Command 'npm') { return }
+    $pnpm = Get-Command 'pnpm.cmd' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $pnpm) {
+        $pnpm = Get-Command 'pnpm' -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if (-not $pnpm -or -not (Test-Path -LiteralPath $pnpm.Source -PathType Leaf)) { return }
+
+    New-Item -ItemType Directory -Force -Path $script:BuildTempDir | Out-Null
+    $shimPath = Join-Path $script:BuildTempDir 'npm.cmd'
+    $pnpmPath = $pnpm.Source.Replace('%', '%%')
+    $shim = @(
+        '@echo off',
+        'setlocal',
+        'set PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false',
+        'if /I "%~1"=="ci" goto install',
+        'if /I "%~1"=="install" goto install',
+        ('call "{0}" --config.verifyDepsBeforeRun=false %*' -f $pnpmPath),
+        'exit /b %ERRORLEVEL%',
+        ':install',
+        'set CI=true',
+        ('call "{0}" --config.verifyDepsBeforeRun=false install --lockfile=false' -f $pnpmPath),
+        'exit /b %ERRORLEVEL%'
+    )
+    [IO.File]::WriteAllLines($shimPath, $shim, [Text.Encoding]::ASCII)
+    $env:Path = "$script:BuildTempDir;$env:Path"
+    $script:UsingPnpmNpmShim = $true
+    Write-Warn 'npm no está instalado; se usará pnpm para los comandos de build del proyecto.'
+}
+
+Initialize-NpmCompatibilityShim
 
 function Get-WebView2RuntimeVersion {
     # Microsoft documenta estas claves como la fuente canónica para detectar
@@ -810,7 +1051,7 @@ function Get-NodeVersion {
 function Refresh-EnvironmentPath {
     $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path    = "$machinePath;$userPath"
+    $existingPath = $env:Path
 
     $commonDirs = @(
         "${env:ProgramFiles}\nodejs",
@@ -818,14 +1059,24 @@ function Refresh-EnvironmentPath {
         "$env:LocalAppData\Programs\node",
         "$env:USERPROFILE\.cargo\bin"
     )
-    foreach ($dir in $commonDirs) {
-        if ($dir -and (Test-Path $dir) -and ($env:Path -notlike "*$dir*")) {
-            $env:Path = "$dir;$env:Path"
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $pathEntries = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @($machinePath -split ';') + @($userPath -split ';') + @($existingPath -split ';') + $commonDirs) {
+        $candidate = [string]$entry
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $candidate = $candidate.Trim().Trim('"')
+            if ($seen.Add($candidate)) { $pathEntries.Add($candidate) }
         }
     }
+    $env:Path = $pathEntries -join ';'
 }
 
+# Incluir los directorios habituales de Node y Rust sin eliminar las rutas que
+# el host ya inyectó (por ejemplo, un runtime portátil de Node o pnpm).
+Refresh-EnvironmentPath
+
 $minNodeVersion = [version]'22.12.0'
+$nodeFallbackVersion = '22.22.2'
 $currentNodeVersion = Get-NodeVersion
 
 if (-not $currentNodeVersion -or $currentNodeVersion -lt $minNodeVersion) {
@@ -868,11 +1119,12 @@ if (-not $currentNodeVersion -or $currentNodeVersion -lt $minNodeVersion) {
     }
 
     if (-not $installed) {
-        Write-Step 'Instalando Node.js (v22.14.0 LTS) mediante descarga directa (MSI)...'
+        Write-Step "Instalando Node.js (v$nodeFallbackVersion LTS) mediante descarga directa (MSI)..."
         try {
-            $msiUrl = 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi'
+            $msiName = "node-v$nodeFallbackVersion-x64.msi"
+            $msiUrl = "https://nodejs.org/dist/v$nodeFallbackVersion/$msiName"
             New-Item -ItemType Directory -Force -Path $script:BuildTempDir | Out-Null
-            $msiPath = Join-Path $script:BuildTempDir 'node-v22.14.0-x64.msi'
+            $msiPath = Join-Path $script:BuildTempDir $msiName
             Write-Host "    Descargando $msiUrl ..." -ForegroundColor Yellow
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
@@ -981,14 +1233,63 @@ function Import-MSVCEnvironment {
     # Usarlo evita que un `cmd.exe` alternativo del PATH sea el que cargue
     # Visual Studio; el literal queda como respaldo para sesiones dañadas.
     $comSpec = if (-not [string]::IsNullOrWhiteSpace($env:ComSpec)) { $env:ComSpec } else { 'cmd.exe' }
-    $environmentLines = @(& $comSpec /d /s /c $commandLine 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $false }
+    # VsDevCmd.bat invoca `vswhere.exe` sin ruta. Desde una consola sin la
+    # carpeta del instalador en PATH, cmd escribe «no se reconoce» en stderr y
+    # Windows PowerShell 5.1 lo convierte en error fatal con
+    # ErrorActionPreference=Stop. Se añade el instalador al PATH solo para esta
+    # llamada y se tolera su stderr: el código de salida decide.
+    $installerDirectories = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer')
+    ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'vswhere.exe') -PathType Leaf) }
+    $pathBeforeDevCmd = $env:Path
+    $errorPreferenceBeforeDevCmd = $ErrorActionPreference
+    try {
+        if ($installerDirectories) { $env:Path = (@($installerDirectories) + $env:Path) -join ';' }
+        $ErrorActionPreference = 'Continue'
+        $environmentLines = @(& $comSpec /d /s /c $commandLine 2>$null)
+        $devCmdExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $errorPreferenceBeforeDevCmd
+        $env:Path = $pathBeforeDevCmd
+    }
+    if ($devCmdExitCode -ne 0) { return $false }
+    $previousPath = $env:Path
+    $previousEnvironment = [Environment]::GetEnvironmentVariables('Process')
+    # `set` separa por líneas los valores multilínea. No dejar que la salida de
+    # VsDevCmd convierta una clave PEM Ed25519 en su primera línea: las claves
+    # se conservan desde el entorno original y se pasan intactas a Node.
+    $preservedMultilineEnvironment = @(
+        'LTERMINAL_SIGNING_PRIVATE_KEY',
+        'LTERMINAL_UPDATE_PUBLIC_KEY',
+        'LTERMINAL_SSH_UPDATE_PUBLIC_KEY',
+        'LTERMINAL_SSH_UPDATE_IDENTITY',
+        'LTERMINAL_SSH_SIGNING_IDENTITY'
+    )
     foreach ($line in $environmentLines) {
         if ([string]$line -match '^([^=]+)=(.*)$') {
+            if ($matches[1] -in $preservedMultilineEnvironment) { continue }
             [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
         }
     }
-    return (Test-Command 'link.exe') -and (Test-Command 'cl.exe')
+    if ((Test-Command 'link.exe') -and (Test-Command 'cl.exe')) { return $true }
+
+    # VsDevCmd puede existir en una instalación incompleta. No conservar un
+    # PATH parcial que oculte cargo/rustc y haga fallar el fallback rust-lld.
+    $currentEnvironment = [Environment]::GetEnvironmentVariables('Process')
+    foreach ($name in @($currentEnvironment.Keys)) {
+        if (-not $previousEnvironment.Contains($name)) {
+            [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
+        }
+    }
+    foreach ($name in @($previousEnvironment.Keys)) {
+        [Environment]::SetEnvironmentVariable([string]$name, [string]$previousEnvironment[$name], 'Process')
+    }
+    # El snapshot del entorno puede traer las claves PATH/Path duplicadas en
+    # PowerShell; restaurar la variable del provider garantiza conservar ambas
+    # rutas inyectadas y las herramientas del usuario.
+    $env:Path = $previousPath
+    return $false
 }
 
 function Test-MSVCLinker {
@@ -1168,11 +1469,32 @@ if ($Clean) {
 }
 
 Write-Step 'Instalando dependencias del frontend (npm ci)'
-$code = Invoke-Native 'npm' @('ci')
-if ($code -ne 0) {
-    Write-Warn 'npm ci no pudo vaciar node_modules por bloqueo de archivos en Windows. Reintentando con npm install...'
-    $code = Invoke-Native 'npm' @('install')
-    if ($code -ne 0) { throw "La instalacion de dependencias fallo (codigo $code)." }
+$npmUserConfig = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.npmrc'
+$npmConfigArgs = if (Test-Path -LiteralPath $npmUserConfig -PathType Leaf) {
+    @('--userconfig', $npmUserConfig)
+} else {
+    @()
+}
+# npm 11 puede interpretar un `allow-scripts` heredado del perfil del usuario
+# como una opción de proyecto cuando se ejecuta desde PowerShell. Pasar el
+# archivo de configuración explícitamente hace que npm aplique el campo
+# allowScripts del package.json de este proyecto de forma determinista, sin
+# modificar la configuración global del usuario.
+$previousNpmAllowScripts = $env:NPM_CONFIG_ALLOW_SCRIPTS
+Remove-Item Env:NPM_CONFIG_ALLOW_SCRIPTS -ErrorAction SilentlyContinue
+try {
+    $code = Invoke-Native 'npm' ($npmConfigArgs + @('ci'))
+    if ($code -ne 0) {
+        Write-Warn 'npm ci no pudo vaciar node_modules por bloqueo de archivos en Windows. Reintentando con npm install...'
+        $code = Invoke-Native 'npm' ($npmConfigArgs + @('install'))
+        if ($code -ne 0) { throw "La instalacion de dependencias fallo (codigo $code)." }
+    }
+} finally {
+    if ($null -eq $previousNpmAllowScripts) {
+        Remove-Item Env:NPM_CONFIG_ALLOW_SCRIPTS -ErrorAction SilentlyContinue
+    } else {
+        $env:NPM_CONFIG_ALLOW_SCRIPTS = $previousNpmAllowScripts
+    }
 }
 Write-Ok 'Dependencias instaladas'
 
@@ -1193,6 +1515,7 @@ if (-not $SkipChecks) {
         throw "Las comprobaciones fallaron (codigo $code). Usa -SkipChecks para saltarlas."
     }
     Write-Ok 'Todo verde'
+    Add-BuildTest 'Comprobaciones (npm run check: tipos, formato, clippy y pruebas de unidad)' 'OK'
 } else {
     Write-Step 'Ejecutando la auditoría mínima de workflows de GitHub'
     $securityCheckCode = Invoke-Native 'npm' @('run', 'check:github-security') -CaptureOutput
@@ -1200,15 +1523,69 @@ if (-not $SkipChecks) {
         throw "La auditoría de workflows de GitHub falló (código $securityCheckCode)."
     }
     Write-Warn 'Comprobaciones saltadas por peticion (-SkipChecks)'
+    Add-BuildTest 'Comprobaciones (npm run check)' 'OMITIDAS' '-SkipChecks; solo la auditoría de workflows'
 }
 
 # ---------------------------------------------------------------------------
 # 6. Compilacion
 # ---------------------------------------------------------------------------
+# Las claves públicas de actualización forman parte del ejecutable: no basta
+# con firmar después el ZIP. Cargarlas antes de invocar Tauri permite que
+# `build.rs` las pase a rustc y evita publicar una aplicación que solo descubre
+# el problema al pulsar «Volver a comprobar».
+function Import-UpdateTrustMaterialForBuild {
+    if ($env:CI -match '^(1|true|yes)$') { return }
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $configRoot = if (-not [string]::IsNullOrWhiteSpace($env:XDG_CONFIG_HOME)) {
+        $env:XDG_CONFIG_HOME
+    } elseif ($env:USERPROFILE) {
+        Join-Path $env:USERPROFILE '.config'
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_UPDATE_PUBLIC_KEY)) {
+        $publicCandidates = @(
+            $env:LTERMINAL_UPDATE_PUBLIC_KEY_FILE,
+            $(if ($configRoot) { Join-Path $configRoot 'lterminal\release-signing-public.hex' }),
+            $(if ($desktop) { Join-Path $desktop 'release-signing-public.hex' })
+        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+        if ($publicCandidates) {
+            $env:LTERMINAL_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath @($publicCandidates)[0] -Raw).Trim()
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY)) {
+        $sshCandidates = @(
+            $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE,
+            $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing.pub' }),
+            $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing.pub' }),
+            $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing.pub' }),
+            $(if ($desktop) { Join-Path $desktop 'ltools-release-signing.pub' })
+        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+        if ($sshCandidates) {
+            $env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath @($sshCandidates)[0] -Raw).Trim()
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_IDENTITY)) {
+        $env:LTERMINAL_SSH_UPDATE_IDENTITY = if ($env:GIT_AUTHOR_EMAIL) { $env:GIT_AUTHOR_EMAIL } else { 'lterminal-release@local' }
+    }
+    $trustRequired = $env:LTERMINAL_REQUIRE_SIGNING -match '^(1|true|yes)$'
+    if ($trustRequired -and ([string]::IsNullOrWhiteSpace($env:LTERMINAL_UPDATE_PUBLIC_KEY) -or
+            [string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY))) {
+        throw 'Faltan las claves públicas de confianza antes de compilar; no se generará una release actualizable.'
+    }
+}
+
+Import-UpdateTrustMaterialForBuild
+
 function Invoke-TauriBuild {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $previousSkipChecks = $env:LTERMINAL_SKIP_CHECKS
+    $previousPnpmVerifyDeps = $env:PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN
     try {
+        if ($script:UsingPnpmNpmShim) {
+            # El beforeBuildCommand ejecuta prebuild en un proceso Node hijo.
+            # pnpm repara node_modules de forma automática si no recibe esta
+            # preferencia heredable, y esa reparación falla sin TTY.
+            $env:PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN = 'false'
+        }
         if ($SkipChecks) {
             # Tauri ejecuta npm run build internamente. Este entorno llega también
             # al prebuild y al build del frontend, de modo que -SkipChecks no
@@ -1217,7 +1594,25 @@ function Invoke-TauriBuild {
         } else {
             Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
         }
-        $code = Invoke-Native 'npm' $Arguments -CaptureOutput
+        $usePnpmTauri = $script:UsingPnpmNpmShim -and
+            $Arguments.Count -ge 4 -and
+            $Arguments[0] -eq 'run' -and
+            $Arguments[1] -eq 'tauri' -and
+            $Arguments[2] -eq '--'
+        if ($usePnpmTauri) {
+            # pnpm conserva `--` como argumento de Tauri mientras npm lo quita.
+            # En PowerShell, `pnpm exec` puede perder la resolución de .bin al
+            # ejecutarse desde el builder; Node ejecuta el entrypoint local sin
+            # depender de esa resolución y el shim npm sigue cubriendo hooks.
+            $tauriCli = Join-Path $ProjectRoot 'node_modules\@tauri-apps\cli\tauri.js'
+            if (-not (Test-Path -LiteralPath $tauriCli -PathType Leaf)) {
+                throw "No se encontró el CLI local de Tauri: $tauriCli"
+            }
+            $tauriArguments = @($tauriCli) + @($Arguments | Select-Object -Skip 3)
+            $code = Invoke-Native 'node' $tauriArguments -CaptureOutput
+        } else {
+            $code = Invoke-Native 'npm' $Arguments -CaptureOutput
+        }
         # En algunos hosts npm/tauri puede devolver cero aunque el proceso de
         # Cargo haya dejado un error fatal en la salida (por ejemplo, una
         # compilación fallida seguida de un ejecutable release antiguo). No se
@@ -1232,6 +1627,11 @@ function Invoke-TauriBuild {
             Remove-Item Env:LTERMINAL_SKIP_CHECKS -ErrorAction SilentlyContinue
         } else {
             $env:LTERMINAL_SKIP_CHECKS = $previousSkipChecks
+        }
+        if ($null -eq $previousPnpmVerifyDeps) {
+            Remove-Item Env:PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN -ErrorAction SilentlyContinue
+        } else {
+            $env:PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN = $previousPnpmVerifyDeps
         }
     }
 }
@@ -1289,10 +1689,38 @@ function Find-PortableWebView2Bootstrapper {
         if ($mode -eq '1') { throw "El bootstrapper WebView2 descargado parece incompleto ($size bytes)." }
     }
     if ($mode -eq '1') { throw "No se pudo preparar el bootstrapper WebView2: $candidate" }
-    Write-Warn 'No se incluirá bootstrapper WebView2 en el portable; usa LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER=1 para descargarlo.'
+    Write-Warn 'No se incluirá bootstrapper WebView2 en el portable; usa WTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER=1 para descargarlo.'
     return $null
 }
 
+function Extract-OfflineWebView2Installer {
+    param([Parameter(Mandatory = $true)][string]$NsisPath)
+    $sevenZip = @(
+        $env:LTERMINAL_7ZIP,
+        $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles '7-Zip\7z.exe' }),
+        $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.exe' })
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
+    if (-not $sevenZip) { throw 'La release Windows completa necesita 7-Zip para extraer WebView2 offline del NSIS.' }
+    $cacheDir = Join-Path $TauriDir 'target\release\portable-webview2'
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    $offlinePath = Join-Path $cacheDir 'MicrosoftEdgeWebView2RuntimeInstaller.exe'
+    Remove-Item -LiteralPath $offlinePath -Force -ErrorAction SilentlyContinue
+    & $sevenZip e -y "-o$cacheDir" $NsisPath '$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe' | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $offlinePath -PathType Leaf)) {
+        throw "No se pudo extraer WebView2 offline del instalador NSIS: $NsisPath"
+    }
+    $offline = Get-Item -LiteralPath $offlinePath
+    if ($offline.Length -lt 100MB) {
+        throw "WebView2 offline extraído está incompleto ($($offline.Length) bytes)."
+    }
+    return $offline.FullName
+}
+
+# Marcar el inicio de esta pasada permite detectar un ejecutable `wterminal.exe`
+# que haya quedado de una build anterior. `cargo build` genera
+# `winslim-terminal.exe`, mientras que solo Tauri aplica `mainBinaryName` y
+# escribe el binario publicable `wterminal.exe`.
+$buildStartedUtc = (Get-Date).ToUniversalTime()
 if ($Installer) {
     # Tauri/tauri-build solo copia automáticamente WebView2Loader para GNU; en
     # MSVC queda dentro de build\\webview2-com-sys-*\\out\\x64. Primero se hace
@@ -1304,8 +1732,12 @@ if ($Installer) {
     if ($code -ne 0) { throw "La compilacion del binario fallo (codigo $code)." }
     Ensure-WebView2Loader | Out-Null
 
-    Write-Step 'Compilando (Tauri + instalador NSIS offline de WebView2)'
-    $code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--config', 'src-tauri/tauri.windows.installer.conf.json')
+    Write-Step 'Empaquetando (Tauri + instalador NSIS offline de WebView2)'
+    # El binario ya se compiló en la pasada --no-bundle anterior. `bundle`
+    # reutiliza ese ejecutable y evita una segunda compilación LTO completa;
+    # `build --config` volvía a enlazar todo el crate aunque solo se necesitara
+    # generar el instalador.
+    $code = Invoke-TauriBuild @('run', 'tauri', '--', 'bundle', '--config', 'src-tauri/tauri.windows.installer.conf.json')
 } else {
     Write-Step 'Compilando (tauri build --no-bundle)'
     # --no-bundle es redundante con bundle.active:false de tauri.windows.conf.json,
@@ -1322,8 +1754,12 @@ if ($Installer) {
         throw "La compilacion termino sin generar instalador NSIS en $nsisDir."
     }
     $installerPath = $installers[0]
-    if ($installerPath.Length -lt 1MB) {
-        throw "El instalador NSIS parece incompleto ($($installerPath.Length) bytes): $($installerPath.FullName)."
+    # `offlineInstaller` incluye el runtime Evergreen completo de WebView2.
+    # Un NSIS de unos pocos megabytes es el bootstrapper online y dejaría sin
+    # conexión a una instalación nueva; rechazarlo aquí evita publicarlo con
+    # la etiqueta de instalador offline.
+    if ($installerPath.Length -lt 100MB) {
+        throw "El instalador NSIS no contiene el runtime WebView2 offline ($($installerPath.Length) bytes): $($installerPath.FullName)."
     }
     Write-Ok "Instalador NSIS con WebView2 offline: $($installerPath.FullName)"
 }
@@ -1345,7 +1781,20 @@ Write-Ok 'Frontend compartido actualizado: atajos configurables y preferencias c
 
 $exePath = Join-Path $ReleaseDir 'wterminal.exe'
 if (-not (Test-Path $exePath)) { throw "La compilacion termino pero no hay ejecutable en $exePath." }
-Write-Ok "Compilado: $exePath"
+$exeInfo = Get-Item -LiteralPath $exePath -ErrorAction Stop
+if ($exeInfo.LastWriteTimeUtc -lt $buildStartedUtc.AddSeconds(-5)) {
+    throw "La compilacion no actualizo $exePath (fecha $($exeInfo.LastWriteTimeUtc.ToString('o')); inicio $($buildStartedUtc.ToString('o'))). No se empaquetara una release antigua."
+}
+Write-Ok "Compilado y actualizado: $exePath ($($exeInfo.LastWriteTimeUtc.ToString('o')) UTC)"
+
+# `cargo build` directo puede dejar el nombre del paquete junto al binario
+# (`winslim-terminal.exe`) en target/release. No es un artefacto publicable ni
+# debe confundirse con WTerminal: la build Tauri ya produjo `wterminal.exe`.
+$legacyCargoExe = Join-Path $ReleaseDir 'winslim-terminal.exe'
+if (Test-Path -LiteralPath $legacyCargoExe -PathType Leaf) {
+    Remove-Item -LiteralPath $legacyCargoExe -Force
+    Write-Ok 'Artefacto Cargo winslim-terminal.exe eliminado; se conserva solo wterminal.exe'
+}
 
 # ---------------------------------------------------------------------------
 # 7. Carpeta desempaquetada
@@ -1359,15 +1808,52 @@ Write-Ok "Compilado: $exePath"
 Write-Step 'Preparando la carpeta desempaquetada'
 # NO en dist/: ahi escribe Vite el frontend compilado y lo vacia en cada build,
 # asi que la release anterior desapareceria al compilar la siguiente.
+# release\ queda solo para lo que se sube a GitHub (instalador, portable, ZIP y
+# el manifiesto con sus firmas). La carpeta desempaquetada y todo lo de las
+# builds rapidas son salidas intermedias: viven en src-tauri\target\dist,
+# ignorado por git.
 $distSuffix = if ($Fast) { '-dev' } else { '' }
-$distDir = Join-Path $ProjectRoot "release\WTerminal-$version$distSuffix"
+$distRoot = Join-Path $TauriDir 'target\dist'
+$distDir = Join-Path $distRoot "WTerminal-$version$distSuffix"
+$releaseArtifactRoot = $env:LTERMINAL_RELEASE_DIR
+if ([string]::IsNullOrWhiteSpace($releaseArtifactRoot)) {
+    $releaseArtifactRoot = Join-Path $ProjectRoot 'release'
+} elseif (-not [IO.Path]::IsPathRooted($releaseArtifactRoot)) {
+    $releaseArtifactRoot = Join-Path $ProjectRoot $releaseArtifactRoot
+}
+$releaseArtifactRoot = [IO.Path]::GetFullPath($releaseArtifactRoot)
+$releaseArtifactOut = if ($Fast) { Join-Path $distRoot 'dev' } else { $releaseArtifactRoot }
+$singleFilePath = Join-Path $releaseArtifactOut "WTerminal-$version$distSuffix-Portable.exe"
 Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
 Ensure-WebView2Loader | Out-Null
 
 $payload = @('wterminal.exe') + $conptyFiles + @('WebView2Loader.dll')
-$portableWebView2Bootstrapper = Find-PortableWebView2Bootstrapper
+$portableWebView2Bootstrapper = if ($Installer -and $installerPath) {
+    # El NSIS ya contiene el runtime completo. Reutilizar exactamente ese
+    # instalador permite que unpacked y el portable arranquen sin red en una
+    # máquina limpia, sin descargar ni compilar una segunda copia.
+    Extract-OfflineWebView2Installer -NsisPath $installerPath.FullName
+} else {
+    Find-PortableWebView2Bootstrapper
+}
+if ($SingleFile -and -not $portableWebView2Bootstrapper) {
+    # El portable debe poder reparar WebView2 en una máquina limpia. El
+    # bootstrapper va dentro del .exe y el preflight de Rust solo lo saca y ejecuta si
+    # el runtime no existe; no se reinstala en cada apertura normal.
+    $previousWebViewMode = $env:LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER
+    try {
+        $env:LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER = '1'
+        $portableWebView2Bootstrapper = Find-PortableWebView2Bootstrapper
+    } finally {
+        if ($null -eq $previousWebViewMode) {
+            Remove-Item Env:LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER -ErrorAction SilentlyContinue
+        } else {
+            $env:LTERMINAL_INCLUDE_WEBVIEW2_BOOTSTRAPPER = $previousWebViewMode
+        }
+    }
+}
 if ($portableWebView2Bootstrapper) {
     Copy-Item -LiteralPath $portableWebView2Bootstrapper -Destination (Join-Path $ReleaseDir 'MicrosoftEdgeWebView2Setup.exe') -Force
     $payload += 'MicrosoftEdgeWebView2Setup.exe'
@@ -1405,6 +1891,24 @@ $artifactCode = Invoke-Native 'node' @(
 if ($artifactCode -ne 0) { throw "La validación PE/runtime de Windows falló (código $artifactCode)." }
 Write-Ok 'Estructura PE x64 y runtime Windows verificados'
 
+$singleFileCreated = $false
+if ($SingleFile) {
+    Write-Step 'Creando el portable de un solo archivo (.exe autónomo, sin extracción)'
+    if (-not $portableWebView2Bootstrapper) {
+        throw 'El portable de un solo archivo requiere el bootstrapper WebView2; no se pudo preparar.'
+    }
+    $singleFileCode = Invoke-Native 'node' @(
+        'scripts/create-single-file-portable.mjs',
+        '--input', $distDir,
+        '--output', $singleFilePath
+    )
+    if ($singleFileCode -ne 0 -or -not (Test-Path -LiteralPath $singleFilePath -PathType Leaf)) {
+        throw "No se pudo crear el portable de un solo archivo: $singleFilePath"
+    }
+    $singleFileCreated = $true
+    Write-Ok "Portable de un solo archivo publicado: $singleFilePath"
+}
+
 # ---------------------------------------------------------------------------
 # 8. Comprobacion de humo
 # ---------------------------------------------------------------------------
@@ -1415,11 +1919,42 @@ Write-Step 'Comprobacion de humo (ventana, frontend, terminal y PTY)'
 Write-Host '    Este paso comprueba solo el arranque mínimo y se cerrará automáticamente.' -ForegroundColor DarkGray
 Write-Host '    Las pestañas, menús, acciones y redimensionado se prueban después en E2E ampliado.' -ForegroundColor DarkGray
 $smokeToken = "windows-build-$([guid]::NewGuid().ToString('N'))"
-$logPath = Join-Path $env:APPDATA 'wterminal\logs\main.log'
+$logPath = Join-Path $script:BuildTempDir 'smoke\main.log'
+$smokeAppDataDir = Join-Path $script:BuildTempDir 'smoke\appdata'
+$null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $logPath)
 $previousSmokeToken = $env:LTERMINAL_SMOKE_TOKEN
 $previousLogFile = $env:LTERMINAL_LOG_FILE
 $previousSmokeAutoExit = $env:LTERMINAL_SMOKE_AUTO_EXIT
+$previousDisableAdmin = $env:LTERMINAL_E2E_DISABLE_ADMIN
+$previousDisablePathAuto = $env:LTERMINAL_E2E_DISABLE_PATH_AUTO
+$previousE2eTesting = $env:LTERMINAL_E2E_TESTING
+$previousE2eAppDataDir = $env:LTERMINAL_E2E_APP_DATA_DIR
 $process = $null
+# El smoke debe iniciar sin el shimming RUNASADMIN ya registrado: Windows
+# eleva el proceso antes de que Rust pueda leer LTERMINAL_E2E_DISABLE_ADMIN y
+# el broker UAC no hereda el token del smoke. La app volverá a sincronizar la
+# preferencia durante ese arranque; al terminar restauramos el valor exacto.
+$appCompatLayersKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+$appCompatValueName = Join-Path $distDir 'wterminal.exe'
+$previousAppCompatValue = $null
+$hadAppCompatValue = $false
+$appCompatProperties = Get-ItemProperty -LiteralPath $appCompatLayersKey -ErrorAction SilentlyContinue
+if ($appCompatProperties) {
+    $appCompatProperty = $appCompatProperties.PSObject.Properties[$appCompatValueName]
+    if ($appCompatProperty) {
+        $previousAppCompatValue = [string]$appCompatProperty.Value
+        $hadAppCompatValue = $true
+    }
+}
+$appCompatWithoutRunAsAdmin = ($previousAppCompatValue -split '\s+' |
+    Where-Object { $_ -and $_ -notmatch '^RUNASADMIN$' }) -join ' '
+if ($previousAppCompatValue -match '(?i)(^|\s)RUNASADMIN(\s|$)') {
+    if ($appCompatWithoutRunAsAdmin) {
+        Set-ItemProperty -LiteralPath $appCompatLayersKey -Name $appCompatValueName -Value $appCompatWithoutRunAsAdmin -ErrorAction Stop
+    } else {
+        Remove-ItemProperty -LiteralPath $appCompatLayersKey -Name $appCompatValueName -ErrorAction Stop
+    }
+}
 # Algunas builds del WebView pueden crear un segundo proceso de la app durante
 # el arranque (el primero confirma el smoke y el segundo queda sin ventana).
 # Recordar los PIDs previos permite limpiar únicamente los que pertenecen a
@@ -1430,6 +1965,15 @@ $preSmokeProcessIds = @(
 )
 try {
     $env:LTERMINAL_SMOKE_TOKEN = $smokeToken
+    # El smoke observa el proceso hijo y su token de éxito. La elevación UAC
+    # crea otro proceso sin heredar las variables del padre, así que la prueba
+    # de arranque debe omitir la elevación igual que la batería E2E.
+    $env:LTERMINAL_E2E_DISABLE_ADMIN = '1'
+    # El smoke debe validar arranque sin registrar la carpeta portable de build
+    # en el PATH persistente del usuario.
+    $env:LTERMINAL_E2E_DISABLE_PATH_AUTO = '1'
+    $env:LTERMINAL_E2E_TESTING = '1'
+    $env:LTERMINAL_E2E_APP_DATA_DIR = $smokeAppDataDir
     # La app debe cerrar su PTY de forma ordenada. TerminateProcess sobre el
     # padre mientras cmd.exe aún conecta al pseudoterminal genera el diálogo
     # STATUS_DLL_INIT_FAILED (0xc0000142) aunque las DLL sean correctas.
@@ -1437,7 +1981,19 @@ try {
     # Resource-dir, WebView2 y los scripts deben resolverse contra la carpeta
     # desempaquetada, no contra la carpeta desde la que se lanzó PowerShell.
     $env:LTERMINAL_LOG_FILE = $logPath
-    $process = Start-Process -FilePath (Join-Path $distDir 'wterminal.exe') -WorkingDirectory $distDir -PassThru
+    # El manifiesto exige UAC y ShellExecute no garantiza conservar las
+    # variables temporales del proceso padre. Pasarlas como argumentos privados
+    # permite que el binario configure el smoke dentro del proceso elevado.
+    $smokeArguments = @(
+        "--wterminal-smoke-token=$smokeToken",
+        '--wterminal-smoke-auto-exit',
+        '--wterminal-e2e-testing',
+        '--wterminal-e2e-disable-admin',
+        '--wterminal-e2e-disable-path-auto',
+        "--wterminal-e2e-app-data-dir=$smokeAppDataDir",
+        "--wterminal-log-file=$logPath"
+    )
+    $process = Start-Process -FilePath (Join-Path $distDir 'wterminal.exe') -WorkingDirectory $distDir -ArgumentList $smokeArguments -PassThru
     $ready = $false
     # El PTY tiene un límite propio de 30 s y se crea en segundo plano; el
     # smoke necesita margen para cargar WebView y completar el handshake.
@@ -1463,6 +2019,7 @@ try {
         throw "La ventana siguio viva, pero frontend/xterm/PTY no confirmaron el arranque en 45 s. Revisa $logPath."
     }
     Write-Ok 'Smoke mínimo completado: frontend, terminal y PTY confirmaron el arranque'
+    Add-BuildTest 'Smoke mínimo (ventana, frontend, terminal y PTY)' 'OK'
 } finally {
     if ($process -and -not $process.HasExited) {
         # Dar tiempo a la salida solicitada por frontend_ready. Solo se fuerza
@@ -1502,6 +2059,42 @@ try {
         Remove-Item Env:LTERMINAL_SMOKE_AUTO_EXIT -ErrorAction SilentlyContinue
     } else {
         $env:LTERMINAL_SMOKE_AUTO_EXIT = $previousSmokeAutoExit
+    }
+    if ($null -eq $previousDisableAdmin) {
+        Remove-Item Env:LTERMINAL_E2E_DISABLE_ADMIN -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_E2E_DISABLE_ADMIN = $previousDisableAdmin
+    }
+    if ($null -eq $previousDisablePathAuto) {
+        Remove-Item Env:LTERMINAL_E2E_DISABLE_PATH_AUTO -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_E2E_DISABLE_PATH_AUTO = $previousDisablePathAuto
+    }
+    if ($null -eq $previousE2eTesting) {
+        Remove-Item Env:LTERMINAL_E2E_TESTING -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_E2E_TESTING = $previousE2eTesting
+    }
+    if ($null -eq $previousE2eAppDataDir) {
+        Remove-Item Env:LTERMINAL_E2E_APP_DATA_DIR -ErrorAction SilentlyContinue
+    } else {
+        $env:LTERMINAL_E2E_APP_DATA_DIR = $previousE2eAppDataDir
+    }
+    try {
+        if ($hadAppCompatValue) {
+            if (-not (Test-Path -LiteralPath $appCompatLayersKey)) {
+                New-Item -Path $appCompatLayersKey -Force | Out-Null
+            }
+            New-ItemProperty -LiteralPath $appCompatLayersKey -Name $appCompatValueName -PropertyType String -Value $previousAppCompatValue -Force | Out-Null
+        } else {
+            $currentAppCompatProperties = Get-ItemProperty -LiteralPath $appCompatLayersKey -ErrorAction SilentlyContinue
+            if ($currentAppCompatProperties -and $currentAppCompatProperties.PSObject.Properties[$appCompatValueName]) {
+                Remove-ItemProperty -LiteralPath $appCompatLayersKey -Name $appCompatValueName -ErrorAction Stop
+            }
+        }
+    } catch {
+        Write-Err "No se pudo restaurar exactamente la compatibilidad AppCompat del ejecutable después del smoke: $_"
+        throw
     }
 }
 
@@ -1590,19 +2183,19 @@ if ($runExtendedTests) {
         @{ Name = 'WireGuard'; Exe = 'wg.exe'; Args = @('--version') },
         @{ Name = 'Tailscale'; Exe = 'tailscale'; Args = @('version') },
         @{ Name = 'QEMU'; Exe = 'qemu-system-x86_64'; Args = @('--version') },
-        @{ Name = 'VirtualBox'; Exe = 'VBoxManage.exe'; Args = @('--version') },
-        @{ Name = 'VMware'; Exe = 'vmrun.exe'; Args = @('-T', 'ws', 'version') }
+        @{ Name = 'VirtualBox'; Exe = 'VBoxManage.exe'; Args = @('--version') }
     )
     $missingProbes = @()
     $failedProbes = @()
     foreach ($probe in $probes) {
+        $resolvedExe = Resolve-ProbeExecutable $probe
         $detectCommand = if ($probe.ContainsKey('Detect')) { [string]$probe.Detect } else { [string]$probe.Exe }
-        if (-not (Test-Command $detectCommand)) {
+        if (-not $resolvedExe -or ($probe.ContainsKey('Detect') -and -not (Test-Command $detectCommand))) {
             Write-Warn "$($probe.Name) no está instalado o no está en PATH."
             $missingProbes += $probe.Name
             continue
         }
-        $probeCode = Invoke-Native $probe.Exe $probe.Args -CaptureOutput
+        $probeCode = Invoke-Native $resolvedExe $probe.Args -CaptureOutput
         if ($probeCode -eq 9009) {
             Write-Warn "$($probe.Name) tiene una entrada en PATH, pero su ejecutable real no está disponible."
             $missingProbes += $probe.Name
@@ -1658,12 +2251,17 @@ if ($runExtendedTests) {
         $previousE2eReport = $env:LTERMINAL_SMOKE_REPORT
         $previousE2eLogFile = $env:LTERMINAL_LOG_FILE
         $previousNativeE2eDriver = $env:TAURI_NATIVE_DRIVER
+        $previousE2eCaptureDir = $env:E2E_CAPTURE_DIR
+        $e2eUnpackedDir = Join-Path (Get-BuildArtifactsDir) 'e2e-desempaquetado'
         try {
             # El smoke activa CDP mediante la API de WebView2 al lanzar la app.
             # Probar la propia release evita una segunda compilación y asegura
             # que el ejecutable que se distribuye supera también el E2E.
             $env:E2E_BINARY = Join-Path $distDir 'wterminal.exe'
-            $env:LTERMINAL_SMOKE_REPORT = Join-Path $env:TEMP "wterminal-e2e-$([guid]::NewGuid().ToString('N')).json"
+            New-Item -ItemType Directory -Force -Path $e2eUnpackedDir | Out-Null
+            $env:LTERMINAL_SMOKE_REPORT = Join-Path $e2eUnpackedDir 'e2e-report.json'
+            $env:E2E_CAPTURE_DIR = Join-Path $e2eUnpackedDir 'capturas'
+            $e2eUnpackedStartedAt = [DateTime]::UtcNow
             $env:TAURI_NATIVE_DRIVER = $nativeE2eDriver
             # El binario lanzado por tauri-driver debe escribir en el mismo
             # archivo que el smoke de arranque. Así el informe no puede pasar
@@ -1685,7 +2283,12 @@ if ($runExtendedTests) {
                 throw "El informe E2E está incompleto (código $reportCode): $e2eReportPath"
             }
             Write-Ok 'E2E confirmó todas las fases: ventana, terminal, paneles, comandos, preferencias y redimensionado'
+            Add-BuildTest 'E2E completo del desempaquetado' 'OK' ('{0:N0} s' -f ([DateTime]::UtcNow - $e2eUnpackedStartedAt).TotalSeconds)
+        } catch {
+            Add-BuildTest 'E2E completo del desempaquetado' 'FALLO' $_.Exception.Message
+            throw
         } finally {
+            if ($null -eq $previousE2eCaptureDir) { Remove-Item Env:E2E_CAPTURE_DIR -ErrorAction SilentlyContinue } else { $env:E2E_CAPTURE_DIR = $previousE2eCaptureDir }
             if ($null -eq $previousE2eBinary) {
                 Remove-Item Env:E2E_BINARY -ErrorAction SilentlyContinue
             } else {
@@ -1710,6 +2313,76 @@ if ($runExtendedTests) {
     } else {
         throw 'E2E no se ejecutó: tauri-driver sigue sin estar disponible después de prepararlo.'
     }
+
+        if ($singleFileCreated -and (Test-Path -LiteralPath $singleFilePath -PathType Leaf) -and (Test-Command 'tauri-driver')) {
+            try {
+                Write-Step 'E2E ampliado del portable de un solo archivo, solo en una carpeta vacía'
+                $previousSingleE2eBinary = $env:E2E_BINARY
+                $previousSingleE2eReport = $env:LTERMINAL_SMOKE_REPORT
+                $previousSingleE2eLogFile = $env:LTERMINAL_LOG_FILE
+                $previousSingleNativeDriver = $env:TAURI_NATIVE_DRIVER
+                $previousSingleExpect = $env:E2E_EXPECT_SINGLE_FILE
+                $previousSingleCaptureDir = $env:E2E_CAPTURE_DIR
+                $previousSingleVideo = $env:E2E_CAPTURE_VIDEO
+                $e2ePortableDir = Join-Path (Get-BuildArtifactsDir) 'e2e-portable'
+                try {
+                    # El portable es el propio ejecutable de Tauri con conpty,
+                    # OpenConsole y el instalador de WebView2 dentro. Se copia
+                    # SOLO a una carpeta vacía: si arranca, abre shells y pasa el
+                    # recorrido completo ahí, no depende de nada a su lado. El
+                    # smoke exige además que el ConPTY salga de su caché.
+                    $portableAloneDir = Join-Path $script:BuildTempDir 'single-file-e2e'
+                    Remove-Item -LiteralPath $portableAloneDir -Recurse -Force -ErrorAction SilentlyContinue
+                    New-Item -ItemType Directory -Path $portableAloneDir -Force | Out-Null
+                    $portableAlone = Join-Path $portableAloneDir (Split-Path -Leaf $singleFilePath)
+                    Copy-Item -LiteralPath $singleFilePath -Destination $portableAlone -Force
+                    $portableVerifyCode = Invoke-Native 'node' @('scripts/create-single-file-portable.mjs', '--verify', $portableAlone, '--input', $distDir)
+                    if ($portableVerifyCode -ne 0) { throw "El portable no coincide con la release unpacked (código $portableVerifyCode)." }
+                    Write-Ok 'Portable: imagen PE y archivos embebidos coinciden por SHA256 con la release unpacked'
+                    $env:E2E_BINARY = $portableAlone
+                    $env:E2E_EXPECT_SINGLE_FILE = '1'
+                    New-Item -ItemType Directory -Force -Path $e2ePortableDir | Out-Null
+                    $env:LTERMINAL_SMOKE_REPORT = Join-Path $e2ePortableDir 'e2e-report.json'
+                    $env:E2E_CAPTURE_DIR = Join-Path $e2ePortableDir 'capturas'
+                    # Con -VideoTest cada forma de distribución deja su vídeo:
+                    # el desempaquetado en la suite «video», el instalador en
+                    # la suite «installer» y el portable aquí.
+                    if ($VideoTest.IsPresent) { $env:E2E_CAPTURE_VIDEO = '1' }
+                    $e2ePortableStartedAt = [DateTime]::UtcNow
+                    $env:TAURI_NATIVE_DRIVER = $nativeE2eDriver
+                    $env:LTERMINAL_LOG_FILE = $logPath
+                    $singleE2eReportPath = $env:LTERMINAL_SMOKE_REPORT
+                    Write-Host "    Informe E2E portable: $singleE2eReportPath" -ForegroundColor DarkGray
+                    $singleE2eCode = Invoke-Native 'npm' @('run', 'e2e')
+                    if ($singleE2eCode -ne 0) { throw "E2E del portable falló (código $singleE2eCode). Revisa el informe y el log en $logPath." }
+                    Assert-E2eReport $singleE2eReportPath
+                    $singleReportCode = Invoke-Native 'node' @('scripts/verify-e2e-report.mjs', $singleE2eReportPath) -CaptureOutput
+                    $singleReportOutputFailed = $script:LastNativeOutput -match '(?im)(?:^\s*Error:|^\s*El E2E no\b|\binforme E2E (?:incompleto|no es|no valid[oó]|fall[oó])\b)'
+                    if ($singleReportCode -ne 0 -or $singleReportOutputFailed) {
+                        throw "El informe E2E del portable está incompleto (código $singleReportCode): $singleE2eReportPath"
+                    }
+                    $portableLeftovers = @(Get-ChildItem -LiteralPath $portableAloneDir -Force | Where-Object { $_.FullName -ne $portableAlone })
+                    if ($portableLeftovers.Count -gt 0) {
+                        throw "El portable dejó archivos junto a sí: $(($portableLeftovers | ForEach-Object Name) -join ', ')"
+                    }
+                    Write-Ok 'E2E confirmó todas las fases con el portable solo en su carpeta, sin dejar nada a su lado'
+                    Add-BuildTest "E2E completo del portable$(if ($VideoTest.IsPresent) { ' (con vídeo)' })" 'OK' ('{0:N0} s' -f ([DateTime]::UtcNow - $e2ePortableStartedAt).TotalSeconds)
+                } catch {
+                    Add-BuildTest 'E2E completo del portable' 'FALLO' $_.Exception.Message
+                    throw
+                } finally {
+                    if ($null -eq $previousSingleCaptureDir) { Remove-Item Env:E2E_CAPTURE_DIR -ErrorAction SilentlyContinue } else { $env:E2E_CAPTURE_DIR = $previousSingleCaptureDir }
+                    if ($null -eq $previousSingleVideo) { Remove-Item Env:E2E_CAPTURE_VIDEO -ErrorAction SilentlyContinue } else { $env:E2E_CAPTURE_VIDEO = $previousSingleVideo }
+                    if ($null -eq $previousSingleE2eBinary) { Remove-Item Env:E2E_BINARY -ErrorAction SilentlyContinue } else { $env:E2E_BINARY = $previousSingleE2eBinary }
+                    if ($null -eq $previousSingleE2eReport) { Remove-Item Env:LTERMINAL_SMOKE_REPORT -ErrorAction SilentlyContinue } else { $env:LTERMINAL_SMOKE_REPORT = $previousSingleE2eReport }
+                    if ($null -eq $previousSingleE2eLogFile) { Remove-Item Env:LTERMINAL_LOG_FILE -ErrorAction SilentlyContinue } else { $env:LTERMINAL_LOG_FILE = $previousSingleE2eLogFile }
+                    if ($null -eq $previousSingleNativeDriver) { Remove-Item Env:TAURI_NATIVE_DRIVER -ErrorAction SilentlyContinue } else { $env:TAURI_NATIVE_DRIVER = $previousSingleNativeDriver }
+                    if ($null -eq $previousSingleExpect) { Remove-Item Env:E2E_EXPECT_SINGLE_FILE -ErrorAction SilentlyContinue } else { $env:E2E_EXPECT_SINGLE_FILE = $previousSingleExpect }
+                }
+            } catch {
+                Add-PostBuildIssue "E2E portable de un solo archivo: $($_.Exception.Message)"
+            }
+        }
 
         if ($strictProbeFailure) {
             throw 'La batería ampliada detectó herramientas instaladas que fallaron, o ausencias bajo -StrictTests. Revisa el diagnóstico anterior.'
@@ -1751,9 +2424,25 @@ if ([string]::IsNullOrWhiteSpace($releaseRoot)) {
 }
 $releaseOut = [IO.Path]::GetFullPath($releaseRoot)
 if ($Fast) {
-    $releaseOut = Join-Path $releaseOut 'dev'
+    $releaseOut = Join-Path $distRoot 'dev'
 }
 New-Item -ItemType Directory -Force -Path $releaseOut | Out-Null
+if (-not $Fast) {
+    # release\ debe contener exactamente lo que se sube a GitHub de ESTA
+    # versión. Lo demás (carpetas de builds anteriores, otras versiones y el
+    # manifiesto viejo, que se regenera ahora) se aparta sin borrarlo.
+    $keepInRelease = @()
+    if ($singleFileCreated) { $keepInRelease += (Split-Path $singleFilePath -Leaf) }
+    $stale = @(Get-ChildItem -LiteralPath $releaseOut -Force | Where-Object { $keepInRelease -notcontains $_.Name })
+    if ($stale.Count -gt 0) {
+        $staleArchive = Join-Path $distRoot ('release-anterior\' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        New-Item -ItemType Directory -Force -Path $staleArchive | Out-Null
+        foreach ($entry in $stale) {
+            Move-Item -LiteralPath $entry.FullName -Destination (Join-Path $staleArchive $entry.Name) -Force
+        }
+        Write-Ok "Contenido anterior de release\ apartado en $staleArchive ($($stale.Count) elementos)"
+    }
+}
 $zipSuffix = if ($Fast) { '-dev' } else { '' }
 $zipPath = Join-Path $releaseOut "WTerminal-Unpacked-$version$zipSuffix.zip"
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
@@ -1772,6 +2461,27 @@ $hashCode = Invoke-Native 'node' @(
 if ($hashCode -ne 0) { throw "No se pudo actualizar el manifiesto SHA256: $checksumManifest" }
 Write-Ok "Release: $zipPath"
 Write-Ok "SHA256: $hash"
+# Lo que esta build publica: la validación final exige exactamente estos
+# artefactos en SHA256SUMS.txt (una build portable sin instalador ni .exe único solo
+# publica el ZIP y antes fallaba por exigir siempre dos).
+$publishedArtifacts = @((Split-Path $zipPath -Leaf))
+
+if ($singleFileCreated) {
+    if (-not (Test-Path -LiteralPath $singleFilePath -PathType Leaf)) {
+        throw "El portable de un solo archivo se creó pero no está disponible para publicar: $singleFilePath"
+    }
+    $singleFileHash = Get-Sha256Hash $singleFilePath
+    $singleHashCode = Invoke-Native 'node' @(
+        'scripts/update-release-hash.mjs',
+        '--manifest', $checksumManifest,
+        '--artifact', (Split-Path $singleFilePath -Leaf),
+        '--hash', $singleFileHash
+    )
+    if ($singleHashCode -ne 0) { throw "No se pudo actualizar el manifiesto SHA256 del portable: $checksumManifest" }
+    $publishedArtifacts += (Split-Path $singleFilePath -Leaf)
+    Write-Ok "Portable de un solo archivo: $singleFilePath"
+    Write-Ok "SHA256 portable: $singleFileHash"
+}
 
 # El bundle NSIS de Tauri pertenece a target/ porque es salida intermedia de
 # Cargo, pero el instalador también es un artefacto publicable. Se copia con
@@ -1786,7 +2496,7 @@ if ($Installer) {
     $installerReleasePath = Join-Path $releaseOut "WTerminal-$version$zipSuffix-x64-setup.exe"
     Copy-Item -LiteralPath $installerPath.FullName -Destination $installerReleasePath -Force
     $publishedInstaller = Get-Item -LiteralPath $installerReleasePath
-    if ($publishedInstaller.Length -ne $installerPath.Length -or $publishedInstaller.Length -lt 1MB) {
+    if ($publishedInstaller.Length -ne $installerPath.Length -or $publishedInstaller.Length -lt 100MB) {
         throw "La copia del instalador NSIS en release es incompleta: $installerReleasePath"
     }
     $installerHash = Get-Sha256Hash $installerReleasePath
@@ -1801,9 +2511,82 @@ if ($Installer) {
         '--hash', $installerHash
     )
     if ($installerHashCode -ne 0) { throw "No se pudo actualizar el manifiesto SHA256 del instalador: $checksumManifest" }
+    $publishedArtifacts += (Split-Path $installerReleasePath -Leaf)
     Write-Ok "Instalador publicado: $installerReleasePath"
     Write-Ok "SHA256 instalador: $installerHash"
 }
+
+function Import-LocalSigningMaterial {
+    # Las builds locales pueden reutilizar el mismo material que linux. CI no
+    # inspecciona el perfil ni el Escritorio: recibe sus secretos explícitos.
+    if ($env:CI -match '^(1|true|yes)$') { return }
+
+    $configRoot = if (-not [string]::IsNullOrWhiteSpace($env:XDG_CONFIG_HOME)) {
+        $env:XDG_CONFIG_HOME
+    } elseif ($env:USERPROFILE) {
+        Join-Path $env:USERPROFILE '.config'
+    }
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $privateCandidates = @(
+        $env:LTERMINAL_SIGNING_PRIVATE_KEY_FILE,
+        $(if ($configRoot) { Join-Path $configRoot 'lterminal\release-signing-private.pem' }),
+        $(if ($desktop) { Join-Path $desktop 'release-signing-private.pem' })
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
+    $privateCandidates = @($privateCandidates)
+    $publicCandidates = @(
+        $env:LTERMINAL_UPDATE_PUBLIC_KEY_FILE,
+        $(if ($configRoot) { Join-Path $configRoot 'lterminal\release-signing-public.hex' }),
+        $(if ($desktop) { Join-Path $desktop 'release-signing-public.hex' })
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
+    $publicCandidates = @($publicCandidates)
+
+    # La firma SSH adicional es la autorización de publicación de releases.
+    # Se reutiliza la convención del proyecto Tools y nunca se copia la clave
+    # privada al repositorio: solo se pasa su ruta al helper de ssh-keygen.
+    $sshPrivateCandidates = @(
+        $env:LTERMINAL_SSH_SIGNING_KEY_FILE,
+        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing' }),
+        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing' }),
+        $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing' }),
+        $(if ($desktop) { Join-Path $desktop 'ltools-release-signing' })
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
+    $sshPrivateCandidates = @($sshPrivateCandidates)
+    $sshPublicCandidates = @(
+        $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE,
+        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing.pub' }),
+        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing.pub' }),
+        $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing.pub' }),
+        $(if ($desktop) { Join-Path $desktop 'ltools-release-signing.pub' })
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
+    $sshPublicCandidates = @($sshPublicCandidates)
+
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SIGNING_PRIVATE_KEY) -and $privateCandidates.Count -gt 0) {
+        $env:LTERMINAL_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $privateCandidates[0] -Raw
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_UPDATE_PUBLIC_KEY) -and $publicCandidates.Count -gt 0) {
+        $env:LTERMINAL_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath $publicCandidates[0] -Raw).Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_SIGNING_KEY_FILE) -and $sshPrivateCandidates.Count -gt 0) {
+        $env:LTERMINAL_SSH_SIGNING_KEY_FILE = $sshPrivateCandidates[0]
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE) -and $sshPublicCandidates.Count -gt 0) {
+        $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE = $sshPublicCandidates[0]
+    }
+    if ($env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE -and [string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY)) {
+        $env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE -Raw).Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_SIGNING_IDENTITY)) {
+        $env:LTERMINAL_SSH_SIGNING_IDENTITY = if ($env:GIT_AUTHOR_EMAIL) { $env:GIT_AUTHOR_EMAIL } else { 'lterminal-release@local' }
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_IDENTITY)) {
+        $env:LTERMINAL_SSH_UPDATE_IDENTITY = $env:LTERMINAL_SSH_SIGNING_IDENTITY
+    }
+    if ($env:LTERMINAL_SIGNING_PRIVATE_KEY -or $env:LTERMINAL_UPDATE_PUBLIC_KEY -or $env:LTERMINAL_SSH_SIGNING_KEY_FILE) {
+        Write-Ok 'Material de firma local cargado automáticamente'
+    }
+}
+
+Import-LocalSigningMaterial
 
 $signingRequired = if (-not [string]::IsNullOrWhiteSpace($env:LTERMINAL_REQUIRE_SIGNING)) {
     $env:LTERMINAL_REQUIRE_SIGNING -match '^(1|true|yes)$'
@@ -1825,12 +2608,149 @@ if ($env:LTERMINAL_SIGNING_PRIVATE_KEY) {
             '--verify'
         )
         if ($verifyCode -ne 0) { throw 'La firma Ed25519 del manifiesto no se pudo verificar.' }
+        Write-Ok 'Firma Ed25519 del manifiesto verificada'
+    } else {
+        Write-Warn 'Manifiesto firmado con Ed25519, pero falta la clave pública para verificarlo localmente.'
     }
-    Write-Ok 'Firma Ed25519 del manifiesto verificada'
 } elseif ($signingRequired) {
-    throw 'Falta LTERMINAL_SIGNING_PRIVATE_KEY: una release oficial no puede publicarse sin firma.'
+    throw 'Falta la clave privada Ed25519: una release oficial no puede publicarse sin firma.'
 } else {
     Write-Warn 'Release local sin firma Ed25519; el actualizador rechazará este artefacto.'
+}
+
+$sshSignaturePath = Join-Path $releaseOut 'SHA256SUMS.txt.sshsig'
+if ($env:LTERMINAL_SSH_SIGNING_KEY_FILE -and $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE) {
+    $sshSignCode = Invoke-Native 'node' @(
+        'scripts/sign-release-ssh.mjs',
+        '--manifest', $checksumManifest,
+        '--signature', $sshSignaturePath
+    )
+    if ($sshSignCode -ne 0) { throw 'No se pudo firmar SHA256SUMS.txt con OpenSSH.' }
+    $sshVerifyCode = Invoke-Native 'node' @(
+        'scripts/sign-release-ssh.mjs',
+        '--manifest', $checksumManifest,
+        '--signature', $sshSignaturePath,
+        '--verify'
+    )
+    if ($sshVerifyCode -ne 0) { throw 'La firma OpenSSH del manifiesto no se pudo verificar.' }
+    Write-Ok 'Firma SSHSIG del manifiesto verificada'
+} elseif ($env:LTERMINAL_SSH_SIGNING_KEY_FILE -or $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE) {
+    Write-Warn 'Material OpenSSH incompleto: se requiere la clave privada y la pública para firmar y verificar.'
+} elseif ($signingRequired) {
+    throw 'Faltan la clave privada SSH de firma y su clave pública: una release oficial no puede publicarse sin firma SSH.'
+} else {
+    Remove-Item -LiteralPath $sshSignaturePath -Force -ErrorAction SilentlyContinue
+    Write-Warn 'Release local sin firma SSHSIG; el actualizador rechazará este artefacto.'
+}
+
+# Un apagado brusco a los pocos minutos dejó en release\ el instalador con su
+# final a ceros y SHA256SUMS.txt, .sig y .sshsig llenos de ceros: Windows aún
+# no había escrito su contenido. Cada archivo publicado se vuelca a disco
+# (FlushFileBuffers) antes de seguir con pruebas largas.
+function Sync-PublishedFiles([string]$Directory) {
+    foreach ($file in Get-ChildItem -LiteralPath $Directory -File) {
+        $stream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+        try { $stream.Flush($true) } finally { $stream.Dispose() }
+    }
+}
+Sync-PublishedFiles $releaseOut
+Write-Ok 'Release volcada a disco (un apagado ya no la deja a medias)'
+
+# La comprobación preventiva del catálogo también valida el informe E2E y los
+# hashes/firma de la release. Esos artefactos solo existen después de este
+# punto, por lo que el `npm check` inicial la ejecuta en modo diferido y aquí
+# se repite una única vez con el informe recién generado como entrada.
+if ($runExtendedTests -and -not [string]::IsNullOrWhiteSpace($e2eReportPath)) {
+    $previousRequiredReport = $env:WTERMINAL_REQUIRE_E2E_REPORT
+    $previousReportOverride = $env:WTERMINAL_E2E_REPORT
+    $previousReleaseOverride = $env:LTERMINAL_RELEASE_DIR
+    $previousExpectedArtifacts = $env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS
+    try {
+        $env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS = ($publishedArtifacts -join ';')
+        $env:WTERMINAL_REQUIRE_E2E_REPORT = '1'
+        $env:WTERMINAL_E2E_REPORT = $e2eReportPath
+        $env:LTERMINAL_RELEASE_DIR = $releaseOut
+        $preventiveCode = Invoke-Native 'node' @('scripts/test-install-actions-preventive.mjs') -CaptureOutput
+        if ($preventiveCode -ne 0) {
+            throw "La validación preventiva final falló (código $preventiveCode)."
+        }
+        Write-Ok 'Validación preventiva final: catálogo, E2E, capturas, hashes y firmas'
+    } finally {
+        if ($null -eq $previousRequiredReport) { Remove-Item Env:WTERMINAL_REQUIRE_E2E_REPORT -ErrorAction SilentlyContinue } else { $env:WTERMINAL_REQUIRE_E2E_REPORT = $previousRequiredReport }
+        if ($null -eq $previousReportOverride) { Remove-Item Env:WTERMINAL_E2E_REPORT -ErrorAction SilentlyContinue } else { $env:WTERMINAL_E2E_REPORT = $previousReportOverride }
+        if ($null -eq $previousReleaseOverride) { Remove-Item Env:LTERMINAL_RELEASE_DIR -ErrorAction SilentlyContinue } else { $env:LTERMINAL_RELEASE_DIR = $previousReleaseOverride }
+        if ($null -eq $previousExpectedArtifacts) { Remove-Item Env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS -ErrorAction SilentlyContinue } else { $env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS = $previousExpectedArtifacts }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 10. Suites E2E estandarizadas (tests/e2e/suites.mjs)
+# ---------------------------------------------------------------------------
+# La batería ampliada ya ejecutó el recorrido completo sobre el ejecutable y el
+# payload del portable (idéntico byte a byte a la carpeta unpacked). Aquí se
+# añaden las regresiones enfocadas y, bajo demanda, el vídeo, las descargas
+# reales, la auditoría del catálogo y el instalador. Todo pasa por el mismo
+# ejecutor (scripts/run-e2e-suite.mjs), contra los artefactos ya firmados, y
+# deja un resumen comparable en artifacts/release-validation.
+$suiteNames = @()
+if ($runExtendedTests -and -not $NoFocusedTests.IsPresent) { $suiteNames += 'focused' }
+if ($VideoTest.IsPresent) { $suiteNames += 'video' }
+if ($DownloadTests.IsPresent) { $suiteNames += 'downloads' }
+if ($DependencyAudit.IsPresent) { $suiteNames += 'dependency-audit' }
+if ($InstallerTest.IsPresent) { $suiteNames += 'installer' }
+$script:SuiteSummaryPath = $null
+$script:SuiteOutDir = $null
+if ($suiteNames.Count -gt 0) {
+    Write-Step "Suites E2E estandarizadas ($($suiteNames -join ', '))"
+    $suiteOut = Join-Path $ProjectRoot ("artifacts\release-validation\WTerminal-$version-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $script:SuiteOutDir = $suiteOut
+    $suiteArgs = @('scripts/run-e2e-suite.mjs', '--binary', (Join-Path $distDir 'wterminal.exe'), '--suite', ($suiteNames -join ','), '--out', $suiteOut)
+    if ($InstallerTest.IsPresent) {
+        if ($installerReleasePath -and (Test-Path -LiteralPath $installerReleasePath -PathType Leaf)) {
+            $suiteArgs += @('--installer', $installerReleasePath, '--release-dir', $distDir)
+            Write-Host '    La prueba del instalador pedirá permiso de administrador (UAC) una sola vez.' -ForegroundColor Yellow
+        } else {
+            Add-PostBuildIssue 'Prueba del instalador: no se generó el instalador NSIS, no hay nada que instalar.'
+        }
+    }
+    $previousSuiteDriver = $env:TAURI_NATIVE_DRIVER
+    $previousSuitePreference = $ErrorActionPreference
+    try {
+        if ($nativeE2eDriver) { $env:TAURI_NATIVE_DRIVER = $nativeE2eDriver }
+        # Las suites pueden durar una hora: su progreso se muestra línea a
+        # línea en vez de esperar al final como hace Invoke-Native. La salida
+        # de cada escenario ya queda en su propio log; aquí solo llega el
+        # resumen del ejecutor, y el código de salida decide el resultado.
+        $ErrorActionPreference = 'Continue'
+        & node @suiteArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $suiteCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousSuitePreference
+        if ($null -eq $previousSuiteDriver) { Remove-Item Env:TAURI_NATIVE_DRIVER -ErrorAction SilentlyContinue } else { $env:TAURI_NATIVE_DRIVER = $previousSuiteDriver }
+    }
+    $script:SuiteSummaryPath = Join-Path $suiteOut 'summary.md'
+    if ($suiteCode -ne 0) {
+        Add-PostBuildIssue "Suites E2E estandarizadas con fallos (código $suiteCode). Resumen: $script:SuiteSummaryPath"
+    } else {
+        Write-Ok "Suites E2E estandarizadas: todo OK. Resumen: $script:SuiteSummaryPath"
+    }
+    # Una validación omitida (por ejemplo, el instalador cuando ya hay un
+    # WTerminal instalado) no rompe el build, pero tampoco cuenta como hecha.
+    $suiteSummaryJson = Join-Path $suiteOut 'summary.json'
+    if (Test-Path -LiteralPath $suiteSummaryJson -PathType Leaf) {
+        $suiteSummary = Get-Content -LiteralPath $suiteSummaryJson -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($skipped in @($suiteSummary.results | Where-Object { $_.status -eq 'skipped' })) {
+            Add-PostBuildIssue "Validación omitida: $($skipped.title) — $($skipped.summary)"
+        }
+        foreach ($result in @($suiteSummary.results)) {
+            $label = switch ($result.status) { 'passed' { 'OK' } 'skipped' { 'OMITIDA' } 'timeout' { 'FALLO' } default { 'FALLO' } }
+            $seconds = if ($result.durationMs) { '{0:N0} s' -f ($result.durationMs / 1000) } else { '' }
+            $detail = (@($seconds, $result.summary) | Where-Object { $_ }) -join ' · '
+            Add-BuildTest "Suite $($result.suite): $($result.title)" $label $detail
+        }
+    } else {
+        Add-BuildTest "Suites E2E ($($suiteNames -join ', '))" $(if ($suiteCode -eq 0) { 'OK' } else { 'FALLO' }) 'sin summary.json'
+    }
 }
 
 if (-not $NoRun) {
@@ -1838,13 +2758,10 @@ if (-not $NoRun) {
     Start-Process -FilePath (Join-Path $distDir 'wterminal.exe') -WorkingDirectory $distDir
 }
 
+Write-BuildSummary
 Write-Host ''
 Write-Host "Listo. WTerminal $version compilado y verificado." -ForegroundColor Green
-Write-Host "  Carpeta: $distDir"
-Write-Host "  Release: $zipPath"
-if ($Installer) { Write-Host "  Instalador: $installerReleasePath" }
-$totalSeconds = ([DateTime]::UtcNow - $script:BuildStartedAt).TotalSeconds
-Write-Host ("  Tiempo total: {0:N1} s" -f $totalSeconds) -ForegroundColor DarkGray
+if ($script:SuiteSummaryPath) { Write-Host "  Validación E2E: $script:SuiteSummaryPath" }
 if ($script:PostBuildIssues.Count -gt 0) {
     Write-Host ''
     Write-Host 'La build terminó y publicó sus artefactos, pero quedaron validaciones pendientes:' -ForegroundColor Yellow

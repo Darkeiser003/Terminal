@@ -63,11 +63,11 @@ check('La sugerencia de herramienta siempre ofrece abrir Dependencias', suggesti
 check('La sugerencia no ejecuta una instalación directa', !suggestion.includes('runInstallAction') && !suggestion.includes('runInstallBulk'));
 check('La etiqueta de sugerencia rellena sus placeholders', suggestion.includes('.replace("{tool}", suggestion.label)') && suggestion.includes('.replace("{app}", suggestion.label)'));
 
-// La detección rápida y la completa son estados distintos. Si se vuelve a
-// cargar todo antes de pintar el inventario, reaparece el salto engañoso de
-// contadores y los clics pierden su elemento WebDriver.
-check('Dependencias pinta la detección rápida antes de refrescar', dependencies.includes('const list = await api.listInstallActions()') && dependencies.includes('actions = list.actions') && dependencies.includes('await refresh()'));
-check('Dependencias conserva la lista visible si falla el refresco', dependencies.includes('actions = list.actions') && dependencies.includes('ok = false'));
+// La detección completa debe terminar antes de publicar cualquier sección. El
+// inventario rápido queda fuera del flujo visible para que nunca aparezca un
+// menú parcial mientras siguen ejecutándose sondas externas.
+check('Dependencias publica cada sección solo después de confirmar su catálogo completo', !dependencies.includes('const list = await api.listInstallActions()') && dependencies.includes('dependency-detection-placeholder') && dependencies.includes('confirmedSectionIds') && dependencies.includes('visibleSections') && dependencies.includes('revealSections') && dependencies.includes('requestAnimationFrame') && dependencies.includes('actions = list.actions'));
+check('Dependencias conserva el último catálogo confirmado si falla el refresco', dependencies.includes('actions = list.actions') && dependencies.includes('ok = false'));
 check('Dependencias no expone instalación masiva en la build', !dependencies.includes('bulkRunning') && !dependencies.includes('runBulk') && !dependencies.includes('dependency-bulk-install') && !dependencies.includes('dependency-bulk-uninstall') && !dependencies.includes('bulk-actions'));
 check('El contador no usa el número bruto de acciones internas', dependencies.includes('visibleComponentCount') && !dependencies.includes('count={actions.length}'));
 
@@ -87,6 +87,10 @@ check('Windows fija una ruta propia para el informe E2E', windowsBuild.includes(
 check('Windows no da por pasado un E2E sin informe y log validados', windowsBuild.includes('Assert-E2eReport') && windowsBuild.includes("$report.status -ne 'passed'") && windowsBuild.includes('$report.logValidated -ne $true'));
 check('El smoke reintenta la espera asíncrona de una sesión PTY real', smoke.includes("'pty spawneado'") && commands.includes('return Ok(false)') && commands.includes('Result<bool, String>') && terminalPane.includes('waitForFrontendReady') && terminalPane.includes('retryUntilReady') && windowsBuild.includes('$attempt -lt 45') && windowsBuild.includes('Test-SmokeReady'));
 check('El smoke exige la ventana principal y solo después registra éxito', frontendReadyBlock.includes('return Ok(false)') && frontendReadyBlock.includes('get_webview_window("main")') && frontendReadyBlock.includes('ok_or_else') && frontendReadyBlock.indexOf('.show()') >= 0 && frontendReadyBlock.indexOf('Frontend y terminal preparados') > frontendReadyBlock.indexOf('.show()') && api.includes("tauriInvoke<boolean>('frontend_ready'"));
+check('La preferencia Iniciar maximizada se aplica después de revelar la ventana', commands.includes('fn apply_initial_window_state(window: &WebviewWindow)') && frontendReadyBlock.includes('apply_initial_window_state(&window)') && commands.includes('preferences::current().start_maximized') && commands.includes('window.unmaximize()'));
+check('Windows exige WTerminal en el banner E2E', smoke.includes("const nativeBrandPattern = process.platform === 'win32' ? /\\bWTerminal\\b/i") && smoke.includes("? /^WTerminal\\b/im.test(text)") && read('scripts/verify-e2e-report.mjs').includes("report.host?.platform === 'win32'"));
+check('El E2E Windows reabre Ajustes y verifica Iniciar maximizada', smoke.includes('settings-start-maximized') && smoke.includes("windows-start-maximized-preference") && read('scripts/verify-e2e-report.mjs').includes('reopenedSettingsVerified'));
+check('El menú PowerShell usa WTerminal en Windows', read('build-tools/build.ps1').includes("$script:AppName = if ($script:OnWindows) { 'WTerminal' }") && read('build-tools/build.ps1').includes('$script:AppName — desarrollo y compilación') && !read('build-tools/build.ps1').includes("'Menú de desarrollo y compilación de LTerminal'"));
 const initialHandshakeStart = terminalPane.indexOf('void api.markTabReady(tabId)');
 const initialHandshakeCatch = terminalPane.indexOf('.catch((error) => {', initialHandshakeStart);
 const initialHandshakeCatchEnd = terminalPane.indexOf('\n            });', initialHandshakeCatch);

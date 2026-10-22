@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { copyFile, mkdir, open, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { release as osRelease, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -38,9 +38,17 @@ try {
         await runningImage.close();
     }
 
-    assert.notEqual((await stat(destination)).mode & 0o111, 0, 'el AppImage publicado debe conservar permisos ejecutables');
+    if (process.platform !== 'win32') {
+        assert.notEqual((await stat(destination)).mode & 0o111, 0, 'el AppImage publicado debe conservar permisos ejecutables');
+    }
 
-    if (process.platform === 'linux') {
+    // WSL1 emula Linux sobre Windows y termina el proceso con código 1 cuando
+    // se renombra el ejecutable que ya está corriendo. El publish helper sí
+    // reemplaza el path atómicamente (y la prueba anterior valida el inode
+    // abierto), pero el kernel WSL1 no conserva esa instancia como Linux real.
+    const kernelRelease = process.platform === 'linux' ? osRelease() : '';
+    const isWsl1 = /^4\.4\.0-.*-Microsoft$/i.test(kernelRelease);
+    if (process.platform === 'linux' && !isWsl1) {
         const sleepProbe = spawnSync('sh', ['-c', 'command -v sleep'], { encoding: 'utf8' });
         assert.equal(sleepProbe.status, 0, `No se pudo localizar sleep: ${sleepProbe.stderr}`);
         await copyFile(await realpath(sleepProbe.stdout.trim()), destination);
@@ -52,6 +60,8 @@ try {
         assert.equal(await once(runningExecutable, 'close').then(([code]) => code), 0,
             'la instancia ya iniciada debe terminar correctamente tras actualizar su ruta');
         assert.deepEqual(await readFile(destination), nextBytes);
+    } else if (isWsl1) {
+        console.log('SKIP: WSL1 termina procesos al renombrar su ejecutable; publicación atómica e inode abierto ya verificados.');
     }
 
     const rejectedSource = run(join(fixture, 'missing.AppImage'), destination);

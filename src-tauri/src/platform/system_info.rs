@@ -1176,23 +1176,61 @@ fn short_disk_identity(disk: &DiskRow) -> String {
         .to_string()
 }
 
-fn storage_rows(disks: &[DiskRow], compact: bool, storage_label: &str) -> Vec<(String, String)> {
+/// Cómo se nombra una unidad en el resumen: la letra en Windows (`C:`), `/`
+/// para la raíz y la ruta de montaje en Unix; si pasa de 20 caracteres, solo
+/// su carpeta final (`…/Juegos`), para que la línea no crezca sin límite.
+fn mount_label(disk: &DiskRow) -> String {
+    let mount = disk.mount.trim();
+    let bytes = mount.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return mount[..2].to_ascii_uppercase();
+    }
+    if mount == "/" || mount == "\\" {
+        return "/".to_string();
+    }
+    let trimmed = mount.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return short_disk_identity(disk);
+    }
+    if trimmed.chars().count() <= 20 {
+        return trimmed.to_string();
+    }
+    format!("…/{}", short_disk_identity(disk))
+}
+
+fn storage_rows(
+    disks: &[DiskRow],
+    compact: bool,
+    storage_label: &str,
+    drives_template: &str,
+) -> Vec<(String, String)> {
     if disks.is_empty() {
         return Vec::new();
     }
     if compact {
-        let used: u64 = disks.iter().map(|disk| disk.used).sum();
-        let total: u64 = disks.iter().map(|disk| disk.total).sum();
-        return vec![(
-            storage_label.to_string(),
+        // Una sola línea, pero con cada unidad: su nombre, su tamaño y su
+        // porcentaje de uso. El total sumado escondía cuál estaba llena.
+        let items = disks
+            .iter()
+            .map(|disk| {
+                format!(
+                    "({}) {} ({}%)",
+                    mount_label(disk),
+                    format_bytes(disk.total),
+                    used_percent(disk.used, disk.total)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" / ");
+        let value = if disks.len() == 1 {
+            items
+        } else {
             format!(
-                "{} unidades · {} / {} ({}%)",
-                disks.len(),
-                format_bytes(used),
-                format_bytes(total),
-                used_percent(used, total)
-            ),
-        )];
+                "{} - {items}",
+                drives_template.replace("{count}", &disks.len().to_string())
+            )
+        };
+        return vec![(storage_label.to_string(), value)];
     }
 
     disks
@@ -1368,6 +1406,27 @@ fn clean_os_name(raw: &str) -> String {
 const MIN_BOXED_WIDTH: usize = 40;
 const ASSUMED_COLUMNS: usize = 80;
 
+/// Columnas de separación entre la imagen del banner y su texto.
+pub const BANNER_IMAGE_GAP: usize = 2;
+/// Lo que debe quedarle al texto para que la imagen tenga sitio.
+pub const BANNER_IMAGE_MIN_TEXT_COLUMNS: usize = 40;
+
+/// Margen izquierdo que se reserva para la imagen del banner: sus columnas
+/// más la separación, o 0 si está apagada o el panel es tan estrecho que el
+/// texto se quedaría sin sitio. El frontend reconoce el banner por su título
+/// precedido de exactamente este margen (`src/lib/banner-image.ts`).
+pub fn banner_image_padding(enabled: bool, image_columns: i64, columns: usize) -> usize {
+    if !enabled || image_columns <= 0 {
+        return 0;
+    }
+    let padding = image_columns as usize + BANNER_IMAGE_GAP;
+    if columns < padding + BANNER_IMAGE_MIN_TEXT_COLUMNS {
+        0
+    } else {
+        padding
+    }
+}
+
 fn banner_item_enabled(hidden_items: &str, item: &str) -> bool {
     !hidden_items.split(',').any(|hidden| hidden == item)
 }
@@ -1404,10 +1463,27 @@ pub fn build_banner(
     // settings.json del usuario que lanza `cargo test` (la E2E cambia esas
     // preferencias deliberadamente). El binario real sigue leyendo siempre
     // la configuración persistente.
+    // La imagen del banner tiene sus propias pruebas
+    // (`build_banner_with`); las demás miden el texto sin margen.
     #[cfg(test)]
-    let prefs = crate::preferences::Preferences::default();
+    let prefs = crate::preferences::Preferences {
+        banner_image: false,
+        ..crate::preferences::Preferences::default()
+    };
     #[cfg(not(test))]
     let prefs = crate::preferences::current();
+    build_banner_with(&prefs, env_label, display_name, columns, rows, t)
+}
+
+/// `build_banner` con unas preferencias concretas.
+pub fn build_banner_with(
+    prefs: &crate::preferences::Preferences,
+    env_label: &str,
+    display_name: &str,
+    columns: u16,
+    rows: u16,
+    t: &Translator,
+) -> String {
     let accent = hex_to_ansi(&prefs.fastfetch_color);
     let hardware = banner_hardware();
     let show = |item: &str| banner_item_enabled(&prefs.banner_hidden_items, item);
@@ -1512,6 +1588,7 @@ pub fn build_banner(
             // una variante más alta en una de las ventanas.
             true,
             &t.t("banner.storage", "Disco"),
+            &t.t("banner.drives", "{count} unidades"),
         ));
     }
 
@@ -1520,6 +1597,14 @@ pub fn build_banner(
     } else {
         columns as usize
     };
+    // La imagen va a la izquierda: el texto se compone en lo que queda y cada
+    // línea se desplaza después con espacios, los mismos en ConPTY y en xterm.
+    let image_padding = banner_image_padding(
+        prefs.banner_image,
+        prefs.banner_image_columns,
+        available_cols,
+    );
+    let available_cols = available_cols - image_padding;
 
     // El ancho depende solo de las columnas reales del panel, no del orden en
     // que se abrió o repintó la pestaña. Así todos los paneles iguales reciben
@@ -1710,6 +1795,12 @@ pub fn build_banner(
         let available_banner_rows = usize::from(rows).saturating_sub(5);
         lines.truncate(available_banner_rows);
     }
+    if image_padding > 0 {
+        let margin = " ".repeat(image_padding);
+        for line in &mut lines {
+            line.insert_str(0, &margin);
+        }
+    }
     if lines.is_empty() {
         String::new()
     } else {
@@ -1749,7 +1840,7 @@ mod tests {
                 total: 200 * gb,
             },
         ];
-        let rows = storage_rows(&disks, false, "Disco");
+        let rows = storage_rows(&disks, false, "Disco", "{count} unidades");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "Disco 1 [/]");
         assert_eq!(rows[1].0, "Disco 2 [JuegosLinux]");
@@ -1774,10 +1865,49 @@ mod tests {
                 total: 200 * gb,
             },
         ];
-        let rows = storage_rows(&disks, true, "Disco");
+        let rows = storage_rows(&disks, true, "Disco", "{count} unidades");
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].1.contains("2 unidades"));
-        assert!(rows[0].1.contains("400.0 GB / 700.0 GB"));
+        assert_eq!(rows[0].0, "Disco");
+        // Cada unidad con su letra, su tamaño y su porcentaje de uso.
+        assert_eq!(
+            rows[0].1,
+            "2 unidades - (C:) 500.0 GB (60%) / (D:) 200.0 GB (50%)"
+        );
+        // Una sola unidad no necesita el recuento.
+        assert_eq!(
+            storage_rows(&disks[..1], true, "Disco", "{count} unidades")[0].1,
+            "(C:) 500.0 GB (60%)"
+        );
+    }
+
+    #[test]
+    fn las_rutas_de_montaje_largas_se_acortan_a_su_carpeta_final() {
+        let gb = 1024u64.pow(3);
+        let disks = vec![
+            DiskRow {
+                device: "/dev/nvme0n1p2".into(),
+                mount: "/".into(),
+                used: 99 * gb,
+                total: 100 * gb,
+            },
+            DiskRow {
+                device: "/dev/sdb1".into(),
+                mount: "/mnt/data".into(),
+                used: 0,
+                total: 50 * gb,
+            },
+            DiskRow {
+                device: "/dev/sdc1".into(),
+                mount: "/run/media/usuario/Disco de juegos".into(),
+                used: 70 * gb,
+                total: 100 * gb,
+            },
+        ];
+        let rows = storage_rows(&disks, true, "Disk", "{count} drives");
+        assert_eq!(
+            rows[0].1,
+            "3 drives - (/) 100.0 GB (99%) / (/mnt/data) 50.0 GB (0%) / (…/Disco de juegos) 100.0 GB (70%)"
+        );
     }
 
     #[test]
@@ -2122,6 +2252,46 @@ mod tests {
     }
 
     /// El nombre va ARRIBA DEL TODO y es el de la build que se está ejecutando.
+    #[test]
+    fn la_imagen_reserva_su_margen_solo_si_el_texto_sigue_cabiendo() {
+        assert_eq!(banner_image_padding(true, 20, 120), 22);
+        assert_eq!(banner_image_padding(true, 20, 62), 22);
+        assert_eq!(banner_image_padding(true, 20, 61), 0);
+        assert_eq!(banner_image_padding(false, 20, 200), 0);
+        assert_eq!(banner_image_padding(true, 0, 200), 0);
+    }
+
+    #[test]
+    fn con_imagen_cada_linea_del_banner_empieza_tras_el_mismo_margen() {
+        let t = Translator::default();
+        let prefs = crate::preferences::Preferences {
+            banner_image: true,
+            banner_image_columns: 20,
+            ..crate::preferences::Preferences::default()
+        };
+        let banner = build_banner_with(&prefs, "cmd.exe", "WTerminal", 120, 40, &t);
+        let lines: Vec<String> = banner
+            .split("\r\n")
+            .filter(|line| !line.is_empty())
+            .map(crate::current_dir::strip_ansi)
+            .collect();
+        assert!(lines.len() >= 4, "{lines:?}");
+        let margin = " ".repeat(22);
+        // El frontend reconoce el banner por el título tras el margen exacto.
+        assert_eq!(
+            lines[0],
+            format!("{margin}WTerminal {}", env!("CARGO_PKG_VERSION"))
+        );
+        for line in &lines {
+            assert!(line.starts_with(&margin), "{line:?}");
+            assert_ne!(line.chars().nth(22), Some(' '), "{line:?}");
+            assert!(line.chars().count() <= 120, "{line:?}");
+        }
+        // Sin sitio para el texto, sin margen.
+        let narrow = build_banner_with(&prefs, "cmd.exe", "WTerminal", 50, 40, &t);
+        assert!(crate::current_dir::strip_ansi(&narrow).starts_with("WTerminal"));
+    }
+
     #[test]
     fn el_banner_abre_con_el_nombre_de_la_terminal() {
         let t = Translator::default();

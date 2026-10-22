@@ -78,22 +78,62 @@ impl Version {
     }
 }
 
-/// El adjunto de una release que corresponde a ESTA plataforma.
-///
-/// En Windows la app se distribuye como carpeta comprimida y en Linux como
-/// AppImage, así que se busca por extensión. Un `.exe` de instalador o el
-/// código fuente que GitHub añade solo se descartan por no coincidir.
+/// Cómo se distribuyó la copia que está corriendo, que decide qué adjunto de
+/// la release la actualiza.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageKind {
+    /// Carpeta unpacked o instalada: se actualiza con el `.zip`.
+    WindowsFolder,
+    /// `WTerminal-<versión>-Portable.exe`: el archivo descargado es la
+    /// versión nueva entera y sustituye al ejecutable, como un AppImage.
+    WindowsSingleFile,
+    LinuxAppImage,
+}
+
+impl PackageKind {
+    pub fn current() -> Self {
+        if !crate::platform::host().is_windows() {
+            PackageKind::LinuxAppImage
+        } else if crate::single_file::is_single_file() {
+            PackageKind::WindowsSingleFile
+        } else {
+            PackageKind::WindowsFolder
+        }
+    }
+
+    /// El paquete es un único archivo que reemplaza al ejecutable, sin
+    /// extraer nada.
+    pub fn is_single_file(self) -> bool {
+        matches!(
+            self,
+            PackageKind::WindowsSingleFile | PackageKind::LinuxAppImage
+        )
+    }
+}
+
+/// El adjunto de una release que corresponde a ESTA copia.
 pub fn asset_for_platform<'a>(names: &[&'a str]) -> Option<&'a str> {
-    let (extension, excluir): (&str, &[&str]) = if crate::platform::host().is_windows() {
-        (".zip", &["source", "linux", "macos", "darwin"])
-    } else {
-        (".appimage", &["source", "windows", "macos"])
+    asset_for_package(names, PackageKind::current())
+}
+
+/// En Windows la carpeta se distribuye comprimida, el portable como un único
+/// `-Portable.exe` y en Linux como AppImage, así que se busca por el final del
+/// nombre. El instalador `-setup.exe` o el código fuente que GitHub añade solo
+/// se descartan por no coincidir.
+pub fn asset_for_package<'a>(names: &[&'a str], kind: PackageKind) -> Option<&'a str> {
+    let (sufijo, excluir): (&str, &[&str]) = match kind {
+        PackageKind::WindowsFolder => (".zip", &["source", "linux", "macos", "darwin"]),
+        PackageKind::WindowsSingleFile => (
+            "-portable.exe",
+            &["source", "setup", "linux", "macos", "darwin"],
+        ),
+        PackageKind::LinuxAppImage => (".appimage", &["source", "windows", "macos"]),
     };
     names
         .iter()
         .find(|name| {
             let bajo = name.to_lowercase();
-            bajo.ends_with(extension) && !excluir.iter().any(|malo| bajo.contains(malo))
+            bajo.ends_with(sufijo) && !excluir.iter().any(|malo| bajo.contains(malo))
         })
         .copied()
 }
@@ -146,6 +186,10 @@ pub fn payload_root(staged: &Path) -> PathBuf {
 /// nada. Sin esto, un `.zip` equivocado dejaría la instalación llena de
 /// archivos ajenos y sin el ejecutable.
 pub fn verify_payload(root: &Path, binary_name: &str) -> Result<(), String> {
+    verify_payload_as(root, binary_name, PackageKind::current())
+}
+
+fn verify_payload_as(root: &Path, binary_name: &str, kind: PackageKind) -> Result<(), String> {
     let binario = root.join(binary_name);
     if !binario.is_file() {
         return Err(format!(
@@ -163,6 +207,11 @@ pub fn verify_payload(root: &Path, binary_name: &str) -> Result<(), String> {
         if magic != *b"\x7fELF" {
             return Err("La actualización Linux no es un AppImage ELF válido.".into());
         }
+    }
+    if kind == PackageKind::WindowsSingleFile {
+        // El portable no trae archivos sueltos: todo va dentro del `.exe`, y
+        // se comprueba que esté completo antes de reemplazar el que corre.
+        return crate::single_file::verify_executable(&binario);
     }
     if crate::platform::host().is_windows() {
         for recurso in windows_runtime_files() {
@@ -280,7 +329,16 @@ fn staged_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 /// usando los archivos renombrados a `.old`, y hasta que muera no hay versión
 /// nueva corriendo.
 pub fn apply(root: &Path, install: &Path, binary_name: &str) -> Result<(), String> {
-    verify_payload(root, binary_name)?;
+    apply_as(root, install, binary_name, PackageKind::current())
+}
+
+fn apply_as(
+    root: &Path,
+    install: &Path,
+    binary_name: &str,
+    kind: PackageKind,
+) -> Result<(), String> {
+    verify_payload_as(root, binary_name, kind)?;
     validate_payload_tree(root)?;
     let install = install
         .canonicalize()
@@ -743,6 +801,42 @@ mod tests {
     }
 
     #[test]
+    fn cada_forma_de_distribucion_elige_su_propio_adjunto() {
+        let adjuntos = [
+            "WTerminal-1.4.3-x64-setup.exe",
+            "WTerminal-1.4.3-Portable.exe",
+            "WTerminal-Unpacked-1.4.3.zip",
+            "LTerminal-1.4.3-x86_64.AppImage",
+            "SHA256SUMS.txt",
+        ];
+        assert_eq!(
+            asset_for_package(&adjuntos, PackageKind::WindowsFolder),
+            Some("WTerminal-Unpacked-1.4.3.zip")
+        );
+        assert_eq!(
+            asset_for_package(&adjuntos, PackageKind::WindowsSingleFile),
+            Some("WTerminal-1.4.3-Portable.exe")
+        );
+        assert_eq!(
+            asset_for_package(&adjuntos, PackageKind::LinuxAppImage),
+            Some("LTerminal-1.4.3-x86_64.AppImage")
+        );
+        // Sin portable publicado, el portable no cae en el instalador.
+        assert_eq!(
+            asset_for_package(
+                &[
+                    "WTerminal-1.4.3-x64-setup.exe",
+                    "WTerminal-Unpacked-1.4.3.zip"
+                ],
+                PackageKind::WindowsSingleFile
+            ),
+            None
+        );
+        assert!(PackageKind::WindowsSingleFile.is_single_file());
+        assert!(!PackageKind::WindowsFolder.is_single_file());
+    }
+
+    #[test]
     fn el_codigo_fuente_que_anade_github_no_se_confunde_con_la_aplicacion() {
         // GitHub adjunta siempre un "Source code (zip)": en Windows termina en
         // .zip igual que el paquete de verdad.
@@ -849,6 +943,107 @@ mod tests {
             std::fs::read_to_string(install.path().join("app.exe.old")).unwrap(),
             "viejo"
         );
+    }
+
+    #[test]
+    fn el_portable_de_un_solo_archivo_solo_reemplaza_su_ejecutable() {
+        // El portable puede vivir en Descargas junto a archivos ajenos: la
+        // actualización trae un único `-Portable.exe` y no toca nada más.
+        let staged = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let nombre = "WTerminal-1.0.0-Portable.exe";
+        std::fs::write(
+            staged.path().join(nombre),
+            portable_de_prueba(&[("conpty.dll", b"dll"), ("OpenConsole.exe", b"host")]),
+        )
+        .unwrap();
+        escribir(&install.path().join(nombre), "viejo");
+        escribir(&install.path().join("documento.txt"), "del usuario");
+        escribir(&install.path().join("conpty.dll"), "ajeno");
+
+        apply_as(
+            staged.path(),
+            install.path(),
+            nombre,
+            PackageKind::WindowsSingleFile,
+        )
+        .unwrap();
+
+        let nuevo = std::fs::read(install.path().join(nombre)).unwrap();
+        assert!(nuevo.starts_with(b"MZ") && nuevo.ends_with(crate::single_file::MAGIC));
+        assert_eq!(
+            std::fs::read_to_string(install.path().join(format!("{nombre}.old"))).unwrap(),
+            "viejo"
+        );
+        assert_eq!(
+            std::fs::read_to_string(install.path().join("documento.txt")).unwrap(),
+            "del usuario"
+        );
+        assert_eq!(
+            std::fs::read_to_string(install.path().join("conpty.dll")).unwrap(),
+            "ajeno"
+        );
+    }
+
+    #[test]
+    fn un_portable_incompleto_no_reemplaza_al_que_corre() {
+        let staged = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let nombre = "WTerminal-1.0.0-Portable.exe";
+        // Sin OpenConsole.exe dentro, o un ejecutable normal de la carpeta.
+        std::fs::write(
+            staged.path().join(nombre),
+            portable_de_prueba(&[("conpty.dll", b"dll")]),
+        )
+        .unwrap();
+        escribir(&install.path().join(nombre), "viejo");
+        assert!(apply_as(
+            staged.path(),
+            install.path(),
+            nombre,
+            PackageKind::WindowsSingleFile
+        )
+        .unwrap_err()
+        .contains("OpenConsole.exe"));
+        escribir(&staged.path().join(nombre), "MZ normal");
+        assert!(apply_as(
+            staged.path(),
+            install.path(),
+            nombre,
+            PackageKind::WindowsSingleFile
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(install.path().join(nombre)).unwrap(),
+            "viejo"
+        );
+        assert!(!install.path().join(format!("{nombre}.old")).exists());
+    }
+
+    /// Un portable mínimo con el formato de `scripts/create-single-file-portable.mjs`.
+    fn portable_de_prueba(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut output = b"MZ".to_vec();
+        let payload_start = output.len() as u64;
+        let mut entries = Vec::new();
+        for (name, content) in files {
+            let hash = ring::digest::digest(&ring::digest::SHA256, content);
+            entries.push(serde_json::json!({
+                "name": name,
+                "offset": output.len() as u64,
+                "size": content.len() as u64,
+                "sha256": hash.as_ref().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            }));
+            output.extend_from_slice(content);
+        }
+        let index =
+            serde_json::to_vec(&serde_json::json!({ "format": 1, "files": entries })).unwrap();
+        let index_offset = output.len() as u64;
+        output.extend_from_slice(&index);
+        output.extend_from_slice(&payload_start.to_le_bytes());
+        output.extend_from_slice(&index_offset.to_le_bytes());
+        output.extend_from_slice(&(index.len() as u64).to_le_bytes());
+        output.extend_from_slice(crate::single_file::MAGIC);
+        output
     }
 
     #[cfg(unix)]

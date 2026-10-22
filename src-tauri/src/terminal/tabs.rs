@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::environments::Environment;
 use crate::platform::traits::HostPlatform;
 use crate::pty::{self, PtySession, SpawnConfig, Viewport};
+use crate::semantic_zones::SemanticZoneSplitter;
 use crate::stream::PtyEvent;
 use crate::{paths, spawn_cwd};
 
@@ -34,6 +35,9 @@ const FAILED_SESSION: Duration = Duration::from_millis(3000);
 /// pantalla empieza en 1,1 y consume únicamente esa sonda de arranque.
 const STARTUP_CURSOR_QUERY: &str = "\x1b[6n";
 const STARTUP_CURSOR_REPORT: &str = "\x1b[1;1R";
+/// Posición en la que `clear_view` deja el cursor de xterm antes de arrancar
+/// la PTY de un entorno nuevo; debe coincidir con `STARTUP_CURSOR_REPORT`.
+const CLEAR_VIEW_CURSOR_HOME: &str = "\x1b[1;1H";
 const STARTUP_ATTRIBUTES_QUERY: &str = "\x1b[c";
 const STARTUP_ATTRIBUTES_QUERY_WITH_ZERO: &str = "\x1b[0c";
 const STARTUP_ATTRIBUTES_REPORT: &str = "\x1b[?1;2c";
@@ -140,6 +144,14 @@ pub struct EnvChangedEvent {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticZoneEvent {
+    pub tab_id: String,
+    pub kind: String,
+    pub payload: Option<String>,
+}
+
 /// Recorta una cola de texto a sus últimos `max` caracteres, sin partir un
 /// carácter multibyte por la mitad.
 fn trim_to_last_chars(buffer: &mut String, max: usize) {
@@ -153,6 +165,86 @@ fn trim_to_last_chars(buffer: &mut String, max: usize) {
         .map(|(index, _)| index)
         .unwrap_or(0);
     buffer.drain(..start);
+}
+
+/// Diagnóstico del arranque: dónde deja ConPTY el cursor según lo que pintó
+/// antes del marcador de inicialización (esa salida no llega a xterm). Solo
+/// interpreta lo que ConPTY usa al repintar —posicionamiento CSI, CR, LF y
+/// texto—; el resto se ignora. Devuelve (fila, columna) desde 0.
+fn startup_cursor_hint(output: &str) -> (u32, u32) {
+    let (mut row, mut col) = (0u32, 0u32);
+    let mut chars = output.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    let mut final_byte = None;
+                    for next in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&next) {
+                            final_byte = Some(next);
+                            break;
+                        }
+                        params.push(next);
+                    }
+                    let mut numbers = params
+                        .split(';')
+                        .map(|part| part.parse::<u32>().unwrap_or(1).max(1));
+                    let first = numbers.next().unwrap_or(1);
+                    match final_byte {
+                        Some('H' | 'f') => {
+                            row = first - 1;
+                            col = numbers.next().unwrap_or(1) - 1;
+                        }
+                        Some('A') => row = row.saturating_sub(first),
+                        Some('B') => row += first,
+                        Some('C') => col += first,
+                        Some('D') => col = col.saturating_sub(first),
+                        Some('G') => col = first - 1,
+                        _ => {}
+                    }
+                }
+                // OSC (títulos): hasta BEL o ST.
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\x07' {
+                            break;
+                        }
+                        if next == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => col = 0,
+            '\n' => row += 1,
+            '\x08' => col = col.saturating_sub(1),
+            other if !other.is_control() => col += 1,
+            _ => {}
+        }
+    }
+    (row, col)
+}
+
+/// Lo que se añade al banner sustituto para que xterm acabe donde ConPTY dejó
+/// el cursor al terminar el arranque. xterm sale del banner en `expected_row`,
+/// columna 0. Bajar se hace con saltos de línea, que al llegar abajo hacen
+/// scroll igual que hizo ConPTY; subir, con CUU. Si ya coinciden, nada.
+fn startup_alignment(row: u32, col: u32, expected_row: u32) -> Option<String> {
+    if row == expected_row {
+        return None;
+    }
+    let mut sequence = if row > expected_row {
+        "\r\n".repeat((row - expected_row) as usize)
+    } else {
+        format!("\x1b[{}A", expected_row - row)
+    };
+    if col > 0 {
+        sequence.push_str(&format!("\x1b[{}G", col + 1));
+    }
+    Some(sequence)
 }
 
 /// El gestor de paquetes de Windows de esta máquina, detectado una sola vez.
@@ -286,8 +378,49 @@ fn waits_for_initial_clear(env: &Environment) -> bool {
 /// libere la salida retenida: necesita el primer resize medido por xterm. Al
 /// cambiar de entorno se reutiliza un xterm ya listo y puede conservar el
 /// mismo tamaño, por lo que el frontend no enviará otro resize por sí solo.
+/// Entorno WSL cuya distro no respondió durante la detección.
+fn is_unverified_wsl(env: &Environment) -> bool {
+    env.transport == crate::environments::Transport::Wsl
+        && env
+            .label
+            .ends_with(crate::environments::WSL_UNVERIFIED_SUFFIX)
+}
+
 fn should_release_transport_startup(tab: &Tab) -> bool {
     tab.ready && tab.pending_init_command.is_none() && tab.initial_banner_pending
+}
+
+/// La geometría con la que se libera el arranque de una pestaña: la que ya
+/// confirmó el frontend si llegó antes que la preparación en segundo plano;
+/// si no, la de nacimiento, que se guarda hasta el primer `pty_resize`.
+fn effective_startup_viewport(tab: &mut Tab, birth: Viewport) -> Viewport {
+    if !tab.viewport_confirmed {
+        tab.viewport = birth;
+    }
+    tab.viewport
+}
+
+/// Valor numérico de una variable que solo se respeta bajo E2E.
+fn e2e_number(name: &str) -> Option<u64> {
+    if std::env::var("LTERMINAL_E2E_TESTING").as_deref() != Ok("1") {
+        return None;
+    }
+    std::env::var(name).ok()?.trim().parse().ok()
+}
+
+/// Retraso de la preparación del banner que solo existe bajo E2E
+/// (`LTERMINAL_E2E_BANNER_DELAY_MS`, máximo 10 s).
+fn e2e_banner_delay() -> Option<std::time::Duration> {
+    let millis = e2e_number("LTERMINAL_E2E_BANNER_DELAY_MS")?;
+    (millis > 0).then(|| std::time::Duration::from_millis(millis.min(10_000)))
+}
+
+/// Filas de nacimiento forzadas bajo E2E (`LTERMINAL_E2E_BIRTH_ROWS`): simulan
+/// la geometría heredada de la ventana antes de que el panel anterior informe
+/// de su nuevo alto tras dividir.
+fn e2e_birth_rows() -> Option<u16> {
+    let rows = e2e_number("LTERMINAL_E2E_BIRTH_ROWS")?;
+    (1..=500).contains(&rows).then_some(rows as u16)
 }
 
 fn manual_aliases_from_text(text: &str) -> Vec<crate::alias_profiles::ScriptAlias> {
@@ -391,6 +524,12 @@ pub struct TabList {
 /// directorio se guarda más porque un comando ruidoso puede empujarlo lejos.
 const OUTPUT_BUFFER_CHARS: usize = 4_000;
 const CWD_BUFFER_CHARS: usize = 12_000;
+/// Límite de columnas que puede reservar la terminal horizontal. Debe ser
+/// mayor que la reserva preventiva del frontend (1024); si el backend la
+/// rechazara, xterm quedaría ancho mientras ConPTY seguiría envolviendo la
+/// entrada con la rejilla corta y el eco aparecería escalonado.
+const MAX_TERMINAL_COLS: i64 = 16_384;
+const MIN_INTERACTIVE_COLS: u16 = 1_024;
 
 struct Tab {
     id: String,
@@ -422,6 +561,9 @@ struct Tab {
     /// El último comando que se reportó como no encontrado, para no sugerir lo
     /// mismo dos veces seguidas.
     last_missing_command: Option<String>,
+    /// Metadatos OSC 133, separados de la salida visible y tolerantes a
+    /// secuencias partidas entre lecturas del PTY.
+    semantic_zones: SemanticZoneSplitter,
     /// Filas que ocupa el último banner calculado. Es solo metadato para
     /// diagnósticos y no reserva ni limpia filas dentro de xterm.
     banner_rows: usize,
@@ -455,6 +597,17 @@ struct Tab {
     /// el viewport persistido aquí hacía nacer el banner con el ancho de una
     /// rejilla anterior y después intentaba refluirlo encima del prompt.
     pending_init_command: Option<String>,
+    /// El script de inicialización ya fue escrito en el PTY y puede haber
+    /// más `resize` antes de que llegue su marcador. Mientras esté activo no
+    /// se debe liberar el banner desde `resize`: hacerlo dejaba la nueva
+    /// casilla con el cursor después del banner y sin el prompt.
+    init_command_in_flight: bool,
+    /// El frontend ya envió la geometría medida de su xterm. Hasta entonces
+    /// `viewport` es el de otra pestaña (`TabManager::viewport`) y la shell
+    /// no debe empezar a escribir: ConPTY posiciona el eco con coordenadas
+    /// absolutas y un banner impreso con otras filas desplazaba la primera
+    /// orden una o dos filas por debajo del prompt.
+    viewport_confirmed: bool,
     /// Para transportes sin script de inicialización (Docker/ADB/Wine), el
     /// banner se entrega como salida PTY en el primer resize real, o al
     /// reutilizar el viewport vigente cuando el xterm ya estaba montado. Los
@@ -496,6 +649,7 @@ impl Tab {
             output_buffer: String::new(),
             cwd_buffer: String::new(),
             last_missing_command: None,
+            semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
             banner_text: String::new(),
             viewport,
@@ -505,6 +659,8 @@ impl Tab {
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
             pending_init_command: None,
+            init_command_in_flight: false,
+            viewport_confirmed: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,
@@ -553,6 +709,10 @@ pub struct TabManager {
     /// Una única compuerta mantiene el orden de bytes/eventos que ve cada
     /// pestaña (también durante `mark_ready`, cuando se vacía la cola inicial).
     outbound_lock: Mutex<()>,
+    /// Emisor opcional para avisar al xterm de los resizes que nacen en un
+    /// panel. Los comandos escritos por el usuario ya pasan por el frontend;
+    /// las acciones de Biblioteca/Proyectos llegan directamente aquí.
+    app_handle: Mutex<Option<AppHandle>>,
 }
 
 impl TabManager {
@@ -562,7 +722,15 @@ impl TabManager {
             viewport: Mutex::new(viewport),
             viewport_saver: ViewportSaver::default(),
             outbound_lock: Mutex::new(()),
+            app_handle: Mutex::new(None),
         }
+    }
+
+    /// Conecta el emisor de eventos una vez que Tauri ha creado el estado.
+    /// Mantenerlo opcional conserva los tests unitarios del gestor sin una
+    /// ventana real.
+    pub fn attach_app(&self, app: &AppHandle) {
+        *self.app_handle.lock() = Some(app.clone());
     }
 
     pub fn viewport(&self) -> Viewport {
@@ -725,7 +893,18 @@ impl TabManager {
     /// arrancar la nueva PTY: shells rápidas pueden imprimir su prompt antes de
     /// que llegue `env-changed`, mezclándolo con el historial anterior.
     pub fn clear_view(&self, app: &AppHandle, tab_id: &str) {
-        self.send(app, tab_id, Outbound::Clear);
+        let _outbound = self.outbound_lock.lock();
+        self.send_locked(app, tab_id, Outbound::Clear);
+        // La PTY nueva nace con PSEUDOCONSOLE_INHERIT_CURSOR y el backend le
+        // responde que el cursor está en 1;1 (`STARTUP_CURSOR_REPORT`). El
+        // clear no mueve el cursor de xterm: si quedaba abajo, la shell nueva
+        // pintaba su prompt al final y ConPTY colocaba el eco de la primera
+        // orden (`ESC[fila;colH`) arriba, separado del prompt.
+        self.send_locked(
+            app,
+            tab_id,
+            Outbound::Data(CLEAR_VIEW_CURSOR_HOME.to_string()),
+        );
     }
 
     // ---- Ciclo de vida ----
@@ -753,7 +932,16 @@ impl TabManager {
         initial_cwd: Option<&Path>,
         pane_count: usize,
     ) -> TabSummary {
-        let initial_viewport = self.viewport();
+        let stored_viewport = self.viewport();
+        // La shell puede recibir el primer comando antes de que WebView2
+        // termine de publicar su primer `fit()`. Nacer con una PTY corta y
+        // ensancharla después hace que cmd marque las continuaciones como
+        // filas ya envueltas; mantener una reserva inicial estable evita ese
+        // reflow irrecuperable.
+        let initial_viewport = Viewport {
+            cols: stored_viewport.cols.max(MIN_INTERACTIVE_COLS),
+            rows: e2e_birth_rows().unwrap_or(stored_viewport.rows).max(1),
+        };
         let pane_count = pane_count.max(1);
         let tab_id = {
             let mut registry = self.registry.lock();
@@ -817,6 +1005,7 @@ impl TabManager {
             tab.startup_attributes_query_pending = false;
             tab.startup_started_at = Some(startup_started_at);
             tab.pending_init_command = None;
+            tab.init_command_in_flight = false;
             tab.initial_banner_pending = false;
             tab.pending_commands.clear();
             tab.generation
@@ -1025,6 +1214,7 @@ impl TabManager {
                 tab.last_clear_marker = None;
                 tab.output_buffer.clear();
                 tab.cwd_buffer.clear();
+                tab.semantic_zones.reset();
                 tab.last_missing_command = None;
                 let viewport = tab.viewport;
                 let pane_count = tab.pane_count.max(1);
@@ -1138,33 +1328,57 @@ impl TabManager {
                         "durationMs": banner_started.elapsed().as_millis(),
                     })
                 );
-                let release_transport_startup =
+                // Solo E2E: retrasa el final de la preparación para reproducir
+                // de forma determinista que el primer `pty_resize` del
+                // frontend llegue antes (`E2E_NEW_TAB_ECHO_FORCED_RACE`).
+                if let Some(delay) = e2e_banner_delay() {
+                    std::thread::sleep(delay);
+                }
+                // La preparación corre en segundo plano con el viewport con el
+                // que nació la pestaña (heredado de la ventana). Si mientras
+                // tanto el frontend ya midió la casilla real con `pty_resize`,
+                // esa medida manda: sobrescribirla liberaba la shell y
+                // redimensionaba ConPTY a la rejilla heredada (26 filas frente
+                // a las 4 de xterm), el banner desplazaba solo a xterm y el eco
+                // de la primera orden salía despegado al crecer la casilla.
+                let (release_transport_startup, viewport) =
                     if let Some(tab) = self.registry.lock().find_mut(tab_id) {
                         tab.banner_rows = banner_rows;
                         tab.banner_text = banner_text.clone();
-                        tab.viewport = viewport;
+                        let viewport = effective_startup_viewport(tab, viewport);
                         let initial_banner_pending =
                             session_files.init_command.is_none() && !banner_text.is_empty();
                         tab.initializing =
                             session_files.init_command.is_some() || initial_banner_pending;
                         tab.initial_banner_pending = initial_banner_pending;
-                        should_release_transport_startup(tab)
+                        (should_release_transport_startup(tab), viewport)
                     } else {
-                        false
+                        (false, viewport)
                     };
 
                 match session_files.init_command {
                     Some(command) => {
-                        let start_now = self
-                            .registry
-                            .lock()
-                            .find(tab_id)
-                            .map(|tab| tab.ready)
-                            .unwrap_or(false);
-                        if start_now {
-                            self.write(tab_id, &format!("{command}\r"));
-                        } else if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                        // El script se prepara en segundo plano y puede
+                        // terminar después del primer `resize` del frontend.
+                        // En ese caso no habrá otro cambio de geometría que
+                        // consuma `pending_init_command`, dejando la PTY en
+                        // blanco indefinidamente. Guardarlo y liberar siempre
+                        // con el último viewport conocido cierra esa carrera;
+                        // `resize` conserva además el orden de salida hasta que
+                        // xterm confirme que está montado.
+                        // Sin geometría confirmada por el frontend se retiene:
+                        // su primer `pty_resize` lo liberará con las filas
+                        // reales del xterm.
+                        let release_viewport = {
+                            let mut registry = self.registry.lock();
+                            let Some(tab) = registry.find_mut(tab_id) else {
+                                return false;
+                            };
                             tab.pending_init_command = Some(command);
+                            tab.viewport_confirmed.then_some(tab.viewport)
+                        };
+                        if let Some(viewport) = release_viewport {
+                            self.resize(app, tab_id, viewport.cols, viewport.rows);
                         }
                     }
                     None => {
@@ -1244,7 +1458,7 @@ impl TabManager {
     /// sistema: dónde está la shell (se reconoce su prompt) y si acaba de
     /// quejarse de un comando que no existe.
     fn inspect_output(&self, app: &AppHandle, tab_id: &str, data: &str) {
-        let (suggestion, cwd_changed) = {
+        let (suggestion, cwd_changed, semantic_events) = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
                 return;
@@ -1257,6 +1471,7 @@ impl TabManager {
             trim_to_last_chars(&mut tab.output_buffer, OUTPUT_BUFFER_CHARS);
             tab.cwd_buffer.push_str(data);
             trim_to_last_chars(&mut tab.cwd_buffer, CWD_BUFFER_CHARS);
+            let semantic_events = tab.semantic_zones.push(data);
 
             let previous = tab
                 .cwd
@@ -1292,7 +1507,7 @@ impl TabManager {
                 }
                 _ => None,
             };
-            (suggestion, cwd_changed)
+            (suggestion, cwd_changed, semantic_events)
         };
 
         if let Some(cwd) = cwd_changed {
@@ -1303,6 +1518,17 @@ impl TabManager {
             let _ = app.emit(
                 "terminal-cwd-changed",
                 serde_json::json!({ "tabId": tab_id, "cwd": cwd }),
+            );
+        }
+
+        for event in semantic_events {
+            let _ = app.emit(
+                "terminal-semantic-zone",
+                SemanticZoneEvent {
+                    tab_id: tab_id.to_string(),
+                    kind: event.kind.as_str().to_string(),
+                    payload: event.payload,
+                },
             );
         }
 
@@ -1327,6 +1553,45 @@ impl TabManager {
             .find(tab_id)
             .map(|tab| tab.generation == generation)
             .unwrap_or(false)
+    }
+
+    /// Una distro WSL marcada «sin comprobar» (su sonda caducó con la VM en
+    /// frío) cuya pestaña acaba de producir salida sí responde: se descarta la
+    /// caché de WSL y se vuelve a detectar en segundo plano para que el
+    /// selector deje de marcarla. Como mucho una vez cada 30 s.
+    fn heal_unverified_wsl(&self, app: &AppHandle, tab_id: &str) {
+        let unverified = self
+            .registry
+            .lock()
+            .find(tab_id)
+            .and_then(|tab| tab.env.clone())
+            .is_some_and(|env| is_unverified_wsl(&env));
+        if !unverified {
+            return;
+        }
+        static LAST_HEAL: once_cell::sync::Lazy<Mutex<Option<Instant>>> =
+            once_cell::sync::Lazy::new(|| Mutex::new(None));
+        {
+            let mut last = LAST_HEAL.lock();
+            if last.is_some_and(|at| at.elapsed() < Duration::from_secs(30)) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        log_info!(
+            "La distro WSL marcada sin comprobar responde; se vuelve a detectar",
+            serde_json::json!({ "tabId": tab_id })
+        );
+        let app = app.clone();
+        let _ = std::thread::Builder::new()
+            .name("wsl-heal".into())
+            .spawn(move || {
+                crate::wsl_env::reset_cache();
+                if let Some(state) = app.try_state::<Arc<crate::state::AppState>>() {
+                    let inventory = state.refresh_environments();
+                    let _ = app.emit("envs-updated", inventory);
+                }
+            });
     }
 
     fn on_pty_event(&self, app: &AppHandle, tab_id: &str, generation: u64, event: PtyEvent) {
@@ -1410,13 +1675,14 @@ impl TabManager {
                                 "durationMs": elapsed.as_millis() as u64,
                             })
                         );
+                        self.heal_unverified_wsl(app, tab_id);
                     }
                     self.inspect_output(app, tab_id, &data);
                     self.send(app, tab_id, Outbound::Data(data));
                 }
             }
             PtyEvent::Clear(marker) => {
-                let (marker_elapsed, pending_banner) = {
+                let (marker_elapsed, pending_banner, startup_trace) = {
                     let mut registry = self.registry.lock();
                     let Some(tab) = registry.find_mut(tab_id) else {
                         return;
@@ -1430,7 +1696,19 @@ impl TabManager {
                     tab.last_clear_marker = Some(marker);
                     // Este es el marcador del script inicial. A partir de aquí
                     // el siguiente Data pertenece ya a la shell inicializada.
+                    let was_initializing = tab.initializing;
+                    // xterm nunca ve esta salida: si ConPTY no terminó en la
+                    // fila que xterm supone, el primer eco cae fuera de sitio.
+                    let startup_trace = was_initializing.then(|| {
+                        // Si la salida se recortó, falta el borrado inicial
+                        // y la fila calculada no es fiable para corregir.
+                        let complete = tab.startup_output.chars().count() < OUTPUT_BUFFER_CHARS;
+                        let mut tail = tab.startup_output.clone();
+                        trim_to_last_chars(&mut tail, 400);
+                        (startup_cursor_hint(&tab.startup_output), complete, tail)
+                    });
                     tab.initializing = false;
+                    tab.init_command_in_flight = false;
                     tab.startup_output.clear();
                     tab.startup_cursor_query_pending = false;
                     tab.startup_attributes_query_pending = false;
@@ -1443,12 +1721,46 @@ impl TabManager {
                     // inicializador. Emitir aquí el banner ya calculado lo
                     // deja en la cola antes del prompt, sin esperar a que el
                     // usuario active la pestaña y escriba encima.
-                    let banner = tab.initial_banner_pending.then(|| {
-                        tab.initial_banner_pending = false;
-                        tab.banner_text.clone()
-                    });
-                    (elapsed, banner)
+                    let banner = (was_initializing || tab.initial_banner_pending)
+                        .then(|| {
+                            tab.initial_banner_pending = false;
+                            tab.banner_text.clone()
+                        })
+                        .filter(|text| !text.is_empty());
+                    (elapsed, banner, startup_trace)
                 };
+                let mut alignment = None;
+                if let Some(((row, col), complete, tail)) = startup_trace {
+                    // xterm sigue en la fila 0 tras el clear y solo recibe el
+                    // banner sustituto: debe acabar en la misma fila que la
+                    // shell dejó en ConPTY o el primer eco saldrá despegado.
+                    let expected_row = pending_banner
+                        .as_deref()
+                        .map_or(0, |text| text.matches('\n').count() as u32);
+                    if complete {
+                        alignment = startup_alignment(row, col, expected_row);
+                    }
+                    let details = serde_json::json!({
+                        "tabId": tab_id,
+                        "generation": generation,
+                        "cursorRow": row,
+                        "cursorCol": col,
+                        "expectedRow": expected_row,
+                        "corrected": alignment.is_some(),
+                        "tail": format!("{tail:?}"),
+                    });
+                    if row == expected_row {
+                        log_debug!("Salida de arranque descartada antes del marcador", details);
+                    } else {
+                        // Se corrige para el usuario, pero sigue siendo un
+                        // aviso: algo del inicializador imprimió tras el
+                        // banner y el E2E (`assertCurrentLog`) lo exige limpio.
+                        log_warn!(
+                            "Desalineación entre ConPTY y xterm tras el arranque",
+                            details
+                        );
+                    }
+                }
                 if let Some(elapsed) = marker_elapsed {
                     log_info!(
                         "Marcador de inicializacion recibido",
@@ -1462,8 +1774,13 @@ impl TabManager {
                 // El marcador se emite antes del clear nativo: se elimina la
                 // pantalla anterior antes de que ConPTY pinte el prompt.
                 self.send(app, tab_id, Outbound::Clear);
-                if let Some(text) = pending_banner.filter(|text| !text.is_empty()) {
+                let banner = pending_banner.filter(|text| !text.is_empty());
+                let had_banner = banner.is_some();
+                let text = banner.unwrap_or_default() + alignment.as_deref().unwrap_or_default();
+                if !text.is_empty() {
                     self.send(app, tab_id, Outbound::Data(text));
+                }
+                if had_banner {
                     log_debug!(
                         "Banner inicial emitido tras el marcador de inicialización",
                         serde_json::json!({ "tabId": tab_id, "generation": generation })
@@ -1720,8 +2037,72 @@ impl TabManager {
             );
             return true;
         }
+        self.prepare_command_resize(tab_id, command);
         let prefix = if pending { "\r" } else { "" };
         self.write(tab_id, &format!("{prefix}{command}\r"))
+    }
+
+    /// Amplía la ConPTY antes de que una acción de panel entre en la shell.
+    ///
+    /// El teclado normal reserva columnas en `TerminalPane`, pero los
+    /// comandos de Biblioteca, Proyectos y LTools se escriben desde Rust. Si
+    /// una cabecera o una barra de progreso supera el panel, cmd recibe la
+    /// línea con la anchura corta y la envuelve antes de que xterm pueda
+    /// ofrecer el scroll horizontal. El frontend recibe el mismo tamaño para
+    /// que ambas rejillas cambien en el mismo ciclo.
+    fn prepare_command_resize(&self, tab_id: &str, command: &str) {
+        const MAX_COMMAND_COLS: u16 = MAX_TERMINAL_COLS as u16;
+        let requested = command
+            .split(['\r', '\n'])
+            .map(|line| line.chars().count().saturating_add(4))
+            .max()
+            .unwrap_or(0)
+            .min(usize::from(MAX_COMMAND_COLS)) as u16;
+        if requested == 0 {
+            return;
+        }
+        let (session, rows, current) = {
+            let registry = self.registry.lock();
+            let Some(tab) = registry.find(tab_id) else {
+                return;
+            };
+            let Some(session) = tab.session.clone() else {
+                return;
+            };
+            (session, tab.viewport.rows.max(1), tab.viewport.cols)
+        };
+        if requested <= current {
+            return;
+        }
+        let viewport = Viewport {
+            cols: requested,
+            rows,
+        };
+        if session.resize(viewport).is_err() {
+            return;
+        }
+        if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+            tab.viewport = viewport;
+        }
+        if let Some(app) = self.app_handle.lock().clone() {
+            let _ = app.emit(
+                "pty-command-resize",
+                serde_json::json!({
+                    "tabId": tab_id,
+                    "cols": requested,
+                    "rows": rows,
+                    "reason": "programmatic-command"
+                }),
+            );
+        }
+        // `write_command` se ejecuta desde la biblioteca/proyectos y el
+        // evento que ensancha xterm viaja al WebView de forma asíncrona. Si
+        // escribimos la orden en el mismo instante, ConPTY ya tiene la nueva
+        // anchura pero xterm todavía pinta el eco con la anterior; una orden
+        // larga queda partida en filas no marcadas y el reflow posterior no
+        // puede recomponerla. Dar un frame nativo al WebView antes del write
+        // hace que ambas rejillas entren en la misma transición.
+        std::thread::sleep(Duration::from_millis(32));
     }
 
     /// Libera los comandos de panel que llegaron mientras la shell ejecutaba
@@ -1740,6 +2121,7 @@ impl TabManager {
             tab.pending_commands.drain(..).collect::<Vec<_>>()
         };
         for command in commands {
+            self.prepare_command_resize(tab_id, &command);
             if !self.write(tab_id, &command) {
                 log_warn!(
                     "No se pudo liberar un comando de panel encolado",
@@ -1769,8 +2151,24 @@ impl TabManager {
     /// El último tamaño medido por el frontend es con el que nacerán las
     /// sesiones siguientes. Se guarda aunque el pty ya no esté: sigue siendo el
     /// tamaño de la ventana.
+    /// `pty_resize`: además de redimensionar, confirma que la geometría ya es
+    /// la del xterm que pintará la salida y permite arrancar la shell.
+    pub fn resize_from_frontend(&self, app: &AppHandle, tab_id: &str, cols: u16, rows: u16) {
+        if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+            tab.viewport_confirmed = true;
+        }
+        self.resize(app, tab_id, cols, rows);
+    }
+
     pub fn resize(&self, app: &AppHandle, tab_id: &str, cols: u16, rows: u16) {
-        let viewport = Viewport { cols, rows };
+        // No encoger una PTY interactiva por debajo de la reserva de arranque:
+        // xterm puede ocultar esa anchura detrás de su host, pero ConPTY debe
+        // conservarla para que una línea que ya está en edición no se vuelva
+        // a envolver con una rejilla distinta.
+        let viewport = Viewport {
+            cols: cols.max(MIN_INTERACTIVE_COLS),
+            rows: rows.max(1),
+        };
         *self.viewport.lock() = viewport;
         self.viewport_saver.remember(viewport);
 
@@ -1795,9 +2193,10 @@ impl TabManager {
         // entonces se libera el inicializador retenido de una pestaña nueva,
         // evitando que una rejilla anterior deje aliases con rutas obsoletas.
         let pending_init = self.registry.lock().find_mut(tab_id).and_then(|tab| {
-            tab.pending_init_command
-                .take()
-                .map(|command| (command, tab.pane_count.max(1)))
+            tab.pending_init_command.take().map(|command| {
+                tab.init_command_in_flight = true;
+                (command, tab.pane_count.max(1))
+            })
         });
         if let Some(command) = pending_init {
             let (command, pane_count) = command;
@@ -1819,7 +2218,7 @@ impl TabManager {
             let Some(tab) = registry.find_mut(tab_id) else {
                 return;
             };
-            if !tab.initial_banner_pending {
+            if !tab.initial_banner_pending || tab.init_command_in_flight {
                 None
             } else {
                 tab.initial_banner_pending = false;
@@ -1955,6 +2354,7 @@ impl TabManager {
                 platform: std::env::consts::OS,
                 windows_manager,
                 initial_banner: false,
+                assist_lines: &[],
             };
             if let Some(script) = crate::alias_profiles::build_init_script(env.kind, &t, &options) {
                 crate::session_files::write_help_files(&tab_id, &help_path, env.kind, &script);
@@ -2104,7 +2504,7 @@ impl ViewportSaver {
 /// Electron. Un valor fuera de rango se ignora en vez de recortarse: viene de
 /// una medición del frontend que ha salido mal.
 pub fn valid_viewport(cols: i64, rows: i64) -> Option<Viewport> {
-    if (1..=1000).contains(&cols) && (1..=500).contains(&rows) {
+    if (1..=MAX_TERMINAL_COLS).contains(&cols) && (1..=500).contains(&rows) {
         Some(Viewport {
             cols: cols as u16,
             rows: rows as u16,
@@ -2117,6 +2517,38 @@ pub fn valid_viewport(cols: i64, rows: i64) -> Option<Viewport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn la_pista_de_cursor_sigue_el_repintado_de_conpty() {
+        assert_eq!(startup_cursor_hint(""), (0, 0));
+        // cls de cmd: HOME y borrado; después, una línea vacía y el prompt.
+        assert_eq!(
+            startup_cursor_hint("C:\\>call x\r\n\x1b[H\x1b[2J\x1b]0;WTerminal\x07\r\nC:\\>"),
+            (1, 4)
+        );
+        assert_eq!(startup_cursor_hint("\x1b[3;24Hecho\x1b[?25h"), (2, 27));
+        assert_eq!(startup_cursor_hint("abc\x1b[2D\x1b[B"), (1, 1));
+    }
+
+    #[test]
+    fn un_aviso_tras_el_banner_se_corrige_alineando_xterm_con_conpty() {
+        // Salida real de ble.sh al regenerar su caché de tput: el banner
+        // (5 filas en este recorte) y una línea más antes del marcador.
+        let output = "\x1b[H\x1b[2JWTerminal 1.0.0\r\r\nSistema\r\r\nCPU\r\r\nUptime\r\r\nMemoria\r\r\nble/term.sh: updating tput cache for TERM=xterm-256color... \rble/term.sh: updating tput cache for TERM=xterm-256color... done\r\n";
+        let (row, col) = startup_cursor_hint(output);
+        assert_eq!((row, col), (6, 0));
+        // xterm solo recibe el banner (5 saltos): baja una fila más.
+        assert_eq!(startup_alignment(row, col, 5).as_deref(), Some("\r\n"));
+        // Alineados: no se añade nada.
+        assert_eq!(startup_alignment(5, 0, 5), None);
+        // ConPTY por encima (banner más corto de lo esperado): sube.
+        assert_eq!(startup_alignment(3, 0, 5).as_deref(), Some("\x1b[2A"));
+        // Y si se quedó a mitad de línea, también la columna.
+        assert_eq!(
+            startup_alignment(7, 4, 5).as_deref(),
+            Some("\r\n\r\n\x1b[5G")
+        );
+    }
 
     #[test]
     fn pestaña_pendiente_publica_el_entorno_solicitado_antes_del_pty() {
@@ -2157,13 +2589,65 @@ mod tests {
     }
 
     #[test]
+    fn la_medida_del_frontend_no_se_pisa_con_la_geometria_de_nacimiento() {
+        // Pestaña nacida con las 26 filas de la ventana sin dividir; el
+        // frontend mide 4 en la casilla real antes de que termine la
+        // preparación del banner en segundo plano.
+        let env = Environment {
+            id: "cmd".into(),
+            label: "cmd.exe".into(),
+            ..Environment::default()
+        };
+        let birth = Viewport {
+            cols: 1024,
+            rows: 26,
+        };
+        let mut tab = Tab::pending("tab-2".into(), &env, birth, 2);
+        tab.viewport_confirmed = true;
+        tab.viewport = Viewport {
+            cols: 1024,
+            rows: 4,
+        };
+        assert_eq!(effective_startup_viewport(&mut tab, birth).rows, 4);
+        assert_eq!(tab.viewport.rows, 4, "la medida confirmada se conserva");
+
+        // Sin medida del frontend todavía, se guarda la de nacimiento hasta
+        // el primer `pty_resize`.
+        let mut sin_medir = Tab::pending("tab-3".into(), &env, Viewport::default(), 3);
+        assert_eq!(effective_startup_viewport(&mut sin_medir, birth), birth);
+        assert_eq!(sin_medir.viewport, birth);
+    }
+
+    #[test]
+    fn solo_una_pestana_wsl_sin_comprobar_dispara_la_nueva_deteccion() {
+        let wsl = |label: &str| Environment {
+            id: "wsl:Ubuntu".into(),
+            label: label.into(),
+            transport: crate::environments::Transport::Wsl,
+            ..Environment::default()
+        };
+        assert!(is_unverified_wsl(&wsl(
+            "WSL: Ubuntu · bash (sin comprobar)"
+        )));
+        assert!(!is_unverified_wsl(&wsl("WSL: Ubuntu · bash")));
+        let native = Environment {
+            label: "cmd.exe (sin comprobar)".into(),
+            ..Environment::default()
+        };
+        assert!(!is_unverified_wsl(&native));
+        // La primera sonda deja margen para arrancar la VM de WSL en frío.
+        assert!(crate::wsl_env::FIRST_PROBE_TIMEOUT >= Duration::from_secs(10));
+    }
+
+    #[test]
     fn el_tamano_se_rechaza_fuera_de_rango() {
         assert!(valid_viewport(80, 24).is_some());
         assert!(valid_viewport(1, 1).is_some());
         assert!(valid_viewport(1000, 500).is_some());
+        assert!(valid_viewport(MAX_TERMINAL_COLS, 500).is_some());
         assert!(valid_viewport(0, 24).is_none());
         assert!(valid_viewport(80, 0).is_none());
-        assert!(valid_viewport(1001, 24).is_none());
+        assert!(valid_viewport(MAX_TERMINAL_COLS + 1, 24).is_none());
         assert!(valid_viewport(80, 501).is_none());
         assert!(valid_viewport(-5, 24).is_none());
     }
@@ -2174,6 +2658,15 @@ mod tests {
         assert!(remove_startup_query(&mut data, STARTUP_CURSOR_QUERY));
         assert_eq!(data, "C:\\Users\\Admin>");
         assert_eq!(STARTUP_CURSOR_REPORT, "\x1b[1;1R");
+    }
+
+    #[test]
+    fn el_clear_de_entorno_deja_el_cursor_donde_la_pty_nueva_cree_que_esta() {
+        // CSI fila;col R (informe) y CSI fila;col H (posición) deben nombrar
+        // la misma celda; si no, el eco de la primera orden queda despegado.
+        let report = STARTUP_CURSOR_REPORT.trim_end_matches('R');
+        let home = CLEAR_VIEW_CURSOR_HOME.trim_end_matches('H');
+        assert_eq!(report, home);
     }
 
     #[test]
@@ -2247,6 +2740,7 @@ mod tests {
             output_buffer: String::new(),
             cwd_buffer: String::new(),
             last_missing_command: None,
+            semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
             banner_text: String::new(),
             viewport: Viewport::default(),
@@ -2256,6 +2750,8 @@ mod tests {
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
             pending_init_command: None,
+            init_command_in_flight: false,
+            viewport_confirmed: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,
@@ -2286,6 +2782,7 @@ mod tests {
             output_buffer: String::new(),
             cwd_buffer: String::new(),
             last_missing_command: None,
+            semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
             banner_text: String::new(),
             viewport: Viewport::default(),
@@ -2295,6 +2792,8 @@ mod tests {
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
             pending_init_command: None,
+            init_command_in_flight: false,
+            viewport_confirmed: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,
@@ -2347,6 +2846,7 @@ mod tests {
             output_buffer: String::new(),
             cwd_buffer: String::new(),
             last_missing_command: None,
+            semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
             banner_text: String::new(),
             viewport: Viewport::default(),
@@ -2356,6 +2856,8 @@ mod tests {
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
             pending_init_command: None,
+            init_command_in_flight: false,
+            viewport_confirmed: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,

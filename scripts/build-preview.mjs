@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const child = spawn(npm, ['run', 'build'], {
+const builder = fileURLToPath(new URL('./build-frontend.mjs', import.meta.url));
+const child = spawn(process.execPath, [builder], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     stdio: 'inherit',
     env: {
         ...process.env,

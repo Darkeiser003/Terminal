@@ -25,12 +25,19 @@ use crate::environments::ShellKind;
 use crate::state::AppState;
 
 const ACTIONS_SCHEMA: &str = "ltools-actions-v1";
-const MAX_ACTIONS: usize = 200;
+/// Tope de acciones que se publican. Un catálogo más largo no se rechaza: se
+/// usan las primeras, para que una versión nueva de Tools con más acciones
+/// nunca deje la Biblioteca vacía.
+const MAX_ACTIONS: usize = 1000;
 const MAX_ID: usize = 100;
 const MAX_TEXT: usize = 1024;
 const MAX_ARGUMENTS: usize = 32;
 const MAX_ARGUMENT: usize = 512;
-const MAX_CATALOG_BYTES: usize = 512 * 1024;
+/// El catálogo de WTools 1.0.0 ocupa unos 72 KB con 75 acciones.
+const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+/// Responde en menos de 100 ms, pero la primera ejecución de un `.exe` recién
+/// actualizado puede esperar al análisis del antivirus.
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_VERSION_BYTES: usize = 160;
 const MAX_RELEASE_DIRECTORIES: usize = 64;
 const SUPPORTED_LANGUAGES: &[&str] = &[
@@ -121,9 +128,26 @@ fn failed(error: impl Into<String>) -> LToolsRunResult {
     }
 }
 
+fn disabled_catalog() -> LToolsActionList {
+    LToolsActionList {
+        available: false,
+        executable: None,
+        version: None,
+        actions: Vec::new(),
+        error: Some("La integración experimental de LTools está desactivada en Ajustes.".into()),
+    }
+}
+
 fn executable_candidates() -> &'static [&'static str] {
     if cfg!(windows) {
+        // La release Windows de Tools publica `wtools-cli.exe` (asInvoker) y
+        // `wtools.exe` (GUI con manifiesto requireAdministrator). La GUI no es
+        // candidata: lanzarla desde una terminal no elevada falla con
+        // ERROR_ELEVATION_REQUIRED y el contrato de acciones ya declara
+        // `wtools-cli.exe`. Los nombres `ltools*` se conservan para builds
+        // locales y versiones anteriores.
         &[
+            "wtools-cli.exe",
             "ltools-cli.exe",
             "ltools.exe",
             "winslim-tools.exe",
@@ -201,7 +225,7 @@ fn add_directory_candidates(directory: &Path, output: &mut Vec<PathBuf>) {
 fn release_directory_name_is_safe(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && (name == "latest"
+        && (name.eq_ignore_ascii_case("latest")
             || name.starts_with('v')
             || name.starts_with('V')
             || name
@@ -232,6 +256,13 @@ fn versioned_release_directories(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn configured_release_root(projects_folder: &str) -> PathBuf {
+    PathBuf::from(projects_folder)
+        .join("_releases")
+        .join("Darkeiser003")
+        .join("Tools")
+}
+
 fn discovery_directories() -> Vec<PathBuf> {
     let home = crate::paths::home_dir();
     let mut roots = Vec::new();
@@ -256,6 +287,13 @@ fn discovery_directories() -> Vec<PathBuf> {
         add(PathBuf::from(path));
     }
 
+    // Instalador NSIS de WTools (`$PROGRAMFILES64\WTools`).
+    #[cfg(windows)]
+    if let Some(program_files) =
+        std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))
+    {
+        add(PathBuf::from(program_files).join("WTools"));
+    }
     add(home.join(".local/bin"));
     add(home.join(".local/share/ltools"));
     add(home.join("bin"));
@@ -274,6 +312,11 @@ fn discovery_directories() -> Vec<PathBuf> {
         crate::paths::documents_dir().join("LTerminal Projects/_releases/Darkeiser003/Tools"),
         crate::paths::documents_dir().join("WTerminal Projects/_releases/Darkeiser003/Tools"),
         crate::paths::documents_dir().join("WinSlim Projects/_releases/Darkeiser003/Tools"),
+        // Las descargas de releases respetan la carpeta de proyectos elegida
+        // por el usuario. Sin esta ruta, el archivo sí se bajaba, pero el
+        // catálogo seguía mostrando «LTools no está instalado» cuando esa
+        // carpeta se encontraba fuera de Documentos.
+        configured_release_root(&crate::projects::github::projects_folder()),
     ] {
         for release_directory in versioned_release_directories(&release_root) {
             add(release_directory);
@@ -289,6 +332,11 @@ fn discovery_directories() -> Vec<PathBuf> {
     {
         add(directory.join("Tools"));
         add(directory.join("LTools"));
+        add(directory.join("WTools"));
+        // «Download ZIP» de GitHub descomprime el repositorio como
+        // `Tools-main`; su `release/WTools-<versión>` es una copia válida.
+        add(directory.join("Tools-main"));
+        add(directory.join("Tools").join("Tools-main"));
     }
 
     // Si se ejecuta desde un checkout o desde una carpeta de releases, se
@@ -313,41 +361,123 @@ fn discovery_directories() -> Vec<PathBuf> {
                 root.join(suffix)
             };
             if !expanded.contains(&directory) {
-                expanded.push(directory);
+                expanded.push(directory.clone());
+            }
+            // El ZIP portable de Windows se descomprime como `WTools-<versión>`.
+            for portable in portable_windows_directories(&directory) {
+                if !expanded.contains(&portable) {
+                    expanded.push(portable);
+                }
             }
         }
     }
     expanded
 }
 
-fn find_executables() -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    for candidate in executable_candidates() {
-        if let Some(path) = crate::path_env::which(candidate) {
-            if !result.contains(&path) {
-                result.push(path);
-            }
-        }
+fn portable_windows_directory_name_is_safe(name: &str) -> bool {
+    name.len() <= 64
+        && name
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("wtools-"))
+        && name[7..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_+".contains(character))
+}
+
+/// Solo el primer nivel y con el mismo límite que las releases descargadas.
+fn portable_windows_directories(root: &Path) -> Vec<PathBuf> {
+    if !cfg!(windows) {
+        return Vec::new();
     }
-    if let Some(path) = std::env::var_os("LTOOLS_PATH") {
-        let path = PathBuf::from(path);
-        if is_executable_file(&path) && !result.contains(&path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    // Se filtra por nombre antes de limitar: en carpetas con muchos archivos
+    // (Descargas, Escritorio) `WTools-<versión>` no tiene por qué estar entre
+    // las primeras entradas.
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            (portable_windows_directory_name_is_safe(name) && path.is_dir()).then_some(path)
+        })
+        .take(MAX_RELEASE_DIRECTORIES)
+        .collect()
+}
+
+/// Un AppImage CLI se prefiere a la variante GUI cuando ambas existen. Solo
+/// cuenta el nombre del archivo: una carpeta como `my-client` no debe
+/// adelantar una GUI.
+fn cli_rank(path: &Path) -> u8 {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if name.contains("-cli") {
+        0
+    } else {
+        1
+    }
+}
+
+/// Orden de preferencia: `LTOOLS_PATH` (elección explícita), después el
+/// PATH y, por último, las copias encontradas en las carpetas conocidas. En
+/// ese último grupo gana la más reciente: al actualizar Tools suele quedar
+/// una copia antigua en otra carpeta (una release descargada antes), y la
+/// Biblioteca debe mostrar el catálogo nuevo, no el de esa copia.
+fn order_candidates(
+    explicit: Option<PathBuf>,
+    on_path: Vec<PathBuf>,
+    discovered: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+) -> Vec<PathBuf> {
+    let mut on_path = on_path;
+    on_path.sort_by_key(|path| cli_rank(path));
+    let mut discovered = discovered;
+    discovered.sort_by(|(left, left_time), (right, right_time)| {
+        cli_rank(left)
+            .cmp(&cli_rank(right))
+            .then_with(|| right_time.cmp(left_time))
+    });
+    let mut result = Vec::new();
+    for path in explicit
+        .into_iter()
+        .chain(on_path)
+        .chain(discovered.into_iter().map(|(path, _)| path))
+    {
+        if !result.contains(&path) {
             result.push(path);
         }
     }
-    for directory in discovery_directories() {
-        add_directory_candidates(&directory, &mut result);
-    }
-    // Un AppImage CLI se prefiere a la variante GUI cuando ambas existen.
-    result.sort_by_key(|path| {
-        let name = path.to_string_lossy().to_ascii_lowercase();
-        if name.contains("-cli") {
-            0
-        } else {
-            1
-        }
-    });
     result
+}
+
+fn find_executables() -> Vec<PathBuf> {
+    let explicit = std::env::var_os("LTOOLS_PATH")
+        .map(PathBuf::from)
+        .filter(|path| is_executable_file(path));
+    let on_path = executable_candidates()
+        .iter()
+        .filter_map(|candidate| crate::path_env::which(candidate))
+        .collect();
+    let mut discovered = Vec::new();
+    for directory in discovery_directories() {
+        add_directory_candidates(&directory, &mut discovered);
+    }
+    let discovered = discovered
+        .into_iter()
+        .map(|path| {
+            let modified = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            (path, modified)
+        })
+        .collect();
+    order_candidates(explicit, on_path, discovered)
 }
 
 fn text_is_safe(value: &str, limit: usize) -> bool {
@@ -492,15 +622,21 @@ fn parse_actions(output: &[u8], executable: &str) -> Result<Vec<LToolsAction>, S
         .get("actions")
         .and_then(Value::as_array)
         .ok_or("El catálogo de LTools no contiene una lista de acciones.")?;
-    if raw_actions.len() > MAX_ACTIONS {
-        return Err("El catálogo de LTools supera el límite de acciones permitido.".into());
-    }
 
+    // Tools evoluciona aparte: una acción con una forma que esta versión no
+    // entiende se descarta sola, igual que una insegura, en vez de dejar sin
+    // botones todas las demás.
     let mut seen = HashSet::new();
-    let mut actions = Vec::with_capacity(raw_actions.len());
+    let mut actions = Vec::with_capacity(raw_actions.len().min(MAX_ACTIONS));
+    let mut malformed = 0usize;
     for raw in raw_actions {
-        let raw: RawLToolsAction = serde_json::from_value(raw.clone())
-            .map_err(|error| format!("Acción de LTools mal formada: {error}"))?;
+        if actions.len() >= MAX_ACTIONS {
+            break;
+        }
+        let Ok(raw) = serde_json::from_value::<RawLToolsAction>(raw.clone()) else {
+            malformed += 1;
+            continue;
+        };
         let fallback_label = human_label(&raw.id);
         let action_key =
             optional_safe_text(raw.action_key, MAX_ID).unwrap_or_else(|| raw.id.clone());
@@ -553,6 +689,17 @@ fn parse_actions(output: &[u8], executable: &str) -> Result<Vec<LToolsAction>, S
             continue;
         }
         actions.push(action);
+    }
+    if malformed > 0 || raw_actions.len() > MAX_ACTIONS {
+        crate::log_info!(
+            "Catálogo de LTools leído con acciones omitidas",
+            serde_json::json!({
+                "published": raw_actions.len(),
+                "accepted": actions.len(),
+                "malformed": malformed,
+                "limit": MAX_ACTIONS,
+            })
+        );
     }
     if actions.is_empty() {
         return Err(
@@ -633,8 +780,7 @@ fn list_actions(language: Option<&str>) -> LToolsActionList {
         if let Some(language) = language.filter(|value| SUPPORTED_LANGUAGES.contains(value)) {
             args.splice(0..0, ["--lang".to_string(), language.to_string()]);
         }
-        let Some(output) = run_ltools_command_owned(&executable, &args, Duration::from_secs(5))
-        else {
+        let Some(output) = run_ltools_command_owned(&executable, &args, CATALOG_TIMEOUT) else {
             last_error = "LTools no respondió dentro del tiempo permitido.".into();
             continue;
         };
@@ -670,6 +816,9 @@ fn list_actions(language: Option<&str>) -> LToolsActionList {
 
 #[tauri::command(async)]
 pub fn ltools_actions_list(language: Option<String>) -> LToolsActionList {
+    if !crate::preferences::current().ltools_enabled {
+        return disabled_catalog();
+    }
     list_actions(language.as_deref())
 }
 
@@ -719,6 +868,9 @@ pub fn ltools_action_run(
     tab_id: String,
     action_id: String,
 ) -> LToolsRunResult {
+    if !crate::preferences::current().ltools_enabled {
+        return failed("La integración experimental de LTools está desactivada en Ajustes.");
+    }
     if action_id.len() > MAX_ID || !id_is_safe(&action_id) {
         return failed("Identificador de acción no válido.");
     }
@@ -926,6 +1078,100 @@ mod tests {
         );
     }
 
+    fn raw_action(id: &str) -> Value {
+        serde_json::json!({
+            "id": id, "category": "audit", "command": "audit", "args": [],
+            "target": "none", "targetPolicy": "none", "mutating": false,
+            "confirmation": "none", "profile": "safe-default"
+        })
+    }
+
+    fn parse_catalog(actions: Vec<Value>) -> Result<Vec<LToolsAction>, String> {
+        parse_actions(
+            serde_json::to_vec(&serde_json::json!({
+                "schema": ACTIONS_SCHEMA,
+                "platform": if cfg!(windows) { "windows" } else { "linux" },
+                "actions": actions
+            }))
+            .unwrap()
+            .as_slice(),
+            "ltools",
+        )
+    }
+
+    #[test]
+    fn una_accion_mal_formada_no_deja_sin_las_demas() {
+        // Una versión futura de Tools puede publicar una acción con una forma
+        // que esta terminal no entiende (aquí, sin `args` ni `category`).
+        let actions = parse_catalog(vec![
+            raw_action("audit.quick"),
+            serde_json::json!({ "id": "nueva.forma", "command": "nueva", "target": "none" }),
+            raw_action("audit.full"),
+        ])
+        .unwrap();
+        let ids: Vec<&str> = actions.iter().map(|action| action.id.as_str()).collect();
+        assert_eq!(ids, ["audit.quick", "audit.full"]);
+    }
+
+    #[test]
+    fn un_catalogo_mas_largo_que_el_tope_se_recorta_en_vez_de_rechazarse() {
+        let actions = parse_catalog(
+            (0..MAX_ACTIONS + 25)
+                .map(|index| raw_action(&format!("audit.a{index}")))
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(actions.len(), MAX_ACTIONS);
+        assert_eq!(actions[0].id, "audit.a0");
+    }
+
+    #[test]
+    fn los_campos_nuevos_del_catalogo_se_ignoran() {
+        // WTools 1.0.0 ya publica `legacyId`, `invocation`, `menuPath`…
+        let mut action = raw_action("windows.boot.status");
+        action["legacyId"] = serde_json::json!("boot.status");
+        action["menuPath"] = serde_json::json!(["Arranque", "Consultar arranque"]);
+        action["invocation"] = serde_json::json!({ "executable": "wtools.exe", "args": ["actions", "run", "windows.boot.status"] });
+        action["campoQueAunNoExiste"] = serde_json::json!({ "x": 1 });
+        assert_eq!(parse_catalog(vec![action]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prefiere_la_eleccion_explicita_el_path_y_luego_la_copia_mas_reciente() {
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let new = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let discovered = vec![
+            (
+                PathBuf::from("/r/Latest/ltools-latest-windows-x86_64-cli.exe"),
+                Some(old),
+            ),
+            (
+                PathBuf::from("/d/Tools-main/release/WTools-1.0.0/wtools-cli.exe"),
+                Some(new),
+            ),
+            (PathBuf::from("/d/Tools/ltools.exe"), Some(new)),
+        ];
+        let ordered = order_candidates(None, Vec::new(), discovered.clone());
+        assert_eq!(
+            ordered[0],
+            PathBuf::from("/d/Tools-main/release/WTools-1.0.0/wtools-cli.exe"),
+            "la copia actualizada gana a una release antigua"
+        );
+        assert_eq!(
+            ordered[2],
+            PathBuf::from("/d/Tools/ltools.exe"),
+            "la GUI va al final"
+        );
+        let ordered = order_candidates(
+            Some(PathBuf::from("/x/elegido-cli.exe")),
+            vec![PathBuf::from("/p/wtools-cli.exe")],
+            discovered,
+        );
+        assert_eq!(ordered[0], PathBuf::from("/x/elegido-cli.exe"));
+        assert_eq!(ordered[1], PathBuf::from("/p/wtools-cli.exe"));
+        assert_eq!(ordered.len(), 5);
+    }
+
     #[test]
     fn rechaza_un_catalogo_de_otra_plataforma() {
         let platform = if cfg!(windows) { "linux" } else { "windows" };
@@ -967,6 +1213,22 @@ mod tests {
         assert!(executable_name_is_safe(executable));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn reconoce_los_ejecutables_publicados_de_wtools() {
+        assert_eq!(executable_candidates()[0], "wtools-cli.exe");
+        // La GUI exige elevación; nunca se usa para consultar el catálogo.
+        assert!(!executable_name_is_safe("wtools.exe"));
+        assert!(executable_name_is_safe(
+            r"C:\Program Files\WTools\wtools-cli.exe"
+        ));
+        assert!(portable_windows_directory_name_is_safe("WTools-1.0.0"));
+        assert!(!portable_windows_directory_name_is_safe(
+            "WTools-1.0.0-x64-setup.exe/.."
+        ));
+        assert!(!portable_windows_directory_name_is_safe("WTools-latest"));
+    }
+
     #[test]
     fn las_rutas_de_tools_se_expanden_sin_recurrir_al_home_completo() {
         let directories = discovery_directories();
@@ -977,17 +1239,29 @@ mod tests {
     }
 
     #[test]
+    fn encuentra_releases_bajo_la_carpeta_de_proyectos_personalizada() {
+        let root = Path::new("/tmp/proyectos-personalizados");
+        assert_eq!(
+            configured_release_root(root.to_str().unwrap()),
+            root.join("_releases/Darkeiser003/Tools")
+        );
+    }
+
+    #[test]
     fn reconoce_el_directorio_de_tag_de_una_release_descargada() {
         let root = std::env::temp_dir().join(format!(
             "lterminal-ltools-release-discovery-{}",
             std::process::id()
         ));
         let tagged = root.join("v1.0.0");
+        let latest = root.join("Latest");
         let unrelated = root.join("cache");
         std::fs::create_dir_all(&tagged).unwrap();
+        std::fs::create_dir_all(&latest).unwrap();
         std::fs::create_dir_all(&unrelated).unwrap();
         let found = versioned_release_directories(&root);
         assert!(found.contains(&tagged));
+        assert!(found.contains(&latest));
         assert!(!found.contains(&unrelated));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -995,6 +1269,7 @@ mod tests {
     #[test]
     fn acepta_tags_de_release_con_v_mayuscula() {
         assert!(release_directory_name_is_safe("V1.0.0"));
+        assert!(release_directory_name_is_safe("Latest"));
         assert!(!release_directory_name_is_safe("../outside"));
     }
 

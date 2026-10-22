@@ -16,7 +16,25 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import type {
     ActionResult,
     AppInfo,
+    GhAsset,
+    GhIssue,
+    GhMergeMethod,
+    GhPull,
+    GhRelease,
+    GhReleaseDraft,
+    GhRepoDetails,
+    GhRepoEdit,
+    GhRepositoryChange,
+    GhResult,
+    GhRun,
+    GhStatus,
+    GhTerminalAction,
+    GitBranchAction,
+    GitTerminalAction,
+    LocalGitStatus,
+    OwnRepository,
     CommandNotFoundEvent,
+    CommandResizeEvent,
     CwdChangedEvent,
     DataEvent,
     DownloadResult,
@@ -36,6 +54,10 @@ import type {
     OpenDirectoryResult,
     PinResult,
     PackageUpdateStatus,
+    PathIntegrationStatus,
+    ToolchainStoreLocation,
+    ToolchainStoreStatus,
+    ShellAssistStatus,
     PreferencesPayload,
     Preferences,
     ProfileTransferResult,
@@ -45,10 +67,12 @@ import type {
     ReleaseResult,
     ScriptEntry,
     ScriptsPanel,
+    SemanticZoneEvent,
     TabClosedEvent,
     TabIdEvent,
     TabList,
     TabSummary,
+    TerminalLinkResult,
     UpdateResult,
     UpdateProgress,
     UpdateStatus
@@ -78,6 +102,22 @@ export const recordPerformance = (payload: Record<string, unknown>) =>
         // Las métricas nunca deben bloquear ni romper una interacción.
     });
 
+/** Llamadas IPC en vuelo (comando y momento de inicio). Un comando que no
+ * vuelve no deja rastro en el log, porque la métrica se escribe al terminar;
+ * esta lista permite ver desde las herramientas de desarrollo o el E2E
+ * (`window.__wtPendingIpc()`) qué llamadas siguen esperando. */
+const pendingIpc = new Map<number, { command: string; startedAt: number }>();
+let nextIpcId = 0;
+
+export function pendingIpcCalls(): { command: string; ageMs: number }[] {
+    const now = Date.now();
+    return [...pendingIpc.values()].map(({ command, startedAt }) => ({ command, ageMs: now - startedAt }));
+}
+
+if (typeof window !== 'undefined') {
+    (window as unknown as { __wtPendingIpc?: typeof pendingIpcCalls }).__wtPendingIpc = pendingIpcCalls;
+}
+
 /** Puente común para medir el tiempo real de cada operación IPC relevante.
  * Las tres rutas de alta frecuencia se dejan fuera para no convertir cada
  * tecla y cada píxel de resize en una línea de log. El resto queda segmentado
@@ -87,6 +127,8 @@ async function invokeLogged<T>(command: string, args?: InvokeArgs): Promise<T> {
         return args === undefined ? tauriInvoke<T>(command) : tauriInvoke<T>(command, args);
     }
     const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const ipcId = ++nextIpcId;
+    pendingIpc.set(ipcId, { command, startedAt: Date.now() });
     try {
         const value = args === undefined ? await tauriInvoke<T>(command) : await tauriInvoke<T>(command, args);
         const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -108,6 +150,8 @@ async function invokeLogged<T>(command: string, args?: InvokeArgs): Promise<T> {
             details: { command, error: String(cause).slice(0, 300) },
         });
         throw cause;
+    } finally {
+        pendingIpc.delete(ipcId);
     }
 }
 
@@ -203,6 +247,51 @@ export const getWindowsIntegration = () =>
     invokeLogged<WindowsIntegrationStatus>('windows_integration_status');
 export const setWindowsIntegration = (enabled: boolean) =>
     invokeLogged<WindowsIntegrationStatus>('windows_integration_set', { enabled });
+/** Elige una imagen para el banner; `null` si se cancela. */
+export async function pickBannerImage(): Promise<string | null> {
+    const path = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Imagen', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg'] }],
+    });
+    return typeof path === 'string' ? path : null;
+}
+/** Imagen propia del banner como URL `data:` (validada por el backend). */
+export const readBannerImage = (path: string) => invokeLogged<string>('banner_image_read', { path });
+/** Pone o quita la marca de compatibilidad RUNASADMIN de este ejecutable. */
+export const setRunAsAdminFlag = (enabled: boolean) =>
+    invokeLogged<WindowsIntegrationStatus>('windows_run_as_admin_set', { enabled });
+/** Relanza WTerminal como administrador (UAC) y cierra esta copia. */
+export const restartAsAdmin = () => invokeLogged<void>('app_restart_as_admin');
+/** Relanza WTerminal sin permisos de administrador (token del Explorador) y
+ *  cierra esta copia. */
+export const restartUnelevated = () => invokeLogged<void>('app_restart_unelevated');
+export const getPathIntegration = () =>
+    invokeLogged<PathIntegrationStatus>('path_integration_status');
+export const setPathIntegration = (enabled: boolean) =>
+    invokeLogged<PathIntegrationStatus>('path_integration_set', { enabled });
+
+/** Carpeta propia de cachés de lenguajes y el espacio que ocupan. */
+export const getToolchainStore = () =>
+    invokeLogged<ToolchainStoreStatus>('toolchain_store_status');
+/** Espacio de ubicaciones conocidas fuera de la carpeta propia. Puede tardar
+ *  decenas de segundos la primera vez; el backend lo reutiliza unos minutos y
+ *  `refresh` fuerza otra medición. */
+export const getToolchainExternalSizes = (refresh = false) =>
+    invokeLogged<ToolchainStoreLocation[]>('toolchain_store_external_sizes', { refresh });
+/** Qué herramienta da sugerencias y colores a cada shell y si está instalada.
+ *  `refresh` hace el inventario detallado de WSL (segundos); sin él solo se
+ *  usa lo que ya esté en caché. */
+export const getShellAssistStatus = (refresh = false) =>
+    invokeLogged<ShellAssistStatus>('shell_assist_status', { refresh });
+/** Abre un enlace pulsado con Ctrl+clic en la salida de la terminal. El
+ *  backend vuelve a validarlo (solo http, https y file) y decide qué hacer:
+ *  navegador, carpeta o mostrar el archivo en su carpeta. */
+export const openTerminalLink = (url: string) =>
+    invokeLogged<TerminalLinkResult>('terminal_open_link', { url });
+/** Vacía solo las cachés propias; devuelve los bytes liberados. */
+export const clearToolchainCaches = () =>
+    invokeLogged<number>('toolchain_store_clear_caches');
 
 export const resize = (tabId: string, cols: number, rows: number) =>
     invokeLogged<void>('pty_resize', { tabId, cols, rows });
@@ -366,16 +455,82 @@ export const openInGithub = (rawTarget: string) =>
 export const runProject = (tabId: string, fullName: string) =>
     invokeLogged<GitRunResult>('projects_run', { tabId, fullName });
 
+// «Mi GitHub»: cuenta y repositorios a través de GitHub CLI (`gh`).
+export const githubCliStatus = () => invokeLogged<GhStatus>('github_cli_status');
+export const githubCliRepositories = () => invokeLogged<OwnRepository[]>('github_cli_repositories');
+/** Iniciar o cerrar sesión, o pedir el permiso de borrar, en una pestaña nueva. */
+export const githubCliTerminal = (tabId: string, action: GhTerminalAction) =>
+    invokeLogged<GitRunResult>('github_cli_terminal', { tabId, action });
+export const githubCliCreate = (name: string, description: string, isPrivate: boolean, readme: boolean) =>
+    invokeLogged<GhResult>('github_cli_create', { name, description, private: isPrivate, readme });
+export const githubCliChange = (fullName: string, change: GhRepositoryChange) =>
+    invokeLogged<GhResult>('github_cli_change', { fullName, change });
+export const githubCliRename = (fullName: string, newName: string) =>
+    invokeLogged<GhResult>('github_cli_rename', { fullName, newName });
+export const githubCliDelete = (fullName: string, confirmation: string) =>
+    invokeLogged<GhResult>('github_cli_delete', { fullName, confirmation });
+
+// «Mi GitHub» ampliado: gestión de un repositorio de la cuenta con `gh` y git
+// en su copia local. El backend solo actúa sobre repositorios del listado.
+export const githubRepoDetails = (fullName: string) =>
+    invokeLogged<GhRepoDetails>('github_repo_details', { fullName });
+export const githubRepoEdit = (fullName: string, change: GhRepoEdit) =>
+    invokeLogged<GhResult>('github_repo_edit', { fullName, change });
+export const githubReleases = (fullName: string) => invokeLogged<GhRelease[]>('github_releases', { fullName });
+export const githubReleaseAssets = (fullName: string, tag: string) =>
+    invokeLogged<GhAsset[]>('github_release_assets', { fullName, tag });
+export const githubReleaseCreate = (fullName: string, draft: GhReleaseDraft) =>
+    invokeLogged<GhResult>('github_release_create', { fullName, draft });
+export const githubReleaseUpload = (fullName: string, tag: string, files: string[]) =>
+    invokeLogged<GhResult>('github_release_upload', { fullName, tag, files });
+export const githubReleasePublish = (fullName: string, tag: string) =>
+    invokeLogged<GhResult>('github_release_publish', { fullName, tag });
+export const githubReleaseDelete = (fullName: string, tag: string, confirmation: string, cleanupTag: boolean) =>
+    invokeLogged<GhResult>('github_release_delete', { fullName, tag, confirmation, cleanupTag });
+export const githubReleaseDeleteAsset = (fullName: string, tag: string, asset: string) =>
+    invokeLogged<GhResult>('github_release_delete_asset', { fullName, tag, asset });
+export const githubPulls = (fullName: string) => invokeLogged<GhPull[]>('github_pulls', { fullName });
+export const githubPullCreate = (fullName: string, head: string, base: string, title: string, body: string, draft: boolean) =>
+    invokeLogged<GhResult>('github_pull_create', { fullName, head, base, title, body, draft });
+export const githubPullMerge = (fullName: string, number: number, method: GhMergeMethod, deleteBranch: boolean) =>
+    invokeLogged<GhResult>('github_pull_merge', { fullName, number, method, deleteBranch });
+export const githubIssues = (fullName: string) => invokeLogged<GhIssue[]>('github_issues', { fullName });
+export const githubIssueCreate = (fullName: string, title: string, body: string) =>
+    invokeLogged<GhResult>('github_issue_create', { fullName, title, body });
+export const githubIssueClose = (fullName: string, number: number) =>
+    invokeLogged<GhResult>('github_issue_close', { fullName, number });
+export const githubRuns = (fullName: string) => invokeLogged<GhRun[]>('github_runs', { fullName });
+export const githubRunRerun = (fullName: string, id: number) =>
+    invokeLogged<GhResult>('github_run_rerun', { fullName, id });
+export const gitLocalStatus = (fullName: string) => invokeLogged<LocalGitStatus>('git_local_status', { fullName });
+export const gitLocalCommit = (fullName: string, message: string) =>
+    invokeLogged<GhResult>('git_local_commit', { fullName, message });
+export const gitLocalBranch = (fullName: string, action: GitBranchAction, name: string) =>
+    invokeLogged<GhResult>('git_local_branch', { fullName, action, name });
+/** Push, pull o publicar la rama actual: en una pestaña nueva y visible. */
+export const githubGitTerminal = (tabId: string, fullName: string, action: GitTerminalAction) =>
+    invokeLogged<GitRunResult>('github_git_terminal', { tabId, fullName, action });
+/** Archivos para adjuntar a una release (rutas absolutas). */
+export async function pickReleaseFiles(): Promise<string[]> {
+    const picked = await open({ multiple: true, directory: false });
+    if (Array.isArray(picked)) return picked.filter((path): path is string => typeof path === 'string');
+    return typeof picked === 'string' ? [picked] : [];
+}
+
 // ---- Entorno y dependencias adicionales ----
 
-/** El catálogo de acciones que tienen sentido en ESTE sistema, ya traducido y
- *  ordenado por apartados. Usa exclusivamente el inventario en memoria y las
- *  comprobaciones rápidas del PATH para poder pintar el panel al instante. */
+/** Compatibilidad con el puente antiguo; el panel usa `loadInstallCatalog`. */
 export const listInstallActions = () => invokeLogged<InstallList>('install_list');
 
-/** Vuelve a detectarlo todo (WSL, daemon de Docker, adb, binarios del PATH) y
- *  devuelve la lista al día. Tarda segundos, así que el panel la pide DESPUÉS
- *  de haberse pintado con `listInstallActions`, nunca antes. */
+/** Construye solo la estructura del panel; no ejecuta detecciones. */
+export const loadInstallCatalog = () => invokeLogged<InstallList>('install_catalog');
+
+/** Comprueba una herramienta concreta cuando el usuario la abre. */
+export const checkInstallAction = (actionId: string) =>
+    invokeLogged<InstallList>('install_check', { actionId });
+
+/** Vuelve a detectar todo (WSL, daemon de Docker, adb y binarios del PATH) de
+ *  forma explícita y devuelve la lista al día. */
 export const refreshInstallActions = () => invokeLogged<InstallList>('install_refresh');
 
 /** Escribe la acción en la terminal. No la ejecuta por detrás: el comando se ve
@@ -477,6 +632,12 @@ export const openInSystem = (path: string) => openPath(path);
 export const onData = (callback: (tabId: string, data: string) => void): Promise<UnlistenFn> =>
     listen<DataEvent>('pty-data', (event) => callback(event.payload.tabId, event.payload.data));
 
+/** Un panel ha ampliado la ConPTY antes de escribir un comando largo. */
+export const onCommandResize = (
+    callback: (event: CommandResizeEvent) => void,
+): Promise<UnlistenFn> =>
+    listen<CommandResizeEvent>('pty-command-resize', (event) => callback(event.payload));
+
 export const onExit = (callback: (tabId: string, code: number | null) => void): Promise<UnlistenFn> =>
     listen<ExitEvent>('pty-exit', (event) => callback(event.payload.tabId, event.payload.code));
 
@@ -520,3 +681,11 @@ export const onCurrentDirectoryChanged = (
     callback: (event: CwdChangedEvent) => void
 ): Promise<UnlistenFn> =>
     listen<CwdChangedEvent>('terminal-cwd-changed', (event) => callback(event.payload));
+
+/** Metadatos OSC 133. La salida visible no se altera; el consumidor puede
+ * usarlos para seleccionar prompts y bloques de salida cuando la shell los
+ * emite. */
+export const onSemanticZone = (
+    callback: (event: SemanticZoneEvent) => void,
+): Promise<UnlistenFn> =>
+    listen<SemanticZoneEvent>('terminal-semantic-zone', (event) => callback(event.payload));

@@ -35,7 +35,7 @@ if [[ "$#" -gt 0 ]]; then
     exit 2
 fi
 
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 pause_menu() {
     printf '\nPulsa Enter para volver al menú…'
@@ -109,15 +109,17 @@ development_menu() {
         printf '  4. Compilar solo el frontend\n'
         printf '  5. Compilar solo el frontend (rápido)\n'
         printf '  6. Generar el preview web funcional (sin Tauri)\n'
+        printf '  7. Ejecutar cualquier script npm/pnpm del proyecto\n'
         printf '  0. Volver\n'
         read -r -p 'Elige una opción: ' choice || return
         case "$choice" in
-            1) run_action 'Iniciando Vite en http://localhost:1420' npm run dev -- --host 127.0.0.1 ;;
-            2) run_action 'Previsualizando dist/ en http://localhost:4173' npm run preview -- --host 127.0.0.1 ;;
-            3) run_action 'Iniciando la aplicación Tauri en desarrollo' npm start ;;
-            4) run_action 'Compilando únicamente el frontend' npm run build ;;
-            5) run_action 'Compilando únicamente el frontend en modo rápido' npm run build:fast ;;
-            6) run_action 'Generando el preview web funcional en dist-preview/' npm run build:preview ;;
+            1) run_action 'Iniciando Vite en http://localhost:1420' node scripts/package-scripts.mjs run dev -- --host 127.0.0.1 ;;
+            2) run_action 'Previsualizando dist/ en http://localhost:4173' node scripts/package-scripts.mjs run preview -- --host 127.0.0.1 ;;
+            3) run_action 'Iniciando la aplicación Tauri en desarrollo' node scripts/package-scripts.mjs run start ;;
+            4) run_action 'Compilando únicamente el frontend' node scripts/package-scripts.mjs run build ;;
+            5) run_action 'Compilando únicamente el frontend en modo rápido' node scripts/package-scripts.mjs run build:fast ;;
+            6) run_action 'Generando el preview web funcional en dist-preview/' node scripts/package-scripts.mjs run build:preview ;;
+            7) run_action 'Abriendo el selector dinámico de scripts' node scripts/package-scripts.mjs menu ;;
             0) return ;;
             *) printf 'Opción no válida.\n' ;;
         esac
@@ -138,6 +140,7 @@ build_menu() {
         printf '  9. Generar AppImage sin pruebas ampliadas (smoke básico)\n'
         printf ' 10. Generar Windows sin pruebas ampliadas\n'
         printf ' 11. Generar Linux y Windows sin pruebas ampliadas\n'
+        printf ' 12. Abrir el asistente interactivo completo del builder Linux\n'
         printf '  0. Volver\n'
         read -r -p 'Elige una opción: ' choice || return
         case "$choice" in
@@ -163,7 +166,7 @@ build_menu() {
                 fi
                 run_action 'Generando AppImage y validando Windows de forma cruzada con Wine' bash linux/build.sh "${args[@]}"
                 ;;
-            8) run_action 'Compilando frontend y aplicación de escritorio Linux sin empaquetar' npm run tauri -- build --config src-tauri/tauri.linux.conf.json --no-bundle ;;
+            8) run_action 'Compilando frontend y aplicación de escritorio Linux sin empaquetar' node scripts/package-scripts.mjs run tauri -- build --config src-tauri/tauri.linux.conf.json --no-bundle ;;
             9) run_linux_build without-tests ;;
             10) run_windows_cross_build without-tests ;;
             11)
@@ -173,6 +176,7 @@ build_menu() {
                 fi
                 run_action 'Generando Linux y Windows sin pruebas ampliadas' bash linux/build.sh "${args[@]}"
                 ;;
+            12) run_action 'Asistente interactivo del builder Linux' bash linux/build.sh ;;
             0) return ;;
             *) printf 'Opción no válida.\n' ;;
         esac
@@ -188,11 +192,12 @@ tests_menu() {
         printf '  4. Smoke de un AppImage existente\n'
         printf '  5. Batería E2E sobre un ejecutable ya compilado\n'
         printf '  6. Comprobar herramientas/shells disponibles en el host\n'
+        printf '  7. Ejecutar cualquier script npm/pnpm del proyecto\n'
         printf '  0. Volver\n'
         read -r -p 'Elige una opción: ' choice || return
         case "$choice" in
-            1) run_action 'Ejecutando validaciones locales' npm run check:local ;;
-            2) run_action 'Ejecutando validaciones completas' npm run check ;;
+            1) run_action 'Ejecutando validaciones locales' node scripts/package-scripts.mjs run check:local ;;
+            2) run_action 'Ejecutando validaciones completas' node scripts/package-scripts.mjs run check ;;
             3) run_action 'Ejecutando pruebas Rust' cargo test --manifest-path src-tauri/Cargo.toml ;;
             4) run_action 'Validando la aplicación ya empaquetada' bash linux/validate-release.sh ;;
             5)
@@ -210,13 +215,14 @@ tests_menu() {
                     local driver_path
                     read -r -p 'Ruta a WebKitWebDriver/EdgeDriver (Enter para autodetectar o usar la variable actual): ' driver_path || return
                     if [[ -n "$driver_path" ]]; then
-                        E2E_BINARY="$binary" TAURI_NATIVE_DRIVER="$driver_path" run_action 'Ejecutando la batería E2E sin recompilar la app' npm run e2e
+                        E2E_BINARY="$binary" TAURI_NATIVE_DRIVER="$driver_path" run_action 'Ejecutando la batería E2E sin recompilar la app' node scripts/package-scripts.mjs run e2e
                     else
-                        E2E_BINARY="$binary" run_action 'Ejecutando la batería E2E sin recompilar la app' npm run e2e
+                        E2E_BINARY="$binary" run_action 'Ejecutando la batería E2E sin recompilar la app' node scripts/package-scripts.mjs run e2e
                     fi
                 fi
                 ;;
             6) run_action 'Probando las herramientas del host' bash linux/exercise-host.sh ;;
+            7) run_action 'Abriendo el selector dinámico de scripts' node scripts/package-scripts.mjs menu ;;
             0) return ;;
             *) printf 'Opción no válida.\n' ;;
         esac
