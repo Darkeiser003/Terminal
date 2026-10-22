@@ -3824,6 +3824,7 @@ async function exerciseHorizontalSequenceIntegrity() {
     // Ejecutar la secuencia en una pestaña limpia evita que una línea larga
     // anterior determine el máximo horizontal y oculte la cola de `1-120`.
     const originalTabCount = (await findAll('.tab')).length;
+    await waitForStartupPrefetch();
     await captureScreenshot('scroll-sequence-before-new-tab');
     await openFreshTab(originalTabCount, 'secuencia horizontal');
     const sequenceTabId = await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id');
@@ -6992,6 +6993,21 @@ async function readCurrentLog() {
         };
     }
     throw new Error(`No se encontró main.log en ${paths.join(', ')}`);
+}
+
+// La precarga del catálogo de Dependencias lanza decenas de sondas (WinGet,
+// PowerShell) en el arranque. En un equipo de 2 CPU satura el procesador
+// durante más de un minuto y una pestaña nueva tarda en ejecutar su init.
+// Las pruebas que miden el arranque de una pestaña la esperan antes.
+async function waitForStartupPrefetch(timeoutMs = 240000) {
+    await waitUntil(async () => {
+        const { text } = await readCurrentLog().catch(() => ({ text: '' }));
+        const lines = text.split(/\r?\n/);
+        const session = lines.find((line) => line.includes(`"smokeToken":"${smokeToken}"`))
+            ?.match(/\] \[([^\]]+)\] \[INFO\]/)?.[1];
+        return Boolean(session) && lines.some((line) => line.includes(`[${session}]`)
+            && line.includes('Catálogo de dependencias precargado'));
+    }, timeoutMs, 'precarga del catálogo de dependencias del arranque');
 }
 
 async function assertCurrentLog() {
