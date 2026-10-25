@@ -4,7 +4,7 @@
 
     import { onMount, tick } from "svelte";
     import type { UnlistenFn } from "@tauri-apps/api/event";
-    import type { PackageUpdateStatus, UpdateStatus } from "./lib/types";
+    import type { ImportableRepository, PackageUpdateStatus, UpdateStatus } from "./lib/types";
 
     import * as api from "./lib/api";
     import { app } from "./lib/appState.svelte";
@@ -45,6 +45,12 @@
     /** La versión publicada, cuando una comprobación autenticada la confirma. */
     let update = $state<UpdateStatus | null>(null);
     let packageUpdates = $state<PackageUpdateStatus | null>(null);
+    /** Repositorio de GitHub de la carpeta activa que todavía no está en Proyectos. */
+    let importSuggestion = $state<ImportableRepository | null>(null);
+    /** Por qué se sugiere el modo de bajo consumo, o vacío si no se sugiere. */
+    let lowPowerReason = $state('');
+    /** Tamaño de interfaz pedido con un atajo y aún sin guardar. */
+    let pendingUiScale: number | null = null;
     let packageUpdateRunning = $state(false);
     let packageUpdateError = $state('');
     let updating = $state(false);
@@ -125,6 +131,64 @@
         }
         packageUpdates = null;
         packageUpdateError = '';
+    }
+
+    // La carpeta de la pestaña activa cambia a menudo (cada `cd`): se espera
+    // un momento antes de preguntar al backend, que sube buscando `.git`.
+    let importDetectTimer: ReturnType<typeof setTimeout> | undefined;
+    function scheduleImportDetection(tabId: string, cwd: string): void {
+        if (tabId !== app.activeTabId || app.preferences?.suggestRepositoryImport === false) return;
+        if (importDetectTimer !== undefined) clearTimeout(importDetectTimer);
+        importDetectTimer = setTimeout(async () => {
+            importDetectTimer = undefined;
+            try {
+                importSuggestion = await api.detectImportableProject(cwd);
+            } catch {
+                importSuggestion = null;
+            }
+        }, 800);
+    }
+
+    async function acceptImportSuggestion(): Promise<void> {
+        const suggestion = importSuggestion;
+        if (!suggestion) return;
+        importSuggestion = null;
+        const result = await api.importProject(suggestion.path);
+        if (result.ok) {
+            panels.show('projects');
+            void loadProjects();
+        }
+    }
+
+    function dismissImportSuggestion(): void {
+        if (importSuggestion) void api.dismissImportableProject(importSuggestion.path);
+        importSuggestion = null;
+    }
+
+    // Se sugiere una vez por sesión, solo si el usuario no lo tiene ya ni dijo
+    // «No volver a sugerir»: equipos de 2 hilos o menos, menos de 8 GB, o una
+    // primera pestaña que tarda más de 8 s en dar el prompt.
+    function considerLowPower(firstReadyMs: number | null): void {
+        const preferences = app.preferences;
+        if (!preferences || preferences.lowPowerMode || preferences.lowPowerSuggest === false || lowPowerReason) return;
+        const info = app.appInfo;
+        if (info?.cpuThreads && info.cpuThreads <= 2) {
+            lowPowerReason = app.t('lowPower.reasonCpu', 'este equipo tiene {n} hilos de CPU').replace('{n}', String(info.cpuThreads));
+        } else if (info?.memoryGb && info.memoryGb < 8) {
+            lowPowerReason = app.t('lowPower.reasonMemory', 'este equipo tiene {n} GB de memoria').replace('{n}', info.memoryGb.toFixed(1));
+        } else if (firstReadyMs !== null && firstReadyMs > 8000) {
+            lowPowerReason = app.t('lowPower.reasonSlow', 'la primera pestaña tardó {n} s en estar lista').replace('{n}', (firstReadyMs / 1000).toFixed(1));
+        }
+    }
+
+    function acceptLowPower(): void {
+        lowPowerReason = '';
+        void app.savePreferences({ lowPowerMode: true });
+    }
+
+    function dismissLowPower(): void {
+        lowPowerReason = '';
+        void app.savePreferences({ lowPowerSuggest: false });
     }
 
     async function runPackageUpdates(): Promise<void> {
@@ -315,6 +379,9 @@
             [preferences.shortcutExplorerCd, 'explorerCd'],
             [preferences.shortcutClearTerminal, 'clearTerminal'],
             [preferences.shortcutOpenSystemExplorer, 'openSystemExplorer'],
+            [preferences.shortcutUiScaleUp, 'uiScaleUp'],
+            [preferences.shortcutUiScaleDown, 'uiScaleDown'],
+            [preferences.shortcutUiScaleReset, 'uiScaleReset'],
         ];
         const extra = extraActions.find(([shortcut]) => shortcut && matchesShortcut(event, shortcut));
         if (extra) {
@@ -359,6 +426,26 @@
     async function runAppAction(action: PaletteAppAction): Promise<string | null> {
         const preferences = app.preferences;
         switch (action) {
+            case 'uiScaleUp':
+            case 'uiScaleDown':
+            case 'uiScaleReset': {
+                if (!preferences) return null;
+                // Pasos de 10 % entre 80 % y 200 %, los mismos límites que valida el backend.
+                // Dos pulsaciones seguidas llegaban antes de que la primera se
+                // guardara y ambas partían del mismo valor (110 → 100 → 100): se
+                // parte del último valor pedido mientras haya uno pendiente.
+                const current = pendingUiScale ?? preferences.uiScale ?? 100;
+                const next = action === 'uiScaleReset'
+                    ? 100
+                    : Math.min(200, Math.max(80, current + (action === 'uiScaleUp' ? 10 : -10)));
+                if (next !== current) {
+                    pendingUiScale = next;
+                    void app.savePreferences({ uiScale: next }).finally(() => {
+                        if (pendingUiScale === next) pendingUiScale = null;
+                    });
+                }
+                return null;
+            }
             case 'toggleTerminalOnly':
                 if (!preferences) return null;
                 panels.close();
@@ -512,6 +599,17 @@
             }
         }
     }
+
+    onMount(() => {
+        const unlisten = api.onCurrentDirectoryChanged((event) => scheduleImportDetection(event.tabId, event.cwd));
+        const onFirstReady = (event: Event) => considerLowPower((event as CustomEvent<{ ms?: number }>).detail?.ms ?? null);
+        window.addEventListener('winslim:first-ready', onFirstReady);
+        return () => {
+            window.removeEventListener('winslim:first-ready', onFirstReady);
+            if (importDetectTimer !== undefined) clearTimeout(importDetectTimer);
+            void unlisten.then((stop) => stop());
+        };
+    });
 
     onMount(() => {
         const scheduleTerminalRefresh = createTerminalRefreshScheduler(
@@ -748,7 +846,11 @@
             });
 
         const packageUpdateCheck = perf.start('package-updates.check', { source: 'startup' });
-        void api.checkPackageUpdatesOnStartup()
+        // En bajo consumo, `winget` espera dos minutos para no competir con la
+        // primera pestaña.
+        const lowPowerDelay = app.preferences?.lowPowerMode ? 120_000 : 0;
+        void new Promise((resolveDelay) => setTimeout(resolveDelay, lowPowerDelay))
+            .then(() => api.checkPackageUpdatesOnStartup())
             .then((status) => {
                 packageUpdateCheck(status.available ? 'available' : 'none', {
                     manager: status.manager,
@@ -968,6 +1070,38 @@
                     onclick={() => app.dismissSuggestion(app.activeTabId!)}
                 >
                     {app.t("suggestion.dismiss", "Descartar")}
+                </button>
+            </div>
+        </div>
+    {/if}
+
+    {#if lowPowerReason && !importSuggestion && !packageUpdates?.available && !update}
+        <div class="update" role="status" aria-live="polite" data-testid="low-power-suggestion">
+            <span>
+                {app.t('lowPower.suggestion', 'Como {reason}, el modo de bajo consumo puede hacer que WTerminal arranque más ágil.').replace('{reason}', lowPowerReason)}
+            </span>
+            <div class="update-actions">
+                <button type="button" class="primary" data-testid="low-power-accept" onclick={acceptLowPower}>{app.t('lowPower.enable', 'Activar')}</button>
+                <button type="button" data-testid="low-power-dismiss" onclick={dismissLowPower}>{app.t('projects.importDismiss', 'No volver a sugerir')}</button>
+            </div>
+        </div>
+    {/if}
+
+    <!-- Un aviso cada vez: la sugerencia de importar espera a que no haya
+         otro aviso abajo para no apilar barras. -->
+    {#if importSuggestion && !packageUpdates?.available && !update}
+        <div class="update" role="status" aria-live="polite" data-testid="import-suggestion">
+            <span>
+                {app
+                    .t('projects.importSuggestion', 'Esta carpeta es el repositorio {repo}. ¿Añadirlo a Proyectos?')
+                    .replace('{repo}', importSuggestion.fullName)}
+            </span>
+            <div class="update-actions">
+                <button type="button" class="primary" data-testid="import-suggestion-accept" onclick={acceptImportSuggestion}>
+                    {app.t('projects.import', 'Importar…')}
+                </button>
+                <button type="button" data-testid="import-suggestion-dismiss" onclick={dismissImportSuggestion}>
+                    {app.t('projects.importDismiss', 'No volver a sugerir')}
                 </button>
             </div>
         </div>

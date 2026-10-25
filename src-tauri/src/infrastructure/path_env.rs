@@ -118,6 +118,22 @@ fn known_install_location(cmd: &str) -> Option<PathBuf> {
     known_install_location_in(cmd, windows, &home, roaming.as_deref())
 }
 
+/// Solo E2E: carpetas del PATH persistente que la prueba aparta (separadas
+/// por el separador del PATH). `ai-environments` simula Claude Code y Ollama;
+/// con los reales instalados, el PATH del registro los volvía a traer.
+fn e2e_hidden_path_dirs() -> Vec<String> {
+    if std::env::var("LTERMINAL_E2E_TESTING").as_deref() != Ok("1") {
+        return Vec::new();
+    }
+    let separator = crate::platform::host().path_separator();
+    std::env::var("LTERMINAL_E2E_HIDDEN_PATH_DIRS")
+        .unwrap_or_default()
+        .split(separator)
+        .map(path_key)
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
 fn e2e_known_locations_root() -> Option<PathBuf> {
     if std::env::var("LTERMINAL_E2E_TESTING").as_deref() != Ok("1") {
         return None;
@@ -309,10 +325,11 @@ pub fn refresh_system_path() -> PathRefresh {
         .map(|entry| path_key(entry))
         .collect();
     let mut added = Vec::new();
+    let hidden = e2e_hidden_path_dirs();
 
     for dir in crate::platform::host().persistent_path_entries() {
         let normalized = path_key(&dir);
-        if normalized.is_empty() || known.contains(&normalized) {
+        if normalized.is_empty() || known.contains(&normalized) || hidden.contains(&normalized) {
             continue;
         }
         known.push(normalized);

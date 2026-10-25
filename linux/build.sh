@@ -83,6 +83,7 @@ INSTALL_E2E_DRIVER=1
 E2E_DRIVER_PATH="${TAURI_NATIVE_DRIVER:-}"
 CROSS_WINDOWS=0
 NON_INTERACTIVE=0
+KEYS_DIR=""
 FAST_BUILD=0
 EXPLICIT_OPTIONS=0
 POST_BUILD_FAILURE=0
@@ -135,6 +136,17 @@ while [ "$#" -gt 0 ]; do
             E2E_DRIVER_PATH="${1#*=}"
             [ -n "$E2E_DRIVER_PATH" ] || { echo "--e2e-driver necesita la ruta a WebKitWebDriver." >&2; exit 2; }
             ;;
+        --keys-dir)
+            shift
+            if [ "$#" -eq 0 ] || [ -z "$1" ]; then
+                echo "--keys-dir necesita la carpeta de las claves de firma." >&2
+                exit 2
+            fi
+            KEYS_DIR="$1"
+            ;;
+        --keys-dir=*)
+            KEYS_DIR="${1#*=}"
+            ;;
         --version)
             shift
             if [ "$#" -eq 0 ] || [ -z "$1" ] || [[ "$1" == -* ]]; then
@@ -148,7 +160,7 @@ while [ "$#" -gt 0 ]; do
             [ -n "$VERSION_OVERRIDE" ] || { echo "--version necesita un valor SemVer, por ejemplo 1.0.0" >&2; exit 2; }
             ;;
         -h|--help)
-            echo "Uso: $0 [--fast] [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z]"
+            echo "Uso: $0 [--fast] [--clean] [--skip-checks] [--allow-offline-checks] [--no-run] [--no-install] [--non-interactive] [--extended-tests|--full-tests|--no-extended-tests] [--cross-windows|--windows-tests] [--install-e2e-driver] [--e2e-driver RUTA] [--version X.Y.Z] [--keys-dir CARPETA]"
             echo "Sin opciones: release completa AppImage + checks estrictos + smoke + bateria ampliada + E2E."
             echo "En modo interactivo, la versión se pide al principio junto al resto de opciones."
             echo "Los fallos de E2E se informan al final sin impedir publicar el AppImage."
@@ -292,6 +304,26 @@ err()  { printf '    \033[31mERROR:\033[0m %s\n' "$1" >&2; }
 # máquina que guarde las claves en otra ubicación.
 load_local_signing_material() {
     [ -n "${CI:-}" ] && return 0
+
+    # --keys-dir manda sobre las rutas por defecto: es la carpeta que se
+    # eligió para esta build (la misma convención que windows/build.ps1).
+    if [ -n "$KEYS_DIR" ]; then
+        [ -d "$KEYS_DIR" ] || { echo "No existe la carpeta de claves: $KEYS_DIR" >&2; exit 2; }
+        local candidate
+        for candidate in release-signing-private.pem; do
+            [ -r "$KEYS_DIR/$candidate" ] && export LTERMINAL_SIGNING_PRIVATE_KEY_FILE="${LTERMINAL_SIGNING_PRIVATE_KEY_FILE:-$KEYS_DIR/$candidate}"
+        done
+        [ -r "$KEYS_DIR/release-signing-public.hex" ] && export LTERMINAL_UPDATE_PUBLIC_KEY_FILE="${LTERMINAL_UPDATE_PUBLIC_KEY_FILE:-$KEYS_DIR/release-signing-public.hex}"
+        local key_root
+        for key_root in "$KEYS_DIR" "$KEYS_DIR/.ssh"; do
+            for candidate in lterminal-release-signing ltools-release-signing; do
+                if [ -z "${LTERMINAL_SSH_SIGNING_KEY_FILE:-}" ] && [ -r "$key_root/$candidate" ]; then
+                    export LTERMINAL_SSH_SIGNING_KEY_FILE="$key_root/$candidate"
+                    [ -r "$key_root/$candidate.pub" ] && export LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE="${LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE:-$key_root/$candidate.pub}"
+                fi
+            done
+        done
+    fi
 
     local config_root="${XDG_CONFIG_HOME:-${HOME:-}}"
     local private_path="${LTERMINAL_SIGNING_PRIVATE_KEY_FILE:-}"

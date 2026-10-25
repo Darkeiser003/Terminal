@@ -321,6 +321,15 @@ pub async fn update_check_on_startup(app: AppHandle) -> UpdateStatus {
 pub fn package_updates_check(
     state: State<'_, Arc<AppState>>,
 ) -> package_updates::PackageUpdateStatus {
+    // En las pruebas el aviso depende de lo que WinGet tenga pendiente en el
+    // equipo: con todo el catálogo instalado salía siempre y, en ventanas
+    // pequeñas, tapaba las casillas que miden los E2E. Solo se consulta si la
+    // prueba lo pide.
+    if std::env::var("LTERMINAL_E2E_TESTING").as_deref() == Ok("1")
+        && std::env::var("LTERMINAL_E2E_PACKAGE_UPDATES").as_deref() != Ok("1")
+    {
+        return package_updates::PackageUpdateStatus::default();
+    }
     let Some(manager) = package_updates::host_manager(state.inventory().pkg_manager.as_deref())
     else {
         return package_updates::PackageUpdateStatus::default();

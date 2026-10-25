@@ -465,8 +465,24 @@ if (aiEnvironmentsOnly) {
     const manifest = join(fakeAiDirectory, 'models', 'manifests', 'registry.ollama.ai', 'library', 'qwen3.8', '27b');
     await mkdir(dirname(manifest), { recursive: true });
     await writeFile(manifest, '{}');
-    process.env.PATH = [fakeAiBin, process.env.PATH].filter(Boolean).join(delimiter);
+    // Un Claude Code u Ollama instalados de verdad (la VM con todo el
+    // catálogo los tiene en el PATH) ganarían a los simulados: se quitan del
+    // PATH de esta prueba las carpetas que traen alguno.
+    const realAiDirs = [];
+    const keptPath = [];
+    for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+        let real = false;
+        for (const name of ['claude.exe', 'claude.cmd', 'claude', 'ollama.exe', 'ollama.cmd']) {
+            if (await access(join(dir, name)).then(() => true, () => false)) real = true;
+        }
+        if (real) realAiDirs.push(dir);
+        else keptPath.push(dir);
+    }
+    process.env.PATH = [fakeAiBin, ...keptPath].join(delimiter);
+    // La app suma además el PATH persistente del registro: también allí.
+    process.env.LTERMINAL_E2E_HIDDEN_PATH_DIRS = realAiDirs.join(delimiter);
     process.env.OLLAMA_MODELS = join(fakeAiDirectory, 'models');
+    if (realAiDirs.length) process.stdout.write(`E2E IA: fuera del PATH de la prueba ${realAiDirs.length} carpetas con Claude Code u Ollama reales.\n`);
 }
 // «Mi GitHub» de Proyectos con un `gh` simulado: un gh.cmd delante del PATH
 // que guarda la sesión en archivos (`state/logged-in`, `state/delete-scope`),
@@ -533,15 +549,28 @@ if (githubAccountOnly) {
         ':pr',
         `if "%~2"=="list" type "%STATE%${String.fromCharCode(92)}pulls.json" & exit /b 0`,
         'if "%~2"=="create" echo https://github.com/wterminal-e2e/demo/pull/8',
+        `if "%~2"=="view" type "%STATE%${String.fromCharCode(92)}pr-view.json" & exit /b 0`,
         'exit /b 0',
         ':issue',
         `if "%~2"=="list" type "%STATE%${String.fromCharCode(92)}issues.json" & exit /b 0`,
         'if "%~2"=="create" echo https://github.com/wterminal-e2e/demo/issues/4',
+        `if "%~2"=="view" type "%STATE%${String.fromCharCode(92)}issue-view.json" & exit /b 0`,
         'exit /b 0',
         ':run',
         `if "%~2"=="list" type "%STATE%${String.fromCharCode(92)}runs.json" & exit /b 0`,
+        `if "%~2"=="view" type "%STATE%${String.fromCharCode(92)}run-log.txt" & exit /b 0`,
         'exit /b 0',
         ':api',
+        // «Gestionar…» → Código pide rutas fijas de la API; cada una tiene su
+        // respuesta guardada. Las escrituras (-X POST/DELETE) solo se anotan.
+        'set "ARG=%~2"',
+        'if "%~2"=="-X" exit /b 0',
+        `if not "%ARG:/branches=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}branches.json" & exit /b 0`,
+        `if not "%ARG:/tags=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}tags.json" & exit /b 0`,
+        `if not "%ARG:/commits/=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}commit.json" & exit /b 0`,
+        `if not "%ARG:/commits?=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}commits.json" & exit /b 0`,
+        `if not "%ARG:/contents/README.md=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}readme.json" & exit /b 0`,
+        `if not "%ARG:/contents/=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}contents.json" & exit /b 0`,
         'if exist "%STATE%/logged-in" (',
         '  echo {"login":"wterminal-e2e","id":1}',
         '  exit /b 0',
@@ -604,6 +633,29 @@ if (githubAccountOnly) {
     ]);
     await state('assets.json', { assets: [{ name: 'demo-windows.zip', size: 2048, downloadCount: 3 }] });
     await state('pulls.json', [{ number: 7, title: 'Arreglo', headRefName: 'feature/x', baseRefName: 'main', isDraft: false, url: 'https://github.com/wterminal-e2e/demo/pull/7' }]);
+    const sha = '0123456789abcdef0123456789abcdef01234567';
+    await state('branches.json', [
+        { name: 'main', protected: true, commit: { sha } },
+        { name: 'feature/x', protected: false, commit: { sha } },
+    ]);
+    await state('tags.json', [{ name: 'v1.0.0', commit: { sha } }]);
+    await state('commits.json', [{
+        sha, html_url: `https://github.com/wterminal-e2e/demo/commit/${sha}`, // link-check: ignore
+        commit: { message: 'Primer commit\n\ncuerpo', author: { name: 'E2E', date: '2026-10-20T10:00:00Z' } },
+    }]);
+    await state('commit.json', { sha, files: [{ filename: 'README.md', status: 'added', additions: 1, deletions: 0, patch: '@@ -0,0 +1 @@\n+# Demo' }] });
+    await state('contents.json', [
+        { name: 'README.md', path: 'README.md', type: 'file', size: 7 },
+        { name: 'src', path: 'src', type: 'dir', size: 0 },
+    ]);
+    await state('readme.json', { path: 'README.md', size: 7, content: Buffer.from('# Demo\n').toString('base64') });
+    await state('pr-view.json', {
+        body: 'Arregla el fallo', state: 'OPEN', isDraft: false, reviewDecision: 'REVIEW_REQUIRED',
+        labels: [{ name: 'bug' }], files: [{ path: 'src/main.rs', additions: 2, deletions: 1 }],
+        comments: [{ author: { login: 'revisora' }, body: 'Mira el caso vacío', createdAt: '2026-10-21T09:00:00Z' }],
+    });
+    await state('issue-view.json', { body: 'Pasos para reproducirlo', state: 'OPEN', labels: [], comments: [] });
+    await writeFile(join(fakeGhDirectory, 'state', 'run-log.txt'), 'build\tcompile\tError: falta un punto y coma\n');
     await state('issues.json', [{ number: 3, title: 'Fallo', url: 'https://github.com/wterminal-e2e/demo/issues/3' }]);
     await state('runs.json', [{ databaseId: 99, displayTitle: 'CI', status: 'completed', conclusion: 'failure', workflowName: 'ci', headBranch: 'main', createdAt: '2026-10-21T10:00:00Z', url: 'https://github.com/wterminal-e2e/demo/actions/runs/99' }]);
     await writeFile(join(fakeGhDirectory, 'adjunto.zip'), 'zip de prueba');
@@ -634,6 +686,13 @@ if (terminalLinksOnly) {
     process.env.LTERMINAL_E2E_OPENED_LINKS = openedLinksFile;
     // Sin el modo de pruebas (fuera de Windows no se activa solo) el backend
     // abriría el navegador de verdad.
+    process.env.LTERMINAL_E2E_TESTING = '1';
+}
+
+// Modo de bajo consumo: el backend dice tener 2 hilos de CPU para que la
+// sugerencia salga en cualquier equipo.
+if (process.env.E2E_LOW_POWER_ONLY === '1') {
+    process.env.LTERMINAL_E2E_CPU_THREADS = '2';
     process.env.LTERMINAL_E2E_TESTING = '1';
 }
 
@@ -6999,7 +7058,7 @@ async function readCurrentLog() {
 // PowerShell) en el arranque. En un equipo de 2 CPU satura el procesador
 // durante más de un minuto y una pestaña nueva tarda en ejecutar su init.
 // Las pruebas que miden el arranque de una pestaña la esperan antes.
-async function waitForStartupPrefetch(timeoutMs = 240000) {
+async function waitForStartupPrefetch(timeoutMs = 300000) {
     await waitUntil(async () => {
         const { text } = await readCurrentLog().catch(() => ({ text: '' }));
         const lines = text.split(/\r?\n/);
@@ -7008,6 +7067,46 @@ async function waitForStartupPrefetch(timeoutMs = 240000) {
         return Boolean(session) && lines.some((line) => line.includes(`[${session}]`)
             && line.includes('Catálogo de dependencias precargado'));
     }, timeoutMs, 'precarga del catálogo de dependencias del arranque');
+}
+
+// Controles pegados al borde de su panel (punto 11 del plan de mejoras). Mide
+// con getBoundingClientRect cada botón, campo y desplegable visible de los
+// paneles abiertos; con densidad cómoda deben quedar a ≥ 8 px del borde y con
+// compacta a ≥ 4 px (con 1 px de tolerancia por el redondeo del zoom).
+async function panelEdgeViolations(minimum) {
+    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `
+            const minimum = arguments[0];
+            const found = [];
+            for (const panel of document.querySelectorAll('[role="dialog"].panel, .panel[role="dialog"]')) {
+                const box = panel.getBoundingClientRect();
+                const style = getComputedStyle(panel);
+                const border = parseFloat(style.borderLeftWidth) || 0;
+                for (const node of panel.querySelectorAll('button, input, select, textarea')) {
+                    const rect = node.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0 || node.closest('.xterm')) continue;
+                    if (node.classList.contains('panel-close')) continue;
+                    // Solo lo que se ve en el scroll; lo que queda fuera se mide al llegar.
+                    const scroller = node.closest('.panel-scroll');
+                    if (scroller) {
+                        const view = scroller.getBoundingClientRect();
+                        if (rect.bottom < view.top || rect.top > view.bottom) continue;
+                    }
+                    const left = rect.left - box.left - border;
+                    const right = box.right - border - rect.right;
+                    if (left < minimum - 1 || right < minimum - 1) {
+                        found.push({
+                            control: (node.dataset.testid || node.getAttribute('aria-label') || node.textContent || node.tagName).trim().slice(0, 60),
+                            left: Math.round(left),
+                            right: Math.round(right),
+                        });
+                    }
+                }
+            }
+            return found;
+        `,
+        args: [minimum],
+    });
 }
 
 async function assertCurrentLog() {
@@ -8128,6 +8227,317 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write(`E2E Ajustes OK: Iniciar maximizada persistente (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_IMPORT_SUGGESTION_ONLY === '1') {
+        markPhase('sugerencia de importar repositorios');
+        await waitForBannerPanes(1, 60000);
+        const pause = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+        const makeRepo = async (name) => {
+            const dir = await mkdtemp(join(tmpdir(), `wterminal-e2e-repo-${name}-`));
+            await execFile('git', ['init', '-q', dir], { windowsHide: true });
+            await execFile('git', ['-C', dir, 'remote', 'add', 'origin', `https://github.com/wterminal-e2e/${name}.git`], { windowsHide: true }); // link-check: ignore
+            await mkdir(join(dir, 'src'), { recursive: true });
+            return dir;
+        };
+        // El aviso de actualizaciones de WinGet tiene prioridad abajo: se aparta.
+        const dismissOtherNotices = async () => {
+            for (const button of (await findAll('[role="status"].update button:not(.primary)')).map((found) => found[elementKey])) {
+                if (!(await attribute(button, 'data-testid'))?.startsWith('import-suggestion')) await click(button).catch(() => {});
+            }
+        };
+        const suggestionShown = async () => (await findAll('[data-testid="import-suggestion"]')).length > 0;
+        const results = {};
+        const first = await makeRepo('importado');
+        const second = await makeRepo('descartado');
+        try {
+            // 1. Entrar en una subcarpeta del repositorio: la sugerencia aparece.
+            await sendTerminalLine(`cd /d "${join(first, 'src')}"`);
+            await dismissOtherNotices();
+            await waitUntil(suggestionShown, 20000, 'sugerencia de importar al entrar en el repositorio');
+            const text = await textOf(await findWhenReady('[data-testid="import-suggestion"]'));
+            if (!text.includes('wterminal-e2e/importado')) throw new Error(`La sugerencia no nombra el repositorio: ${text}`);
+            await captureScreenshot('importar-sugerencia');
+            // 2. Importar: aparece en Descargados como importado y la carpeta sigue en su sitio.
+            await clickWhenReady('[data-testid="import-suggestion-accept"]');
+            await clickWhenReady('[data-testid="projects-mode-downloaded"]');
+            await waitUntil(async () => (await findAll('[data-testid="projects-forget-imported"]')).length === 1, 20000, 'repositorio importado en Descargados');
+            if (!(await stat(join(first, '.git')).then(() => true, () => false))) throw new Error('Importar movió o borró la carpeta.');
+            await captureScreenshot('importar-descargados');
+            results.imported = true;
+            // 3. Quitar de la lista: desaparece de Descargados y la carpeta sigue.
+            await clickWhenReady('[data-testid="projects-forget-imported"]');
+            await waitUntil(async () => (await findAll('[data-testid="projects-forget-imported"]')).length === 0, 15000, 'quitar de la lista');
+            if (!(await stat(join(first, '.git')).then(() => true, () => false))) throw new Error('Quitar de la lista borró la carpeta.');
+            results.forgotten = true;
+            await clickWhenReady('[role="dialog"] .panel-close');
+            // 4. «No volver a sugerir» en otro repositorio: al volver a entrar ya no sale.
+            await sendTerminalLine(`cd /d "${second}"`);
+            await dismissOtherNotices();
+            await waitUntil(suggestionShown, 20000, 'sugerencia en el segundo repositorio');
+            await clickWhenReady('[data-testid="import-suggestion-dismiss"]');
+            await waitUntil(async () => !(await suggestionShown()), 5000, 'la sugerencia se cierra');
+            await sendTerminalLine('cd /d "%USERPROFILE%"');
+            await sendTerminalLine(`cd /d "${second}"`);
+            await pause(4000);
+            if (await suggestionShown()) throw new Error('«No volver a sugerir» no se respetó.');
+            results.dismissed = true;
+            // 5. Con el interruptor de Ajustes apagado no se sugiere nada. Se
+            // apaga desde Ajustes, como una persona: `settings_save` directo
+            // guarda, pero la ventana conserva sus preferencias en memoria.
+            const toggleSuggestion = async () => {
+                await clickWhenReady('[data-testid="toolbar-settings"]');
+                await clickWhenReady('[data-testid="settings-tab-behavior"]');
+                await toggleCheckboxAndWait('[data-testid="settings-suggest-repo-import"]');
+                await waitForSettingsAutosave();
+                await clickWhenReady('[role="dialog"] .panel-close');
+            };
+            await toggleSuggestion();
+            if ((await invokeJson('settings_get')).preferences.suggestRepositoryImport !== false) {
+                throw new Error('No se pudo apagar «Sugerir importar repositorios».');
+            }
+            await sendTerminalLine('cd /d "%USERPROFILE%"');
+            await sendTerminalLine(`cd /d "${first}"`);
+            await pause(4000);
+            if (await suggestionShown()) throw new Error('La sugerencia sale con el interruptor apagado.');
+            await toggleSuggestion();
+            results.switchOff = true;
+        } finally {
+            await sendTerminalLine('cd /d "%USERPROFILE%"').catch(() => {});
+            await rm(first, { recursive: true, force: true }).catch(() => {});
+            await rm(second, { recursive: true, force: true }).catch(() => {});
+        }
+        recordEvent('import-suggestion', { ...results, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'import-suggestion';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E importar repositorios OK: sugerencia, importar sin mover, quitar, no volver a sugerir e interruptor (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_LOW_POWER_ONLY === '1') {
+        markPhase('sugerencia del modo de bajo consumo');
+        await waitForBannerPanes(1, 60000);
+        // Los avisos de actualizaciones tienen prioridad abajo: se apartan
+        // mientras se espera, porque pueden llegar en cualquier momento.
+        await waitUntil(async () => {
+            if ((await findAll('[data-testid="low-power-suggestion"]')).length > 0) return true;
+            for (const button of (await findAll('[role="status"].update button:not(.primary)')).map((found) => found[elementKey])) {
+                await click(button).catch(() => {});
+            }
+            return false;
+        }, 60000, 'sugerencia del modo de bajo consumo');
+        const notice = await findWhenReady('[data-testid="low-power-suggestion"]');
+        const text = await textOf(notice);
+        if (!text.includes('2')) throw new Error(`La sugerencia no explica el motivo: ${text}`);
+        await captureScreenshot('bajo-consumo-sugerencia');
+        await clickWhenReady('[data-testid="low-power-accept"]');
+        await waitUntil(async () => (await invokeJson('settings_get')).preferences.lowPowerMode === true, 10000, 'modo de bajo consumo guardado');
+        await waitUntil(async () => (await findAll('[data-testid="low-power-suggestion"]')).length === 0, 5000, 'el aviso se cierra');
+        // Ajustes enseña el interruptor encendido; se apaga para dejar el perfil como estaba.
+        await clickWhenReady('[data-testid="toolbar-settings"]');
+        await clickWhenReady('[data-testid="settings-tab-behavior"]');
+        const checkbox = await findWhenReady('[data-testid="settings-low-power"]');
+        if (!(await property(checkbox, 'checked'))) throw new Error('Ajustes no refleja el modo de bajo consumo.');
+        await toggleCheckboxAndWait('[data-testid="settings-low-power"]');
+        await waitForSettingsAutosave();
+        await clickWhenReady('[role="dialog"] .panel-close');
+        if ((await invokeJson('settings_get')).preferences.lowPowerMode !== false) throw new Error('No se pudo apagar el modo de bajo consumo.');
+        recordEvent('low-power', { text, accepted: true, settingsReflected: true, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'low-power';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E modo de bajo consumo OK: sugerencia con motivo, activar, Ajustes y apagar (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_UI_SCALE_ONLY === '1') {
+        markPhase('tamaño de la interfaz');
+        await waitForBannerPanes(1, 60000);
+        const pause = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+        // Mismo camino que una persona: el control de Ajustes. `settings_save`
+        // directo guarda, pero no reaplica el tema en el WebView.
+        const setScale = async (uiScale) => {
+            await clickWhenReady('[data-testid="toolbar-settings"]');
+            await clickWhenReady('[data-testid="settings-tab-appearance"]');
+            const slider = await findWhenReady('[data-testid="settings-ui-scale"]');
+            await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `
+                    const input = arguments[0];
+                    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, arguments[1]);
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));`,
+                args: [{ [elementKey]: slider }, String(uiScale)],
+            });
+            await waitForSettingsAutosave();
+            await clickWhenReady('[role="dialog"] .panel-close');
+            await waitUntil(async () => Number(await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: "return getComputedStyle(document.documentElement).getPropertyValue('--ui-scale').trim();", args: [],
+            })) === uiScale / 100, 10000, `--ui-scale al ${uiScale} %`);
+            await pause(400);
+        };
+        const measure = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `
+                const toolbar = document.querySelector('main > .toolbar');
+                const rows = document.querySelector('.cell:not(.hidden) .xterm-rows');
+                const outside = [...document.querySelectorAll('main > .toolbar button, .panel button, .panel input, .panel select')]
+                    .filter((node) => { const r = node.getBoundingClientRect(); return r.width > 0 && (r.right > innerWidth + 1 || r.left < -1); })
+                    .map((node) => (node.dataset.testid || node.textContent || '').trim().slice(0, 40));
+                return {
+                    toolbarHeight: toolbar?.getBoundingClientRect().height ?? 0,
+                    terminalFont: rows ? getComputedStyle(rows).fontSize : '',
+                    terminalZoom: rows ? getComputedStyle(rows.closest('.cell')).zoom : '',
+                    outside,
+                };`,
+            args: [],
+        });
+        const results = [];
+        const violations = [];
+        let baseline = null;
+        for (const scale of [100, 80, 150, 200]) {
+            await setScale(scale);
+            await clickWhenReady('[data-testid="toolbar-settings"]');
+            await findWhenReady('[role="dialog"]');
+            await pause(300);
+            const metrics = await measure();
+            if (scale === 100) baseline = metrics;
+            const ratio = metrics.toolbarHeight / baseline.toolbarHeight;
+            if (Math.abs(ratio - scale / 100) > 0.12) violations.push(`barra al ${scale} %: ${ratio.toFixed(2)}x`);
+            if (metrics.terminalFont !== baseline.terminalFont) violations.push(`la letra de la terminal cambió al ${scale} %: ${metrics.terminalFont}`);
+            if (metrics.outside.length) violations.push(`fuera de la ventana al ${scale} %: ${metrics.outside.join(', ')}`);
+            for (const edge of await panelEdgeViolations(8 * Math.min(1, scale / 100))) violations.push(`margen al ${scale} %: ${JSON.stringify(edge)}`);
+            await captureScreenshot(`escala-${scale}-ajustes`);
+            await clickWhenReady('[role="dialog"] .panel-close');
+            results.push({ scale, ...metrics });
+        }
+        // Atajos: Ctrl+Alt+= sube un paso, Ctrl+Alt+- baja y Ctrl+Alt+0 vuelve al 100 %.
+        await setScale(100);
+        const keyChord = async (key) => request(`/session/${sessionId}/actions`, 'POST', { actions: [{ type: 'key', id: 'k', actions: [
+            { type: 'keyDown', value: '\uE009' }, { type: 'keyDown', value: '\uE00A' }, { type: 'keyDown', value: key },
+            { type: 'keyUp', value: key }, { type: 'keyUp', value: '\uE00A' }, { type: 'keyUp', value: '\uE009' },
+        ] }] });
+        const savedScale = async () => (await invokeJson('settings_get')).preferences.uiScale;
+        await keyChord('=');
+        await waitUntil(async () => (await savedScale()) === 110, 5000, 'Ctrl+Alt+= sube al 110 %');
+        await keyChord('-');
+        await keyChord('-');
+        await waitUntil(async () => (await savedScale()) === 90, 5000, 'Ctrl+Alt+- baja al 90 %');
+        await keyChord('0');
+        await waitUntil(async () => (await savedScale()) === 100, 5000, 'Ctrl+Alt+0 vuelve al 100 %');
+        recordEvent('ui-scale', { results, violations, passed: violations.length === 0 });
+        if (violations.length) throw new Error(`Tamaño de la interfaz: ${violations.slice(0, 10).join('; ')}`);
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'ui-scale';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E tamaño de la interfaz OK: 80/100/150/200 %, terminal sin escalar, márgenes y atajos (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_FASTFETCH_MATRIX_ONLY === '1') {
+        markPhase('banner y fastfetch en varias shells y tamaños');
+        await waitForBannerPanes(1, 60000);
+        const pause = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+        const sizes = [[1100, 720], [920, 640], [800, 600], [1360, 820]];
+        const cut = [];
+        const cases = [];
+        // Una línea del banner está cortada si la última fila visible termina
+        // a media palabra pegada al borde derecho de la casilla.
+        const bannerCut = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `
+                const cell = document.querySelector('.cell:not(.hidden)');
+                const rows = [...(cell?.querySelectorAll('.xterm-rows > div') ?? [])].map((row) => row.textContent ?? '');
+                const cols = Math.max(...rows.map((row) => row.length), 0);
+                const banner = rows.slice(0, 12);
+                return banner.filter((row) => row.trimEnd().length >= cols - 1 && /[A-Za-z0-9]$/.test(row.trimEnd())).slice(0, 3);
+            `,
+            args: [],
+        });
+        const available = ((await invokeJson('env_list', { tabId: null })).envs ?? []).filter((env) => env.available).map((env) => env.id);
+        for (const shell of ['cmd', 'powershell', 'gitbash'].filter((id) => available.includes(id))) {
+            for (const image of [true, false]) {
+                const current = (await invokeJson('settings_get')).preferences;
+                await invokeJson('settings_save', { incoming: { ...current, bannerImage: image } });
+                await invokeJson('env_switch', { tabId: await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id'), envId: shell }).catch(() => null);
+                await waitForBannerPanes(1, 60000);
+                for (const [width, height] of sizes) {
+                    await resizeWindow(width, height);
+                    await pause(800);
+                    for (const moment of ['tras-redimensionar', 'tras-cls']) {
+                        if (moment === 'tras-cls') {
+                            await sendTerminalLine(shell === 'cmd' ? 'cls' : 'clear');
+                            await waitForBannerPanes(1, 30000).catch(() => {});
+                            await pause(600);
+                        }
+                        const lines = await bannerCut();
+                        const label = `${shell}-${image ? 'imagen' : 'sin-imagen'}-${width}x${height}-${moment}`;
+                        cases.push(label);
+                        if (lines.length) {
+                            cut.push({ label, lines });
+                            await captureScreenshot(`fastfetch-cortado-${label}`);
+                        }
+                    }
+                }
+                await captureScreenshot(`fastfetch-${shell}-${image ? 'imagen' : 'sin-imagen'}`);
+            }
+        }
+        recordEvent('fastfetch-matrix', { cases: cases.length, cut, passed: cut.length === 0 });
+        if (cut.length) throw new Error(`Banner cortado en ${cut.length} de ${cases.length} casos: ${JSON.stringify(cut.slice(0, 4))}`);
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'fastfetch-matrix';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E fastfetch OK: ${cases.length} casos sin líneas cortadas (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_VISUAL_TOUR_ONLY === '1') {
+        // Lo que antes se capturaba a mano para revisar la interfaz: cada
+        // pestaña de Ajustes, Proyectos, la Biblioteca y Dependencias, en las
+        // dos densidades, con la comprobación de márgenes mínimos.
+        markPhase('recorrido visual');
+        const violations = [];
+        const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const setDensity = async (uiDensity) => {
+            const current = (await invokeJson('settings_get')).preferences;
+            await invokeJson('settings_save', { incoming: { ...current, uiDensity } });
+        };
+        const visit = async (label, density) => {
+            await captureScreenshot(`${density}-${label}`);
+            const minimum = density === 'compact' ? 4 : 8;
+            for (const violation of await panelEdgeViolations(minimum)) {
+                violations.push({ density, view: label, ...violation });
+            }
+        };
+        for (const density of ['comfortable', 'compact']) {
+            await setDensity(density);
+            await clickWhenReady('[data-testid="toolbar-settings"]');
+            await findWhenReady('[role="dialog"]');
+            for (const tab of ['appearance', 'terminal', 'behavior', 'about']) {
+                await clickWhenReady(`[data-testid="settings-tab-${tab}"]`);
+                await pause(300);
+                await visit(`ajustes-${tab}`, density);
+            }
+            await clickWhenReady('[role="dialog"] .panel-close');
+            await clickWhenReady('[data-testid="toolbar-projects"]');
+            for (const mode of ['pinned', 'downloaded', 'explore', 'github']) {
+                await clickWhenReady(`[data-testid="projects-mode-${mode}"]`);
+                await pause(400);
+                await visit(`proyectos-${mode}`, density);
+            }
+            await clickWhenReady('[role="dialog"] .panel-close');
+            await clickWhenReady('[data-testid="toolbar-library"]');
+            await pause(300);
+            await visit('biblioteca', density);
+            await clickWhenReady('[role="dialog"] .panel-close');
+            await clickWhenReady('[data-testid="toolbar-dependencies"]');
+            await pause(600);
+            await visit('dependencias', density);
+            await clickWhenReady('[role="dialog"] .panel-close');
+        }
+        await setDensity('comfortable');
+        recordEvent('visual-tour', { captures: smokeReport.captures.length, violations, passed: violations.length === 0 });
+        if (violations.length) {
+            throw new Error(`Controles pegados al borde del panel: ${JSON.stringify(violations.slice(0, 12))}`);
+        }
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'visual-tour';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E recorrido visual OK: ${smokeReport.captures.length} capturas y márgenes mínimos en ambas densidades (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (process.env.E2E_SETTINGS_FOOTER_ONLY === '1') {
         markPhase('Ajustes compactos 800x600');
         await clickWhenReady('[data-testid="toolbar-settings"]');
@@ -9000,6 +9410,10 @@ try {
         const repo = 'wterminal-e2e/demo';
         const manageIn = `${demoRow} [data-testid="gh-manage"]`;
         const manageTab = async (id) => {
+            // Las pestañas se desactivan mientras se relee la sección anterior
+            // (p. ej. tras crear una pull request): un clic entonces se pierde.
+            await waitUntil(async () => (await attribute(await findWhenReady(manageIn), 'aria-busy')) !== 'true',
+                15000, `Gestionar libre antes de abrir ${id}`);
             await clickWhenReady(`${manageIn} [data-testid="gh-manage-tab-${id}"]`);
             await waitUntil(async () => (await attribute(await findWhenReady(manageIn), 'data-section')) === id
                 && (await attribute(await findWhenReady(manageIn), 'aria-busy')) !== 'true', 15000, `sección ${id} de Gestionar`);
@@ -9055,6 +9469,22 @@ try {
         await clickWhenReady('[data-testid="gh-manage-pull-create"]');
         await waitForArgs(['pr', 'create', '--repo', repo, '--head', 'feature/y', '--base', 'main', '--title', 'Nueva funcion', '--body', ''],
             'gh pr create hacia la rama por defecto');
+        // Detalle de la PR: comentarios y archivos, comentar y aprobar.
+        await clickWhenReady('[data-testid="gh-manage-pull"][data-number="7"] [data-testid="gh-manage-pull-view"]');
+        const prDetail = await findWhenReady('[data-testid="gh-manage-item-detail"][data-kind="pr"]');
+        const prText = await textOf(prDetail);
+        if (!prText.includes('Mira el caso vacío') || !prText.includes('bug')) {
+            throw new Error(`El detalle de la PR no enseña comentarios y etiquetas: ${prText}`);
+        }
+        await setInput('[data-testid="gh-manage-comment-body"]', 'Hecho');
+        await clickWhenReady('[data-testid="gh-manage-comment-send"]');
+        await waitForArgs(['pr', 'comment', '7', '--repo', repo, '--body', 'Hecho'], 'gh pr comment');
+        // Tras comentar se vuelve a leer la PR: hasta entonces los botones están desactivados.
+        await waitUntil(async () => (await attribute(await findWhenReady(manageIn), 'aria-busy')) !== 'true', 15000, 'PR releída tras comentar');
+        await clickWhenReady('[data-testid="gh-manage-review-approve"]');
+        await waitForArgs(['pr', 'review', '7', '--repo', repo, '--approve'], 'gh pr review --approve');
+        await captureScreenshot('mi-github-gestionar-pr-detalle');
+        results.pullDetail = true;
         // Issues: crear y cerrar.
         await manageTab('issues');
         await setInput('[data-testid="gh-manage-issue-title"]', 'Otro fallo');
@@ -9063,9 +9493,33 @@ try {
         await clickWhenReady('[data-testid="gh-manage-issue"][data-number="3"] [data-testid="gh-manage-issue-close"]');
         await waitForArgs(['issue', 'close', '3', '--repo', repo], 'gh issue close');
         // Actions: relanzar lo que falló.
+        // Código: archivos, abrir el README, historial con su diff y crear una rama.
+        await manageTab('code');
+        await findWhenReady('[data-testid="gh-code-entry"][data-kind="dir"]');
+        if ((await attribute(await findWhenReady('[data-testid="gh-code-entry"]'), 'data-kind')) !== 'dir') {
+            throw new Error('Código no pone las carpetas primero.');
+        }
+        await clickWhenReady('[data-testid="gh-code-entry"][data-kind="file"]');
+        await waitUntil(async () => (await textOf(await findWhenReady('[data-testid="gh-code-file"]'))).includes('# Demo'),
+            15000, 'README leído desde gh api contents');
+        await captureScreenshot('mi-github-gestionar-codigo');
+        await clickWhenReady('[data-testid="gh-code-view-commits"]');
+        await clickWhenReady('[data-testid="gh-code-commit"] button');
+        await waitUntil(async () => (await findAll('[data-testid="gh-code-commit"] details.diff')).length === 1, 15000, 'diff del commit');
+        await clickWhenReady('[data-testid="gh-code-view-branches"]');
+        await findWhenReady('[data-testid="gh-code-branch"][data-name="feature/x"]');
+        await setInput('[data-testid="gh-code-branch-name"]', 'nueva');
+        await clickWhenReady('[data-testid="gh-code-branch-create"]');
+        await waitForArgs(['api', '-X', 'POST', 'repos/wterminal-e2e/demo/git/refs', '-f', 'ref=refs/heads/nueva', '-f', `sha=${'0123456789abcdef0123456789abcdef01234567'}`],
+            'gh api para crear la rama');
+        results.code = true;
         await manageTab('runs');
         await clickWhenReady('[data-testid="gh-manage-run"][data-id="99"] [data-testid="gh-manage-run-rerun"]');
         await waitForArgs(['run', 'rerun', '99', '--repo', repo, '--failed'], 'gh run rerun');
+        await clickWhenReady('[data-testid="gh-manage-run"][data-id="99"] [data-testid="gh-manage-run-log"]');
+        await waitUntil(async () => (await textOf(await findWhenReady('[data-testid="gh-manage-run-log-text"]'))).includes('falta un punto y coma'),
+            15000, 'log de lo que falló en Actions');
+        results.runLog = true;
         await captureScreenshot('mi-github-gestionar-actions');
         await clickWhenReady('[data-testid="gh-manage-close"]');
         await waitUntil(async () => (await findAll('[data-testid="gh-manage"]')).length === 0, 5000, 'Gestionar se cierra');
@@ -10656,7 +11110,7 @@ try {
             await new Promise((resolve) => setTimeout(resolve, 2000));
             await clickWhenReady('[role="dialog"] .panel-close');
         }
-        if (headers.length !== 5) categoryProblems.push(`categorías visibles: ${JSON.stringify(headers)}`);
+        if (headers.length !== 6) categoryProblems.push(`categorías visibles: ${JSON.stringify(headers)}`);
         recordEvent('toolchain-store-categories', { headers, problems: categoryProblems, passed: categoryProblems.length === 0 });
         if (categoryProblems.length) throw new Error(`Categorías de Entornos y descargas: ${categoryProblems.join('; ')}`);
         // Descarga real (opcional, necesita red): cada gestor instalado baja un
@@ -10664,6 +11118,7 @@ try {
         // carpeta propia del perfil E2E; después «Vaciar cachés» debe poder
         // borrarlo todo, incluida la caché de módulos de Go (solo lectura).
         const downloaded = [];
+        const userDefinedSkipped = [];
         if (process.env.E2E_TOOLCHAIN_STORE_DOWNLOAD === '1' && seedPip) {
             const treeSize = async (dir) => {
                 let total = 0;
@@ -10696,6 +11151,14 @@ try {
             ];
             for (const manager of managers) {
                 if (!(await toolAvailable(manager.tool))) continue;
+                // Si el usuario ya define la variable, WTerminal respeta su
+                // carpeta y no hay nada que comprobar en la propia (la VM con
+                // todo el catálogo tiene PIP_CACHE_DIR, npm_config_cache y
+                // GOMODCACHE en su disco de datos).
+                if (process.env[manager.variable]) {
+                    userDefinedSkipped.push(manager.variable);
+                    continue;
+                }
                 const marker = `LTERMINAL_E2E_DL_${manager.id.replace('-', '_')}_${Date.now()}`;
                 await sendTerminalLine(`${manager.command} && echo ${marker}_OK || echo ${marker}_FAIL`, cell);
                 let outcome = '';
@@ -10756,6 +11219,7 @@ try {
             terminalValue,
             seeded: seedPip,
             downloaded,
+            userDefinedSkipped,
             freed,
             passed: true,
         });

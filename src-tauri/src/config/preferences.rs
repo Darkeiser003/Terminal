@@ -432,6 +432,7 @@ pub static FONT_FAMILIES: Lazy<Vec<FontFamily>> = Lazy::new(|| {
 const CURSOR_STYLES: [&str; 5] = ["block", "underline", "bar", "beam", "underline-thick"];
 const FONT_WEIGHTS: [&str; 5] = ["light", "normal", "medium", "semibold", "bold"];
 const UI_DENSITIES: [&str; 2] = ["compact", "comfortable"];
+const GITHUB_SESSION_MODES: [&str; 3] = ["always", "onExhausted", "never"];
 
 /// Las preferencias tal y como viajan al renderer y se guardan en disco. Los
 /// nombres son los mismos que en la versión Electron, así que un
@@ -503,6 +504,9 @@ pub struct Preferences {
     pub shortcut_clear_terminal: String,
     pub shortcut_search_terminal: String,
     pub shortcut_open_system_explorer: String,
+    pub shortcut_ui_scale_up: String,
+    pub shortcut_ui_scale_down: String,
+    pub shortcut_ui_scale_reset: String,
     pub theme_id: String,
     pub accent_color: String,
     pub ui_background_color: String,
@@ -549,6 +553,20 @@ pub struct Preferences {
     /// fábrica porque en Windows sorprende: la gente selecciona para leer.
     pub copy_on_select: bool,
     pub ui_density: String,
+    /// Tamaño de la interfaz (barra, pestañas, paneles, explorador y avisos)
+    /// en tanto por ciento, de 80 a 200. No afecta a las casillas de terminal.
+    pub ui_scale: i64,
+    /// Sugerir importar el repositorio de GitHub de la carpeta de una pestaña
+    /// cuando no está en Proyectos.
+    pub suggest_repository_import: bool,
+    /// Modo de bajo consumo: la precarga de Dependencias y la comprobación de
+    /// actualizaciones se aplazan y las sondas van de una en una.
+    pub low_power_mode: bool,
+    /// Sugerir el modo de bajo consumo si el equipo va justo.
+    pub low_power_suggest: bool,
+    /// Cuándo usar la sesión de `gh` para las consultas de Explorar GitHub:
+    /// `always`, `onExhausted` (al agotar las 60 públicas por hora) o `never`.
+    pub github_session_mode: String,
     pub default_environment_id: String,
     /// Solicita elevación UAC al iniciar WTerminal para que las shells,
     /// intérpretes y herramientas hereden un token administrativo.
@@ -564,6 +582,18 @@ pub struct Preferences {
     pub toolchain_store_ai_models: bool,
     pub toolchain_store_tools: bool,
     pub toolchain_store_repl_history: bool,
+    /// Toolchains completas (rustup, cargo, GOPATH, Gradle, .NET, Android):
+    /// solo instalaciones nuevas, apagado de fábrica.
+    pub toolchain_store_toolchains: bool,
+    /// Programas de WinGet y Chocolatey: las acciones «Instalar» los ponen en
+    /// `<carpeta propia>\programas\<id>` (`--location` de WinGet; Chocolatey
+    /// en `programas\chocolatey`). Activo de fábrica: solo afecta a lo que se
+    /// instale desde entonces.
+    pub toolchain_store_programs: bool,
+    /// Proyectos de GitHub en `<carpeta propia>\proyectos` si no se eligió
+    /// otra carpeta de Proyectos. Apagado de fábrica: los que ya están en
+    /// Documentos dejarían de verse en la lista.
+    pub toolchain_store_projects: bool,
     /// Sugerencias del historial en gris y colores para órdenes y argumentos
     /// en la línea de órdenes de cada shell, con las herramientas propias de
     /// cada una (Clink en cmd, PSReadLine en PowerShell, ble.sh o los plugins
@@ -1233,6 +1263,18 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("shortcutOpenSystemExplorer"),
             &defaults.shortcut_open_system_explorer,
         ),
+        shortcut_ui_scale_up: safe_shortcut(
+            get("shortcutUiScaleUp"),
+            &defaults.shortcut_ui_scale_up,
+        ),
+        shortcut_ui_scale_down: safe_shortcut(
+            get("shortcutUiScaleDown"),
+            &defaults.shortcut_ui_scale_down,
+        ),
+        shortcut_ui_scale_reset: safe_shortcut(
+            get("shortcutUiScaleReset"),
+            &defaults.shortcut_ui_scale_reset,
+        ),
         accent_color: safe_hex_color(get("accentColor"), &palette.accent),
         ui_background_color: safe_hex_color(get("uiBackgroundColor"), &palette.background),
         ui_surface_color: safe_hex_color(get("uiSurfaceColor"), &palette.surface),
@@ -1320,6 +1362,18 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
         ),
         copy_on_select: bool_or_default(get("copyOnSelect"), defaults.copy_on_select),
         ui_density: one_of(get("uiDensity"), &UI_DENSITIES, &defaults.ui_density),
+        ui_scale: integer_in_range(get("uiScale"), 80, 200, defaults.ui_scale),
+        suggest_repository_import: bool_or_default(
+            get("suggestRepositoryImport"),
+            defaults.suggest_repository_import,
+        ),
+        low_power_mode: bool_or_default(get("lowPowerMode"), defaults.low_power_mode),
+        low_power_suggest: bool_or_default(get("lowPowerSuggest"), defaults.low_power_suggest),
+        github_session_mode: one_of(
+            get("githubSessionMode"),
+            &GITHUB_SESSION_MODES,
+            &defaults.github_session_mode,
+        ),
         default_environment_id: safe_environment_id(get("defaultEnvironmentId")),
         terminal_admin_by_default: bool_or_default(
             get("terminalAdminByDefault"),
@@ -1344,6 +1398,18 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
         toolchain_store_repl_history: bool_or_default(
             get("toolchainStoreReplHistory"),
             defaults.toolchain_store_repl_history,
+        ),
+        toolchain_store_toolchains: bool_or_default(
+            get("toolchainStoreToolchains"),
+            defaults.toolchain_store_toolchains,
+        ),
+        toolchain_store_programs: bool_or_default(
+            get("toolchainStorePrograms"),
+            defaults.toolchain_store_programs,
+        ),
+        toolchain_store_projects: bool_or_default(
+            get("toolchainStoreProjects"),
+            defaults.toolchain_store_projects,
         ),
         shell_assist: bool_or_default(get("shellAssist"), defaults.shell_assist),
         shell_assist_cmd: bool_or_default(get("shellAssistCmd"), defaults.shell_assist_cmd),

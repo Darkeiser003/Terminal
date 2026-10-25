@@ -11,6 +11,13 @@
     import * as api from '../lib/api';
     import type {
         GhAsset,
+        GhBranch,
+        GhChangedFile,
+        GhCommit,
+        GhItemKind,
+        GhItemView,
+        GhContents,
+        GhTag,
         GhIssue,
         GhMergeMethod,
         GhPull,
@@ -23,7 +30,8 @@
         LocalGitStatus,
     } from '../lib/types';
 
-    type Section = 'details' | 'releases' | 'git' | 'pulls' | 'issues' | 'runs';
+    type Section = 'details' | 'code' | 'releases' | 'git' | 'pulls' | 'issues' | 'runs';
+    type CodeView = 'files' | 'commits' | 'branches' | 'tags';
 
     let {
         fullName,
@@ -81,9 +89,35 @@
     let issueTitle = $state('');
     let issueBody = $state('');
     let runs = $state<GhRun[]>([]);
+    // PR e issues en detalle, y logs de Actions.
+    let openItem = $state('');
+    let itemView = $state<GhItemView | null>(null);
+    let itemComment = $state('');
+    let reviewBody = $state('');
+    let issueState = $state<'open' | 'closed' | 'all'>('open');
+    let openLog = $state(0);
+    let runLog = $state('');
+    // Código.
+    let codeView = $state<CodeView>('files');
+    let codeRef = $state('');
+    let codePath = $state('');
+    let contents = $state<GhContents | null>(null);
+    let branchList = $state<GhBranch[]>([]);
+    let tagList = $state<GhTag[]>([]);
+    let commitList = $state<GhCommit[]>([]);
+    let openCommit = $state('');
+    let commitFiles = $state<GhChangedFile[]>([]);
+    let compareBase = $state('');
+    let compareHead = $state('');
+    let compareFiles = $state<GhChangedFile[] | null>(null);
+    let newBranchName = $state('');
+    let newBranchFrom = $state('');
+    let deleteBranchName = $state('');
+    let deleteBranchConfirm = $state('');
 
     const sections: { id: Section; label: string }[] = $derived([
         { id: 'details', label: app.t('ghm.tabDetails', 'Detalles') },
+        { id: 'code', label: app.t('ghm.tabCode', 'Código') },
         { id: 'releases', label: app.t('ghm.tabReleases', 'Releases') },
         { id: 'git', label: app.t('ghm.tabGit', 'Git') },
         { id: 'pulls', label: app.t('ghm.tabPulls', 'Pull requests') },
@@ -129,6 +163,8 @@
                 details = loaded;
                 topicsText = loaded.topics.join(', ');
             }
+        } else if (next === 'code') {
+            await loadCode(codeView);
         } else if (next === 'releases') {
             releases = (await work(() => api.githubReleases(fullName))) ?? releases;
             assetsOf = '';
@@ -139,7 +175,8 @@
         } else if (next === 'pulls') {
             pulls = (await work(() => api.githubPulls(fullName))) ?? pulls;
         } else if (next === 'issues') {
-            issues = (await work(() => api.githubIssues(fullName))) ?? issues;
+            issues = (await work(() => issueState === 'open' ? api.githubIssues(fullName) : api.githubIssuesByState(fullName, issueState))) ?? issues;
+            openItem = '';
         } else {
             runs = (await work(() => api.githubRuns(fullName))) ?? runs;
         }
@@ -151,6 +188,111 @@
         void fullName;
         untrack(() => void load('details'));
     });
+
+    /** Abre (o pliega) una issue o PR con su descripción y comentarios. */
+    async function toggleItem(kind: GhItemKind, number: number): Promise<void> {
+        const key = `${kind}-${number}`;
+        if (openItem === key) {
+            openItem = '';
+            return;
+        }
+        const loaded = await work(() => api.githubItemView(fullName, kind, number));
+        if (loaded) {
+            itemView = loaded;
+            openItem = key;
+            itemComment = reviewBody = '';
+        }
+    }
+
+    /** Una acción sobre la issue o PR abierta: vuelve a leerla, y la lista. */
+    async function itemChange(kind: GhItemKind, number: number, operation: () => Promise<GhResult>): Promise<void> {
+        const result = await work(operation);
+        if (!result) return;
+        show(result.message, !result.ok);
+        if (!result.ok) return;
+        itemComment = reviewBody = '';
+        const key = `${kind}-${number}`;
+        await load(section, true);
+        const loaded = await work(() => api.githubItemView(fullName, kind, number));
+        if (loaded) {
+            itemView = loaded;
+            openItem = key;
+        }
+    }
+
+    async function toggleLog(id: number): Promise<void> {
+        if (openLog === id) {
+            openLog = 0;
+            return;
+        }
+        const loaded = await work(() => api.githubRunLog(fullName, id));
+        if (loaded !== null) {
+            runLog = loaded.trim() || app.t('ghm.logEmpty', 'Esta ejecución no tiene pasos fallidos con log.');
+            openLog = id;
+        }
+    }
+
+    async function loadCode(view: CodeView): Promise<void> {
+        codeView = view;
+        if (!branchList.length) branchList = (await work(() => api.githubCodeBranches(fullName))) ?? [];
+        if (!codeRef) codeRef = details?.defaultBranch || branchList[0]?.name || '';
+        if (view === 'files') {
+            contents = (await work(() => api.githubCodeContents(fullName, codePath, codeRef))) ?? contents;
+        } else if (view === 'commits') {
+            commitList = (await work(() => api.githubCodeCommits(fullName, codeRef))) ?? commitList;
+            openCommit = '';
+        } else if (view === 'branches') {
+            branchList = (await work(() => api.githubCodeBranches(fullName))) ?? branchList;
+        } else {
+            tagList = (await work(() => api.githubCodeTags(fullName))) ?? tagList;
+        }
+    }
+
+    async function openPath(path: string): Promise<void> {
+        codePath = path;
+        await loadCode('files');
+    }
+
+    function parentPath(path: string): string {
+        return path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    }
+
+    async function toggleCommit(sha: string): Promise<void> {
+        if (openCommit === sha) {
+            openCommit = '';
+            return;
+        }
+        const loaded = await work(() => api.githubCodeCommitFiles(fullName, sha));
+        if (loaded) {
+            commitFiles = loaded;
+            openCommit = sha;
+        }
+    }
+
+    async function runCompare(): Promise<void> {
+        compareFiles = await work(() => api.githubCodeCompare(fullName, compareBase, compareHead));
+    }
+
+    async function createBranch(): Promise<void> {
+        const from = newBranchFrom || codeRef;
+        const result = await work(() => api.githubCodeBranchCreate(fullName, newBranchName, from));
+        if (!result) return;
+        show(result.message, !result.ok);
+        if (result.ok) {
+            newBranchName = '';
+            branchList = (await work(() => api.githubCodeBranches(fullName))) ?? branchList;
+        }
+    }
+
+    async function deleteRemoteBranch(): Promise<void> {
+        const result = await work(() => api.githubCodeBranchDelete(fullName, deleteBranchName, deleteBranchConfirm));
+        if (!result) return;
+        show(result.message, !result.ok);
+        if (result.ok) {
+            deleteBranchName = deleteBranchConfirm = '';
+            branchList = (await work(() => api.githubCodeBranches(fullName))) ?? branchList;
+        }
+    }
 
     async function saveDetails(): Promise<void> {
         if (!details) return;
@@ -236,6 +378,51 @@
     }
 </script>
 
+{#snippet itemDetail(kind: GhItemKind, number: number, view: GhItemView, draft: boolean)}
+    <div class="detail" data-testid="gh-manage-item-detail" data-kind={kind} data-number={number} data-state={view.state}>
+        <div class="row">
+            <small>{view.state}{view.draft ? ` · ${app.t('ghm.draft', 'Borrador')}` : ''}{view.reviewDecision ? ` · ${view.reviewDecision}` : ''}</small>
+            {#each view.labels as label (label)}<span class="label">{label}</span>{/each}
+        </div>
+        {#if view.body}<pre class="code-view body">{view.body}</pre>{/if}
+        {#if view.files.length}
+            <details class="diff">
+                <summary>{app.t('ghm.prFiles', 'Archivos que cambia')} ({view.files.length})</summary>
+                {#each view.files as file (file.path)}
+                    <div class="row"><span class="path">{file.path}</span><small>+{file.additions} −{file.deletions}</small></div>
+                {/each}
+            </details>
+        {/if}
+        {#each view.comments as comment, index (index)}
+            <div class="comment" data-testid="gh-manage-comment">
+                <small><strong>{comment.author}</strong> · {comment.createdAt.slice(0, 10)}</small>
+                <pre class="code-view body">{comment.body}</pre>
+            </div>
+        {/each}
+        <textarea data-testid="gh-manage-comment-body" bind:value={itemComment} rows="2" placeholder={app.t('ghm.commentPlaceholder', 'Escribe un comentario…')}></textarea>
+        <div class="row">
+            <button type="button" class="run" data-testid="gh-manage-comment-send" disabled={busy || !itemComment.trim()} onclick={() => itemChange(kind, number, () => api.githubItemComment(fullName, kind, number, itemComment))}>{app.t('ghm.comment', 'Comentar')}</button>
+            {#if view.state === 'OPEN'}
+                <button type="button" data-testid="gh-manage-item-close" disabled={busy} onclick={() => itemChange(kind, number, () => api.githubItemState(fullName, kind, number, 'close'))}>{app.t('ghm.close', 'Cerrar')}</button>
+            {:else if view.state === 'CLOSED'}
+                <button type="button" data-testid="gh-manage-item-reopen" disabled={busy} onclick={() => itemChange(kind, number, () => api.githubItemState(fullName, kind, number, 'reopen'))}>{app.t('ghm.reopen', 'Reabrir')}</button>
+            {/if}
+        </div>
+        {#if kind === 'pr' && view.state === 'OPEN'}
+            <div class="form" data-testid="gh-manage-review">
+                {#if draft}
+                    <button type="button" data-testid="gh-manage-pull-ready" disabled={busy} onclick={() => itemChange(kind, number, () => api.githubPullReady(fullName, number))}>{app.t('ghm.ready', 'Marcar como lista para revisar')}</button>
+                {/if}
+                <textarea data-testid="gh-manage-review-body" bind:value={reviewBody} rows="2" placeholder={app.t('ghm.reviewPlaceholder', 'Comentario de la revisión (obligatorio para pedir cambios)')}></textarea>
+                <div class="row">
+                    <button type="button" class="run" data-testid="gh-manage-review-approve" disabled={busy} onclick={() => itemChange(kind, number, () => api.githubPullReview(fullName, number, 'approve', reviewBody))}>{app.t('ghm.approve', 'Aprobar')}</button>
+                    <button type="button" data-testid="gh-manage-review-changes" disabled={busy || !reviewBody.trim()} onclick={() => itemChange(kind, number, () => api.githubPullReview(fullName, number, 'request-changes', reviewBody))}>{app.t('ghm.requestChanges', 'Pedir cambios')}</button>
+                </div>
+            </div>
+        {/if}
+    </div>
+{/snippet}
+
 <div class="manage" data-testid="gh-manage" data-full-name={fullName} data-section={section} aria-busy={busy}>
     <div class="manage-head">
         <div class="tabs" role="tablist">
@@ -279,6 +466,111 @@
         <div class="row">
             <button type="button" class="run" data-testid="gh-manage-save" disabled={busy} onclick={saveDetails}>{app.t('ghm.save', 'Guardar cambios')}</button>
         </div>
+    {:else if section === 'code'}
+        <div class="row">
+            <div class="tabs" role="tablist">
+                {#each [['files', app.t('ghm.codeFiles', 'Archivos')], ['commits', app.t('ghm.codeCommits', 'Commits')], ['branches', app.t('ghm.codeBranches', 'Ramas')], ['tags', app.t('ghm.codeTags', 'Etiquetas')]] as [id, label] (id)}
+                    <button type="button" role="tab" data-testid={`gh-code-view-${id}`} class:active={codeView === id} aria-selected={codeView === id} disabled={busy} onclick={() => loadCode(id as CodeView)}>{label}</button>
+                {/each}
+            </div>
+            {#if codeView === 'files' || codeView === 'commits'}
+                <select data-testid="gh-code-ref" bind:value={codeRef} aria-label={app.t('ghm.codeRef', 'Rama o etiqueta')} disabled={busy} onchange={() => loadCode(codeView)}>
+                    {#each branchList as branch (branch.name)}<option value={branch.name}>{branch.name}</option>{/each}
+                    {#each tagList as tagItem (tagItem.name)}<option value={tagItem.name}>{tagItem.name}</option>{/each}
+                </select>
+            {/if}
+        </div>
+        {#if codeView === 'files' && contents}
+            <div class="row">
+                <span class="path" data-testid="gh-code-path">/{codePath}</span>
+                {#if codePath}<button type="button" data-testid="gh-code-up" disabled={busy} onclick={() => openPath(parentPath(codePath))}>↑ {app.t('ghm.codeUp', 'Subir')}</button>{/if}
+            </div>
+            {#if contents.type === 'dir'}
+                {#each contents.entries as entry (entry.path)}
+                    <button type="button" class="row item entry" data-testid="gh-code-entry" data-kind={entry.kind} disabled={busy || entry.kind === 'submodule'} onclick={() => openPath(entry.path)}>
+                        <span class="path">{entry.kind === 'dir' ? '📁' : '📄'} {entry.name}</span>
+                        {#if entry.kind === 'file'}<small>{size(entry.size)}</small>{/if}
+                    </button>
+                {:else}
+                    <small>{app.t('ghm.empty', 'Nada por aquí.')}</small>
+                {/each}
+            {:else}
+                {#if contents.text === null}
+                    <small>{app.t('ghm.codeBinary', 'Archivo binario: ábrelo en GitHub para verlo.')}</small>
+                {:else}
+                    <pre class="code-view" data-testid="gh-code-file">{contents.text}</pre>
+                    {#if contents.truncated}<small>{app.t('ghm.codeTruncated', 'Archivo grande: se muestra solo el principio.')}</small>{/if}
+                {/if}
+            {/if}
+        {:else if codeView === 'commits'}
+            {#each commitList as item (item.sha)}
+                <div class="item" data-testid="gh-code-commit" data-sha={item.sha}>
+                    <button type="button" class="row entry" disabled={busy} onclick={() => toggleCommit(item.sha)}>
+                        <span class="path"><code>{item.sha.slice(0, 7)}</code> {item.message}</span>
+                        <small>{item.author} · {item.date.slice(0, 10)}</small>
+                    </button>
+                    {#if openCommit === item.sha}
+                        {#each commitFiles as file (file.filename)}
+                            <details class="diff">
+                                <summary><span class="path">{file.status} · {file.filename}</span> <small>+{file.additions} −{file.deletions}</small></summary>
+                                {#if file.patch}<pre class="code-view">{file.patch}</pre>{/if}
+                            </details>
+                        {/each}
+                    {/if}
+                </div>
+            {:else}
+                <small>{app.t('ghm.empty', 'Nada por aquí.')}</small>
+            {/each}
+            <div class="form">
+                <strong>{app.t('ghm.codeCompare', 'Comparar')}</strong>
+                <div class="row">
+                    <input data-testid="gh-code-compare-base" bind:value={compareBase} placeholder={app.t('ghm.base', 'Hacia la rama')} spellcheck="false" />
+                    <input data-testid="gh-code-compare-head" bind:value={compareHead} placeholder={app.t('ghm.head', 'Desde la rama')} spellcheck="false" />
+                    <button type="button" data-testid="gh-code-compare" disabled={busy || !compareBase.trim() || !compareHead.trim()} onclick={runCompare}>{app.t('ghm.codeCompare', 'Comparar')}</button>
+                </div>
+                {#if compareFiles}
+                    {#each compareFiles as file (file.filename)}
+                        <details class="diff">
+                            <summary><span class="path">{file.status} · {file.filename}</span> <small>+{file.additions} −{file.deletions}</small></summary>
+                            {#if file.patch}<pre class="code-view">{file.patch}</pre>{/if}
+                        </details>
+                    {:else}
+                        <small>{app.t('ghm.codeNoChanges', 'Sin diferencias.')}</small>
+                    {/each}
+                {/if}
+            </div>
+        {:else if codeView === 'branches'}
+            <div class="form">
+                <div class="row">
+                    <input data-testid="gh-code-branch-name" bind:value={newBranchName} placeholder={app.t('ghm.codeNewBranch', 'Nueva rama')} spellcheck="false" />
+                    <input data-testid="gh-code-branch-from" bind:value={newBranchFrom} placeholder={`${app.t('ghm.codeFrom', 'Desde')} ${codeRef}`} spellcheck="false" />
+                    <button type="button" class="run" data-testid="gh-code-branch-create" disabled={busy || !newBranchName.trim()} onclick={createBranch}>{app.t('projects.ghCreate', 'Crear')}</button>
+                </div>
+            </div>
+            {#each branchList as branch (branch.name)}
+                <div class="row item" data-testid="gh-code-branch" data-name={branch.name}>
+                    <span class="path">{branch.name}{branch.name === details?.defaultBranch ? ` · ${app.t('ghm.codeDefault', 'por defecto')}` : ''}{branch.protected ? ' · 🔒' : ''}</span>
+                    <code>{branch.sha.slice(0, 7)}</code>
+                </div>
+            {/each}
+            <div class="danger-box">
+                <strong>{app.t('ghm.codeDeleteBranch', 'Borrar una rama de GitHub')}</strong>
+                <div class="row">
+                    <input data-testid="gh-code-branch-delete-name" bind:value={deleteBranchName} placeholder={app.t('ghm.codeBranch', 'Rama')} spellcheck="false" />
+                    <input data-testid="gh-code-branch-delete-confirm" bind:value={deleteBranchConfirm} placeholder={app.t('ghm.codeConfirm', 'Escribe su nombre para confirmar')} spellcheck="false" />
+                    <button type="button" class="danger" data-testid="gh-code-branch-delete" disabled={busy || !deleteBranchName || deleteBranchConfirm !== deleteBranchName} onclick={deleteRemoteBranch}>{app.t('ghm.codeDelete', 'Borrar')}</button>
+                </div>
+            </div>
+        {:else if codeView === 'tags'}
+            {#each tagList as tagItem (tagItem.name)}
+                <div class="row item" data-testid="gh-code-tag" data-name={tagItem.name}>
+                    <span class="path">{tagItem.name}</span>
+                    <code>{tagItem.sha.slice(0, 7)}</code>
+                </div>
+            {:else}
+                <small>{app.t('ghm.empty', 'Nada por aquí.')}</small>
+            {/each}
+        {/if}
     {:else if section === 'releases'}
         <div class="row">
             <button type="button" data-testid="gh-manage-release-new" class:active={newRelease} onclick={() => (newRelease = !newRelease)}>{app.t('ghm.newRelease', 'Nueva release')}</button>
@@ -425,7 +717,11 @@
                 </div>
                 <div class="row">
                     <button type="button" class="run" data-testid="gh-manage-pull-merge" disabled={busy || pull.draft} onclick={() => change(() => api.githubPullMerge(fullName, pull.number, mergeMethod, deleteBranch))}>{app.t('ghm.merge', 'Fusionar')}</button>
+                    <button type="button" data-testid="gh-manage-pull-view" class:active={openItem === `pr-${pull.number}`} disabled={busy} onclick={() => toggleItem('pr', pull.number)}>{app.t('ghm.view', 'Ver')}</button>
                 </div>
+                {#if openItem === `pr-${pull.number}` && itemView}
+                    {@render itemDetail('pr', pull.number, itemView, pull.draft)}
+                {/if}
             </div>
         {:else}
             <small>{app.t('ghm.empty', 'Nada por aquí.')}</small>
@@ -438,10 +734,25 @@
                 <button type="button" class="run" data-testid="gh-manage-issue-create" disabled={busy || !issueTitle.trim()} onclick={createIssue}>{app.t('ghm.newIssue', 'Nueva issue')}</button>
             </div>
         </div>
+        <div class="row">
+            <select data-testid="gh-manage-issue-state" bind:value={issueState} disabled={busy} onchange={() => load('issues')} aria-label={app.t('ghm.issueState', 'Qué issues ver')}>
+                <option value="open">{app.t('ghm.issuesOpen', 'Abiertas')}</option>
+                <option value="closed">{app.t('ghm.issuesClosed', 'Cerradas')}</option>
+                <option value="all">{app.t('ghm.issuesAll', 'Todas')}</option>
+            </select>
+        </div>
         {#each issues as issue (issue.number)}
-            <div class="row item" data-testid="gh-manage-issue" data-number={issue.number}>
-                <span class="path">#{issue.number} {issue.title}</span>
-                <button type="button" data-testid="gh-manage-issue-close" disabled={busy} onclick={() => change(() => api.githubIssueClose(fullName, issue.number))}>{app.t('ghm.closeIssue', 'Cerrar issue')}</button>
+            <div class="item" data-testid="gh-manage-issue" data-number={issue.number}>
+                <div class="row">
+                    <span class="path">#{issue.number} {issue.title}</span>
+                    {#if issueState === 'open'}
+                        <button type="button" data-testid="gh-manage-issue-close" disabled={busy} onclick={() => change(() => api.githubIssueClose(fullName, issue.number))}>{app.t('ghm.closeIssue', 'Cerrar issue')}</button>
+                    {/if}
+                    <button type="button" data-testid="gh-manage-issue-view" class:active={openItem === `issue-${issue.number}`} disabled={busy} onclick={() => toggleItem('issue', issue.number)}>{app.t('ghm.view', 'Ver')}</button>
+                </div>
+                {#if openItem === `issue-${issue.number}` && itemView}
+                    {@render itemDetail('issue', issue.number, itemView, false)}
+                {/if}
             </div>
         {:else}
             <small>{app.t('ghm.empty', 'Nada por aquí.')}</small>
@@ -452,6 +763,13 @@
                 <span class="path">{run.conclusion === 'success' ? '✔' : run.conclusion === 'failure' ? '✘' : run.status === 'completed' ? '•' : '…'} {run.workflow} · {run.title} · {run.branch}</span>
                 {#if run.conclusion === 'failure' || run.conclusion === 'cancelled'}
                     <button type="button" data-testid="gh-manage-run-rerun" disabled={busy} onclick={() => change(() => api.githubRunRerun(fullName, run.id))}>{app.t('ghm.rerun', 'Relanzar lo que falló')}</button>
+                    <button type="button" data-testid="gh-manage-run-log" class:active={openLog === run.id} disabled={busy} onclick={() => toggleLog(run.id)}>{app.t('ghm.runLog', 'Ver log')}</button>
+                {/if}
+                {#if run.status === 'queued' || run.status === 'in_progress'}
+                    <button type="button" data-testid="gh-manage-run-cancel" disabled={busy} onclick={() => change(() => api.githubRunCancel(fullName, run.id))}>{app.t('ghm.runCancel', 'Cancelar')}</button>
+                {/if}
+                {#if openLog === run.id}
+                    <pre class="code-view" data-testid="gh-manage-run-log-text">{runLog}</pre>
                 {/if}
             </div>
         {:else}
@@ -461,6 +779,51 @@
 </div>
 
 <style>
+    .detail {
+        display: flex;
+        flex-direction: column;
+        gap: var(--density-control-gap, 6px);
+        margin-top: 4px;
+        padding: var(--space-min, 6px);
+        border-left: 2px solid var(--accent-soft);
+    }
+    .detail .body {
+        max-height: 220px;
+        white-space: pre-wrap;
+        font-family: inherit;
+    }
+    .label {
+        padding: 0 6px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 11px;
+    }
+    .comment {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+    .entry {
+        width: 100%;
+        justify-content: space-between;
+        text-align: left;
+    }
+    .code-view {
+        max-height: 360px;
+        overflow: auto;
+        margin: 0;
+        padding: var(--space-min, 6px);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface-alt);
+        font-family: var(--terminal-font);
+        font-size: 11px;
+        white-space: pre;
+    }
+    .diff summary {
+        cursor: pointer;
+    }
     .manage {
         display: flex;
         flex-direction: column;

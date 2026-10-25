@@ -33,7 +33,10 @@ const ignoredFiles = new Set(['Cargo.lock', 'verify-install-sources.mjs', 'test-
 // (abrir una página de descargas/documentación). No son artefactos ni fuentes
 // necesarias para compilar; se siguen comprobando, pero una caída temporal del
 // tercero no puede invalidar una release reproducible.
-const nonBlockingHosts = new Set(['codeweavers.com', 'www.codeweavers.com']);
+// ffmpeg.org solo sale en el mensaje que pide instalar ffmpeg a mano: el
+// builder lo instala con WinGet. Desde la VM, `fetch` de Node no conectaba con
+// él (UND_ERR_CONNECT_TIMEOUT) mientras PowerShell sí, y paraba la release.
+const nonBlockingHosts = new Set(['codeweavers.com', 'www.codeweavers.com', 'ffmpeg.org']);
 const execFileAsync = promisify(execFile);
 const urlPattern = /https?:\/\/[^\s<>"'`\\]+/g;
 const trailingPunctuation = /[),.;:!?\]}]+$/;
@@ -120,9 +123,9 @@ function networkErrorText(error) {
     return code ? `${error.message} (${code})` : error.message;
 }
 
-async function request(url, method) {
+async function request(url, method, timeout = timeoutMs) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
         const response = await fetch(url, {
             method,
@@ -176,6 +179,20 @@ async function checkUrl(url) {
             }
         }
         if (attempt < retries) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+    // Todos los intentos agotaron el plazo: un servidor lento (ffmpeg.org tardó
+    // más de 8 s una vez en la build final de la VM y paró la release) recibe
+    // un último GET con el triple de plazo antes de darse por caído.
+    if (lastError.startsWith('timeout') || /CONNECT_TIMEOUT|ETIMEDOUT/u.test(lastError)) {
+        try {
+            const response = await request(url, 'GET', timeoutMs * 3);
+            if (response.status >= 200 && response.status < 400) {
+                return { ok: true, status: response.status, method: 'GET', finalUrl: response.finalUrl, attempt: retries + 1 };
+            }
+            lastError = `HTTP ${response.status}`;
+        } catch (error) {
+            lastError = error?.name === 'AbortError' ? `timeout de ${timeoutMs * 3} ms` : networkErrorText(error);
+        }
     }
     // Un 5xx tras agotar los intentos indica indisponibilidad temporal del
     // servidor/proxy, no una URL rota. Se informa, pero no se bloquea una

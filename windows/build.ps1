@@ -33,7 +33,8 @@ param(
     [switch]$DownloadTests,
     [switch]$DependencyAudit,
     [switch]$InstallerTest,
-    [switch]$NoFocusedTests
+    [switch]$NoFocusedTests,
+    [string]$KeysDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -183,6 +184,7 @@ if ($Help) {
     Write-Host '  -InstallE2eDriver     Compatibilidad: el E2E ya prepara tauri-driver automáticamente.'
     Write-Host '  -Version X.Y.Z        Sobrescribe la version del paquete.'
     Write-Host '  -NonInteractive        No espera entrada del usuario.'
+    Write-Host '  -KeysDir <carpeta>     Carpeta con las claves de firma. Sin ella se pregunta (sin preguntar en -NonInteractive: release sin firmar).'
     Write-Host '  Sin opciones           Release completa: EXE + portable de un solo archivo + NSIS, checks estrictos, smoke, bateria ampliada y E2E.'
     Write-Host '                        En modo interactivo, la versión se pide al principio junto al resto de opciones.'
     Write-Host '                        Un fallo de E2E se informa al final sin impedir publicar la release.'
@@ -409,6 +411,85 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
         $Version = $currentVersionForPrompt
     }
 }
+# Las claves de firma viven en una carpeta que se indica en cada build: con
+# `-KeysDir` o respondiendo a la pregunta. El script ya no rebusca por su
+# cuenta en el perfil, el Escritorio o Documentos, donde podía recoger una
+# clave antigua sin que nadie lo supiera. Las variables `*_FILE` siguen
+# mandando por encima de la carpeta (CI y E2E las usan).
+$script:SigningKeyNames = @{
+    Private    = @('release-signing-private.pem')
+    Public     = @('release-signing-public.hex')
+    SshPrivate = @('lterminal-release-signing', 'ltools-release-signing')
+    SshPublic  = @('lterminal-release-signing.pub', 'ltools-release-signing.pub')
+}
+
+function Get-LastSigningKeysDirFile {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $null }
+    return Join-Path $env:LOCALAPPDATA 'WTerminalBuild\keys-dir.txt'
+}
+
+function Get-DefaultSigningKeysDir {
+    $memory = Get-LastSigningKeysDirFile
+    if ($memory -and (Test-Path -LiteralPath $memory -PathType Leaf)) {
+        $last = (Get-Content -LiteralPath $memory -Raw).Trim()
+        if ($last -and (Test-Path -LiteralPath $last -PathType Container)) { return $last }
+    }
+    return Join-Path ([Environment]::GetFolderPath('Desktop')) 'Claves SSH'
+}
+
+function Resolve-SigningKeysDir {
+    if ($env:CI -match '^(1|true|yes)$') { return $null }
+    $chosen = $KeysDir
+    if ([string]::IsNullOrWhiteSpace($chosen)) {
+        if (-not $canPromptVersion) {
+            Write-Warn 'Sin -KeysDir: la release no se firmará (pasa -KeysDir <carpeta> para firmarla).'
+            return $null
+        }
+        $default = Get-DefaultSigningKeysDir
+        $answer = Read-Host "Carpeta de las claves de firma [$default] (escribe - para no firmar)"
+        if ($null -ne $answer -and $answer.Trim() -eq '-') { return $null }
+        $chosen = if ([string]::IsNullOrWhiteSpace($answer)) { $default } else { $answer.Trim().Trim('"') }
+    }
+    if (-not (Test-Path -LiteralPath $chosen -PathType Container)) {
+        throw "No existe la carpeta de claves: $chosen"
+    }
+    $chosen = (Resolve-Path -LiteralPath $chosen).Path
+    $memory = Get-LastSigningKeysDirFile
+    if ($memory) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $memory) | Out-Null
+        Set-Content -LiteralPath $memory -Value $chosen -Encoding UTF8
+    }
+    $found = foreach ($names in $script:SigningKeyNames.Values) {
+        Find-SigningKeyIn $chosen $names | ForEach-Object { $_.Substring($chosen.Length).TrimStart([char]92) }
+    }
+    if ($found) {
+        Write-Ok "Claves en ${chosen}: $(@($found) -join ', ')"
+    } else {
+        Write-Warn "No hay claves reconocidas en $chosen; la release no se firmará."
+    }
+    return $chosen
+}
+
+# Cada clave se busca en la carpeta y en su subcarpeta .ssh, la estructura
+# habitual cuando se mueve tal cual la carpeta .ssh del perfil.
+function Find-SigningKeyIn([string]$Folder, [string[]]$Names) {
+    foreach ($root in @($Folder, (Join-Path $Folder '.ssh'))) {
+        foreach ($name in $Names) {
+            $candidate = Join-Path $root $name
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
+    }
+    return $null
+}
+
+function Get-SigningKeyFile([string]$Override, [string]$Kind) {
+    if ($Override -and (Test-Path -LiteralPath $Override -PathType Leaf)) { return $Override }
+    if (-not $script:SigningKeysDirResolved) { return $null }
+    return Find-SigningKeyIn $script:SigningKeysDirResolved $script:SigningKeyNames[$Kind]
+}
+
+$script:SigningKeysDirResolved = Resolve-SigningKeysDir
+
 if ($interactiveBuild) {
     if (-not $printedBuildConfigHeader) {
         Write-Host ''
@@ -1039,6 +1120,56 @@ if ($AllowOfflineChecks) {
 # ---------------------------------------------------------------------------
 Write-Step 'Comprobando requisitos'
 
+# Espacio libre en la unidad del repositorio. Una build completa necesita unos
+# 3 GB para las pruebas, 3 GB para la release y 1-2 GB para paquetes, E2E y
+# vídeo, más lo que instale si faltan herramientas (Build Tools, Rust). Sin
+# este aviso, la build se quedaba sin disco a mitad y fallaba con un «os error
+# 112» difícil de relacionar.
+#
+# Lo pesado es `src-tauri\target` (pruebas y release) y el temporal (E2E y
+# vídeo). Si `target` es una unión o enlace a otra unidad (por ejemplo un disco
+# de datos con C: justo), se mide esa unidad; el temporal, en la suya.
+function Resolve-BuildPathTarget([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($item -and $item.LinkType -and $item.Target) { return [string]@($item.Target)[0] }
+    return $Path
+}
+$targetPath = Resolve-BuildPathTarget (Join-Path $ProjectRoot 'src-tauri\target')
+$spaceChecks = [ordered]@{}
+# El repositorio solo guarda node_modules y release\ (menos de 2 GB) cuando
+# `target` vive en otra unidad.
+foreach ($entry in @(
+        @{ Path = $targetPath; Need = 'compilar'; Min = 5 },
+        @{ Path = $env:TEMP; Need = 'E2E y vídeo'; Min = 5 },
+        @{ Path = $ProjectRoot; Need = 'repositorio y release'; Min = 2 })) {
+    if (-not $entry.Path) { continue }
+    $qualifier = (Split-Path -Qualifier $entry.Path -ErrorAction SilentlyContinue)
+    if (-not $qualifier) { continue }
+    $name = $qualifier.TrimEnd(':')
+    if ($spaceChecks.Contains($name)) {
+        $spaceChecks[$name].Need += ", $($entry.Need)"
+        $spaceChecks[$name].Min = [math]::Max($spaceChecks[$name].Min, $entry.Min)
+        continue
+    }
+    $spaceChecks[$name] = @{ Need = $entry.Need; Min = $entry.Min }
+}
+foreach ($name in $spaceChecks.Keys) {
+    $drive = Get-PSDrive -Name $name -ErrorAction SilentlyContinue
+    if (-not $drive -or $null -eq $drive.Free) { continue }
+    $freeGb = [math]::Round($drive.Free / 1GB, 1)
+    $use = $spaceChecks[$name].Need
+    if ($freeGb -lt $spaceChecks[$name].Min) {
+        throw "Solo quedan $freeGb GB libres en ${name}: ($use). Libera espacio (build-tools\build.ps1 → 4. Limpiar cachés y builds temporales) antes de compilar."
+    } elseif ($freeGb -lt 12) {
+        Write-Warn "Solo quedan $freeGb GB libres en ${name}: ($use); una build completa con E2E puede necesitar 10 GB o más."
+    } else {
+        Write-Ok "$freeGb GB libres en ${name}: ($use)"
+    }
+}
+if ($targetPath -ne (Join-Path $ProjectRoot 'src-tauri\target')) {
+    Write-Ok "src-tauri\target apunta a $targetPath"
+}
+
 function Get-NodeVersion {
     if (-not (Test-Command 'node')) { return $null }
     try {
@@ -1156,7 +1287,30 @@ if (-not (Test-Command 'cargo')) {
 
     $rustInstalled = $false
 
-    if (Test-Command 'winget') {
+    # Rust instalado pero fuera del PATH de esta sesión (instalado hace un
+    # momento en otra ventana, o PATH del usuario sin refrescar).
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    if (Test-Path (Join-Path $cargoHome 'bin\cargo.exe') -PathType Leaf) {
+        $env:Path = (Join-Path $cargoHome 'bin') + ';' + $env:Path
+        if (Test-Command 'cargo') {
+            Write-Ok "cargo encontrado en $cargoHome\bin (fuera del PATH de esta sesión)"
+            $rustInstalled = $true
+        }
+    }
+
+    # WinGet sigue dando Rustup por instalado tras `rustup self uninstall`
+    # (su registro no se borra) y entonces `winget install` no hace nada. Se
+    # detecta antes y se pasa directamente a rustup-init.exe.
+    $wingetStaleRustup = $false
+    if (-not $rustInstalled -and (Test-Command 'winget')) {
+        $rustupListed = (& winget list --id Rustlang.Rustup --exact --accept-source-agreements --disable-interactivity 2>$null | Out-String)
+        if ($LASTEXITCODE -eq 0 -and $rustupListed -match 'Rustlang\.Rustup') {
+            $wingetStaleRustup = $true
+            Write-Warn 'WinGet da Rustup por instalado pero no hay cargo: registro obsoleto. Se usa rustup-init.exe directamente.'
+        }
+    }
+
+    if (-not $rustInstalled -and -not $wingetStaleRustup -and (Test-Command 'winget')) {
         Write-Step 'Instalando el toolchain de Rust mediante winget...'
         $wingetCode = Invoke-Native 'winget' @(
             'install',
@@ -1430,6 +1584,43 @@ if ($Installer) {
     }
 }
 
+# El recorrido con vídeo (-VideoTest, incluido en -ReleaseValidation) codifica
+# los fotogramas con ffmpeg. En un Windows limpio no está y la suite fallaba al
+# final, tras ~10 minutos de recorrido, sin vídeo. El E2E lo busca también
+# dentro de los paquetes de WinGet, que es donde lo deja esta instalación.
+function Find-Ffmpeg {
+    if (Test-Command 'ffmpeg') { return 'ffmpeg' }
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $null }
+    $packages = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    if (-not (Test-Path -LiteralPath $packages -PathType Container)) { return $null }
+    return Get-ChildItem -LiteralPath $packages -Filter 'ffmpeg.exe' -Recurse -File -Depth 5 -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+
+if ($VideoTest) {
+    if (Find-Ffmpeg) {
+        Write-Ok 'ffmpeg disponible para el vídeo del E2E'
+    } elseif (Test-Command 'winget') {
+        Write-Step 'Instalando ffmpeg mediante winget (vídeo del E2E)...'
+        [void](Invoke-Native 'winget' @(
+            'install',
+            '--id', 'Gyan.FFmpeg.Essentials',
+            '--exact',
+            '--source', 'winget',
+            '--accept-source-agreements',
+            '--accept-package-agreements',
+            '--disable-interactivity'
+        ))
+        Refresh-EnvironmentPath
+        if (-not (Find-Ffmpeg)) {
+            throw 'Falta ffmpeg para grabar el vídeo del E2E. Se intento la instalacion con winget pero no concluyo. Instalalo desde https://ffmpeg.org/'
+        }
+        Write-Ok 'ffmpeg instalado correctamente'
+    } else {
+        throw 'Falta ffmpeg para grabar el vídeo del E2E. Instalalo desde https://ffmpeg.org/'
+    }
+}
+
 # La versión se pregunta antes de empaquetar. Enter conserva la actual; el
 # parámetro permite builds automatizadas sin diálogo.
 $packageJson = Get-Content (Join-Path $ProjectRoot 'package.json') -Raw | ConvertFrom-Json
@@ -1567,7 +1758,21 @@ if (-not $SkipChecks) {
     # procesos encadenados (cargo/clippy) haya escrito un error fatal. Capturar
     # la salida permite detectar también ese caso y evita imprimir «Todo
     # verde» después de un `could not compile`.
-    $code = Invoke-Native 'npm' @('run', 'check') -CaptureOutput
+    # Las pruebas y clippy compilan el perfil `dev`. Con la información de
+    # depuración completa y la caché incremental, `target\debug` pasaba de 8 GB
+    # y llenaba el disco de una VM de 64 GB a mitad de las comprobaciones. Aquí
+    # basta con archivo y línea en los pánicos: se compila sin el resto y sin
+    # caché incremental, solo para este paso (`npm run dev` no cambia).
+    $previousDevDebug = $env:CARGO_PROFILE_DEV_DEBUG
+    $previousIncremental = $env:CARGO_INCREMENTAL
+    if ([string]::IsNullOrWhiteSpace($env:CARGO_PROFILE_DEV_DEBUG)) { $env:CARGO_PROFILE_DEV_DEBUG = 'line-tables-only' }
+    if ([string]::IsNullOrWhiteSpace($env:CARGO_INCREMENTAL)) { $env:CARGO_INCREMENTAL = '0' }
+    try {
+        $code = Invoke-Native 'npm' @('run', 'check') -CaptureOutput
+    } finally {
+        $env:CARGO_PROFILE_DEV_DEBUG = $previousDevDebug
+        $env:CARGO_INCREMENTAL = $previousIncremental
+    }
     $checkOutputFailed = $script:LastNativeOutput -match '(?im)\b(?:error:\s+could not compile|error\[E\d+\]:|svelte-check found\s+[1-9]\d*\s+errors?)\b'
     if ($code -ne 0 -or $checkOutputFailed) {
         throw "Las comprobaciones fallaron (codigo $code). Usa -SkipChecks para saltarlas."
@@ -1593,35 +1798,16 @@ if (-not $SkipChecks) {
 # el problema al pulsar «Volver a comprobar».
 function Import-UpdateTrustMaterialForBuild {
     if ($env:CI -match '^(1|true|yes)$') { return }
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    $documents = [Environment]::GetFolderPath('MyDocuments')
-    $configRoot = if (-not [string]::IsNullOrWhiteSpace($env:XDG_CONFIG_HOME)) {
-        $env:XDG_CONFIG_HOME
-    } elseif ($env:USERPROFILE) {
-        Join-Path $env:USERPROFILE '.config'
-    }
     if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_UPDATE_PUBLIC_KEY)) {
-        $publicCandidates = @(
-            $env:LTERMINAL_UPDATE_PUBLIC_KEY_FILE,
-            $(if ($configRoot) { Join-Path $configRoot 'lterminal\release-signing-public.hex' }),
-            $(if ($desktop) { Join-Path $desktop 'release-signing-public.hex' })
-        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
-        if ($publicCandidates) {
-            $env:LTERMINAL_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath @($publicCandidates)[0] -Raw).Trim()
+        $publicKey = Get-SigningKeyFile $env:LTERMINAL_UPDATE_PUBLIC_KEY_FILE 'Public'
+        if ($publicKey) {
+            $env:LTERMINAL_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath $publicKey -Raw).Trim()
         }
     }
     if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY)) {
-        $sshCandidates = @(
-            $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE,
-            $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing.pub' }),
-            $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing.pub' }),
-            $(if ($documents) { Join-Path $documents '.ssh\lterminal-release-signing.pub' }),
-            $(if ($documents) { Join-Path $documents '.ssh\ltools-release-signing.pub' }),
-            $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing.pub' }),
-            $(if ($desktop) { Join-Path $desktop 'ltools-release-signing.pub' })
-        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
-        if ($sshCandidates) {
-            $env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath @($sshCandidates)[0] -Raw).Trim()
+        $sshPublicKey = Get-SigningKeyFile $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE 'SshPublic'
+        if ($sshPublicKey) {
+            $env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath $sshPublicKey -Raw).Trim()
         }
     }
     if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_IDENTITY)) {
@@ -2574,66 +2760,26 @@ if ($Installer) {
 }
 
 function Import-LocalSigningMaterial {
-    # Las builds locales pueden reutilizar el mismo material que linux. CI no
-    # inspecciona el perfil ni el Escritorio: recibe sus secretos explícitos.
+    # Las builds locales usan la carpeta elegida al empezar (-KeysDir o la
+    # pregunta). CI no la tiene: recibe sus secretos explícitos.
     if ($env:CI -match '^(1|true|yes)$') { return }
-
-    $configRoot = if (-not [string]::IsNullOrWhiteSpace($env:XDG_CONFIG_HOME)) {
-        $env:XDG_CONFIG_HOME
-    } elseif ($env:USERPROFILE) {
-        Join-Path $env:USERPROFILE '.config'
-    }
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    $documents = [Environment]::GetFolderPath('MyDocuments')
-    $privateCandidates = @(
-        $env:LTERMINAL_SIGNING_PRIVATE_KEY_FILE,
-        $(if ($configRoot) { Join-Path $configRoot 'lterminal\release-signing-private.pem' }),
-        $(if ($desktop) { Join-Path $desktop 'release-signing-private.pem' })
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
-    $privateCandidates = @($privateCandidates)
-    $publicCandidates = @(
-        $env:LTERMINAL_UPDATE_PUBLIC_KEY_FILE,
-        $(if ($configRoot) { Join-Path $configRoot 'lterminal\release-signing-public.hex' }),
-        $(if ($desktop) { Join-Path $desktop 'release-signing-public.hex' })
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
-    $publicCandidates = @($publicCandidates)
 
     # La firma SSH adicional es la autorización de publicación de releases.
     # Se reutiliza la convención del proyecto Tools y nunca se copia la clave
     # privada al repositorio: solo se pasa su ruta al helper de ssh-keygen.
-    $sshPrivateCandidates = @(
-        $env:LTERMINAL_SSH_SIGNING_KEY_FILE,
-        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing' }),
-        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing' }),
-        $(if ($documents) { Join-Path $documents '.ssh\lterminal-release-signing' }),
-        $(if ($documents) { Join-Path $documents '.ssh\ltools-release-signing' }),
-        $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing' }),
-        $(if ($desktop) { Join-Path $desktop 'ltools-release-signing' })
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
-    $sshPrivateCandidates = @($sshPrivateCandidates)
-    $sshPublicCandidates = @(
-        $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE,
-        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\lterminal-release-signing.pub' }),
-        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ssh\ltools-release-signing.pub' }),
-        $(if ($documents) { Join-Path $documents '.ssh\lterminal-release-signing.pub' }),
-        $(if ($documents) { Join-Path $documents '.ssh\ltools-release-signing.pub' }),
-        $(if ($desktop) { Join-Path $desktop 'lterminal-release-signing.pub' }),
-        $(if ($desktop) { Join-Path $desktop 'ltools-release-signing.pub' })
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { $_ }
-    $sshPublicCandidates = @($sshPublicCandidates)
+    $privateKey = Get-SigningKeyFile $env:LTERMINAL_SIGNING_PRIVATE_KEY_FILE 'Private'
+    $publicKey = Get-SigningKeyFile $env:LTERMINAL_UPDATE_PUBLIC_KEY_FILE 'Public'
+    $sshPrivateKey = Get-SigningKeyFile $env:LTERMINAL_SSH_SIGNING_KEY_FILE 'SshPrivate'
+    $sshPublicKey = Get-SigningKeyFile $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE 'SshPublic'
 
-    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SIGNING_PRIVATE_KEY) -and $privateCandidates.Count -gt 0) {
-        $env:LTERMINAL_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $privateCandidates[0] -Raw
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SIGNING_PRIVATE_KEY) -and $privateKey) {
+        $env:LTERMINAL_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $privateKey -Raw
     }
-    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_UPDATE_PUBLIC_KEY) -and $publicCandidates.Count -gt 0) {
-        $env:LTERMINAL_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath $publicCandidates[0] -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_UPDATE_PUBLIC_KEY) -and $publicKey) {
+        $env:LTERMINAL_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath $publicKey -Raw).Trim()
     }
-    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_SIGNING_KEY_FILE) -and $sshPrivateCandidates.Count -gt 0) {
-        $env:LTERMINAL_SSH_SIGNING_KEY_FILE = $sshPrivateCandidates[0]
-    }
-    if ([string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE) -and $sshPublicCandidates.Count -gt 0) {
-        $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE = $sshPublicCandidates[0]
-    }
+    if ($sshPrivateKey) { $env:LTERMINAL_SSH_SIGNING_KEY_FILE = $sshPrivateKey }
+    if ($sshPublicKey) { $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE = $sshPublicKey }
     if ($env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE -and [string]::IsNullOrWhiteSpace($env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY)) {
         $env:LTERMINAL_SSH_UPDATE_PUBLIC_KEY = (Get-Content -LiteralPath $env:LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE -Raw).Trim()
     }

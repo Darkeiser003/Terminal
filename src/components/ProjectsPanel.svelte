@@ -112,6 +112,26 @@
         }
     }
 
+    async function importRepository(): Promise<void> {
+        const path = await api.pickRepositoryFolder();
+        if (!path) return;
+        const result = await api.importProject(path);
+        statusError = !result.ok;
+        status = result.ok
+            ? app.t('projects.imported', 'Repositorio importado. Sigue en su carpeta; no se ha copiado ni movido.')
+            : result.error ?? app.t('projects.importFailed', 'No se pudo importar el repositorio.');
+        if (result.ok) await load('downloaded');
+    }
+
+    async function forgetImported(fullName: string): Promise<void> {
+        const result = await api.forgetImportedProject(fullName);
+        statusError = !result.ok;
+        status = result.ok
+            ? app.t('projects.forgotten', 'Quitado de la lista. La carpeta sigue en el disco.')
+            : result.error ?? '';
+        if (result.ok) await load('downloaded');
+    }
+
     async function search(): Promise<void> {
         if (!target.trim() || loading) return;
         release = null;
@@ -128,7 +148,12 @@
             found = result.repositories;
             const quedan = result.rateLimit?.remaining;
             status = app
-                .t('projects.found', '{count} repositorios · consultas públicas restantes: {rate}')
+                .t(
+                    result.rateLimit?.viaSession ? 'projects.foundSession' : 'projects.found',
+                    result.rateLimit?.viaSession
+                        ? '{count} repositorios · con tu sesión de GitHub: quedan {rate}'
+                        : '{count} repositorios · consultas públicas restantes: {rate}',
+                )
                 .replace('{count}', String(found.length))
                 .replace('{rate}', quedan === null || quedan === undefined ? '—' : String(quedan));
         } catch (cause) {
@@ -485,6 +510,12 @@
             {/if}
         {/each}
     {:else if mode === 'downloaded'}
+        <div class="import-bar">
+            <span class="hint">{app.t('projects.importHint', '¿Tienes repositorios clonados en otra carpeta? Enlázalos sin moverlos.')}</span>
+            <button type="button" data-testid="projects-import" onclick={importRepository}>
+                {app.t('projects.import', 'Importar…')}
+            </button>
+        </div>
         {#each downloadedVisible as repo (repo.fullName)}
             {@render row(
                 repo.fullName,
@@ -494,6 +525,14 @@
                 repo.path,
                 null
             )}
+            {#if repo.imported}
+                <div class="imported-note">
+                    <small>{app.t('projects.importedBadge', 'Importado: está fuera de la carpeta de proyectos.')}</small>
+                    <button type="button" data-testid="projects-forget-imported" onclick={() => forgetImported(repo.fullName)}>
+                        {app.t('projects.forget', 'Quitar de la lista')}
+                    </button>
+                </div>
+            {/if}
         {:else}
             <div class="empty">
                 {app.t(
@@ -830,11 +869,26 @@
 {/snippet}
 
 <style>
+    .import-bar,
+    .imported-note {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--density-control-gap, 8px);
+        padding: var(--space-min, 6px);
+    }
+    .import-bar {
+        border-bottom: 1px solid var(--border);
+    }
+    .imported-note {
+        padding-top: 0;
+        color: var(--muted);
+    }
     .modes {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 4px;
-        padding: 7px 0;
+        padding: 7px var(--space-min, 6px);
         border-bottom: 1px solid var(--border);
         background: var(--surface);
     }

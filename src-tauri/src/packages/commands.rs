@@ -176,6 +176,11 @@ fn filter_available_actions_with_depth(
     } else {
         (WingetInventory::default(), HashMap::new())
     };
+    let powershell_batch = if depth == DetectionDepth::Full && !targeted {
+        batch_powershell_probes(&actions)
+    } else {
+        HashMap::new()
+    };
     let mut installed = |cmd: &str| -> DetectionState {
         *checked.entry(cmd.to_string()).or_insert_with(|| {
             // La lista inicial tiene que ser inmediata. Estas capacidades solo
@@ -266,6 +271,9 @@ fn filter_available_actions_with_depth(
             // evita que el panel marque como ausente una característica ya
             // habilitada o la ofrezca como desinstalable sin comprobarla.
             if let Some(script) = cmd.strip_prefix("powershell:") {
+                if let Some(state) = powershell_batch.get(script) {
+                    return *state;
+                }
                 let program = if crate::path_env::is_tool_installed("powershell") {
                     "powershell"
                 } else {
@@ -697,27 +705,39 @@ fn prefetch_ecosystem_inventory(
         .into_iter()
         .map(|(key, (program, args))| (key, program, args))
         .collect();
-    let results = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .iter()
+    let results: Vec<_> = if crate::preferences::current().low_power_mode {
+        jobs.iter()
             .map(|(key, program, args)| {
-                scope.spawn(move || {
-                    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-                    let started = std::time::Instant::now();
-                    let output = crate::process::output_text_probe(
-                        program,
-                        &args_ref,
-                        ECOSYSTEM_PROBE_TIMEOUT,
-                    );
-                    (key.clone(), output, started.elapsed())
-                })
+                let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+                let started = std::time::Instant::now();
+                let output =
+                    crate::process::output_text_probe(program, &args_ref, ECOSYSTEM_PROBE_TIMEOUT);
+                (key.clone(), output, started.elapsed())
             })
-            .collect();
-        handles
-            .into_iter()
-            .filter_map(|handle| handle.join().ok())
-            .collect::<Vec<_>>()
-    });
+            .collect()
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = jobs
+                .iter()
+                .map(|(key, program, args)| {
+                    scope.spawn(move || {
+                        let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+                        let started = std::time::Instant::now();
+                        let output = crate::process::output_text_probe(
+                            program,
+                            &args_ref,
+                            ECOSYSTEM_PROBE_TIMEOUT,
+                        );
+                        (key.clone(), output, started.elapsed())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok())
+                .collect::<Vec<_>>()
+        })
+    };
     let mut summary = std::collections::BTreeMap::new();
     let mut retried = Vec::new();
     for (key, output, elapsed) in results {
@@ -776,6 +796,142 @@ fn probe_allowing_retry(
         return crate::process::output_text_probe(program, args, timeout * 2);
     }
     first
+}
+
+/// Plazo del proceso único que resuelve todas las sondas `powershell:`.
+const POWERSHELL_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Marca con la que el proceso único anuncia el resultado de cada sonda.
+const POWERSHELL_BATCH_MARKER: &str = "__wterminal_probe_";
+
+/// Las sondas `powershell:` de la pasada completa (AutoHotkey, MSYS2, GHCup,
+/// Clink, PSReadLine, QEMU, VirtualBox, Hyper-V, Sandbox…) arrancaban un
+/// `powershell.exe` cada una: era el mayor gasto de CPU de la detección al
+/// arrancar. Ahora van todas en un solo proceso. Lo que no se pueda agrupar,
+/// o si el proceso falla o agota el plazo, sigue por la sonda individual.
+fn batch_powershell_probes(actions: &[InstallAction]) -> HashMap<String, DetectionState> {
+    let mut scripts: Vec<&str> = actions
+        .iter()
+        .flat_map(|action| [action.check_cmd.as_deref(), action.requires_cmd.as_deref()])
+        .flatten()
+        .filter_map(|command| command.strip_prefix("powershell:"))
+        .filter(|script| powershell_batchable(script))
+        .collect();
+    scripts.sort_unstable();
+    scripts.dedup();
+    if scripts.len() < 2 {
+        return HashMap::new();
+    }
+    let program = if crate::path_env::is_tool_installed("powershell") {
+        "powershell"
+    } else {
+        "pwsh"
+    };
+    let script = powershell_batch_script(&scripts);
+    let started = std::time::Instant::now();
+    let output = crate::process::output_text_probe(
+        program,
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        POWERSHELL_BATCH_TIMEOUT,
+    );
+    let results = match &output {
+        crate::process::ProbeOutput::Success(stdout) => parse_powershell_batch(stdout, &scripts),
+        _ => HashMap::new(),
+    };
+    log_info!(
+        "Sondas de PowerShell agrupadas",
+        serde_json::json!({
+            "scripts": scripts.len(),
+            "resueltas": results.len(),
+            "ms": started.elapsed().as_millis() as u64,
+            "ok": matches!(output, crate::process::ProbeOutput::Success(_)),
+        })
+    );
+    results
+}
+
+/// Solo se agrupan sondas cuyo único `exit` es `exit 0` o `exit 1` en su
+/// nivel superior: dentro del bloque común se convierten en `return`. Un
+/// `exit` dentro de un `ForEach-Object { }` solo saldría de ese bloque, así
+/// que las sondas con llaves anidadas que contengan `exit` se quedan fuera.
+pub(crate) fn powershell_batchable(script: &str) -> bool {
+    let mut depth = 0usize;
+    let mut has_exit = false;
+    let bytes = script.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if script[index..].starts_with("exit") {
+            let before = index.checked_sub(1).map(|i| bytes[i]).map_or(true, |c| {
+                !c.is_ascii_alphanumeric() && c != b'_' && c != b'-'
+            });
+            if before {
+                let rest = &script[index + 4..];
+                let code = rest.trim_start();
+                if !(code.starts_with("0") || code.starts_with("1"))
+                    || code[1..].starts_with(|c: char| c.is_ascii_alphanumeric())
+                {
+                    return false;
+                }
+                // `if (...) { exit 0 }` está a profundidad 1 dentro del `if`;
+                // más llaves serían un bloque de canalización.
+                if depth > 1 {
+                    return false;
+                }
+                has_exit = true;
+            }
+        }
+        index += 1;
+    }
+    has_exit
+}
+
+/// Un único script que ejecuta cada sonda en su propio bloque y escribe
+/// `__wterminal_probe_<n>=<código>`. Un error dentro de una sonda cuenta como
+/// `1`, igual que el código de salida de `powershell -Command` ante un fallo.
+fn powershell_batch_script(scripts: &[&str]) -> String {
+    let mut batch = String::from("$ErrorActionPreference = 'Continue'; ");
+    for (index, script) in scripts.iter().enumerate() {
+        let body = script
+            .replace("exit 0", "return 0")
+            .replace("exit 1", "return 1");
+        batch.push_str(&format!(
+            "try {{ $wtCode = & {{ {body} }} | Select-Object -Last 1 }} catch {{ $wtCode = 1 }}; if ($wtCode -ne 0) {{ $wtCode = 1 }}; Write-Output \"{POWERSHELL_BATCH_MARKER}{index}=$wtCode\"; "
+        ));
+    }
+    batch.push_str("exit 0");
+    batch
+}
+
+/// Lee las marcas del proceso único. Una sonda sin marca no se resuelve aquí.
+fn parse_powershell_batch(stdout: &str, scripts: &[&str]) -> HashMap<String, DetectionState> {
+    let mut results = HashMap::new();
+    for line in stdout.lines() {
+        let Some(rest) = line.trim().strip_prefix(POWERSHELL_BATCH_MARKER) else {
+            continue;
+        };
+        let Some((index, code)) = rest.split_once('=') else {
+            continue;
+        };
+        let Some(script) = index
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| scripts.get(index))
+        else {
+            continue;
+        };
+        let state = if code.trim() == "0" {
+            DetectionState::Installed
+        } else {
+            DetectionState::Missing
+        };
+        results.insert((*script).to_string(), state);
+    }
+    results
 }
 
 /// Clave de inventario para `module:<programa>:<módulo>`.
@@ -1167,10 +1323,23 @@ fn chocolatey_capability_installed(spec: &str) -> DetectionState {
     if command != "__package__" && crate::path_env::is_tool_installed(command) {
         return DetectionState::Installed;
     }
+    // NSudo suele venir con WinSlim (`C:\WSCore\Components\Hooks\NSudo`), fuera
+    // del PATH y de Chocolatey: la misma búsqueda que usa «Permisos de
+    // administrador» evita ofrecer instalarlo otra vez.
+    if command.eq_ignore_ascii_case("NSudoLC") && crate::platform::nsudo_path().is_some() {
+        return DetectionState::Installed;
+    }
 
     let root = std::env::var_os("ChocolateyInstall")
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_dir())
+        // Instalado por WTerminal con «Programas» en la carpeta propia: la
+        // variable de máquina aún no ha llegado a este proceso.
+        .or_else(|| {
+            std::env::var_os("WTERMINAL_PROGRAMS")
+                .map(|dir| std::path::PathBuf::from(dir).join("chocolatey"))
+                .filter(|path| path.join("lib").is_dir())
+        })
         .or_else(|| {
             crate::platform::host()
                 .is_windows()
@@ -2358,6 +2527,67 @@ mod tests {
     }
 
     #[test]
+    fn solo_se_agrupan_sondas_de_powershell_con_exit_de_primer_nivel() {
+        assert!(powershell_batchable(
+            "if (Get-Command x -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+        ));
+        assert!(powershell_batchable(
+            "$b = $r | ForEach-Object { Join-Path $_ 'bin' }; if ($b | Where-Object { Test-Path $_ }) { exit 0 } else { exit 1 }"
+        ));
+        // Sin exit no hay código que leer; con exit 2 o anidado, tampoco se agrupa.
+        assert!(!powershell_batchable("Get-Command x"));
+        assert!(!powershell_batchable("if ($true) { exit 2 }"));
+        assert!(!powershell_batchable(
+            "$r | ForEach-Object { if (Test-Path $_) { exit 0 } }; exit 1"
+        ));
+        assert!(!powershell_batchable("if ($true) { exit $LASTEXITCODE }"));
+        // `exit` dentro de otra palabra no cuenta.
+        assert!(!powershell_batchable("Write-Output pre-exit 0"));
+    }
+
+    #[test]
+    fn el_proceso_unico_de_powershell_escribe_una_marca_por_sonda() {
+        let scripts = ["if ($true) { exit 0 } else { exit 1 }", "exit 1"];
+        let batch = powershell_batch_script(&scripts);
+        assert!(!batch.contains("exit 0 }"));
+        assert!(batch.contains("__wterminal_probe_0="));
+        assert!(batch.contains("__wterminal_probe_1="));
+        assert!(batch.ends_with("exit 0"));
+        let parsed = parse_powershell_batch(
+            "ruido\r\n__wterminal_probe_0=0\r\n__wterminal_probe_1=1\r\n__wterminal_probe_9=0\r\n",
+            &scripts,
+        );
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[scripts[0]], DetectionState::Installed);
+        assert_eq!(parsed[scripts[1]], DetectionState::Missing);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn el_proceso_unico_de_powershell_da_el_mismo_resultado_que_las_sondas_sueltas() {
+        let scripts = [
+            "if ($true) { exit 0 } else { exit 1 }",
+            "if ($false) { exit 0 } else { exit 1 }",
+            "if ((Get-Item 'Z:\\no\\existe' -ErrorAction Stop)) { exit 0 } else { exit 1 }",
+            "Write-Output 'ruido'; if (Get-Command cmd.exe -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
+        ];
+        let script = powershell_batch_script(&scripts);
+        let output = crate::process::output_text_probe(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+            POWERSHELL_BATCH_TIMEOUT,
+        );
+        let crate::process::ProbeOutput::Success(stdout) = output else {
+            panic!("el proceso único falló: {output:?}");
+        };
+        let parsed = parse_powershell_batch(&stdout, &scripts);
+        assert_eq!(parsed[scripts[0]], DetectionState::Installed);
+        assert_eq!(parsed[scripts[1]], DetectionState::Missing);
+        assert_eq!(parsed[scripts[2]], DetectionState::Missing, "{stdout}");
+        assert_eq!(parsed[scripts[3]], DetectionState::Installed, "{stdout}");
+    }
+
+    #[test]
     fn una_accion_que_sobrevive_al_filtro_ya_dice_en_que_estado_esta_su_herramienta() {
         // El comando no existe: instalar se queda (y se marca no instalado),
         // actualizar se va.
@@ -2377,7 +2607,10 @@ mod tests {
         // usuario pueda preparar la dependencia desde el propio catálogo.
         let mut install = accion("framework-busted", None, Some("runtime-ausente"));
         install.verb = None;
-        install.check_cmd = Some("ecosystem:luarocks|luarocks|busted".to_string());
+        // Un paquete que no existe: con LuaRocks y Busted instalados de verdad
+        // (la VM con todo el catálogo) la acción desaparecía y el test fallaba.
+        install.check_cmd =
+            Some("ecosystem:luarocks|luarocks|wterminal-paquete-que-no-existe".to_string());
         let mut update = accion("framework-busted-update", None, Some("runtime-ausente"));
         update.verb = Some("Actualizar".to_string());
 

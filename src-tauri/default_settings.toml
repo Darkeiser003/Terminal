@@ -69,6 +69,9 @@ shortcutExplorerFollow = ""
 shortcutExplorerCd = ""
 shortcutClearTerminal = ""
 shortcutSearchTerminal = "Ctrl+Shift+F"
+shortcutUiScaleUp = "Ctrl+Alt+Equal"
+shortcutUiScaleDown = "Ctrl+Alt+Minus"
+shortcutUiScaleReset = "Ctrl+Alt+0"
 shortcutOpenSystemExplorer = ""
 
 # Los temas de fábrica comparten la base negra de «Cian técnico» y solo
@@ -110,6 +113,11 @@ terminalLinksConfirm = true
 terminalScrollSensitivity = 3
 copyOnSelect = false
 uiDensity = "comfortable"
+uiScale = 100
+suggestRepositoryImport = true
+lowPowerMode = false
+lowPowerSuggest = true
+githubSessionMode = "onExhausted"
 
 defaultEnvironmentId = ""
 terminalAdminByDefault = false
@@ -126,6 +134,9 @@ toolchainStoreDownloads = true
 toolchainStoreAiModels = true
 toolchainStoreTools = true
 toolchainStoreReplHistory = true
+toolchainStoreToolchains = false
+toolchainStorePrograms = true
+toolchainStoreProjects = false
 # Sugerencias del historial y colores en la línea de órdenes (Clink en cmd,
 # PSReadLine en PowerShell, ble.sh o plugins de zsh) si están instalados.
 shellAssist = true

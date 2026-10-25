@@ -167,6 +167,9 @@ export interface Preferences {
     shortcutClearTerminal: string;
     shortcutSearchTerminal: string;
     shortcutOpenSystemExplorer: string;
+    shortcutUiScaleUp: string;
+    shortcutUiScaleDown: string;
+    shortcutUiScaleReset: string;
     themeId: string;
     accentColor: string;
     uiBackgroundColor: string;
@@ -203,6 +206,15 @@ export interface Preferences {
     terminalScrollSensitivity: number;
     copyOnSelect: boolean;
     uiDensity: 'compact' | 'comfortable';
+    /** Tamaño de la interfaz en %, de 80 a 200. No escala la terminal. */
+    uiScale: number;
+    /** Sugerir importar el repositorio de la carpeta de la pestaña. */
+    suggestRepositoryImport: boolean;
+    /** Modo de bajo consumo (apagado de fábrica). */
+    lowPowerMode: boolean;
+    /** Sugerir el modo de bajo consumo si el equipo va justo. */
+    lowPowerSuggest: boolean;
+    githubSessionMode: 'always' | 'onExhausted' | 'never';
     defaultEnvironmentId: string;
     terminalAdminByDefault: boolean;
     toolchainStoreEnabled: boolean;
@@ -211,6 +223,11 @@ export interface Preferences {
     toolchainStoreAiModels: boolean;
     toolchainStoreTools: boolean;
     toolchainStoreReplHistory: boolean;
+    toolchainStoreToolchains: boolean;
+    /** Programas de WinGet en `<carpeta propia>\programas\winget\<id>` (`--location`). */
+    toolchainStorePrograms: boolean;
+    /** Proyectos de GitHub en `<carpeta propia>\proyectos` (si no hay otra carpeta elegida). */
+    toolchainStoreProjects: boolean;
     shellAssist: boolean;
     shellAssistCmd: boolean;
     shellAssistPowershell: boolean;
@@ -334,6 +351,10 @@ export interface ToolchainStoreCache {
     variable: string;
     path: string;
     bytes: number;
+    /** `false` si no se midió (toolchain en su sitio de siempre). */
+    measured?: boolean;
+    /** `true` si la medición no terminó a tiempo (carpeta grande): sale en la próxima apertura. */
+    measuring?: boolean;
     /** El usuario ya define la variable: se usa su carpeta, no la propia. */
     userDefined: boolean;
     /** Dónde está lo medido: la carpeta propia, la variable del usuario o la
@@ -346,7 +367,7 @@ export interface ToolchainStoreCache {
     info: StorageLocationInfo;
 }
 
-export type ToolchainStoreCategory = 'caches' | 'downloads' | 'aiModels' | 'tools' | 'replHistory';
+export type ToolchainStoreCategory = 'caches' | 'downloads' | 'aiModels' | 'tools' | 'replHistory' | 'toolchains' | 'programs' | 'projects';
 
 /** Carpeta de WTerminal (`app`) o de otra herramienta (`external`); solo se
  *  mide y se explica. */
@@ -373,6 +394,9 @@ export interface InternalCommand {
 }
 
 export interface AppInfo {
+    /** Hilos de CPU y memoria total (GB), para sugerir el modo de bajo consumo. */
+    cpuThreads?: number;
+    memoryGb?: number | null;
     name: string;
     slug: string;
     version: string;
@@ -610,12 +634,46 @@ export interface LocalRepository {
     path: string;
     /** Milisegundos desde la época de la última modificación. */
     modified: number;
+    /** Importado desde fuera de la carpeta de proyectos. */
+    imported?: boolean;
+}
+
+/** «Mi GitHub» → una issue o pull request abierta en detalle. */
+export interface GhComment { author: string; body: string; createdAt: string }
+export interface GhPullFile { path: string; additions: number; deletions: number }
+export interface GhItemView {
+    body: string;
+    state: string;
+    labels: string[];
+    comments: GhComment[];
+    files: GhPullFile[];
+    draft: boolean;
+    reviewDecision: string;
+}
+export type GhItemKind = 'issue' | 'pr';
+
+/** «Mi GitHub» → Código. */
+export interface GhBranch { name: string; sha: string; protected: boolean }
+export interface GhTag { name: string; sha: string }
+export interface GhCommit { sha: string; message: string; author: string; date: string; url: string }
+export interface GhChangedFile { filename: string; status: string; additions: number; deletions: number; patch: string | null }
+export interface GhEntry { name: string; path: string; kind: 'file' | 'dir' | 'symlink' | 'submodule'; size: number }
+export type GhContents =
+    | { type: 'dir'; entries: GhEntry[] }
+    | { type: 'file'; path: string; size: number; text: string | null; truncated: boolean };
+
+/** Repositorio git encontrado en la carpeta de una pestaña y que se puede importar. */
+export interface ImportableRepository {
+    fullName: string;
+    path: string;
 }
 
 /** Lo que queda del límite de consultas públicas de GitHub. */
 export interface RateLimit {
     remaining: number | null;
     resetAt: string | null;
+    /** La consulta se hizo con la sesión de `gh` (5.000/h). */
+    viaSession?: boolean;
 }
 
 export interface LookupResult {

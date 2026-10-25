@@ -1330,7 +1330,7 @@ mod tests {
             assert!(release_create_args("owner/demo", &bad).is_err(), "{bad:?}");
         }
         assert_eq!(
-            release_upload_args("owner/demo", "v1.0.0", &[file.clone()]).unwrap(),
+            release_upload_args("owner/demo", "v1.0.0", std::slice::from_ref(&file)).unwrap(),
             vec![
                 "release".to_string(),
                 "upload".into(),

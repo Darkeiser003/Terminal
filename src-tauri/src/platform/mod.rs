@@ -52,3 +52,33 @@ static HOST: WindowsPlatform = WindowsPlatform;
 pub fn host() -> &'static impl HostPlatform {
     &HOST
 }
+
+/// Argumento con el que el desinstalador NSIS llama a `wterminal.exe` antes de
+/// borrar el programa (`windows/installer-hooks.nsh`).
+pub const UNINSTALL_CLEANUP_ARG: &str = "--wterminal-uninstall-cleanup";
+
+/// Deshace lo que WTerminal registró por su cuenta en el perfil del usuario y
+/// que el desinstalador de Tauri no conoce: su carpeta y las `bin` de las
+/// herramientas en el PATH de HKCU (solo las que añadió él), los menús «Abrir
+/// con WTerminal», App Paths y el protocolo `wterminal://`, y la marca
+/// RUNASADMIN. Sin esto, tras desinstalar quedaban entradas apuntando a un
+/// ejecutable que ya no existe. No toca ajustes ni la carpeta propia: eso lo
+/// decide la casilla «Borrar los datos» del desinstalador. Devuelve el código
+/// de salida (0 si todo fue bien).
+#[cfg(windows)]
+pub fn uninstall_cleanup() -> i32 {
+    let mut failures = 0;
+    if let Err(error) = path_integration::path_integration_set(false) {
+        eprintln!("PATH: {error}");
+        failures += 1;
+    }
+    if let Err(error) = windows_integration::set_enabled(false) {
+        eprintln!("Integración de Windows: {error}");
+        failures += 1;
+    }
+    if let Err(error) = windows_integration::set_run_as_admin_flag(false) {
+        eprintln!("RUNASADMIN: {error}");
+        failures += 1;
+    }
+    i32::from(failures > 0)
+}

@@ -23,7 +23,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { runSmokeScenario } from '../tests/e2e/run-scenario.mjs';
-import { restoreWindowsPathIntegration, sameWindowsPathSnapshot, snapshotWindowsPathIntegration } from '../tests/e2e/windows-path-guard.mjs';
+import { describeWindowsPathChange, restoreWindowsPathIntegration, sameWindowsPathSnapshot, snapshotWindowsPathIntegration } from '../tests/e2e/windows-path-guard.mjs';
 import { dropPowerShell7ModulePath } from '../tests/e2e/powershell-env.mjs';
 // Lanzado desde PowerShell 7, el PSModulePath heredado rompe los powershell.exe 5.1
 // que lanzan estas pruebas (ver tests/e2e/powershell-env.mjs).
@@ -243,7 +243,7 @@ Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Argume
     const pathAfter = await snapshotWindowsPathIntegration();
     if (!sameWindowsPathSnapshot(pathBefore, pathAfter)) {
         await restoreWindowsPathIntegration(pathBefore).catch(() => undefined);
-        step('PATH del usuario intacto', false, 'cambió durante la prueba; se ha restaurado');
+        step('PATH del usuario intacto', false, `cambió durante la prueba (${describeWindowsPathChange(pathBefore, pathAfter)}); se ha restaurado`);
     } else {
         step('PATH del usuario intacto', true);
     }

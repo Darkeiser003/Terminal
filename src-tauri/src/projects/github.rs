@@ -534,12 +534,20 @@ pub fn local_repository_state(
     repository: &Repository,
 ) -> Option<LocalState> {
     let root = PathBuf::from(projects_folder);
-    let local_path = root.join(&repository.owner).join(&repository.name);
-    // El nombre de propietario y de repositorio ya están validados, así que la
-    // ruta no puede salirse; la comprobación se mantiene por si acaso.
-    if !local_path.starts_with(&root) {
-        return None;
-    }
+    // Un repositorio importado vive fuera de la carpeta de proyectos: su ruta
+    // es la que guardó el propio backend al importarlo, no una del frontend.
+    let local_path = match imported_path(&repository.full_name) {
+        Some(path) => path,
+        None => {
+            let local_path = root.join(&repository.owner).join(&repository.name);
+            // El nombre de propietario y de repositorio ya están validados, así
+            // que la ruta no puede salirse; la comprobación se mantiene por si acaso.
+            if !local_path.starts_with(&root) {
+                return None;
+            }
+            local_path
+        }
+    };
     let exists = local_path.exists();
     let repository_exists = exists && local_path.join(".git").exists();
     Some(LocalState {
@@ -559,12 +567,14 @@ pub fn local_repository_state(
 /// descargado, incluido lo que se clonó y luego se desancló.
 const MAX_SCANNED_OWNERS: usize = 200;
 
-/// Dónde se clonan los proyectos: la carpeta que haya elegido el usuario o la
-/// de fábrica, igual que `tabs::scripts_folder` con la de scripts.
+/// Dónde se clonan los proyectos: la carpeta que haya elegido el usuario; si
+/// no eligió ninguna, `<carpeta propia>\proyectos` con «Proyectos de GitHub»
+/// activa en Entornos y descargas, y si no, la de fábrica en Documentos.
 pub fn projects_folder() -> String {
     crate::settings::string_setting(&crate::settings::load_settings(), "projectsFolder")
         .unwrap_or_else(|| {
-            crate::paths::default_projects_dir()
+            crate::config::toolchain_store::centralized_projects_dir()
+                .unwrap_or_else(crate::paths::default_projects_dir)
                 .to_string_lossy()
                 .to_string()
         })
@@ -587,6 +597,10 @@ pub struct LocalRepository {
     /// Milisegundos desde la época de la última modificación, para poder poner
     /// arriba lo que se ha tocado hace poco.
     pub modified: u64,
+    /// Importado desde fuera de la carpeta de proyectos: se puede quitar de la
+    /// lista sin tocar el disco.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
 }
 
 /// Los repositorios clonados bajo la carpeta de proyectos, ordenados por lo más
@@ -633,6 +647,7 @@ pub fn list_local_repositories(projects_folder: &str) -> Vec<LocalRepository> {
                 path: path.to_string_lossy().to_string(),
                 modified: modified_millis(&path),
                 name,
+                imported: false,
             });
         }
     }
@@ -679,6 +694,226 @@ pub fn count_local_repositories(projects_folder: &str) -> usize {
                 .unwrap_or(0)
         })
         .sum()
+}
+
+// ---- Repositorios importados ----
+//
+// Un repositorio que ya está en el disco fuera de la carpeta de proyectos se
+// puede «importar»: se guarda su ruta en `importedRepositories` y aparece en
+// Descargados con las mismas acciones. Nunca se copia ni se mueve, y quitarlo
+// de la lista no borra nada. Las acciones siguen resolviendo la carpeta en el
+// backend (`local_repository_state`), a partir de lo guardado aquí, no de una
+// ruta que mande el frontend.
+
+const IMPORTED_KEY: &str = "importedRepositories";
+const DISMISSED_KEY: &str = "dismissedRepositories";
+const MAX_IMPORTED: usize = 200;
+/// Hasta dónde se sube buscando `.git` desde la carpeta de una pestaña.
+const MAX_GIT_ROOT_DEPTH: usize = 24;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedRepository {
+    pub full_name: String,
+    pub path: String,
+}
+
+/// La carpeta raíz del repositorio que contiene `start`: la primera que tenga
+/// `.git` (carpeta, o archivo en un worktree o submódulo).
+pub fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    for _ in 0..MAX_GIT_ROOT_DEPTH {
+        let dir = current?;
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// `owner/repo` de una URL de remoto de GitHub (https, ssh o `git@`).
+pub fn github_full_name_from_remote(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("git@github.com:"))?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let parsed = parse_full_name(rest)?;
+    Some(parsed.full_name)
+}
+
+/// El `origin` de un repositorio local, leído con git.
+fn origin_url(root: &Path) -> Option<String> {
+    let root_text = root.to_string_lossy().to_string();
+    crate::process::output_text(
+        "git",
+        &["-C", &root_text, "remote", "get-url", "origin"],
+        Duration::from_secs(5),
+    )
+    .map(|text| text.trim().to_string())
+    .filter(|text| !text.is_empty())
+}
+
+fn read_list<T: serde::de::DeserializeOwned>(key: &str) -> Vec<T> {
+    crate::settings::load_settings()
+        .get(key)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+pub fn imported_repositories() -> Vec<ImportedRepository> {
+    read_list::<ImportedRepository>(IMPORTED_KEY)
+        .into_iter()
+        .filter(|entry| parse_full_name(&entry.full_name).is_some())
+        .take(MAX_IMPORTED)
+        .collect()
+}
+
+fn dismissed_repositories() -> Vec<String> {
+    read_list(DISMISSED_KEY)
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    let normalize = |value: &str| value.trim_end_matches(['\\', '/']).replace('\\', "/");
+    if cfg!(windows) {
+        normalize(a).eq_ignore_ascii_case(&normalize(b))
+    } else {
+        normalize(a) == normalize(b)
+    }
+}
+
+/// La ruta importada de un repositorio, si existe todavía en el disco.
+pub fn imported_path(full_name: &str) -> Option<PathBuf> {
+    imported_repositories()
+        .into_iter()
+        .find(|entry| entry.full_name.eq_ignore_ascii_case(full_name))
+        .map(|entry| PathBuf::from(entry.path))
+        .filter(|path| path.join(".git").exists())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportError {
+    NotARepository,
+    NoGithubRemote,
+    AlreadyKnown(String),
+}
+
+/// Importa la carpeta (o su `.git`) como repositorio. Devuelve lo guardado.
+pub fn import_repository(raw_path: &str) -> Result<ImportedRepository, ImportError> {
+    let mut start = PathBuf::from(raw_path.trim().trim_matches('"'));
+    if start.file_name().is_some_and(|name| name == ".git") {
+        start.pop();
+    }
+    let root = find_git_root(&start).ok_or(ImportError::NotARepository)?;
+    let full_name = origin_url(&root)
+        .as_deref()
+        .and_then(github_full_name_from_remote)
+        .ok_or(ImportError::NoGithubRemote)?;
+    let path = root.to_string_lossy().to_string();
+    let in_projects = list_local_repositories(&projects_folder())
+        .into_iter()
+        .any(|local| {
+            local.full_name.eq_ignore_ascii_case(&full_name) && same_path(&local.path, &path)
+        });
+    let mut imported = imported_repositories();
+    if in_projects || imported.iter().any(|entry| same_path(&entry.path, &path)) {
+        return Err(ImportError::AlreadyKnown(full_name));
+    }
+    let entry = ImportedRepository { full_name, path };
+    imported.retain(|existing| !existing.full_name.eq_ignore_ascii_case(&entry.full_name));
+    imported.insert(0, entry.clone());
+    imported.truncate(MAX_IMPORTED);
+    crate::settings::save_key(
+        IMPORTED_KEY,
+        serde_json::to_value(&imported).unwrap_or_default(),
+    );
+    Ok(entry)
+}
+
+/// Quita un repositorio importado de la lista. No toca el disco.
+pub fn forget_imported_repository(full_name: &str) -> bool {
+    let mut imported = imported_repositories();
+    let before = imported.len();
+    imported.retain(|entry| !entry.full_name.eq_ignore_ascii_case(full_name));
+    if imported.len() == before {
+        return false;
+    }
+    crate::settings::save_key(
+        IMPORTED_KEY,
+        serde_json::to_value(&imported).unwrap_or_default(),
+    );
+    true
+}
+
+/// Los importados como `LocalRepository`, para mezclarlos con los clonados.
+pub fn list_imported_repositories() -> Vec<LocalRepository> {
+    imported_repositories()
+        .into_iter()
+        .filter_map(|entry| {
+            let path = PathBuf::from(&entry.path);
+            if !path.join(".git").exists() {
+                return None;
+            }
+            let parsed = parse_full_name(&entry.full_name)?;
+            Some(LocalRepository {
+                owner: parsed.owner,
+                name: parsed.name,
+                full_name: parsed.full_name,
+                modified: modified_millis(&path),
+                path: entry.path,
+                imported: true,
+            })
+        })
+        .collect()
+}
+
+/// Repositorio git desconocido en la carpeta de una pestaña: ni clonado en la
+/// carpeta de proyectos, ni importado, ni descartado antes. Es lo que activa la
+/// sugerencia de importarlo.
+pub fn detect_unknown_repository(cwd: &str) -> Option<ImportedRepository> {
+    let root = find_git_root(Path::new(cwd))?;
+    let path = root.to_string_lossy().to_string();
+    if dismissed_repositories()
+        .iter()
+        .any(|dismissed| same_path(dismissed, &path))
+    {
+        return None;
+    }
+    let projects = projects_folder();
+    if !projects.is_empty() && root.starts_with(&projects) {
+        return None;
+    }
+    if imported_repositories()
+        .iter()
+        .any(|entry| same_path(&entry.path, &path))
+    {
+        return None;
+    }
+    let full_name = origin_url(&root)
+        .as_deref()
+        .and_then(github_full_name_from_remote)?;
+    Some(ImportedRepository { full_name, path })
+}
+
+/// «Descartar»: la sugerencia no vuelve a salir para esa carpeta.
+pub fn dismiss_repository_suggestion(path: &str) {
+    let mut dismissed = dismissed_repositories();
+    if dismissed.iter().any(|existing| same_path(existing, path)) {
+        return;
+    }
+    dismissed.push(path.to_string());
+    if dismissed.len() > MAX_IMPORTED {
+        dismissed.remove(0);
+    }
+    crate::settings::save_key(
+        DISMISSED_KEY,
+        serde_json::to_value(&dismissed).unwrap_or_default(),
+    );
 }
 
 fn q_win(value: &str) -> String {
@@ -971,6 +1206,75 @@ fn single_file_output(path: &str, windows_shell: bool) -> String {
 pub struct RateLimit {
     pub remaining: Option<i64>,
     pub reset_at: Option<String>,
+    /// La consulta se hizo con la sesión de `gh` (5.000/h) y no con las 60
+    /// públicas: la cabecera de Explorar GitHub lo dice.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub via_session: bool,
+}
+
+/// Parte la salida de `gh api --include`: línea de estado, cabeceras, línea
+/// en blanco y cuerpo JSON.
+pub fn parse_gh_api_include(output: &str) -> Option<(u16, RateLimit, Value)> {
+    let normalized = output.replace("\r\n", "\n");
+    let (head, body) = normalized.split_once("\n\n")?;
+    let mut lines = head.lines();
+    let status = lines
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u16>()
+        .ok()?;
+    let mut rate_limit = RateLimit {
+        via_session: true,
+        ..RateLimit::default()
+    };
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "x-ratelimit-remaining" => rate_limit.remaining = value.parse().ok(),
+            "x-ratelimit-reset" => {
+                rate_limit.reset_at = value.parse::<i64>().ok().and_then(|seconds| {
+                    chrono::DateTime::from_timestamp(seconds, 0)
+                        .map(|time| time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+                });
+            }
+            _ => {}
+        }
+    }
+    Some((
+        status,
+        rate_limit,
+        serde_json::from_str(body.trim()).unwrap_or(Value::Null),
+    ))
+}
+
+/// La misma ruta de la API, pero con la sesión de `gh`. WTerminal nunca lee
+/// ni guarda el token: lo usa `gh`. Sin `gh` o sin sesión devuelve `None`
+/// y quien llama conserva el error de la consulta pública.
+fn request_via_gh(api_path: &str) -> Option<(Value, RateLimit)> {
+    let args = vec![
+        "api".to_string(),
+        "--include".to_string(),
+        api_path.to_string(),
+    ];
+    let output = crate::projects::gh_cli::run_args(&args, REQUEST_TIMEOUT).ok()?;
+    if output.len() > MAX_API_BYTES {
+        return None;
+    }
+    let (status, rate_limit, data) = parse_gh_api_include(&output)?;
+    (200..300).contains(&status).then_some((data, rate_limit))
+}
+
+fn github_session_mode() -> String {
+    // Los E2E apuntan a un servidor local con `LTERMINAL_E2E_GITHUB_API`: `gh`
+    // iría a github.com de verdad, así que ahí nunca se usa.
+    if api_origin() != GITHUB_API_ORIGIN {
+        return "never".into();
+    }
+    crate::preferences::current().github_session_mode
 }
 
 #[derive(Debug, Clone)]
@@ -1021,6 +1325,12 @@ pub fn shared_client() -> &'static GithubClient {
     &CLIENT
 }
 
+/// GitHub responde 403 con el contador a cero (o 429) cuando se acaban las
+/// consultas públicas; cualquier otro error no se arregla con la sesión.
+fn is_rate_limited(error: &ApiError) -> bool {
+    error.status == 429 || (error.status == 403 && error.rate_limit.remaining == Some(0))
+}
+
 impl GithubClient {
     pub fn new(user_agent: &str) -> GithubClient {
         GithubClient {
@@ -1049,6 +1359,44 @@ impl GithubClient {
                 return Ok((data, rate));
             }
         }
+        let mode = github_session_mode();
+        if mode == "always" {
+            if let Some((data, rate_limit)) = request_via_gh(api_path) {
+                self.remember(api_path, &data, &rate_limit);
+                return Ok((data, rate_limit));
+            }
+        }
+        match self.request_public(api_path) {
+            Err(error) if mode == "onExhausted" && is_rate_limited(&error) => {
+                let Some((data, rate_limit)) = request_via_gh(api_path) else {
+                    return Err(error);
+                };
+                self.remember(api_path, &data, &rate_limit);
+                Ok((data, rate_limit))
+            }
+            Ok((data, rate_limit)) => {
+                self.remember(api_path, &data, &rate_limit);
+                Ok((data, rate_limit))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn remember(&self, api_path: &str, data: &Value, rate_limit: &RateLimit) {
+        let mut cache = self.cache.lock();
+        if cache.len() >= MAX_CACHE_ENTRIES {
+            cache.retain(|_, (at, _, _)| at.elapsed() < API_CACHE_TTL);
+            if cache.len() >= MAX_CACHE_ENTRIES {
+                cache.clear();
+            }
+        }
+        cache.insert(
+            api_path.to_string(),
+            (Instant::now(), data.clone(), rate_limit.clone()),
+        );
+    }
+
+    fn request_public(&self, api_path: &str) -> Result<(Value, RateLimit), ApiError> {
         let response = self
             .client
             .get(format!("{}{api_path}", api_origin()))
@@ -1077,6 +1425,7 @@ impl GithubClient {
                 chrono::DateTime::from_timestamp(seconds, 0)
                     .map(|time| time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
             }),
+            via_session: false,
         };
         let status = response.status().as_u16();
         let ok = response.status().is_success();
@@ -1103,17 +1452,6 @@ impl GithubClient {
                 rate_limit,
             });
         }
-        let mut cache = self.cache.lock();
-        if cache.len() >= MAX_CACHE_ENTRIES {
-            cache.retain(|_, (at, _, _)| at.elapsed() < API_CACHE_TTL);
-            if cache.len() >= MAX_CACHE_ENTRIES {
-                cache.clear();
-            }
-        }
-        cache.insert(
-            api_path.to_string(),
-            (Instant::now(), data.clone(), rate_limit.clone()),
-        );
         Ok((data, rate_limit))
     }
 
@@ -1189,6 +1527,78 @@ impl GithubClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn el_remoto_de_github_da_owner_repo_en_todos_sus_formatos() {
+        for url in [
+            "https://github.com/octo/demo.git", // link-check: ignore
+            "https://github.com/octo/demo",     // link-check: ignore
+            "git@github.com:octo/demo.git",
+            "ssh://git@github.com/octo/demo.git",
+        ] {
+            assert_eq!(
+                github_full_name_from_remote(url).as_deref(),
+                Some("octo/demo"),
+                "{url}"
+            );
+        }
+        assert!(github_full_name_from_remote("https://gitlab.com/octo/demo.git").is_none()); // link-check: ignore
+        assert!(github_full_name_from_remote("https://github.com/octo").is_none());
+    }
+
+    #[test]
+    fn la_raiz_git_se_busca_hacia_arriba_y_acepta_un_archivo_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let nested = repo.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        assert_eq!(find_git_root(&nested).as_deref(), Some(repo.as_path()));
+        // Un worktree o submódulo tiene `.git` como archivo.
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../repo/.git/worktrees/w").unwrap();
+        assert_eq!(
+            find_git_root(&worktree).as_deref(),
+            Some(worktree.as_path())
+        );
+    }
+
+    #[test]
+    fn la_salida_de_gh_api_include_da_estado_limite_y_cuerpo() {
+        let output = "HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 4987\r\nX-Ratelimit-Reset: 1700000000\r\n\r\n{\"login\":\"octocat\"}";
+        let (status, rate, body) = parse_gh_api_include(output).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(rate.remaining, Some(4987));
+        assert!(rate.via_session && rate.reset_at.is_some());
+        assert_eq!(body["login"], "octocat");
+    }
+
+    #[test]
+    fn solo_el_limite_agotado_pasa_a_la_sesion_de_gh() {
+        let agotado = ApiError {
+            message: String::new(),
+            status: 403,
+            rate_limit: RateLimit {
+                remaining: Some(0),
+                ..RateLimit::default()
+            },
+        };
+        assert!(is_rate_limited(&agotado));
+        assert!(is_rate_limited(&ApiError {
+            status: 429,
+            ..agotado.clone()
+        }));
+        assert!(!is_rate_limited(&ApiError {
+            status: 404,
+            ..agotado.clone()
+        }));
+        let prohibido = ApiError {
+            rate_limit: RateLimit::default(),
+            ..agotado
+        };
+        assert!(!is_rate_limited(&prohibido));
+    }
 
     #[test]
     fn el_origen_de_la_api_solo_cambia_en_el_e2e_y_hacia_un_servidor_local() {

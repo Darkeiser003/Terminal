@@ -371,7 +371,7 @@
            pulsable incluso con el scroll completamente abajo. Se publica como
            variable: un pie sticky necesita la misma medida para tocar el borde. */
         --panel-scroll-bottom: 14px;
-        padding: 6px 6px var(--panel-scroll-bottom);
+        padding: var(--space-min, 6px) var(--space-min, 6px) var(--panel-scroll-bottom);
     }
 
     /* Mientras se arrastra no se selecciona texto ni se disparan estados de

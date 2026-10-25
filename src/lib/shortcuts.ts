@@ -28,6 +28,9 @@ export const SHORTCUT_PREFERENCE_KEYS = [
     'shortcutClearTerminal',
     'shortcutSearchTerminal',
     'shortcutOpenSystemExplorer',
+    'shortcutUiScaleUp',
+    'shortcutUiScaleDown',
+    'shortcutUiScaleReset',
 ] as const;
 
 export type ShortcutPreferenceKey = (typeof SHORTCUT_PREFERENCE_KEYS)[number];
@@ -62,6 +65,9 @@ export const SHORTCUT_DEFINITIONS: ReadonlyArray<{
     { key: 'shortcutExplorerCd', labelKey: 'explorer.cd', fallback: 'Llevar la terminal a esta carpeta' },
     { key: 'shortcutClearTerminal', labelKey: 'help.clear', fallback: 'Limpiar terminal' },
     { key: 'shortcutOpenSystemExplorer', labelKey: 'explorer.openInSystem', fallback: 'Abrir en el explorador del sistema' },
+    { key: 'shortcutUiScaleUp', labelKey: 'palette.action.uiScaleUp', fallback: 'Aumentar el tamaño de la interfaz' },
+    { key: 'shortcutUiScaleDown', labelKey: 'palette.action.uiScaleDown', fallback: 'Reducir el tamaño de la interfaz' },
+    { key: 'shortcutUiScaleReset', labelKey: 'palette.action.uiScaleReset', fallback: 'Tamaño de la interfaz al 100 %' },
 ];
 
 const MODIFIER_ORDER = ['ctrl', 'alt', 'shift', 'meta'] as const;

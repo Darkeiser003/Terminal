@@ -205,6 +205,12 @@ fn startup_elevated() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // El desinstalador llama al ejecutable solo para limpiar lo registrado en
+    // el perfil del usuario: sin ventana, sin migraciones y sin tocar ajustes.
+    #[cfg(windows)]
+    if std::env::args().any(|argument| argument == platform::UNINSTALL_CLEANUP_ARG) {
+        std::process::exit(platform::uninstall_cleanup());
+    }
     install_async_runtime();
     apply_runtime_argument_overrides();
     let startup_started = Instant::now();
@@ -465,8 +471,28 @@ pub fn run() {
             commands_projects::projects_choose_folder,
             commands_projects::projects_open_github,
             commands_projects::projects_run,
+            commands_projects::projects_import,
+            commands_projects::projects_forget_imported,
+            commands_projects::projects_detect,
+            commands_projects::projects_dismiss_suggestion,
             commands_projects::github_cli_repositories,
             commands_projects::github_cli_terminal,
+            projects::gh_code::github_code_branches,
+            projects::gh_code::github_code_tags,
+            projects::gh_code::github_code_commits,
+            projects::gh_code::github_code_commit_files,
+            projects::gh_code::github_code_compare,
+            projects::gh_code::github_code_contents,
+            projects::gh_code::github_code_branch_create,
+            projects::gh_code::github_code_branch_delete,
+            projects::gh_work::github_item_view,
+            projects::gh_work::github_item_comment,
+            projects::gh_work::github_item_state,
+            projects::gh_work::github_pull_ready,
+            projects::gh_work::github_pull_review,
+            projects::gh_work::github_issues_by_state,
+            projects::gh_work::github_run_log,
+            projects::gh_work::github_run_cancel,
             projects::gh_manage::github_repo_details,
             projects::gh_manage::github_repo_edit,
             projects::gh_manage::github_releases,

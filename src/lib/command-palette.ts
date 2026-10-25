@@ -53,7 +53,10 @@ export type PaletteAppAction =
     | 'cyclePanes'
     | 'nextTab'
     | 'previousTab'
-    | 'refreshEnvironments';
+    | 'refreshEnvironments'
+    | 'uiScaleUp'
+    | 'uiScaleDown'
+    | 'uiScaleReset';
 
 export type PaletteAction =
     | { kind: 'app'; action: PaletteAppAction }
@@ -143,6 +146,9 @@ export const PALETTE_APP_ACTIONS: ReadonlyArray<AppActionDefinition> = [
     { action: 'explorerFollow', group: 'panels', labelKey: 'palette.action.explorerFollow', fallback: 'Explorador: seguir la carpeta de la terminal', shortcut: 'shortcutExplorerFollow', keywords: ['explorer', 'follow', 'cwd'] },
     { action: 'explorerCd', group: 'panels', labelKey: 'palette.action.explorerCd', fallback: 'Explorador: llevar la terminal a su carpeta', shortcut: 'shortcutExplorerCd', keywords: ['explorer', 'cd'] },
     { action: 'openSystemExplorer', group: 'panels', labelKey: 'palette.action.openSystemExplorer', fallback: 'Abrir la carpeta actual en el explorador del sistema', shortcut: 'shortcutOpenSystemExplorer', command: ':explorer-here', keywords: [':open-here', ':reveal-here', 'folder'] },
+    { action: 'uiScaleUp', group: 'panels', labelKey: 'palette.action.uiScaleUp', fallback: 'Aumentar el tamaño de la interfaz', shortcut: 'shortcutUiScaleUp', command: ':ui-scale +', keywords: ['bigger', 'zoom', 'ui'] },
+    { action: 'uiScaleDown', group: 'panels', labelKey: 'palette.action.uiScaleDown', fallback: 'Reducir el tamaño de la interfaz', shortcut: 'shortcutUiScaleDown', command: ':ui-scale -', keywords: ['smaller', 'zoom', 'ui'] },
+    { action: 'uiScaleReset', group: 'panels', labelKey: 'palette.action.uiScaleReset', fallback: 'Tamaño de la interfaz al 100 %', shortcut: 'shortcutUiScaleReset', command: ':ui-scale 100', keywords: ['reset', 'zoom', 'ui'] },
     { action: 'closePanel', group: 'panels', labelKey: 'palette.action.closePanel', fallback: 'Cerrar los paneles', shortcut: 'shortcutClosePanel', command: ':panel close', keywords: ['close'] },
     { action: 'searchTerminal', group: 'terminal', labelKey: 'palette.action.searchTerminal', fallback: 'Buscar en el historial de la terminal', shortcut: 'shortcutSearchTerminal', keywords: ['search', 'find', 'scrollback'] },
     { action: 'clearTerminal', group: 'terminal', labelKey: 'palette.action.clearTerminal', fallback: 'Limpiar la terminal (clear)', shortcut: 'shortcutClearTerminal', command: 'clear', keywords: ['clear', 'cls'] },

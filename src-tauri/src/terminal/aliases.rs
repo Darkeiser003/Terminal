@@ -1467,12 +1467,45 @@ pub struct InitScript {
 }
 
 /// Deja el carácter ESC en una variable de la sesión, para que las cabeceras
-/// que escribe la app puedan llevar color en cmd.
+/// que escribe la app puedan llevar color en cmd. El byte va escrito en el
+/// propio `.cmd`: capturarlo con `echo prompt $E | cmd` costaba dos procesos
+/// por pestaña, y con la CPU ocupada cada uno tardaba segundos en arrancar.
 fn escape_capture_line() -> String {
-    format!(
-        "for /f \"delims=\" %%E in ('echo prompt $E^| \"%ComSpec%\" /d') do set \"{}=%%E\"",
-        crate::console_ui::CMD_ESC_VAR
-    )
+    format!("set \"{}=\x1b\"", crate::console_ui::CMD_ESC_VAR)
+}
+
+/// Extensión del archivo de macros de cmd que acompaña a `init-<tab>.cmd`.
+pub const CMD_MACRO_EXT: &str = "mac";
+
+/// Saca los `doskey nombre=valor` de un init de cmd a un archivo de macros y
+/// los sustituye por un único `doskey /macrofile=`. Cada `doskey` era un
+/// proceso: unos 20 por pestaña, que en un equipo con la CPU ocupada (la
+/// precarga de Dependencias en un portátil de 2 núcleos) retrasaban el primer
+/// prompt hasta 20 s.
+///
+/// Dentro de un `.cmd` el `%%` llega a doskey como `%`; en el archivo de
+/// macros no hay esa pasada, así que se escribe ya sin duplicar. Si alguna
+/// macro lleva caracteres no ASCII (rutas con «ñ», por ejemplo) se devuelve
+/// `None` y el init conserva sus líneas: doskey lee el archivo con la página
+/// de códigos de la consola y podría estropear la ruta.
+pub fn split_cmd_macros(content: &str, eol: &str, macro_path: &str) -> Option<(String, String)> {
+    let mut init = Vec::new();
+    let mut macros = Vec::new();
+    for line in content.split(eol) {
+        match line.strip_prefix("doskey ") {
+            Some(definition) if !definition.starts_with('/') && definition.contains('=') => {
+                if macros.is_empty() {
+                    init.push(format!("doskey /macrofile=\"{macro_path}\""));
+                }
+                macros.push(definition.trim_start().replace("%%", "%"));
+            }
+            _ => init.push(line.to_string()),
+        }
+    }
+    if macros.is_empty() || macros.iter().any(|line| !line.is_ascii()) {
+        return None;
+    }
+    Some((init.join(eol), macros.join(eol) + eol))
 }
 
 /// El archivo de inicialización de una pestaña, o `None` si la shell no es de
@@ -1879,6 +1912,29 @@ mod tests {
     }
 
     #[test]
+    fn cmd_carga_todos_sus_alias_con_un_solo_doskey() {
+        let script = build(ShellKind::Cmd, &options(Transport::Native));
+        let (init, macros) =
+            split_cmd_macros(&script.content, "\r\n", "C:\\temp\\macros-tab-1.mac").unwrap();
+        assert_eq!(init.matches("doskey").count(), 1);
+        assert!(init.contains("doskey /macrofile=\"C:\\temp\\macros-tab-1.mac\""));
+        // El orden se conserva: las macros se cargan donde estaba el primer alias
+        // y el marcador de arranque sigue siendo lo último.
+        assert!(init.find("doskey /macrofile").unwrap() > init.find("@cls").unwrap());
+        assert!(macros.lines().any(|line| line.starts_with("cls=")));
+        assert!(macros.lines().any(|line| line.starts_with("ls=")));
+        // En el archivo de macros no hay pasada de `%%` -> `%` como en un .cmd.
+        assert!(macros.contains("%RANDOM%") && !macros.contains("%%"));
+        assert!(!init.contains("for /f"));
+    }
+
+    #[test]
+    fn las_macros_con_rutas_no_ascii_se_quedan_en_el_init() {
+        let content = "@echo off\r\ndoskey ayuda=call \"C:\\Users\\Año\\help.cmd\" $*\r\n";
+        assert!(split_cmd_macros(content, "\r\n", "C:\\temp\\m.mac").is_none());
+    }
+
+    #[test]
     fn cada_limpieza_lleva_un_sufijo_distinto() {
         for (kind, marca) in [
             (ShellKind::Cmd, "%RANDOM%"),
@@ -2012,8 +2068,9 @@ mod tests {
             .content
             .contains("doskey ll=call \"%WSTERM_UI%\\wt-ls.cmd\" -la $*"));
         assert!(cmd.content.contains("doskey pwd=cd $*"));
-        assert!(cmd.content.contains("\"%ComSpec%\" /d"));
-        assert!(!cmd.content.contains("prompt $E^| cmd')"));
+        // ESC va escrito en el propio archivo: sin un cmd auxiliar por pestaña.
+        assert!(cmd.content.contains("set \"WSTERM_ESC=\x1b\""));
+        assert!(!cmd.content.contains("%ComSpec%"));
 
         let bash = build(ShellKind::Bash, &options(Transport::Native));
         assert!(bash.content.contains("alias ls='command ls'"));
@@ -2311,7 +2368,7 @@ mod tests {
             .expect("el inicializador debe limpiar la pantalla");
         let captura_escape = script
             .content
-            .find("for /f")
+            .find("set \"WSTERM_ESC=")
             .expect("cmd debe preparar la variable ESC");
         assert!(
             limpieza < captura_escape,

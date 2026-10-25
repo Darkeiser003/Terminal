@@ -76,16 +76,78 @@ pub fn path_with_tool_bins(
     (entries.join(";"), added)
 }
 
+/// Qué hacer con una variable de herramientas en el entorno del usuario.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariableChange {
+    Set(String, String),
+    Remove(String),
+}
+
+/// Variables de herramientas del entorno del usuario: las que WTerminal
+/// publicó antes (`previous`, con el valor que escribió) frente a las que
+/// necesitan ahora sus carpetas `bin` (`desired`). `current` lee el valor
+/// actual. Solo se toca lo propio: una variable que el usuario ya tenía (o
+/// cambió después a mano) no se pisa ni se borra, y tampoco se apunta como
+/// propia. Devuelve los cambios y la nueva lista de variables propias.
+pub fn tool_variable_changes(
+    previous: &[(String, String)],
+    desired: &[(String, String)],
+    current: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<VariableChange>, Vec<(String, String)>) {
+    let same_name = |left: &str, right: &str| left.eq_ignore_ascii_case(right);
+    let ours_with = |name: &str, value: &str| {
+        previous
+            .iter()
+            .any(|(old, old_value)| same_name(old, name) && same_windows_dir(old_value, value))
+    };
+    let mut changes = Vec::new();
+    let mut owned = Vec::new();
+    for (name, value) in desired {
+        match current(name) {
+            None => {
+                changes.push(VariableChange::Set(name.clone(), value.clone()));
+                owned.push((name.clone(), value.clone()));
+            }
+            Some(existing) if same_windows_dir(&existing, value) => {
+                if ours_with(name, &existing) {
+                    owned.push((name.clone(), value.clone()));
+                }
+            }
+            Some(existing) if ours_with(name, &existing) => {
+                // La puso WTerminal con otra carpeta (cambió la raíz).
+                changes.push(VariableChange::Set(name.clone(), value.clone()));
+                owned.push((name.clone(), value.clone()));
+            }
+            Some(_) => {}
+        }
+    }
+    for (name, old_value) in previous {
+        if desired.iter().any(|(wanted, _)| same_name(wanted, name)) {
+            continue;
+        }
+        if current(name).is_some_and(|existing| same_windows_dir(&existing, old_value)) {
+            changes.push(VariableChange::Remove(name.clone()));
+        }
+    }
+    (changes, owned)
+}
+
 /// Pone en el PATH del usuario las carpetas `bin` de «Herramientas y lenguajes
 /// nuevos» mientras la integración con el PATH esté activa, y las quita si se
 /// apaga la categoría o la integración: lo que se instala desde WTerminal se ve
-/// en cualquier terminal. Nunca en pruebas (`LTERMINAL_E2E_DISABLE_PATH_AUTO`).
+/// en cualquier terminal. Con ellas van las variables que esas carpetas
+/// necesitan (`PYTHONUSERBASE` para los lanzadores de `pip --user`): sin ella,
+/// `ipython` estaba en el PATH pero fallaba con «No module named 'IPython'».
+/// Nunca en pruebas (`LTERMINAL_E2E_DISABLE_PATH_AUTO`).
 pub fn sync_tool_bins() -> Result<(), String> {
     // Los tests de unidad que guardan ajustes tampoco tocan el PATH real.
     if cfg!(test) || e2e_skips_path_auto() {
         return Ok(());
     }
-    host::sync_tool_bins(&crate::config::toolchain_store::published_bin_dirs())
+    host::sync_tool_bins(
+        &crate::config::toolchain_store::published_bin_dirs(),
+        &crate::config::toolchain_store::published_variables(),
+    )
 }
 
 #[cfg(windows)]
@@ -369,8 +431,78 @@ mod host {
             .map_err(|error| error.to_string())
     }
 
-    pub fn sync_tool_bins(desired: &[PathBuf]) -> Result<(), String> {
-        let desired: Vec<String> = if status()?.enabled {
+    const TOOL_VARIABLES: &str = "ToolVariables";
+
+    /// Variables de herramientas que WTerminal escribió, `NOMBRE=valor` por
+    /// línea, con el valor que escribió.
+    fn added_tool_variables() -> Vec<(String, String)> {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(STATE, KEY_READ)
+            .ok()
+            .and_then(|state| state.get_value::<String, _>(TOOL_VARIABLES).ok())
+            .map(|value| {
+                value
+                    .lines()
+                    .filter_map(|line| line.split_once('='))
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn save_added_tool_variables(variables: &[(String, String)]) -> Result<(), String> {
+        let root = RegKey::predef(HKEY_CURRENT_USER);
+        if variables.is_empty() {
+            if let Ok(state) = root.open_subkey_with_flags(STATE, KEY_WRITE) {
+                let _ = state.delete_value(TOOL_VARIABLES);
+            }
+            return Ok(());
+        }
+        let (state, _) = root
+            .create_subkey(STATE)
+            .map_err(|error| format!("No se pudo guardar el estado del PATH: {error}"))?;
+        let text = variables
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state
+            .set_value(TOOL_VARIABLES, &text)
+            .map_err(|error| error.to_string())
+    }
+
+    fn read_user_variable(name: &str) -> Option<String> {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(ENVIRONMENT, KEY_READ)
+            .ok()?
+            .get_value::<String, _>(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+    }
+
+    fn apply_variable_changes(changes: &[super::VariableChange]) -> Result<(), String> {
+        let (environment, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(ENVIRONMENT)
+            .map_err(|error| format!("No se pudo abrir el entorno del usuario: {error}"))?;
+        for change in changes {
+            match change {
+                super::VariableChange::Set(name, value) => environment
+                    .set_value(name, value)
+                    .map_err(|error| format!("No se pudo guardar {name}: {error}"))?,
+                super::VariableChange::Remove(name) => {
+                    let _ = environment.delete_value(name);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn sync_tool_bins(
+        desired: &[PathBuf],
+        variables: &[(String, String)],
+    ) -> Result<(), String> {
+        let enabled = status()?.enabled;
+        let desired: Vec<String> = if enabled {
             desired
                 .iter()
                 .map(|dir| dir.to_string_lossy().into_owned())
@@ -381,11 +513,27 @@ mod host {
         let previous = added_tool_bins();
         let (path, kind) = read_path();
         let (next, added) = super::path_with_tool_bins(&path, &previous, &desired);
+
+        let wanted_variables = if enabled { variables } else { &[] };
+        let (variable_changes, owned_variables) = super::tool_variable_changes(
+            &added_tool_variables(),
+            wanted_variables,
+            &read_user_variable,
+        );
+        apply_variable_changes(&variable_changes)?;
+        save_added_tool_variables(&owned_variables)?;
+
         if next != path {
+            // `write_path` avisa a las aplicaciones del cambio de entorno, que
+            // incluye también las variables recién escritas.
             write_path(&next, kind)?;
+        } else if !variable_changes.is_empty() {
+            broadcast_environment_change();
+        }
+        if next != path || !variable_changes.is_empty() {
             log_info!(
-                "Carpetas de herramientas de WTerminal en el PATH del usuario",
-                serde_json::json!({ "dirs": added })
+                "Carpetas y variables de herramientas de WTerminal en el entorno del usuario",
+                serde_json::json!({ "dirs": added, "variables": owned_variables })
             );
         }
         save_added_tool_bins(&added)
@@ -637,7 +785,10 @@ mod host {
     /// En Linux las carpetas de herramientas van, por ahora, solo delante en
     /// el PATH de WTerminal: el bloque gestionado de los perfiles de shell solo
     /// añade `~/.local/bin`.
-    pub fn sync_tool_bins(_desired: &[PathBuf]) -> Result<(), String> {
+    pub fn sync_tool_bins(
+        _desired: &[PathBuf],
+        _variables: &[(String, String)],
+    ) -> Result<(), String> {
         Ok(())
     }
 
@@ -673,7 +824,10 @@ mod host {
         Ok(())
     }
 
-    pub fn sync_tool_bins(_desired: &[std::path::PathBuf]) -> Result<(), String> {
+    pub fn sync_tool_bins(
+        _desired: &[std::path::PathBuf],
+        _variables: &[(String, String)],
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -702,6 +856,84 @@ pub fn path_integration_set(enabled: bool) -> Result<PathIntegrationStatus, Stri
 
 #[cfg(test)]
 mod tests {
+    use super::{tool_variable_changes, VariableChange};
+
+    fn pair(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn publica_la_variable_que_necesita_su_bin_y_la_apunta_como_propia() {
+        let desired = [pair(
+            "PYTHONUSERBASE",
+            r"E:\WTerminal\entornos\herramientas\python",
+        )];
+        let (changes, owned) = tool_variable_changes(&[], &desired, &|_| None);
+        assert_eq!(
+            changes,
+            vec![VariableChange::Set(
+                "PYTHONUSERBASE".into(),
+                r"E:\WTerminal\entornos\herramientas\python".into()
+            )]
+        );
+        assert_eq!(owned, desired.to_vec());
+        // Ya escrita: idempotente (sin cambios, sigue siendo propia).
+        let (changes, again) = tool_variable_changes(&owned, &desired, &|_| {
+            Some(r"e:\wterminal\entornos\herramientas\python\".into())
+        });
+        assert!(changes.is_empty());
+        assert_eq!(again, owned);
+    }
+
+    #[test]
+    fn nunca_pisa_ni_borra_la_variable_del_usuario() {
+        let desired = [pair(
+            "PYTHONUSERBASE",
+            r"E:\WTerminal\entornos\herramientas\python",
+        )];
+        let user = |_: &str| Some(r"D:\mi-python".to_string());
+        let (changes, owned) = tool_variable_changes(&[], &desired, &user);
+        assert!(changes.is_empty());
+        assert!(owned.is_empty());
+        // Igual valor pero puesto por el usuario: no se apunta como propio,
+        // así que apagar la integración no se lo quita.
+        let same = |_: &str| Some(r"E:\WTerminal\entornos\herramientas\python".to_string());
+        let (_, owned) = tool_variable_changes(&[], &desired, &same);
+        assert!(owned.is_empty());
+        // Era nuestra, pero el usuario la cambió a mano: no se toca al quitarla.
+        let previous = [pair(
+            "PYTHONUSERBASE",
+            r"E:\WTerminal\entornos\herramientas\python",
+        )];
+        let (changes, owned) = tool_variable_changes(&previous, &[], &user);
+        assert!(changes.is_empty());
+        assert!(owned.is_empty());
+    }
+
+    #[test]
+    fn retira_la_propia_al_apagar_y_la_actualiza_si_cambia_la_raiz() {
+        let old = r"E:\WTerminal\entornos\herramientas\python";
+        let previous = [pair("PYTHONUSERBASE", old)];
+        let current = |_: &str| Some(old.to_string());
+        let (changes, owned) = tool_variable_changes(&previous, &[], &current);
+        assert_eq!(
+            changes,
+            vec![VariableChange::Remove("PYTHONUSERBASE".into())]
+        );
+        assert!(owned.is_empty());
+
+        let moved = [pair("PYTHONUSERBASE", r"F:\entornos\herramientas\python")];
+        let (changes, owned) = tool_variable_changes(&previous, &moved, &current);
+        assert_eq!(
+            changes,
+            vec![VariableChange::Set(
+                "PYTHONUSERBASE".into(),
+                r"F:\entornos\herramientas\python".into()
+            )]
+        );
+        assert_eq!(owned, moved.to_vec());
+    }
+
     #[test]
     fn habilita_automaticamente_salvo_que_el_usuario_lo_haya_deshabilitado() {
         assert!(super::should_auto_enable(None, false));
@@ -733,8 +965,11 @@ mod tests {
         assert!(none.is_empty());
         // Una que el usuario ya tenía (otra grafía) no se apunta ni se quita.
         let user = r"c:/E/Herramientas/npm/";
-        let (with_user, ours) =
-            super::path_with_tool_bins(&format!(r"C:\Windows;{user}"), &[], &[npm.clone()]);
+        let (with_user, ours) = super::path_with_tool_bins(
+            &format!(r"C:\Windows;{user}"),
+            &[],
+            std::slice::from_ref(&npm),
+        );
         assert_eq!(with_user, format!(r"C:\Windows;{user}"));
         assert!(ours.is_empty());
         let (kept, _) = super::path_with_tool_bins(&with_user, &ours, &[]);

@@ -208,6 +208,23 @@ explícito `npm run dist:win:installer` generan un NSIS con el instalador
 offline de WebView2 incluido y lo publican como
 `release/WTerminal-<versión>-x64-setup.exe`. Es la opción recomendada
 para equipos recortados, instalaciones limpias o despliegues sin Internet.
+El asistente lleva el icono y las imágenes de WTerminal (barra lateral de
+bienvenida y final, cabeceras del instalador y del desinstalador, en
+`src-tauri/windows/installer/`, generadas con
+`scripts/generate-installer-art.ps1`) y pregunta el idioma al empezar: español,
+inglés, francés, alemán, italiano, portugués, ruso, ucraniano, árabe,
+japonés, coreano o chino. Al desinstalar, el propio `wterminal.exe`
+(`--wterminal-uninstall-cleanup`, `platform::uninstall_cleanup`) deshace lo que
+registró en el perfil del usuario: su carpeta y las `bin` de herramientas que
+añadió al PATH de HKCU, los menús «Abrir con WTerminal», App Paths, el
+protocolo `wterminal://` y la marca RUNASADMIN; antes quedaban apuntando a un
+ejecutable borrado. La casilla **Borrar los datos de la aplicación** borra
+además `%APPDATA%\wterminal` (ajustes y registros) y `%LOCALAPPDATA%\WTerminal`
+(carpeta propia de fábrica, perfil de Clink y caché del portable); una carpeta
+propia movida a otra ruta no se toca. En una actualización (`/UPDATE`) no se
+deshace nada (`src-tauri/windows/installer/hooks.nsh`).
+`scripts/capture-installer-pages.ps1` recorre el asistente de forma visible y
+captura cada página del instalador y del desinstalador.
 
 **Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
 
@@ -223,11 +240,14 @@ Linux, bajo `~/.local/share/LTerminal/entornos`), por categorías:
 | Modelos de IA | `ia\` | `HF_HOME`; `OLLAMA_MODELS` solo si aún no hay modelos en la carpeta de siempre de Ollama | activa |
 | Herramientas y lenguajes nuevos | `herramientas\` | `npm_config_prefix`, `CARGO_INSTALL_ROOT`, `GOBIN`, `PYTHONUSERBASE`, y su carpeta de programas delante en el PATH de WTerminal y, con la integración con el PATH, también en el del usuario | activa |
 | Historial de los REPL | `historial\` | `NODE_REPL_HISTORY`, `PYTHON_HISTORY` (3.13+), `SQLITE_HISTORY`, `PSQL_HISTORY` | activa |
+| Toolchains completas | `toolchains\` | `RUSTUP_HOME`, `CARGO_HOME` (con su `bin`), `GOPATH` (con su `bin`), `GRADLE_USER_HOME`, `DOTNET_CLI_HOME`, `ANDROID_USER_HOME`; cada una solo si no existe ya su carpeta de siempre (`~\.rustup`, `~\.cargo`, `~\go`…) | apagada |
+| Proyectos de GitHub | `proyectos\<propietario>\<repositorio>` | Carpeta de Proyectos de fábrica (`projects::github::projects_folder`) si no elegiste otra en Ajustes; los que ya tenías en Documentos no se mueven | apagada |
+| Programas (WinGet y Chocolatey) | `programas\<id>` | `WTERMINAL_PROGRAMS`: las acciones «Instalar» de WinGet añaden `--location`; Chocolatey va a `programas\chocolatey` (sus paquetes, en su `lib\`) y sus herramientas sueltas a `programas\chocolatey-tools` | activa |
 
 WTerminal exporta esas variables estándar solo a los procesos que lanza
 (pestañas y sondas de detección): no toca las variables del sistema, respeta
 las que el usuario ya tenga definidas y **nunca mueve nada ya instalado**. De
-fábrica se centralizan las cinco categorías:
+fábrica se centralizan todas menos «Toolchains completas», que va apagada:
 
 - **Herramientas y lenguajes nuevos** cambia dónde se instala lo nuevo. Lo que
   ya tenías sigue donde estaba y se sigue detectando. Las carpetas `bin`
@@ -245,6 +265,33 @@ fábrica se centralizan las cinco categorías:
   propia, que es la que se usa dentro de WTerminal.
 - **Historial de los REPL** separa el historial de los intérpretes abiertos
   desde WTerminal del que tengas fuera.
+- **Toolchains completas** instala rustup, cargo, Go, Gradle, .NET o el perfil
+  de Android en la carpeta propia, pero solo los que aún no tenías en su sitio
+  de siempre (`toolchain_preinstalled`): con la variable apuntando a una
+  carpeta vacía, lo ya instalado dejaría de verse. Fuera de WTerminal no se ven
+  salvo que definas esas variables en tu usuario.
+- **Programas (WinGet y Chocolatey)**, activa de fábrica, lleva también los
+  programas a la carpeta propia: cada acción «Instalar» del catálogo pasa por
+  `centralized_install`, que añade `--location <carpeta>\programas\<id>` a
+  WinGet (Git, Node, Python, los editores…). Chocolatey se instala en
+  `programas\chocolatey` (`ChocolateyInstall`), donde quedan sus paquetes
+  portables, y sus herramientas sueltas en `programas\chocolatey-tools`
+  (`ChocolateyToolsLocation`), salvo que ya tengas esas variables. A sus
+  paquetes no se les pasa `--install-directory`: es una opción de las
+  ediciones de pago y la libre rechaza la orden entera (comprobado en la VM);
+  si uno trae un instalador que va a Program Files, se ofrece moverlo como con
+  WinGet.
+  Muchos instaladores lo respetan; los que no (en la VM con todo el catálogo:
+  Octave, el SDK de .NET, Julia, Swift, MySQL, mongosh o la caché de paquetes
+  de LM Studio) acaban en Program Files o en `%LOCALAPPDATA%\Programs`. La
+  acción compara esas carpetas antes y después, dice dónde quedó y pregunta si
+  moverlo a la carpeta propia: con «s» lo mueve con `robocopy /MOVE` en una
+  PowerShell elevada (un aviso de UAC) y deja una **unión** en su sitio, así
+  que las rutas, los accesos directos, los servicios y «Aplicaciones
+  instaladas» siguen funcionando; si algo está en uso, lo devuelve a su sitio
+  en vez de dejarlo partido. Lo ya instalado no se mueve, y la detección
+  encuentra estos programas por WinGet y por la carpeta que registran en
+  «Aplicaciones instaladas». Sin la categoría, la orden es la de siempre.
 
 Con Ollama hay un matiz: los modelos los guarda su servidor, que suele
 arrancar la aplicación de Ollama fuera de WTerminal con su propia carpeta. Por
@@ -266,8 +313,14 @@ siempre se mide una vez y se reutiliza 10 minutos (`cached_system_size`), igual
 que el de las ubicaciones externas: recorrer `~\.cargo` o el npm global
 tardaba de 7 a 11 s en cada apertura de Ajustes y, como el comando retiene su
 hilo mientras mide, varias aperturas seguidas dejaban el guardado automático
-esperando. Las cachés de la carpeta propia se miden siempre en el momento. Los
-tres comandos de esta sección (`toolchain_store_status`,
+esperando. Las carpetas que define el usuario con su variable siguen la misma
+regla. Las cachés de la carpeta propia se miden siempre en el momento. Ajustes
+espera como mucho 3 s a todas esas mediciones (`STATUS_MEASURE_BUDGET`): con
+las variables apuntando a carpetas grandes (en la VM con todo el catálogo,
+GOPATH, `pip --user` con PyTorch y TensorFlow o el npm global) medirlas pasaba
+de 20 s y la lista no salía; lo que no termina se ve como «…» (`measuring`) y
+la medición sigue en segundo plano para la siguiente apertura o «Recalcular».
+Los tres comandos de esta sección (`toolchain_store_status`,
 `toolchain_store_external_sizes` y `toolchain_store_clear_caches`) son `async`
 y miden en `spawn_blocking`: la primera medición externa pasa del minuto en
 frío y cada apertura de Ajustes pedía otra que esperaba a la anterior dentro
@@ -790,7 +843,8 @@ build.
 Los enlaces que solo son destinos informativos de una acción de usuario se
 comprueban igualmente, pero están marcados como no bloqueantes: por ejemplo,
 `www.codeweavers.com` se abre en el navegador y no aporta ningún archivo al
-binario. Si ese tercero responde con timeout/5xx, el informe muestra un aviso y
+binario, y `ffmpeg.org` solo aparece en el mensaje que pide instalar ffmpeg a
+mano (el builder lo instala con WinGet). Si ese tercero responde con timeout/5xx, el informe muestra un aviso y
 la build estricta continúa; una URL que sí sea fuente o dependencia de build
 sigue siendo un fallo estricto.
 
@@ -800,6 +854,13 @@ dominios reservados para ejemplos y pruebas (`example.com`, `example.net`,
 fragmentos sin dominio completo (`https://ex`, `https://xn--`) con los que los
 tests de enlaces clicables trocean una URL. `scripts/verify-links.mjs`
 comprueba esas reglas al arrancar.
+
+Cada URL HTTP se prueba con HEAD y GET en dos intentos de 8 s
+(`LTERMINAL_LINK_CHECK_TIMEOUT_MS`, `LTERMINAL_LINK_CHECK_RETRIES`). Si todos
+agotan el plazo, un último GET con el triple de plazo decide antes de dar la
+URL por caída: un servidor lento (ffmpeg.org tardó más de 8 s una vez y paró
+una build de release en la VM) ya no detiene la build, y una URL caída de
+verdad sigue fallando.
 
 Si el equipo está temporalmente sin DNS o sin acceso a Internet, se puede
 comprobar y compilar con `LTERMINAL_LINK_CHECK=warn npm run check` o anteponer
@@ -876,13 +937,23 @@ builds para incrustarlas en el actualizador. Los builders locales aceptan
 `~/.ssh/lterminal-release-signing` y, por compatibilidad con `Tools`,
 `~/.ssh/ltools-release-signing`.
 
-En una máquina de desarrollo, `linux/build.sh` y `windows/build.ps1` cargan
-automáticamente esas dos claves desde `~/.config/lterminal/` (o desde
-`%USERPROFILE%\.config\lterminal\` en Windows), siempre que no se hayan
-proporcionado ya mediante variables de entorno. Windows también acepta el
-Escritorio como fallback para las copias locales habituales. Se puede cambiar
-la ubicación con `LTERMINAL_SIGNING_PRIVATE_KEY_FILE` y
-`LTERMINAL_UPDATE_PUBLIC_KEY_FILE`. En CI no se usa este fallback local: el
+En Windows las claves de una build local están en **una sola carpeta**, que
+se indica en cada build: `windows/build.ps1 -KeysDir <carpeta>` o, sin él,
+la pregunta del principio (Enter acepta la última usada, guardada en
+`%LOCALAPPDATA%\WTerminalBuild\keys-dir.txt`, fuera de la carpeta que borra el desinstalador, o `Escritorio\Claves SSH`; `-`
+genera la release sin firmar). Como el menú `build-tools/build.ps1` lanza el
+builder con `-NonInteractive`, la pregunta la hace el menú y le pasa
+`-KeysDir`. Dentro de la carpeta, y de su subcarpeta `.ssh`, se buscan
+`release-signing-private.pem`, `release-signing-public.hex` y
+`lterminal-release-signing` / `ltools-release-signing` (con su `.pub`), y la
+build dice cuáles encontró. El builder ya no rebusca claves por su cuenta en
+el perfil, el Escritorio o Documentos, donde podía recoger una clave antigua
+sin avisar. Con `-NonInteractive` y sin `-KeysDir` la release sale sin firmar
+(o falla si `LTERMINAL_REQUIRE_SIGNING=1`). `linux/build.sh` acepta igual
+`--keys-dir <carpeta>`; sin él sigue cargando las claves desde
+`~/.config/lterminal/` y `~/.ssh/`. Las variables
+`LTERMINAL_SIGNING_PRIVATE_KEY_FILE`, `LTERMINAL_UPDATE_PUBLIC_KEY_FILE` y
+`LTERMINAL_SSH_SIGNING_*` mandan siempre sobre la carpeta. En CI no se usa este fallback local: el
 workflow debe entregar los secretos mediante Actions. La build no afirma que
 una firma es válida hasta verificarla con la clave pública, y elimina una firma
 antigua si se intenta generar una build sin material de firma.
@@ -920,6 +991,10 @@ nativo.
 | WebKitGTK (Linux) | Su ausencia son cientos de líneas de error de enlazado a mitad de la compilación. |
 | Solo el artefacto esperado | Un `.deb` que se cuele acabaría publicado en una release sin que nadie lo haya probado. |
 | Comprobación de humo | Que compile no significa que arranque. |
+| Release al día (menú `build-tools/build.ps1`) | Al abrir el menú se compara `release\SHA256SUMS.txt` con los archivos de la app (`src`, `src-tauri`, configuración): si hay alguno más nuevo, avisa de que la release es anterior a los cambios y conviene recompilar antes de probarla o publicarla. |
+| Espacio libre en la unidad del repositorio (Windows) | Por debajo de 5 GB la build se detiene con un mensaje claro; por debajo de 12 GB avisa. Antes se quedaba sin disco a mitad y fallaba con un `os error 112` que no decía la causa. |
+| Pruebas con depuración ligera (Windows) | Durante `npm run check` se compila con `CARGO_PROFILE_DEV_DEBUG=line-tables-only` y `CARGO_INCREMENTAL=0` (salvo que ya vengan definidas): los pánicos siguen dando archivo y línea, y `target\debug` ocupa unos pocos GB en vez de más de 8. |
+| Linker, 7-Zip y ffmpeg (Windows) | `rust-lld` solo se usa si hay bibliotecas del SDK y del CRT; si no, se instalan las Build Tools. 7-Zip (para sacar WebView2 del NSIS) y ffmpeg (vídeo del E2E) se instalan al principio si faltan, no a mitad de build. |
 
 ## Arquitectura
 
@@ -1425,6 +1500,33 @@ se repite una vez. El log registra `Inventario de WinGet`, `Inventario de
 ecosistemas`, las acciones sin confirmar por origen (`Catalogo de acciones
 preparado`, `Catálogo de Dependencias entregado`) y las familias lentas.
 
+Las sondas `powershell:` del catálogo (AutoHotkey, MSYS2, GHCup, Clink,
+PSReadLine, QEMU, VirtualBox, Hyper-V, Virtual Machine Platform y Windows
+Sandbox) se resuelven en la pasada completa con **un único**
+`powershell.exe` (`batch_powershell_probes`): cada sonda corre en su propio
+bloque, su `exit 0`/`exit 1` se convierte en `return` y el proceso escribe
+`__wterminal_probe_<n>=<código>`; un error dentro de una sonda cuenta como
+`1`, igual que con la sonda suelta. Antes era un proceso por sonda y el mayor
+gasto de CPU de la detección al arrancar. Solo se agrupan las sondas cuyo
+`exit` es de primer nivel (`powershell_batchable`; un test exige que todas las
+del catálogo lo cumplan); si el proceso único falla o agota sus 20 s, cada
+sonda vuelve a su proceso individual. Las comprobaciones de familia, que traen
+pocas acciones, siguen usando la sonda suelta. El log registra `Sondas de
+PowerShell agrupadas` con el número de sondas, las resueltas y los ms.
+
+AutoHotkey, Clink, QEMU, VirtualBox y MSYS2 se pueden instalar en cualquier
+carpeta (`winget --location`, o la que se elija en su instalador) y entonces
+no están en `Program Files` ni en el PATH. Sus sondas, sus órdenes de versión
+y las acciones de MSYS2 (pacman, GCC, OCaml) buscan también la carpeta que el
+instalador registró en «Aplicaciones instaladas»: las claves `Uninstall` de
+HKLM, de su vista de 32 bits y de HKCU, con `InstallLocation` o, si falta, la
+carpeta de `DisplayIcon` (macro `registered_install_dirs!` en
+`packages/actions.rs`; las claves se leen una vez por proceso y en el proceso
+único de sondas las comparten todas). Las pestañas de cmd aplican la misma
+regla para encontrar `clink.bat` (`shell_assist::registered_install_dirs`).
+Se comprobó en la VM con todo el catálogo instalado en `E:\`: sin esto, las
+cinco herramientas salían como no instaladas.
+
 ### Inventario del frontend
 
 | Archivo | Responsabilidad y conexiones |
@@ -1560,6 +1662,8 @@ preparado`, `Catálogo de Dependencias entregado`) y las familias lentas.
 | `src-tauri/src/projects/commands.rs` | IPC de proyectos, favoritos, descarga, CD y ejecución. |
 | `src-tauri/src/projects/github.rs` | Cliente HTTP, catálogos y metadatos GitHub. |
 | `src-tauri/src/projects/gh_cli.rs` | «Mi GitHub»: sesión y repositorios de la cuenta con GitHub CLI (`gh api user`, `gh repo list/create/edit/archive/unarchive/rename/delete`) con argumentos fijos y validados (`valid_new_repo_name`, `create_args`, `change_args`…), solo sobre repositorios del último listado (`OWN_REPOSITORIES`); `gh auth setup-git` una vez con sesión. Login, logout y el permiso `delete_repo` van a una pestaña visible (`projects::commands::github_cli_terminal`). |
+| `src-tauri/src/projects/gh_code.rs` | «Gestionar…» → Código de «Mi GitHub» con `gh api`: archivos y carpetas por rama (`contents`), commits con sus cambios, comparar ramas o etiquetas, y listar, crear y borrar ramas (nunca la rama por defecto, confirmando el nombre). Rutas fijas con parámetros validados (`encode_repo_path`, `valid_ref_name`), respuestas saneadas y recortadas (`parse_*`) y solo repositorios del listado (`gh_cli::own`). |
+| `src-tauri/src/projects/gh_work.rs` | «Gestionar…» de «Mi GitHub», fase de trabajo diario: ver una issue o PR con descripción, etiquetas, comentarios y archivos (`gh issue|pr view --json`), comentar, cerrar y reabrir, PR de borrador a lista (`gh pr ready`) y revisiones (`gh pr review --approve|--request-changes`), issues por estado y el log de lo que falló en Actions (`gh run view --log-failed`, sin colores y recortado por el final) o cancelar una ejecución. Argumentos fijos y validados, solo repositorios de la cuenta. |
 | `src-tauri/src/projects/gh_manage.rs` | «Gestionar…» de «Mi GitHub» con `gh`: detalles (`gh repo view/edit`), releases (`gh release list/view/create/upload/edit/delete/delete-asset`), pull requests (`gh pr list/create/merge`), issues (`gh issue list/create/close`) y Actions (`gh run list/rerun`). Argumentos fijos y validados (`valid_ref_name`, `valid_topic`, `valid_homepage`, `valid_files`…), JSON saneado (`parse_*`) y solo repositorios del listado (`gh_cli::own`). |
 | `src-tauri/src/projects/git_local.rs` | Git en la copia local de un repositorio de la cuenta (`local_clone`: la carpeta la calcula el backend): estado (`parse_status`), commit de todo y ramas (`branch_args`: `switch -c`, `switch`, `branch -d`), sin preguntas (`GIT_TERMINAL_PROMPT=0`). Push, pull y publicar rama van a una pestaña visible (`commands::github_git_terminal` con `github::build_git_sync_command`). |
 | `src-tauri/src/updater/mod.rs` | Declara actualizador. |
@@ -1915,6 +2019,24 @@ completo de la misma build, con duración y segmentos correspondientes al E2E.
 
 #### Validación estandarizada
 
+Los E2E no dependen de lo que tenga instalado el equipo. Se comprobó en la VM
+con todo el catálogo instalado (75 programas de WinGet y más de 200
+herramientas de pip, npm, cargo, go, dotnet, gem y cabal):
+
+- el aviso «Hay actualizaciones disponibles… WinGet» no se consulta en pruebas
+  (`package_updates_check` con `LTERMINAL_E2E_TESTING=1`; una prueba que lo
+  necesite pone `LTERMINAL_E2E_PACKAGE_UPDATES=1`): en ventanas pequeñas
+  tapaba las casillas que mide `tiny-grow`;
+- `ai-environments` quita de su PATH las carpetas con un Claude Code u Ollama
+  reales, que si no ganaban a los simulados, y se las oculta también al PATH
+  persistente que la app vuelve a leer del registro
+  (`LTERMINAL_E2E_HIDDEN_PATH_DIRS`, solo con `LTERMINAL_E2E_TESTING=1`);
+- la descarga real (`downloads`) se salta los gestores cuya variable de caché
+  ya define el usuario (`userDefinedSkipped` en el informe): WTerminal respeta
+  su carpeta y no hay nada que comprobar en la propia;
+- los tests de Rust no suponen que falte una herramienta concreta (uno daba por
+  hecho que Busted no estaba instalado).
+
 `tests/e2e/suites.mjs` es el catálogo único de suites: `focused` (regresiones
 enfocadas: pie de Ajustes, Entornos y descargas, PATH, escribir tras
 redimensionar, entrada en cola, primera orden en pestañas nuevas ×3 y con la
@@ -1925,7 +2047,11 @@ comprueba qué se pide abrir sin lanzar el navegador, y la paleta de comandos,
 `command-palette`, que la maneja con el teclado y comprueba el efecto de cada
 acción, y los permisos de administrador, `admin-permissions`, que recorre
 también la ruta de NSudo a través de un gsudo simulado sin pedir nunca el
-UAC), `full`, `video`, `downloads` (descarga real,
+UAC; además la sugerencia de importar repositorios al hacer `cd`,
+`import-suggestion`; el tamaño de la interfaz al 80–200 % con sus atajos,
+`ui-scale`; la sugerencia del modo de bajo consumo en un equipo de 2 hilos
+simulado, `low-power`; y el banner con fastfetch en cmd, PowerShell y Git Bash
+a varios tamaños, `fastfetch-matrix`), `full`, `video`, `downloads` (descarga real,
 necesita red), `dependency-audit` e `installer`. `scripts/run-e2e-suite.mjs` las ejecuta
 contra cualquier binario mediante `tests/e2e/run-scenario.mjs` (salida, informe
 y log por escenario, límite de tiempo que mata el árbol de procesos) y escribe
@@ -1970,6 +2096,8 @@ instalador.
 | `tests/e2e/windows-path-guard.mjs` | Copia y restauración exacta del PATH del usuario y del estado de la integración (HKCU). |
 | `tests/e2e/powershell-env.mjs` | Quita el `PSModulePath` heredado de PowerShell 7 (`dropPowerShell7ModulePath`, `windowsPowerShellEnvironment`) para que los `powershell.exe` 5.1 que lanzan las pruebas carguen sus propios módulos. |
 | `scripts/test-installer.mjs`, `windows/test-installer-elevated.ps1` | Prueba real del instalador NSIS: instala con un UAC, verifica, E2E sobre lo instalado (con vídeo si la suite `video` va en la misma ejecución) y desinstala. |
+| `scripts/capture-installer-pages.ps1` | Pasada visible del instalador y del desinstalador NSIS: se eleva si hace falta, avanza cada página con su botón por defecto (id 1) y guarda una captura PNG por página en la carpeta indicada, más `pages.json`. Complementa la instalación silenciosa de `test-installer.mjs`. |
+| `scripts/generate-installer-art.ps1` | Genera `src-tauri/windows/installer/*.bmp` (barra lateral y cabeceras del asistente NSIS) a partir del icono y los colores del tema de fábrica. Se ejecuta a mano si cambian. |
 | `scripts/test-e2e-suite.mjs` | Prueba sin app del catálogo de suites, el ejecutor y la comparación de binarios del instalador. |
 | `scripts/prepare-e2e-shell-tools.mjs` | Solo para `E2E_SHELL_ASSIST_ONLY`: descarga a `artifacts/e2e-tools` (ignorado por git) Clink portable y el PSReadLine actual con versión y SHA-256 fijados, comprueba la firma de Microsoft de PSReadLine y los reutiliza; el smoke los pone delante en `PATH` y `PSModulePath`. No instala nada. |
 | `scripts/test-single-file-portable.mjs` | Prueba sin app del empaquetador del portable de un solo `.exe`: formato, contenido, alteraciones y contrato con `single_file.rs`. |
@@ -3141,6 +3269,31 @@ cualquier orden. `Esc` vacía el filtro sin cerrar el panel.
 HTTPS exacta de `github.com`. Se rechazan SSH, `git://`, hosts alternativos,
 credenciales embebidas, puertos y segmentos adicionales.
 
+Las consultas son las públicas de la API (60 por hora). Cuando se agotan
+(GitHub responde 403 con el contador a cero, o 429) y `gh` tiene sesión,
+WTerminal repite la misma ruta con `gh api --include` y la cabecera dice
+«con tu sesión de GitHub: quedan N» (5.000 por hora; las búsquedas, 30 por
+minuto). WTerminal nunca lee ni guarda el token: la consulta la hace `gh`
+(`github::request_via_gh`). **Ajustes › Comportamiento › Secciones visibles ›
+Consultas de Explorar GitHub** elige *al agotarse* (de fábrica), *siempre* o
+*nunca* (`githubSessionMode`). En los E2E, que apuntan a una API local, nunca
+se usa `gh`.
+
+**Descargados** lista lo clonado en la carpeta de proyectos y, además, los
+repositorios **importados**: **Importar…** acepta la carpeta de un repositorio
+(o su `.git`) que ya tengas clonado en otro sitio, sube hasta encontrar `.git`
+(también un worktree, donde `.git` es un archivo), lee `origin` y lo enlaza
+como `propietario/nombre`. No copia ni mueve nada: se guarda la ruta en
+`importedRepositories` y **Quitar de la lista** solo la olvida. Las acciones
+(`cd`, actualizar, Gestionar…) resuelven la carpeta en el backend a partir de
+lo guardado (`github::local_repository_state`), nunca de una ruta que mande el
+panel. Si una pestaña entra (`cd`) en un repositorio de GitHub que no está ni
+clonado ni importado, abajo aparece «¿Añadirlo a Proyectos?» con **Importar…**
+y **No volver a sugerir** (`dismissedRepositories`); sale solo cuando no hay
+otro aviso abajo y se apaga en **Ajustes › Comportamiento › Sugerir importar
+repositorios** (`suggestRepositoryImport`). Hoy solo se importan repositorios
+con un `origin` de GitHub.
+
 **Release** (en «⋯» de cada repositorio) abre la última release y sus adjuntos
 bajo la fila de ese repositorio. Se cierra con «✕», pulsando **Release** otra
 vez, al plegar la fila, al abrir la de otro repositorio, al buscar o al
@@ -3174,10 +3327,19 @@ La cuarta pestaña del panel trabaja con tu cuenta a través de **GitHub CLI**
 - **Nuevo repositorio**: nombre, descripción, privado o público, README
   inicial y, si se quiere, clonarlo en la carpeta de proyectos.
 - **Gestionar…** (en «⋯» de cada repositorio de la cuenta) abre bajo su fila
-  una ficha con seis secciones (`GithubRepoManager.svelte`):
+  una ficha con siete secciones (`GithubRepoManager.svelte`):
   - **Detalles**: descripción, web, temas, rama por defecto, issues y wiki
     (`gh repo view` para leerlos, `gh repo edit` para guardarlos; solo se
     añaden y quitan los temas que cambian).
+  - **Código** (`projects/gh_code.rs`, con `gh api`): **Archivos** de
+    cualquier rama o etiqueta (carpetas primero, abrir un archivo de texto;
+    los binarios se abren en GitHub y los grandes se recortan a 512 KB),
+    **Commits** de la rama con los cambios de cada uno y **Comparar** dos
+    ramas o etiquetas, **Ramas** (crear desde la actual u otra, borrar
+    escribiendo su nombre; nunca la rama por defecto) y **Etiquetas**. Las
+    rutas del repositorio se validan y se codifican segmento a segmento
+    (`encode_repo_path`: sin `..`, sin segmentos vacíos ni caracteres de
+    control).
   - **Releases**: la lista (`gh release list`), **Nueva release** con
     etiqueta, título, notas o notas automáticas, borrador, prerelease, rama de
     destino y **adjuntos** elegidos con el selector o pegando su ruta (`gh
@@ -3193,9 +3355,16 @@ La cuarta pestaña del panel trabaja con tu cuenta a través de **GitHub CLI**
     (`commands::github_git_terminal`).
   - **Pull requests**: las abiertas, **Fusionar** (squash, merge o rebase, y
     borrar la rama) y **Nueva pull request** hacia la rama por defecto.
-  - **Issues**: crear y cerrar.
-  - **Actions**: las últimas ejecuciones y **Relanzar lo que falló** (`gh run
-    rerun --failed`).
+    **Ver** despliega la descripción, las etiquetas, los comentarios y los
+    archivos que cambia; desde ahí se comenta, se cierra o reabre, se pasa
+    de borrador a **lista para revisar** y se **aprueba** o se **piden
+    cambios** (con texto obligatorio) (`projects/gh_work.rs`).
+  - **Issues**: abiertas, cerradas o todas; crear, cerrar y, con **Ver**,
+    leer los comentarios, comentar y reabrir.
+  - **Actions**: las últimas ejecuciones, **Relanzar lo que falló** (`gh run
+    rerun --failed`), **Ver log** de los pasos que fallaron (sin colores y
+    recortado a los últimos 60 000 caracteres, que es donde está el error) y
+    **Cancelar** las que siguen en cola o en marcha.
 - **Cerrar sesión** (`gh auth logout`) también va a la terminal, porque `gh`
   pide confirmación.
 
@@ -3652,7 +3821,12 @@ editarlos, ejecutar
 | `terminalScrollback` | 1000–100000 | `5000` |
 | `fastfetchColor` | `#rrggbb` | color del banner de información del sistema |
 | `terminalCursorColor` | `#rrggbb` | color del cursor |
-| `uiDensity` | `comfortable`, `compact` | `comfortable` |
+| `uiDensity` | `comfortable`, `compact`: separaciones y margen mínimo de cada control respecto al borde de su panel (`--space-min`: 8 px en cómoda, 4 px en compacta, nunca 0) | `comfortable` |
+| `uiScale` | 80–200 (%): tamaño de barra, pestañas, explorador, avisos, paleta y contenido de los paneles; las casillas de terminal no se escalan. Atajos `Ctrl+Alt+=`, `Ctrl+Alt+-`, `Ctrl+Alt+0` y paleta | `100` |
+| `githubSessionMode` | `onExhausted`, `always`, `never`: cuándo usar la sesión de `gh` en Explorar GitHub | `onExhausted` |
+| `suggestRepositoryImport` | booleano: sugerir importar el repositorio de GitHub de la carpeta de una pestaña | `true` |
+| `lowPowerMode` | booleano: modo de bajo consumo. La precarga del catálogo de Dependencias no se hace al arrancar (se construye al abrir el panel), la comprobación de actualizaciones de WinGet espera dos minutos y las sondas de ecosistema van de una en una. Se aplica en el siguiente arranque | `false` |
+| `lowPowerSuggest` | booleano: sugerir abajo el modo de bajo consumo cuando el equipo tiene 2 hilos de CPU o menos, menos de 8 GB de memoria, o la primera pestaña tarda más de 8 s en dar el prompt (una vez por sesión; «No volver a sugerir» lo apaga) | `true` |
 | `showSystemBanner` | booleano | `true` |
 | `bannerHiddenItems` | lista de campos | `host,kernel,environment,motherboard,gpu,storage,datetime` (**Solo esencial**, 5–8 líneas) |
 | `bannerImage` | booleano: imagen a la izquierda del banner | `true` |
@@ -3674,6 +3848,7 @@ editarlos, ejecutar
 | `toolchainStoreDir` | ruta absoluta o vacía (la de fábrica) | `""` |
 | `toolchainStoreDownloads`, `toolchainStoreAiModels` | booleanos: categorías activas de la carpeta propia | `true` |
 | `toolchainStoreTools`, `toolchainStoreReplHistory` | booleanos: herramientas nuevas (con sus `bin` en el PATH) e historial de los REPL en la carpeta propia | `true` |
+| `toolchainStoreToolchains` | booleano: toolchains completas (rustup, cargo, GOPATH, Gradle, .NET, Android) en la carpeta propia, solo si no estaban instaladas | `false` |
 
 **Temas.** Hay 15, agrupados por color y con al menos dos variantes cada uno
 (`THEME_FAMILIES` en `config/preferences.rs`, que un test mantiene: cada tema

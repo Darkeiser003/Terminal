@@ -202,7 +202,22 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
         }
     }
     let init_path = dir.join(format!("init-{}.{}", request.tab_id, script.ext));
-    if write_init_script(&init_path, request.env.kind, &script.content).is_err() {
+    let mut content = std::borrow::Cow::Borrowed(script.content.as_str());
+    if request.env.kind == crate::environments::ShellKind::Cmd {
+        let macro_path = dir.join(format!(
+            "macros-{}.{}",
+            request.tab_id,
+            alias_profiles::CMD_MACRO_EXT
+        ));
+        if let Some((init, macros)) =
+            alias_profiles::split_cmd_macros(&content, "\r\n", &macro_path.to_string_lossy())
+        {
+            if std::fs::write(&macro_path, macros).is_ok() {
+                content = std::borrow::Cow::Owned(init);
+            }
+        }
+    }
+    if write_init_script(&init_path, request.env.kind, &content).is_err() {
         log_warn!(
             "No se pudo escribir la inicializacion de la pestaña",
             serde_json::json!({ "tabId": request.tab_id })

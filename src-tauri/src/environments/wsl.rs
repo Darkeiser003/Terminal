@@ -38,8 +38,18 @@ const INSTALLED_CACHE: Duration = Duration::from_millis(10_000);
 /// WSL solo estaba frío — sin repetir la espera dentro de la misma operación.
 const FAILED_PROBE_CACHE: Duration = Duration::from_secs(30);
 /// Primera orden dentro de una distro: incluye arrancar la VM de WSL en frío.
-pub const FIRST_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-const RETRY_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Medido en una VM de 8 hilos: Ubuntu sola en frío tarda ~10 s; con siete
+/// distros arrancando a la vez, entre 11 y 46 s. 15 s dejaba todas «sin
+/// comprobar» bajo carga.
+pub const FIRST_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const RETRY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Distros sondeadas a la vez una vez arrancada la VM. WSL serializa buena
+/// parte del arranque de cada distro: lanzarlas todas juntas no acaba antes y
+/// hace que cada una agote su plazo esperando a las demás.
+const PROBE_CONCURRENCY: usize = 3;
+/// Inventario detallado (recorre PATH y gestores de versiones). Con la VM
+/// cargada, las distros con systemd tardaban más de los 12 s de antes.
+const DETAILED_LISTING_TIMEOUT: Duration = Duration::from_secs(30);
 const ONLINE_CACHE: Duration = Duration::from_secs(5 * 60);
 
 /// Si `wsl --list --online` no responde, se ofrecen al menos las distros
@@ -187,6 +197,11 @@ pub struct InstalledDistro {
     pub detailed: bool,
     /// La distro está instalada, pero WSL no respondió durante la sonda.
     pub probe_error: bool,
+    /// La login shell respondió, pero el inventario detallado no llegó a
+    /// tiempo. La distro está comprobada (el selector no la marca «sin
+    /// comprobar»), pero sus herramientas son desconocidas: el panel no
+    /// inventa instalaciones pendientes para ella.
+    pub listing_error: bool,
     /// Intérpretes presentes que el kernel no puede ejecutar (código 126,
     /// «Exec format error»): por ejemplo, el `node` de Ubuntu 24 en WSL 1.
     /// Siguen en `tools`, pero no se ofrecen como REPL.
@@ -203,6 +218,7 @@ impl InstalledDistro {
             tools: Vec::new(),
             detailed: false,
             probe_error: false,
+            listing_error: false,
             unrunnable: Vec::new(),
         }
     }
@@ -219,6 +235,7 @@ impl InstalledDistro {
             tools: Vec::new(),
             detailed: false,
             probe_error: true,
+            listing_error: false,
             unrunnable: Vec::new(),
         }
     }
@@ -386,6 +403,7 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
             tools: Vec::new(),
             detailed: false,
             probe_error: false,
+            listing_error: false,
             unrunnable: Vec::new(),
         };
     }
@@ -398,8 +416,11 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
     );
     let Some(listing) = run_wsl(
         &["-d", name, "--exec", "sh", "-lc", &listing_script],
-        Duration::from_secs(12),
+        DETAILED_LISTING_TIMEOUT,
     ) else {
+        // La shell ya respondió: la distro funciona aunque el inventario no
+        // llegara. Marcarla «sin comprobar» (como antes) la hacía parecer
+        // rota en el selector cuando la VM solo iba cargada.
         return InstalledDistro {
             name: name.to_string(),
             shells: vec![shell.clone()],
@@ -407,7 +428,8 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
             package_manager: None,
             tools: Vec::new(),
             detailed: false,
-            probe_error: true,
+            probe_error: false,
+            listing_error: true,
             unrunnable: Vec::new(),
         };
     };
@@ -459,6 +481,7 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
             .collect(),
         detailed: true,
         probe_error: false,
+        listing_error: false,
         unrunnable,
     }
 }
@@ -494,6 +517,12 @@ fn runnable_probe_script(executables: &[String]) -> String {
     [
         "if command -v timeout >/dev/null 2>&1; then".to_string(),
         user_path_prelude(),
+        // Igual que el inventario, sin el PATH de Windows (`/mnt/c/...`):
+        // cada `command -v` que falla recorre esas carpetas por 9P. Con 87
+        // entradas costaba 640 ms por intérprete ausente (7 ms sin ellas) y la
+        // sonda de una distro con bash superaba el minuto.
+        r#"wt_ifs="$IFS"; IFS=:; wt_linux_path=""; for wt_dir in $PATH; do case "$wt_dir" in /mnt/[A-Za-z]/*) ;; *) wt_linux_path="${wt_linux_path:+$wt_linux_path:}$wt_dir" ;; esac; done; IFS="$wt_ifs"; PATH="$wt_linux_path""#
+            .to_string(),
         format!("for wt_exe in {}; do", names.join(" ")),
         r#"wt_path=$(command -v "$wt_exe" 2>/dev/null) || continue"#.to_string(),
         r#"case "$(head -c 4 "$wt_path" 2>/dev/null)" in ?ELF) ;; *) continue ;; esac"#
@@ -665,7 +694,10 @@ pub fn get_wsl_context(options: ContextOptions) -> WslContext {
 /// tardar más en la primera activación en frío), no información útil.
 fn reusable_installed(cache: &CacheState, options: ContextOptions) -> Option<Vec<InstalledDistro>> {
     let entry = cache.installed.as_ref()?;
-    let has_probe_errors = entry.installed.iter().any(|distro| distro.probe_error);
+    let has_probe_errors = entry
+        .installed
+        .iter()
+        .any(|distro| distro.probe_error || distro.listing_error);
     let ttl = if has_probe_errors {
         FAILED_PROBE_CACHE
     } else {
@@ -719,23 +751,48 @@ fn rebuild_installed(cache: &CacheState, options: ContextOptions) -> Option<Vec<
 }
 
 /// Cada sonda entra en su distro y puede tardar segundos; en serie, cuatro
-/// distros bloquearían el arranque casi medio minuto.
+/// distros bloquearían el arranque casi medio minuto. Pero todas a la vez
+/// tampoco: en frío compiten por arrancar la VM y agotan el plazo.
+///
+/// La primera distro se sondea sola (paga el arranque de la VM) y el resto
+/// después, como mucho `PROBE_CONCURRENCY` a la vez. El plazo de cada sonda
+/// empieza a contar cuando le toca, no mientras espera turno.
 fn probe_all(names: &[String], detailed: bool) -> Vec<InstalledDistro> {
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = names
-            .iter()
-            .map(|name| scope.spawn(move || probe_distro(name, detailed)))
-            .collect();
-        handles
-            .into_iter()
-            .zip(names)
-            .map(|(handle, name)| {
-                handle
-                    .join()
-                    .unwrap_or_else(|_| InstalledDistro::failed(name))
-            })
-            .collect()
+    probe_all_with(names, PROBE_CONCURRENCY, |name| {
+        probe_distro(name, detailed)
     })
+}
+
+fn probe_all_with<F>(names: &[String], concurrency: usize, probe: F) -> Vec<InstalledDistro>
+where
+    F: Fn(&str) -> InstalledDistro + Sync,
+{
+    let Some((first, rest)) = names.split_first() else {
+        return Vec::new();
+    };
+    let probe_or_failed = |name: &str| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe(name)))
+            .unwrap_or_else(|_| InstalledDistro::failed(name))
+    };
+    let mut results = vec![probe_or_failed(first)];
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<InstalledDistro>>> =
+        rest.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..concurrency.max(1).min(rest.len()) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(name) = rest.get(index) else { break };
+                *slots[index].lock() = Some(probe_or_failed(name));
+            });
+        }
+    });
+    results.extend(slots.into_iter().zip(rest).map(|(slot, name)| {
+        slot.into_inner()
+            .unwrap_or_else(|| InstalledDistro::failed(name))
+    }));
+    results
 }
 
 fn fetch_online() -> Vec<OnlineDistro> {
@@ -762,6 +819,55 @@ fn fetch_online() -> Vec<OnlineDistro> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_all_sondea_la_primera_sola_y_limita_la_concurrencia() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let names: Vec<String> = (0..7).map(|i| format!("distro{i}")).collect();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let first_alone = AtomicUsize::new(usize::MAX);
+        let probed = probe_all_with(&names, 3, |name| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            if name == "distro0" {
+                first_alone.store(now, Ordering::SeqCst);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            active.fetch_sub(1, Ordering::SeqCst);
+            let mut distro = InstalledDistro::unprobed(name);
+            distro.shell = "bash".into();
+            distro
+        });
+        assert_eq!(
+            probed
+                .iter()
+                .map(|distro| distro.name.as_str())
+                .collect::<Vec<_>>(),
+            names.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            first_alone.load(Ordering::SeqCst),
+            1,
+            "la primera sonda arranca la VM sola"
+        );
+        assert!(peak.load(Ordering::SeqCst) <= 3);
+        assert!(probed.iter().all(|distro| !distro.probe_error));
+        assert!(probe_all_with(&[], 3, InstalledDistro::failed).is_empty());
+    }
+
+    #[test]
+    fn probe_all_convierte_un_panico_en_sonda_fallida() {
+        let names = vec!["ok".to_string(), "boom".to_string()];
+        let probed = probe_all_with(&names, 3, |name| {
+            if name == "boom" {
+                panic!("sonda rota");
+            }
+            InstalledDistro::unprobed(name)
+        });
+        assert!(!probed[0].probe_error);
+        assert!(probed[1].probe_error);
+    }
 
     fn utf16le(text: &str) -> Vec<u8> {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
@@ -877,6 +983,10 @@ mod tests {
         assert!(script.contains("timeout 3 sh -c 'exec \"$0\" --version'"));
         assert!(script.contains(&user_path_prelude()));
         assert!(script.contains("[ $? -eq 126 ]"));
+        // Sin el PATH de Windows: cada búsqueda fallida por /mnt cuesta ~0,6 s.
+        assert!(script.contains(r#"case "$wt_dir" in /mnt/[A-Za-z]/*) ;;"#));
+        let filter = script.find("wt_linux_path=\"\"").unwrap();
+        assert!(filter < script.find("for wt_exe in").unwrap());
         assert!(script.contains("printf 'wterminal-unrunnable:%s\\n'"));
         assert!(script.trim_end().ends_with("fi"));
         assert!(runnable_probe_script(&[]).is_empty());

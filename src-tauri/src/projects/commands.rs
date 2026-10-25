@@ -174,7 +174,16 @@ pub fn projects_state_get(state: State<'_, Arc<AppState>>) -> ProjectsState {
 /// entrar en él sin que el frontend mande una ruta suya.
 #[tauri::command(async)]
 pub fn projects_downloaded(state: State<'_, Arc<AppState>>) -> Vec<github::LocalRepository> {
-    let clonados = github::list_local_repositories(&github::projects_folder());
+    let mut clonados = github::list_local_repositories(&github::projects_folder());
+    // Los importados se añaden detrás de los clonados, sin repetir ninguno.
+    for imported in github::list_imported_repositories() {
+        if !clonados
+            .iter()
+            .any(|local| local.full_name.eq_ignore_ascii_case(&imported.full_name))
+        {
+            clonados.push(imported);
+        }
+    }
     let conocidos: Vec<github::Repository> = clonados
         .iter()
         .filter_map(|local| github::repository_from_full_name(&local.full_name))
@@ -185,6 +194,63 @@ pub fn projects_downloaded(state: State<'_, Arc<AppState>>) -> Vec<github::Local
         serde_json::json!({ "total": clonados.len() })
     );
     clonados
+}
+
+/// `projects:import`: enlaza un repositorio que ya está en el disco (la carpeta
+/// o su `.git`) para que aparezca en Descargados. No copia ni mueve nada.
+#[tauri::command(async)]
+pub fn projects_import(state: State<'_, Arc<AppState>>, path: String) -> ActionResult {
+    match github::import_repository(&path) {
+        Ok(entry) => {
+            if let Some(repository) = github::repository_from_full_name(&entry.full_name) {
+                state.remember_repositories(std::iter::once(&repository));
+            }
+            log_info!(
+                "Repositorio importado",
+                serde_json::json!({ "fullName": entry.full_name })
+            );
+            ActionResult::ok()
+        }
+        Err(github::ImportError::NotARepository) => ActionResult::failed_t(
+            "projects.importNotRepo",
+            "Esa carpeta no está dentro de un repositorio git.",
+        ),
+        Err(github::ImportError::NoGithubRemote) => ActionResult::failed_t(
+            "projects.importNoGithub",
+            "El repositorio no tiene un remoto origin de GitHub.",
+        ),
+        Err(github::ImportError::AlreadyKnown(_)) => ActionResult::failed_t(
+            "projects.importKnown",
+            "Ese repositorio ya está en Descargados.",
+        ),
+    }
+}
+
+/// `projects:forget`: quita un repositorio importado de la lista. La carpeta
+/// sigue en el disco tal cual.
+#[tauri::command(async)]
+pub fn projects_forget_imported(full_name: String) -> ActionResult {
+    if github::forget_imported_repository(&full_name) {
+        ActionResult::ok()
+    } else {
+        ActionResult::failed_t(
+            "projects.importNotFound",
+            "Ese repositorio no estaba importado.",
+        )
+    }
+}
+
+/// `projects:detect`: si la carpeta de una pestaña está dentro de un
+/// repositorio de GitHub desconocido, lo devuelve para sugerir importarlo.
+#[tauri::command(async)]
+pub fn projects_detect(cwd: String) -> Option<github::ImportedRepository> {
+    github::detect_unknown_repository(&cwd)
+}
+
+/// `projects:dismiss`: no volver a sugerir importar esa carpeta.
+#[tauri::command(async)]
+pub fn projects_dismiss_suggestion(path: String) {
+    github::dismiss_repository_suggestion(&path);
 }
 
 /// `projects:cd`: lleva la terminal a la carpeta de un repositorio clonado.

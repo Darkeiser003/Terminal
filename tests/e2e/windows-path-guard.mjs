@@ -53,6 +53,31 @@ export function sameWindowsPathSnapshot(left, right) {
     return JSON.stringify(left) === JSON.stringify(right);
 }
 
+/**
+ * Qué cambió entre dos copias, en una línea: entradas del PATH añadidas y
+ * quitadas, tipo del valor y estado de la integración. Sin esto, «el PATH
+ * cambió» no decía qué prueba ni qué carpeta (pasó con el instalador en la VM
+ * con todo el catálogo).
+ */
+export function describeWindowsPathChange(before, after) {
+    if (!before || !after) return 'sin copia';
+    const entries = (snapshot) => String(snapshot.path ?? '').split(';').filter(Boolean);
+    const lower = (list) => new Set(list.map((entry) => entry.toLowerCase()));
+    const beforeSet = lower(entries(before));
+    const afterSet = lower(entries(after));
+    const added = entries(after).filter((entry) => !beforeSet.has(entry.toLowerCase()));
+    const removed = entries(before).filter((entry) => !afterSet.has(entry.toLowerCase()));
+    const parts = [];
+    if (added.length) parts.push(`añadidas: ${added.join(' | ')}`);
+    if (removed.length) parts.push(`quitadas: ${removed.join(' | ')}`);
+    if (!added.length && !removed.length && before.path !== after.path) parts.push('mismas carpetas en otro orden o con otra forma');
+    if (before.kind !== after.kind) parts.push(`tipo ${before.kind} → ${after.kind}`);
+    if (JSON.stringify([before.stateExists, before.state]) !== JSON.stringify([after.stateExists, after.state])) {
+        parts.push(`integración: ${JSON.stringify(before.state)} → ${JSON.stringify(after.state)}`);
+    }
+    return parts.join('; ') || 'sin diferencias visibles';
+}
+
 /** Repone la copia y comprueba que el registro quedó exactamente igual. */
 export async function restoreWindowsPathIntegration(snapshot) {
     if (!snapshot || process.platform !== 'win32') return;

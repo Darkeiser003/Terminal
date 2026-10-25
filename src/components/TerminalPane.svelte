@@ -4996,6 +4996,7 @@
                     `ready-for-input-after-mount:${tabId}`,
                 );
                 perf.timeToOnce('app-ready-for-input', 'app.ready-for-input', { tabId });
+                window.dispatchEvent(new CustomEvent('winslim:first-ready', { detail: { ms: performance.now() } }));
                 // Algunas shells no dejan un prompt reconocible (REPL,
                 // dispositivos o contenedores). Liberar la cola en un límite
                 // acotado evita bloquearlas indefinidamente; las shells host

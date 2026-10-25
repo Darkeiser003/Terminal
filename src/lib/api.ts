@@ -15,6 +15,14 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 
 import type {
     ActionResult,
+    ImportableRepository,
+    GhBranch,
+    GhItemView,
+    GhItemKind,
+    GhTag,
+    GhCommit,
+    GhChangedFile,
+    GhContents,
     AppInfo,
     GhAsset,
     GhIssue,
@@ -445,6 +453,55 @@ export const pinProject = (kind: 'owner' | 'repo', value: string, pinned: boolea
     invokeLogged<PinResult>('projects_pin', { kind, value, pinned });
 
 export const chooseProjectsFolder = () => invokeLogged<ProjectsState>('projects_choose_folder');
+
+/** Elige la carpeta de un repositorio ya clonado; `null` si se cancela. */
+export async function pickRepositoryFolder(): Promise<string | null> {
+    const path = await open({ multiple: false, directory: true });
+    return typeof path === 'string' ? path : null;
+}
+// «Mi GitHub» → PR, issues y Actions en detalle (gh_work.rs).
+export const githubItemView = (fullName: string, kind: GhItemKind, number: number) =>
+    invokeLogged<GhItemView>('github_item_view', { fullName, kind, number });
+export const githubItemComment = (fullName: string, kind: GhItemKind, number: number, body: string) =>
+    invokeLogged<GhResult>('github_item_comment', { fullName, kind, number, body });
+export const githubItemState = (fullName: string, kind: GhItemKind, number: number, action: 'close' | 'reopen') =>
+    invokeLogged<GhResult>('github_item_state', { fullName, kind, number, action });
+export const githubPullReady = (fullName: string, number: number) =>
+    invokeLogged<GhResult>('github_pull_ready', { fullName, number });
+export const githubPullReview = (fullName: string, number: number, decision: 'approve' | 'request-changes' | 'comment', body: string) =>
+    invokeLogged<GhResult>('github_pull_review', { fullName, number, decision, body });
+export const githubIssuesByState = (fullName: string, state: 'open' | 'closed' | 'all') =>
+    invokeLogged<GhIssue[]>('github_issues_by_state', { fullName, state });
+export const githubRunLog = (fullName: string, id: number) => invokeLogged<string>('github_run_log', { fullName, id });
+export const githubRunCancel = (fullName: string, id: number) => invokeLogged<GhResult>('github_run_cancel', { fullName, id });
+
+// «Mi GitHub» → Código: solo repositorios de la cuenta (gh_code.rs).
+export const githubCodeBranches = (fullName: string) => invokeLogged<GhBranch[]>('github_code_branches', { fullName });
+export const githubCodeTags = (fullName: string) => invokeLogged<GhTag[]>('github_code_tags', { fullName });
+export const githubCodeCommits = (fullName: string, reference: string) =>
+    invokeLogged<GhCommit[]>('github_code_commits', { fullName, reference });
+export const githubCodeCommitFiles = (fullName: string, sha: string) =>
+    invokeLogged<GhChangedFile[]>('github_code_commit_files', { fullName, sha });
+export const githubCodeCompare = (fullName: string, base: string, head: string) =>
+    invokeLogged<GhChangedFile[]>('github_code_compare', { fullName, base, head });
+export const githubCodeContents = (fullName: string, path: string, reference: string) =>
+    invokeLogged<GhContents>('github_code_contents', { fullName, path, reference });
+export const githubCodeBranchCreate = (fullName: string, branch: string, from: string) =>
+    invokeLogged<GhResult>('github_code_branch_create', { fullName, branch, from });
+export const githubCodeBranchDelete = (fullName: string, branch: string, confirm: string) =>
+    invokeLogged<GhResult>('github_code_branch_delete', { fullName, branch, confirm });
+
+/** Enlaza un repositorio que ya está en el disco (no lo copia ni lo mueve). */
+export const importProject = (path: string) => invokeLogged<ActionResult>('projects_import', { path });
+/** Quita un repositorio importado de Descargados sin tocar el disco. */
+export const forgetImportedProject = (fullName: string) =>
+    invokeLogged<ActionResult>('projects_forget_imported', { fullName });
+/** Repositorio de GitHub desconocido que contiene esa carpeta, o `null`. */
+export const detectImportableProject = (cwd: string) =>
+    invokeLogged<ImportableRepository | null>('projects_detect', { cwd });
+/** No volver a sugerir importar esa carpeta. */
+export const dismissImportableProject = (path: string) =>
+    invokeLogged<void>('projects_dismiss_suggestion', { path });
 
 /** Devuelve el mensaje de error, o una cadena vacía si se abrió bien. */
 export const openInGithub = (rawTarget: string) =>

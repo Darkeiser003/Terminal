@@ -78,6 +78,27 @@ function Invoke-MenuAction {
     Pause-Menu
 }
 
+# windows/build.ps1 se lanza con -NonInteractive y no puede preguntar, así que
+# la carpeta de claves se pide aquí y se le pasa con -KeysDir. Enter acepta la
+# última usada (o Escritorio\Claves SSH); «-» genera la release sin firmar.
+function Read-KeysDirArguments {
+    $memory = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'WTerminalBuild\keys-dir.txt' }
+    $default = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Claves SSH'
+    if ($memory -and (Test-Path -LiteralPath $memory -PathType Leaf)) {
+        $last = (Get-Content -LiteralPath $memory -Raw).Trim()
+        if ($last -and (Test-Path -LiteralPath $last -PathType Container)) { $default = $last }
+    }
+    while ($true) {
+        $answer = Read-Host "Carpeta de las claves de firma [$default] (- para no firmar)"
+        if ($null -eq $answer) { return @() }
+        $answer = $answer.Trim().Trim('"')
+        if ($answer -eq '-') { return @() }
+        $chosen = if ([string]::IsNullOrWhiteSpace($answer)) { $default } else { $answer }
+        if (Test-Path -LiteralPath $chosen -PathType Container) { return @('-KeysDir', $chosen) }
+        Write-Host "No existe la carpeta: $chosen"
+    }
+}
+
 function Invoke-LinuxBuild([bool]$Fast) {
     $arguments = @('linux/build.sh', '--no-run', '--non-interactive')
     if ($Fast) { $arguments += @('--fast', '--no-extended-tests', '--skip-checks') }
@@ -211,7 +232,7 @@ function Show-BuildMenu {
         }
         if ($choice -eq '10' -and $script:OnWindows) {
             if (Confirm-MenuAction 'Incluye la batería completa, vídeo, descargas reales, la auditoría del catálogo y una instalación real del NSIS (pide UAC y lo desinstala al terminar). ¿Continuar?') {
-                Invoke-MenuAction 'Generando la release Windows con validación completa' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-ReleaseValidation')
+                Invoke-MenuAction 'Generando la release Windows con validación completa' $script:PowerShellExe (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-ReleaseValidation') + (Read-KeysDirArguments))
             }
             continue
         }
@@ -230,22 +251,22 @@ function Show-BuildMenu {
             switch ($choice) {
                 '2' {
                     if (Confirm-MenuAction 'El builder puede descargar o instalar Node.js, Rust o herramientas de Visual Studio si faltan. ¿Continuar?') {
-                        Invoke-MenuAction 'Generando la release Windows completa' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-FullTests')
+                        Invoke-MenuAction 'Generando la release Windows completa' $script:PowerShellExe (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-FullTests') + (Read-KeysDirArguments))
                     }
                 }
                 '3' {
                     if (Confirm-MenuAction 'El builder puede descargar o instalar herramientas necesarias si faltan. ¿Continuar?') {
-                        Invoke-MenuAction 'Generando la versión portable Windows' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-NoInstaller', '-FullTests')
+                        Invoke-MenuAction 'Generando la versión portable Windows' $script:PowerShellExe (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-NoInstaller', '-FullTests') + (Read-KeysDirArguments))
                     }
                 }
                 '4' {
                     if (Confirm-MenuAction 'El builder puede descargar o instalar herramientas necesarias si faltan. ¿Continuar?') {
-                        Invoke-MenuAction 'Generando la versión portable rápida Windows' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-NoInstaller', '-NoExtendedTests', '-SkipChecks', '-Fast')
+                        Invoke-MenuAction 'Generando la versión portable rápida Windows' $script:PowerShellExe (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-NoInstaller', '-NoExtendedTests', '-SkipChecks', '-Fast') + (Read-KeysDirArguments))
                     }
                 }
                 '5' {
                     if (Confirm-MenuAction 'Esto compila Windows y Linux mediante WSL; el builder puede instalar herramientas si faltan. ¿Continuar?') {
-                        Invoke-MenuAction 'Generando release Windows y validando Linux en WSL' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-FullTests', '-CrossLinux')
+                        Invoke-MenuAction 'Generando release Windows y validando Linux en WSL' $script:PowerShellExe (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'windows/build.ps1', '-NoRun', '-NonInteractive', '-FullTests', '-CrossLinux') + (Read-KeysDirArguments))
                     }
                 }
                 default { Write-Host 'Opción no válida.' }
@@ -341,6 +362,34 @@ function Show-CleanMenu {
         Invoke-MenuAction 'Eliminando cachés y salidas temporales conocidas' $script:PowerShellExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $cleaner, '-Apply')
     }
 }
+
+# ¿La release de release\ corresponde al código actual? Si hay archivos de la
+# app más nuevos que su manifiesto, se avisa al abrir el menú: así no se prueba
+# ni se publica un binario anterior a los últimos cambios sin darse cuenta.
+function Show-ReleaseFreshness {
+    $manifest = Join-Path $Root 'release\SHA256SUMS.txt'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        Write-Host 'Aún no hay una release en release\: «2. Compilar» la genera.' -ForegroundColor DarkGray
+        return
+    }
+    $builtAt = (Get-Item -LiteralPath $manifest).LastWriteTime
+    $sources = @('src', 'src-tauri\src', 'src-tauri\windows', 'src-tauri\locales', 'src-tauri\crates') |
+        ForEach-Object { Join-Path $Root $_ } | Where-Object { Test-Path -LiteralPath $_ }
+    $files = @(Get-ChildItem -LiteralPath $sources -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '[\\/](target|node_modules)[\\/]' })
+    $files += @('package.json', 'index.html', 'vite.config.ts', 'src-tauri\Cargo.toml', 'src-tauri\tauri.conf.json',
+        'src-tauri\tauri.windows.conf.json', 'src-tauri\tauri.windows.installer.conf.json', 'src-tauri\default_settings.toml') |
+        ForEach-Object { Join-Path $Root $_ } | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-Item -LiteralPath $_ }
+    $newer = @($files | Where-Object { $_.LastWriteTime -gt $builtAt } | Sort-Object LastWriteTime -Descending)
+    if ($newer.Count -gt 0) {
+        $latest = $newer[0].FullName.Substring($Root.Length).TrimStart('\', '/')
+        Write-Host ("AVISO: la release de release\ ({0:dd/MM HH:mm}) es anterior a tus cambios: {1} archivo(s) más nuevos, el último {2}. Recompila antes de probarla o publicarla." -f $builtAt, $newer.Count, $latest) -ForegroundColor Yellow
+    } else {
+        Write-Host ("La release de release\ ({0:dd/MM HH:mm}) está al día con el código." -f $builtAt) -ForegroundColor DarkGray
+    }
+}
+
+Show-ReleaseFreshness
 
 while ($true) {
     Write-Host "`n$script:AppName — desarrollo y compilación"

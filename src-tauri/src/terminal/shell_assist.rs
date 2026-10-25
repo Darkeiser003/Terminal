@@ -617,13 +617,81 @@ pub fn clink_script() -> Option<PathBuf> {
         return Some(path);
     }
     let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
-    clink_candidates(
+    let mut candidates = clink_candidates(
         env("ProgramFiles(x86)"),
         env("ProgramFiles"),
         env("LOCALAPPDATA"),
-    )
-    .into_iter()
-    .find(|path| path.is_file())
+    );
+    // Instalado en otra carpeta (`winget --location`, o elegida en su
+    // instalador): la que dejó registrada en «Aplicaciones instaladas».
+    candidates.extend(
+        registered_install_dirs("Clink")
+            .into_iter()
+            .map(|dir| dir.join("clink.bat")),
+    );
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Carpetas de instalación registradas en las claves `Uninstall` (HKLM, su
+/// vista de 32 bits y HKCU) de los programas cuyo `DisplayName` empieza por
+/// `prefix`: `InstallLocation` o, si falta, la carpeta de `DisplayIcon`. La
+/// misma regla que `registered_install_dirs!` en las sondas del catálogo.
+#[cfg(windows)]
+pub fn registered_install_dirs(prefix: &str) -> Vec<PathBuf> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY};
+    use winreg::RegKey;
+    const UNINSTALL: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+    let mut dirs = Vec::new();
+    for (hive, flags) in [
+        (HKEY_LOCAL_MACHINE, KEY_READ),
+        (HKEY_LOCAL_MACHINE, KEY_READ | KEY_WOW64_32KEY),
+        (HKEY_CURRENT_USER, KEY_READ),
+    ] {
+        let Ok(root) = RegKey::predef(hive).open_subkey_with_flags(UNINSTALL, flags) else {
+            continue;
+        };
+        for name in root.enum_keys().flatten() {
+            let Ok(entry) = root.open_subkey_with_flags(&name, flags) else {
+                continue;
+            };
+            let display: String = entry.get_value("DisplayName").unwrap_or_default();
+            if !display.starts_with(prefix) {
+                continue;
+            }
+            let location: String = entry.get_value("InstallLocation").unwrap_or_default();
+            let dir = registered_dir(
+                &location,
+                &entry
+                    .get_value::<String, _>("DisplayIcon")
+                    .unwrap_or_default(),
+            );
+            if let Some(dir) = dir {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+    }
+    dirs
+}
+
+#[cfg(not(windows))]
+pub fn registered_install_dirs(_prefix: &str) -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// `InstallLocation` sin comillas o, si está vacío, la carpeta del
+/// ejecutable de `DisplayIcon` (`"C:\…\app.exe",0`).
+fn registered_dir(location: &str, icon: &str) -> Option<PathBuf> {
+    let location = location.trim().trim_matches('"');
+    if !location.is_empty() {
+        return Some(PathBuf::from(location));
+    }
+    let icon = icon.split(',').next()?.trim().trim_matches('"');
+    if icon.is_empty() {
+        return None;
+    }
+    PathBuf::from(icon).parent().map(PathBuf::from)
 }
 
 fn clink_candidates(
@@ -1133,5 +1201,28 @@ mod tests {
             PathBuf::from("C:/Local/Programs/clink/clink.bat")
         );
         assert!(clink_candidates(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn la_carpeta_registrada_sale_de_install_location_o_del_icono() {
+        assert_eq!(
+            registered_dir("\"E:\\Apps\\clink\"", "E:\\Otra\\clink.ico,0"),
+            Some(PathBuf::from("E:\\Apps\\clink"))
+        );
+        assert_eq!(
+            registered_dir("", "\"E:\\Apps\\qemu\\qemu-uninstall.exe\",0"),
+            PathBuf::from("E:\\Apps\\qemu\\qemu-uninstall.exe")
+                .parent()
+                .map(PathBuf::from)
+        );
+        assert_eq!(registered_dir("  ", ""), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn leer_las_claves_de_desinstalacion_no_falla() {
+        // Un prefijo que nadie usa: lista vacía y sin errores al recorrer las
+        // tres vistas del registro.
+        assert!(registered_install_dirs("WTerminal-prueba-que-no-existe").is_empty());
     }
 }

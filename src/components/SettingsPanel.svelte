@@ -862,7 +862,7 @@
         return rows;
     });
 
-    type StoreCategoryPreference = "toolchainStoreDownloads" | "toolchainStoreAiModels" | "toolchainStoreTools" | "toolchainStoreReplHistory";
+    type StoreCategoryPreference = "toolchainStoreDownloads" | "toolchainStoreAiModels" | "toolchainStoreTools" | "toolchainStoreReplHistory" | "toolchainStoreToolchains" | "toolchainStorePrograms" | "toolchainStoreProjects";
 
     /** Categorías de la carpeta propia: cada una con su interruptor (las
      *  cachés van con el general) y una explicación de lo que cambia. */
@@ -882,6 +882,15 @@
         { id: "replHistory" as ToolchainStoreCategory, preference: "toolchainStoreReplHistory" as StoreCategoryPreference,
             title: app.t("settings.storeCategoryReplHistory", "Historial de los REPL"),
             hint: app.t("settings.storeCategoryReplHistoryHint", "El historial de Node, Python 3.13+, SQLite y psql abiertos desde WTerminal.") },
+        { id: "toolchains" as ToolchainStoreCategory, preference: "toolchainStoreToolchains" as StoreCategoryPreference,
+            title: app.t("settings.storeCategoryToolchains", "Toolchains completas"),
+            hint: app.t("settings.storeCategoryToolchainsHint", "Rust (rustup y cargo), Go, Gradle, .NET y Android instalados desde WTerminal. Solo si aún no los tenías: lo ya instalado no se mueve. Fuera de WTerminal no se ven salvo que definas sus variables en tu usuario.") },
+        { id: "programs" as ToolchainStoreCategory, preference: "toolchainStorePrograms" as StoreCategoryPreference,
+            title: app.t("settings.storeCategoryPrograms", "Programas (WinGet y Chocolatey)"),
+            hint: app.t("settings.storeCategoryProgramsHint", "Las acciones «Instalar» de WinGet y Chocolatey instalan cada programa en su propia carpeta aquí (--location); Chocolatey y sus herramientas, también. Si un instalador no lo respeta, la acción te dice dónde quedó y te ofrece moverlo dejando una unión en su sitio. Lo ya instalado no se mueve.") },
+        { id: "projects" as ToolchainStoreCategory, preference: "toolchainStoreProjects" as StoreCategoryPreference,
+            title: app.t("settings.storeCategoryProjects", "Proyectos de GitHub"),
+            hint: app.t("settings.storeCategoryProjectsHint", "Lo que clonas o creas desde Proyectos va aquí en vez de a Documentos. Si ya elegiste una carpeta de Proyectos, se usa la tuya. Los proyectos que ya tienes no se mueven.") },
     ]);
 
     type AssistColorKey = "shellAssistSuggestionColor" | "shellAssistCommandColor" | "shellAssistArgumentColor" | "shellAssistErrorColor";
@@ -1298,6 +1307,18 @@
                                     )}
                                 </option>
                             </select>
+                        </label>
+                        <label class="field">
+                            <span>{app.t("settings.uiScale", "Tamaño de la interfaz")}: {draft.uiScale} %</span>
+                            <input
+                                data-testid="settings-ui-scale"
+                                type="range"
+                                min="80"
+                                max="200"
+                                step="10"
+                                bind:value={draft.uiScale}
+                            />
+                            <small>{app.t("settings.uiScaleHint", "Botones, paneles, desplegables y textos; la terminal conserva su letra. Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0.")}</small>
                         </label>
                     </div>
 
@@ -2029,6 +2050,17 @@
                     </div>
                     <label class="check"><input data-testid="settings-show-dependencies" type="checkbox" bind:checked={draft.showDependenciesPanel} /><span><strong>{app.t("toolbar.deps", "Entorno y dependencias")}</strong><small>{app.t("settings.showDependenciesHint", "Instalar, actualizar y quitar herramientas, lenguajes, shells y modelos de IA.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-projects" type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong><small>{app.t("settings.showProjectsHint", "Tus repositorios de GitHub: anclados, clonados, explorar y Mi GitHub.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-low-power" type="checkbox" bind:checked={draft.lowPowerMode} /><span><strong>{app.t("settings.lowPowerMode", "Modo de bajo consumo")}</strong><small>{app.t("settings.lowPowerModeHint", "Para equipos modestos: la detección de Dependencias espera a que abras el panel, las comprobaciones de actualizaciones esperan dos minutos y las sondas van de una en una. Se aplica en el próximo arranque.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-suggest-repo-import" type="checkbox" bind:checked={draft.suggestRepositoryImport} /><span><strong>{app.t("settings.suggestRepositoryImport", "Sugerir importar repositorios")}</strong><small>{app.t("settings.suggestRepositoryImportHint", "Si la terminal entra en un repositorio de GitHub que no está en Proyectos, ofrece añadirlo abajo, sin moverlo.")}</small></span></label>
+                    <label class="field">
+                        <span>{app.t("settings.githubSessionMode", "Consultas de Explorar GitHub")}</span>
+                        <select data-testid="settings-github-session-mode" bind:value={draft.githubSessionMode}>
+                            <option value="onExhausted">{app.t("settings.githubSessionOnExhausted", "Públicas y, al agotarse, con mi sesión de gh")}</option>
+                            <option value="always">{app.t("settings.githubSessionAlways", "Siempre con mi sesión de gh")}</option>
+                            <option value="never">{app.t("settings.githubSessionNever", "Solo públicas (60 por hora)")}</option>
+                        </select>
+                        <small>{app.t("settings.githubSessionHint", "Con sesión de GitHub CLI el límite es de 5.000 consultas por hora (30 búsquedas por minuto). WTerminal no lee ni guarda tu token: la consulta la hace gh.")}</small>
+                    </label>
                     <label class="check"><input data-testid="settings-show-library" type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong><small>{app.t("settings.showLibraryHint", "Tus scripts y los de la carpeta actual, listos para ejecutar.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-explorer" type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong><small>{app.t("settings.showExplorerHint", "Árbol de archivos de la carpeta de la terminal, con vistas previas.")}</small></span></label>
                     <div class="heading">
@@ -2196,7 +2228,7 @@
                                         : cache.location === "system"
                                         ? app.t("settings.toolchainStoreSystemLocation", "sin centralizar · ubicación actual")
                                         : ""}</small>
-                                    <span class="store-size">{formatBytes(cache.bytes)}</span>
+                                    <span class="store-size" data-measuring={String(Boolean(cache.measuring))} title={cache.measuring ? app.t("settings.storeMeasuring", "Midiendo: es una carpeta grande; pulsa «Recalcular» en unos segundos.") : cache.measured === false ? app.t("settings.storeNotMeasured", "Sin medir aquí: su tamaño sale en «Ubicaciones externas».") : undefined}>{cache.measuring ? "…" : cache.measured === false ? "—" : formatBytes(cache.bytes)}</span>
                                 </div>
                             {/each}
                         </div>
@@ -2591,7 +2623,7 @@
         display: flex;
         gap: 8px;
         align-items: center;
-        padding: 6px 0 2px;
+        padding: 6px var(--space-min, 6px) 2px;
     }
     .settings-search input {
         flex: 1 1 auto;
@@ -2613,7 +2645,7 @@
         display: flex;
         flex-wrap: wrap;
         gap: 4px;
-        padding: 4px 0 2px;
+        padding: 4px var(--space-min, 6px) var(--space-min, 6px);
     }
     .settings-index button {
         padding: 2px 8px;
@@ -2686,7 +2718,7 @@
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 4px;
-        padding: 7px 0;
+        padding: 7px var(--space-min, 6px);
         border-bottom: 1px solid var(--border);
         background: var(--surface);
     }
@@ -3520,6 +3552,12 @@
        que el desplazamiento del foco lo deje por encima del pie. */
     .settings-form :global(section *) {
         scroll-margin-bottom: 64px;
+    }
+
+    /* Al saltar a un apartado desde el índice, su título queda con aire por
+       encima en vez de pegado (o medio cortado) contra el borde del scroll. */
+    .settings-form :global(section > .heading) {
+        scroll-margin-top: calc(var(--space-min, 6px) * 2);
     }
 
     .footer button {

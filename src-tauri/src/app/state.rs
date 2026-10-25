@@ -427,7 +427,12 @@ impl AppState {
                 // precarga del catálogo se ejecuta en otro hilo para que no
                 // retrase la interfaz ni el primer uso del panel.
                 let _ = app.emit("envs-updated", inventory.clone());
-                if state.begin_install_prefetch() {
+                if crate::preferences::current().low_power_mode {
+                    log_info!(
+                        "Modo de bajo consumo: la precarga de Dependencias espera a que se abra el panel",
+                        serde_json::json!({})
+                    );
+                } else if state.begin_install_prefetch() {
                     let prefetch_state = Arc::clone(&state);
                     let prefetch_inventory = inventory;
                     let _ = std::thread::Builder::new()

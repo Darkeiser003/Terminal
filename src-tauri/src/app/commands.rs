@@ -643,6 +643,9 @@ pub struct AppInfo {
     /// distinguir la elevación de la sesión actual de la preferencia para el
     /// siguiente arranque.
     pub process_elevated: bool,
+    /// Hilos de CPU y memoria total: deciden si se sugiere el modo de bajo consumo.
+    pub cpu_threads: usize,
+    pub memory_gb: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -650,6 +653,18 @@ pub struct AppInfo {
 pub struct CollaboratorCredit {
     pub login: &'static str,
     pub role: &'static str,
+}
+
+/// El E2E `low-power` simula un equipo de pocos hilos; fuera de las pruebas
+/// se ignora.
+fn e2e_cpu_threads() -> Option<usize> {
+    if std::env::var("LTERMINAL_E2E_TESTING").as_deref() != Ok("1") {
+        return None;
+    }
+    std::env::var("LTERMINAL_E2E_CPU_THREADS")
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// Datos de identidad que el frontend pinta en el título y el panel de ajustes.
@@ -677,6 +692,12 @@ pub fn app_info(app: AppHandle) -> AppInfo {
             .unwrap_or_default(),
         settings_path: settings::settings_path().to_string_lossy().to_string(),
         process_elevated,
+        cpu_threads: e2e_cpu_threads().unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+        }),
+        memory_gb: crate::environments::ai::total_memory_gb(),
     }
 }
 

@@ -14,6 +14,9 @@ pub struct WindowsPlatform;
 
 impl ProcessPlatform for WindowsPlatform {
     fn configure_background_command(&self, command: &mut Command) {
+        // Prioridad normal a propósito: con BELOW_NORMAL, en un equipo de 2
+        // núcleos con la CPU ocupada, `gh`, `git` y las sondas de Dependencias
+        // casi no avanzaban (la precarga no terminaba y Mi GitHub no cargaba).
         command.creation_flags(CREATE_NO_WINDOW);
     }
 

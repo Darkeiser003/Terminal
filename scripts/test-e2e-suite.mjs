@@ -8,6 +8,7 @@ import { planSuites, SUITES, VALIDATION_LEVELS } from '../tests/e2e/suites.mjs';
 import { scenarioSummaryLine } from '../tests/e2e/run-scenario.mjs';
 import { formatSummaryMarkdown, parseSuiteArgs } from './run-e2e-suite.mjs';
 import { compareInstalledBinary, installerIntegrity } from './test-installer.mjs';
+import { describeWindowsPathChange } from '../tests/e2e/windows-path-guard.mjs';
 
 const smoke = await readFile('tests/e2e/smoke.mjs', 'utf8');
 
@@ -94,5 +95,12 @@ assert.deepEqual(installerIntegrity(setup, 'WTerminal-1.0.0-x64-setup.exe', `${s
 const damaged = Buffer.concat([setup.subarray(0, 10), Buffer.alloc(setup.length - 10)]);
 assert.match(installerIntegrity(damaged, 'WTerminal-1.0.0-x64-setup.exe', `${setupHash}  WTerminal-1.0.0-x64-setup.exe`).message, /está dañado/u);
 assert.match(installerIntegrity(setup, 'WTerminal-1.0.0-x64-setup.exe', '\0'.repeat(286)).message, /no tiene la huella/u);
+
+// El aviso «el PATH cambió» dice qué cambió.
+const pathBefore = { path: 'C:\\a;C:\\b', kind: 'ExpandString', stateExists: false, state: [] };
+assert.equal(describeWindowsPathChange(pathBefore, { ...pathBefore }), 'sin diferencias visibles');
+assert.equal(describeWindowsPathChange(pathBefore, { ...pathBefore, path: 'C:\\a;C:\\c' }), 'añadidas: C:\\c; quitadas: C:\\b');
+assert.match(describeWindowsPathChange(pathBefore, { ...pathBefore, kind: 'String' }), /tipo ExpandString → String/u);
+assert.match(describeWindowsPathChange(pathBefore, { ...pathBefore, stateExists: true, state: [{ name: 'x' }] }), /^integración:/u);
 
 console.log(`Suites E2E verificadas: ${Object.keys(SUITES).length} suites, ${everyScenario.length} escenarios y niveles ${Object.keys(VALIDATION_LEVELS).join('/')}.`);

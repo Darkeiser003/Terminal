@@ -156,7 +156,7 @@ export function applyTheme(
     root.setProperty('--terminal-selection', preferences.terminalSelectionColor);
     root.setProperty('--terminal-padding', `${preferences.terminalPadding}px`);
     root.setProperty('--terminal-font', terminalFont(preferences, fonts));
-    root.setProperty('--ui-scale', preferences.uiDensity === 'compact' ? '0.9' : '1');
+    root.setProperty('--ui-scale', String((preferences.uiScale ?? 100) / 100));
 
     document.body.dataset.density = preferences.uiDensity;
 }

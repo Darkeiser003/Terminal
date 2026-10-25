@@ -48,6 +48,10 @@
     --density-control-gap: 6px;
     --density-control-height: 32px;
     --density-grid-gap: 12px;
+    /* Margen mínimo entre un control y el borde de su panel o caja. Ningún
+       elemento interactivo debe quedar pegado al borde; en compacta se reduce,
+       pero nunca llega a cero. */
+    --space-min: 6px;
 }
 
 body[data-density='comfortable'] {
@@ -57,6 +61,7 @@ body[data-density='comfortable'] {
     --density-control-gap: 8px;
     --density-control-height: 36px;
     --density-grid-gap: 16px;
+    --space-min: 8px;
 }
 
 body[data-density='compact'] {
@@ -66,6 +71,7 @@ body[data-density='compact'] {
     --density-control-gap: 4px;
     --density-control-height: 28px;
     --density-grid-gap: 8px;
+    --space-min: 4px;
 }
 
 /* Los dos WebView (WebKitGTK y WebView2) dejan que el sistema pinte una parte
@@ -203,4 +209,21 @@ body[data-density] .footer {
 
 body[data-density] .sections {
     padding: var(--density-grid-gap);
+}
+
+/* Tamaño de la interfaz (Ajustes → Apariencia). Se escala la barra superior,
+   las pestañas, el explorador, los avisos, la paleta y el contenido de los
+   paneles, pero nunca las casillas de terminal: xterm mide en píxeles reales y
+   un zoom ahí rompería el cálculo de columnas y la posición del ratón. En los
+   paneles se escala el contenido y no el marco, que el usuario mueve y
+   redimensiona en píxeles de pantalla. */
+main > .toolbar,
+main > .tab-strip,
+main > .update,
+.explorer,
+.palette,
+.panel > .panel-header,
+.panel > .panel-subheader,
+.panel > .panel-scroll {
+    zoom: var(--ui-scale, 1);
 }

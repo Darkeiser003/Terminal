@@ -19,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { planSuites, SUITES, VALIDATION_LEVELS } from '../tests/e2e/suites.mjs';
 import { runSmokeScenario } from '../tests/e2e/run-scenario.mjs';
-import { restoreWindowsPathIntegration, sameWindowsPathSnapshot, snapshotWindowsPathIntegration } from '../tests/e2e/windows-path-guard.mjs';
+import { describeWindowsPathChange, restoreWindowsPathIntegration, sameWindowsPathSnapshot, snapshotWindowsPathIntegration } from '../tests/e2e/windows-path-guard.mjs';
 import { dropPowerShell7ModulePath } from '../tests/e2e/powershell-env.mjs';
 
 // Lanzado desde PowerShell 7, el PSModulePath heredado rompe los powershell.exe 5.1
@@ -180,7 +180,7 @@ export async function runSuites(options) {
     const pathAfter = await snapshotWindowsPathIntegration();
     if (!sameWindowsPathSnapshot(pathBefore, pathAfter)) {
         await restoreWindowsPathIntegration(pathBefore).catch(() => undefined);
-        results.push({ suite: 'aislamiento', id: 'user-path', title: 'PATH del usuario intacto', status: 'failed', durationMs: 0, summary: 'Las suites alteraron el PATH del usuario; se ha restaurado.' });
+        results.push({ suite: 'aislamiento', id: 'user-path', title: 'PATH del usuario intacto', status: 'failed', durationMs: 0, summary: `Las suites alteraron el PATH del usuario (${describeWindowsPathChange(pathBefore, pathAfter)}); se ha restaurado.` });
     }
 
     const counts = {

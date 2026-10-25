@@ -9,6 +9,8 @@
 //! | Modelos de IA | `ia/` | `HF_HOME`; `OLLAMA_MODELS` solo si aún no hay modelos de Ollama | activa |
 //! | Herramientas nuevas | `herramientas/` | `npm -g`, `cargo install`, `go install`, `pip --user`, con su `bin` en el PATH | apagada |
 //! | Historial de los REPL | `historial/` | Node, Python 3.13+, SQLite y psql | apagada |
+//! | Toolchains completas | `toolchains/` | rustup, cargo, GOPATH, Gradle, .NET, Android | apagada |
+//! | Programas | `programas/<id>` | `--location` de WinGet en las acciones «Instalar»; Chocolatey (con sus paquetes) y sus herramientas sueltas también | activa |
 //!
 //! Cada herramienta ya permite elegir su carpeta con una variable de entorno
 //! estándar. WTerminal la inyecta solo en los procesos que lanza (terminales
@@ -75,15 +77,21 @@ pub enum Category {
     AiModels,
     Tools,
     ReplHistory,
+    Toolchains,
+    Programs,
+    Projects,
 }
 
 impl Category {
-    pub const ALL: [Category; 5] = [
+    pub const ALL: [Category; 8] = [
         Category::Caches,
         Category::Downloads,
         Category::AiModels,
         Category::Tools,
         Category::ReplHistory,
+        Category::Toolchains,
+        Category::Programs,
+        Category::Projects,
     ];
 
     /// Subcarpeta dentro de la raíz. `cache` conserva el nombre de siempre:
@@ -95,6 +103,9 @@ impl Category {
             Category::AiModels => "ia",
             Category::Tools => "herramientas",
             Category::ReplHistory => "historial",
+            Category::Toolchains => "toolchains",
+            Category::Programs => "programas",
+            Category::Projects => "proyectos",
         }
     }
 }
@@ -107,6 +118,9 @@ pub struct Categories {
     pub ai_models: bool,
     pub tools: bool,
     pub repl_history: bool,
+    pub toolchains: bool,
+    pub programs: bool,
+    pub projects: bool,
 }
 
 impl Categories {
@@ -117,6 +131,9 @@ impl Categories {
             ai_models: preferences.toolchain_store_ai_models,
             tools: preferences.toolchain_store_tools,
             repl_history: preferences.toolchain_store_repl_history,
+            toolchains: preferences.toolchain_store_toolchains,
+            programs: preferences.toolchain_store_programs,
+            projects: preferences.toolchain_store_projects,
         }
     }
 
@@ -127,6 +144,9 @@ impl Categories {
             Category::AiModels => self.ai_models,
             Category::Tools => self.tools,
             Category::ReplHistory => self.repl_history,
+            Category::Toolchains => self.toolchains,
+            Category::Programs => self.programs,
+            Category::Projects => self.projects,
         }
     }
 }
@@ -189,6 +209,19 @@ const fn tool(
     }
 }
 
+const fn toolchain(
+    id: &'static str,
+    name: &'static str,
+    variable: &'static str,
+    subdir: &'static str,
+    bin: Bin,
+) -> CacheDef {
+    CacheDef {
+        bin,
+        ..entry(id, name, variable, subdir, Category::Toolchains)
+    }
+}
+
 const fn history(
     id: &'static str,
     name: &'static str,
@@ -230,6 +263,29 @@ const CACHES: &[CacheDef] = &[
     history("python-history", "Python 3.13+ (REPL)", "PYTHON_HISTORY", "python_history"),
     history("sqlite-history", "SQLite", "SQLITE_HISTORY", "sqlite_history"),
     history("psql-history", "psql", "PSQL_HISTORY", "psql_history"),
+    toolchain("rustup", "Rust (rustup)", "RUSTUP_HOME", "rustup", Bin::None),
+    toolchain("cargo-home", "Rust (cargo)", "CARGO_HOME", "cargo-home", Bin::Sub("bin")),
+    toolchain("gopath", "Go (GOPATH)", "GOPATH", "gopath", Bin::Sub("bin")),
+    toolchain("gradle", "Gradle", "GRADLE_USER_HOME", "gradle", Bin::None),
+    toolchain("dotnet-home", ".NET (dotnet)", "DOTNET_CLI_HOME", "dotnet", Bin::None),
+    toolchain("android-user", "Android (AVD y ajustes)", "ANDROID_USER_HOME", "android", Bin::None),
+    // Las acciones «Instalar» de WinGet y Chocolatey instalan en
+    // `<esta carpeta>\<id>` si la variable existe
+    // (`packages::actions::centralized_install`).
+    entry("winget-programs", "Programas (WinGet y Chocolatey)", "WTERMINAL_PROGRAMS", "", Category::Programs),
+    // Carpeta de proyectos de fábrica (`projects::github::projects_folder`).
+    entry("projects", "Proyectos de GitHub", "WTERMINAL_PROJECTS", "", Category::Projects),
+];
+
+/// Variables sin las que la carpeta `bin` de una entrada no funciona fuera de
+/// WTerminal. Los lanzadores de `pip --user` (`ipython.exe`…) importan su
+/// módulo de `PYTHONUSERBASE`; los proxies de rustup de `CARGO_HOME\bin`
+/// buscan las toolchains en `RUSTUP_HOME`. El resto (`cargo install`,
+/// `go install`, npm global) son ejecutables o shims autónomos.
+#[rustfmt::skip]
+const BIN_REQUIRES: &[(&str, &[&str])] = &[
+    ("pip-user", &["PYTHONUSERBASE"]),
+    ("cargo-home", &["CARGO_HOME", "RUSTUP_HOME"]),
 ];
 
 /// Una ubicación que Ajustes mide y explica.
@@ -758,6 +814,21 @@ pub fn default_root() -> PathBuf {
 }
 
 /// Raíz efectiva según las preferencias: `None` si está desactivada.
+/// `<carpeta propia>\proyectos` si «Proyectos de GitHub» está activa: la
+/// carpeta de Proyectos de fábrica cuando el usuario no eligió otra
+/// (`projects::github::projects_folder`).
+pub fn centralized_projects_dir() -> Option<PathBuf> {
+    let preferences = crate::preferences::current();
+    if !preferences.toolchain_store_projects {
+        return None;
+    }
+    effective_root(
+        preferences.toolchain_store_enabled,
+        &preferences.toolchain_store_dir,
+    )
+    .map(|root| root.join(Category::Projects.dir()))
+}
+
 pub fn effective_root(enabled: bool, configured: &str) -> Option<PathBuf> {
     if !enabled {
         return None;
@@ -773,7 +844,13 @@ pub fn effective_root(enabled: bool, configured: &str) -> Option<PathBuf> {
 }
 
 fn cache_path(root: &Path, cache: &CacheDef) -> PathBuf {
-    root.join(cache.category.dir()).join(cache.subdir)
+    let dir = root.join(cache.category.dir());
+    // Programas no tiene subcarpeta: `<raíz>\programas\<id>`.
+    if cache.subdir.is_empty() {
+        dir
+    } else {
+        dir.join(cache.subdir)
+    }
 }
 
 /// Entradas que se reubican con estas categorías. `existing_ollama_models`
@@ -783,7 +860,9 @@ fn active_entries(
     existing_ollama_models: bool,
 ) -> impl Iterator<Item = &'static CacheDef> {
     CACHES.iter().filter(move |cache| {
-        categories.includes(cache.category) && !(cache.id == OLLAMA_ENTRY && existing_ollama_models)
+        categories.includes(cache.category)
+            && !(cache.id == OLLAMA_ENTRY && existing_ollama_models)
+            && !toolchain_preinstalled(cache)
     })
 }
 
@@ -821,35 +900,101 @@ fn extra_path_dirs(
     let Some(root) = root else {
         return Vec::new();
     };
-    let mut dirs = Vec::new();
-    for cache in active_entries(categories, false).filter(|cache| !user_defined(cache.variable)) {
-        let base = cache_path(root, cache);
-        match cache.bin {
-            Bin::None => {}
-            Bin::Same => dirs.push(base),
-            Bin::Sub(sub) => dirs.push(base.join(sub)),
-            Bin::NpmPrefix if windows => dirs.push(base),
-            Bin::NpmPrefix => dirs.push(base.join("bin")),
-            Bin::PythonUser if windows => {
-                let mut versions: Vec<PathBuf> = std::fs::read_dir(&base)
-                    .map(|entries| {
-                        entries
-                            .filter_map(Result::ok)
-                            .filter(|entry| {
-                                entry.file_name().to_string_lossy().starts_with("Python")
-                            })
-                            .map(|entry| entry.path().join("Scripts"))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                versions.sort();
-                versions.reverse();
-                dirs.extend(versions);
+    active_entries(categories, false)
+        .filter(|cache| !user_defined(cache.variable))
+        .flat_map(|cache| bin_dirs(cache, &cache_path(root, cache), windows))
+        .collect()
+}
+
+/// Las carpetas `bin` de una entrada ya reubicada en `base`.
+fn bin_dirs(cache: &CacheDef, base: &Path, windows: bool) -> Vec<PathBuf> {
+    match cache.bin {
+        Bin::None => Vec::new(),
+        Bin::Same => vec![base.to_path_buf()],
+        Bin::Sub(sub) => vec![base.join(sub)],
+        Bin::NpmPrefix if windows => vec![base.to_path_buf()],
+        Bin::NpmPrefix => vec![base.join("bin")],
+        Bin::PythonUser if windows => {
+            let mut versions: Vec<PathBuf> = std::fs::read_dir(base)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.file_name().to_string_lossy().starts_with("Python"))
+                        .map(|entry| entry.path().join("Scripts"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            versions.sort();
+            versions.reverse();
+            versions
+        }
+        Bin::PythonUser => vec![base.join("bin")],
+    }
+}
+
+/// De las variables que inyecta WTerminal (`overrides`), las que necesitan las
+/// carpetas `bin` publicadas (`BIN_REQUIRES`). Una entrada sin carpetas (p. ej.
+/// `pip --user` antes de instalar nada) no publica su variable: así no cambia
+/// dónde instala `pip --user` fuera de WTerminal sin motivo.
+fn required_variables(
+    root: Option<&Path>,
+    categories: Categories,
+    windows: bool,
+    overrides: &[(String, String)],
+    user_defined: &dyn Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let mut required = Vec::new();
+    for (id, variables) in BIN_REQUIRES {
+        let Some(cache) = active_entries(categories, false).find(|cache| cache.id == *id) else {
+            continue;
+        };
+        if user_defined(cache.variable)
+            || bin_dirs(cache, &cache_path(root, cache), windows).is_empty()
+        {
+            continue;
+        }
+        for variable in *variables {
+            if let Some(pair) = overrides.iter().find(|(name, _)| name == variable) {
+                if !required.contains(pair) {
+                    required.push(pair.clone());
+                }
             }
-            Bin::PythonUser => dirs.push(base.join("bin")),
         }
     }
-    dirs
+    required
+}
+
+fn same_dir(left: &Path, right: &Path) -> bool {
+    let normalize = |path: &Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let text = text.trim_end_matches('/').to_string();
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    };
+    normalize(left) == normalize(right)
+}
+
+/// La variable la definió el usuario (y manda la suya). Si vale justo la
+/// carpeta que pondría WTerminal no cuenta: es la que publicó la integración
+/// con el PATH, y tratarla como del usuario haría que la siguiente
+/// sincronización retirara su propia carpeta `bin`.
+fn defined_by_user(root: Option<&Path>, variable: &str) -> bool {
+    let Some(value) = std::env::var_os(variable) else {
+        return false;
+    };
+    let ours = root.and_then(|root| {
+        CACHES
+            .iter()
+            .find(|cache| cache.variable == variable)
+            .map(|cache| cache_path(root, cache))
+    });
+    !ours.is_some_and(|ours| same_dir(Path::new(&value), &ours))
 }
 
 /// Dónde guarda cada herramienta lo suyo cuando WTerminal no lo centraliza:
@@ -919,11 +1064,43 @@ fn system_location(
         ("sqlite-history", _) => home(&[".sqlite_history"]),
         ("psql-history", true) => roaming(&["postgresql", "psql_history"]),
         ("psql-history", false) => home(&[".psql_history"]),
+        ("rustup", _) => home(&[".rustup"]),
+        ("cargo-home", _) => home(&[".cargo"]),
+        ("gopath", _) => home(&["go"]),
+        ("gradle", _) => home(&[".gradle"]),
+        ("dotnet-home", _) => home(&[".dotnet"]),
+        ("android-user", _) => home(&[".android"]),
+        // Sin centralizar, WinGet decide: Program Files para los instaladores y
+        // sus paquetes portables en LOCALAPPDATA, que es lo que se mide aquí.
+        ("winget-programs", true) => local(&["Microsoft", "WinGet", "Packages"]),
+        ("winget-programs", false) => home(&[".local"]),
+        ("projects", _) => Some(crate::paths::default_projects_dir()),
         _ => None,
     }
 }
 
 /// `true` si Ollama ya tiene modelos en su carpeta de siempre.
+/// Una toolchain que ya está en su carpeta de siempre no se reubica: con la
+/// variable apuntando a una carpeta vacía, rustup, cargo o Gradle dejarían de
+/// ver lo que ya tienes instalado. La categoría solo sirve para instalaciones
+/// nuevas, igual que la regla de Ollama.
+fn toolchain_preinstalled(cache: &CacheDef) -> bool {
+    if cache.category != Category::Toolchains {
+        return false;
+    }
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
+    system_location(
+        cache,
+        cfg!(windows),
+        &crate::paths::home_dir(),
+        local.as_deref(),
+        roaming.as_deref(),
+        &std::env::temp_dir(),
+    )
+    .is_some_and(|path| path.exists())
+}
+
 fn ollama_has_existing_models() -> bool {
     let default_dir = std::env::var_os("OLLAMA_MODELS")
         .map(PathBuf::from)
@@ -942,11 +1119,37 @@ pub fn published_bin_dirs() -> Vec<PathBuf> {
         preferences.toolchain_store_enabled,
         &preferences.toolchain_store_dir,
     );
-    let user_defined = |variable: &str| std::env::var_os(variable).is_some();
+    let user_defined = |variable: &str| defined_by_user(root.as_deref(), variable);
     extra_path_dirs(
         root.as_deref(),
         Categories::from_preferences(&preferences),
         cfg!(windows),
+        &user_defined,
+    )
+}
+
+/// Variables que la integración con el PATH publica junto a esas carpetas
+/// `bin`, para que sus programas funcionen también fuera de WTerminal
+/// (`BIN_REQUIRES`). Nunca incluye una variable que ya definió el usuario.
+pub fn published_variables() -> Vec<(String, String)> {
+    let preferences = crate::preferences::current();
+    let root = effective_root(
+        preferences.toolchain_store_enabled,
+        &preferences.toolchain_store_dir,
+    );
+    let categories = Categories::from_preferences(&preferences);
+    let user_defined = |variable: &str| defined_by_user(root.as_deref(), variable);
+    let overrides = overrides_for(
+        root.as_deref(),
+        categories,
+        ollama_has_existing_models(),
+        &user_defined,
+    );
+    required_variables(
+        root.as_deref(),
+        categories,
+        cfg!(windows),
+        &overrides,
         &user_defined,
     )
 }
@@ -962,7 +1165,7 @@ pub fn refresh_environment() {
     );
     let categories = Categories::from_preferences(&preferences);
     let existing_ollama = ollama_has_existing_models();
-    let user_defined = |variable: &str| std::env::var_os(variable).is_some();
+    let user_defined = |variable: &str| defined_by_user(root.as_deref(), variable);
     if let Some(root) = root.as_deref() {
         // Las carpetas existen desde el principio para poder abrirlas en
         // Ajustes, y las de historial para que el REPL pueda crear su archivo.
@@ -1040,6 +1243,13 @@ pub struct StoreCache {
     pub category: Category,
     /// La categoría está activa y la entrada se aplica a las pestañas nuevas.
     pub active: bool,
+    /// `false` si no se ha medido: una toolchain que sigue en su sitio de
+    /// siempre (`~\.rustup`, `~\.cargo`…) tarda decenas de segundos en
+    /// medirse y ya sale en «Ubicaciones externas».
+    pub measured: bool,
+    /// La medición sigue en marcha (carpeta grande): no terminó dentro de
+    /// [`STATUS_MEASURE_BUDGET`] y su tamaño llega en la próxima apertura.
+    pub measuring: bool,
     pub info: LocationInfo,
 }
 
@@ -1084,6 +1294,27 @@ fn cache_info(cache: &CacheDef, user_defined: bool) -> LocationInfo {
                 Safety::Caution,
                 &format!("Herramientas instaladas desde WTerminal con {} ({}). Su carpeta de programas va delante en el PATH de WTerminal; lo que ya tenías instalado sigue donde estaba.", cache.name, cache.variable),
                 "Borrarla desinstala esas herramientas. Mejor desinstalarlas desde el panel.",
+            )
+        }
+        Category::Toolchains => {
+            return info(
+                Safety::Keep,
+                &format!("{} instalado desde WTerminal ({}). Solo se usa si no lo tenías ya en su carpeta de siempre: lo instalado no se mueve. Fuera de WTerminal esa instalación no se ve salvo que definas la variable en tu usuario.", cache.name, cache.variable),
+                "No la borres a mano: desinstala con su propia herramienta (rustup self uninstall, etc.). Borrarla quita la toolchain completa.",
+            )
+        }
+        Category::Projects => {
+            return info(
+                Safety::Keep,
+                &format!("Proyectos que clonas o creas desde WTerminal ({}): cada uno en <propietario>\\<repositorio>. Solo si no elegiste otra carpeta de Proyectos en Ajustes; los que ya tenías siguen donde estaban.", cache.variable),
+                "No la borres: son tus repositorios, con su código y su historial de Git.",
+            )
+        }
+        Category::Programs => {
+            return info(
+                Safety::Keep,
+                &format!("Programas instalados con WinGet desde las acciones de WTerminal ({}): cada uno en su carpeta con el identificador del paquete. Los que ya tenías siguen donde estaban.", cache.variable),
+                "No la borres a mano: desinstala cada programa desde el panel o con winget uninstall. Borrarla dejaría programas rotos y entradas huérfanas en «Aplicaciones instaladas».",
             )
         }
         Category::ReplHistory => {
@@ -1135,7 +1366,8 @@ pub fn status() -> StoreStatus {
     let categories = Categories::from_preferences(&preferences);
     let existing_ollama = ollama_has_existing_models();
     let root = effective_root(true, &preferences.toolchain_store_dir).unwrap_or_else(default_root);
-    let caches = std::thread::scope(|scope| {
+    let started = Instant::now();
+    let caches = {
         let home = crate::paths::home_dir();
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
         let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
@@ -1143,7 +1375,9 @@ pub fn status() -> StoreStatus {
         let pending: Vec<_> = CACHES
             .iter()
             .map(|cache| {
-                let user_value = std::env::var_os(cache.variable).map(PathBuf::from);
+                let user_value = std::env::var_os(cache.variable)
+                    .filter(|_| defined_by_user(Some(&root), cache.variable))
+                    .map(PathBuf::from);
                 let centralized = enabled
                     && active_entries(categories, existing_ollama)
                         .any(|active| active.id == cache.id);
@@ -1163,34 +1397,55 @@ pub fn status() -> StoreStatus {
                 };
                 let measured = path.clone();
                 let file = cache.file;
-                let handle = scope.spawn(move || {
-                    if location == "system" {
-                        cached_system_size(&measured, file)
-                    } else {
-                        measure_path(&measured, file)
-                    }
-                });
-                (cache, path, user_value.is_some(), location, handle)
+                // Abrir Ajustes no debe esperar a recorrer una toolchain entera.
+                let skip = location == "system" && cache.category == Category::Toolchains;
+                // Cada medición va en su propio hilo, que puede seguir después
+                // de responder: lo que no termine a tiempo queda en la caché de
+                // tamaños para la próxima apertura.
+                let (sender, receiver) = std::sync::mpsc::channel();
+                if skip {
+                    let _ = sender.send(0);
+                } else {
+                    std::thread::spawn(move || {
+                        // Solo las cachés propias se miden siempre en el
+                        // momento (al vaciarlas tiene que verse lo liberado);
+                        // las del usuario y las de siempre no se tocan desde
+                        // aquí y se reutilizan unos minutos.
+                        let bytes = if location == "own" {
+                            measure_path(&measured, file)
+                        } else {
+                            cached_system_size(&measured, file)
+                        };
+                        let _ = sender.send(bytes);
+                    });
+                }
+                (cache, path, user_value.is_some(), location, skip, receiver)
             })
             .collect();
         pending
             .into_iter()
-            .map(|(cache, path, user_defined, location, handle)| StoreCache {
-                id: cache.id.to_string(),
-                name: cache.name.to_string(),
-                variable: cache.variable.to_string(),
-                path: path.to_string_lossy().into_owned(),
-                bytes: handle.join().unwrap_or(0),
-                user_defined,
-                location,
-                category: cache.category,
-                active: enabled
-                    && active_entries(categories, existing_ollama)
-                        .any(|active| active.id == cache.id),
-                info: cache_info(cache, user_defined),
+            .map(|(cache, path, user_defined, location, skip, receiver)| {
+                let left = STATUS_MEASURE_BUDGET.saturating_sub(started.elapsed());
+                let bytes = receiver.recv_timeout(left).ok();
+                StoreCache {
+                    id: cache.id.to_string(),
+                    name: cache.name.to_string(),
+                    variable: cache.variable.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    bytes: bytes.unwrap_or(0),
+                    user_defined,
+                    location,
+                    category: cache.category,
+                    active: enabled
+                        && active_entries(categories, existing_ollama)
+                            .any(|active| active.id == cache.id),
+                    measured: !skip && bytes.is_some(),
+                    measuring: !skip && bytes.is_none(),
+                    info: cache_info(cache, user_defined),
+                }
             })
             .collect::<Vec<_>>()
-    });
+    };
     // «Vaciar cachés» solo cuenta y borra las cachés de la carpeta propia.
     let cache_bytes = caches
         .iter()
@@ -1205,6 +1460,14 @@ pub fn status() -> StoreStatus {
         cache_bytes,
     }
 }
+
+/// Lo más que espera Ajustes a las mediciones de la carpeta propia. Con las
+/// variables apuntando a carpetas del usuario grandes (en la VM con todo el
+/// catálogo: GOPATH, `pip --user` con PyTorch y TensorFlow, el npm global con
+/// cientos de miles de archivos) medirlas pasaba de 20 s y la lista de
+/// cachés no aparecía. Lo que no termina sale sin medir (`measured: false`) y
+/// se completa en la siguiente apertura.
+const STATUS_MEASURE_BUDGET: Duration = Duration::from_secs(3);
 
 /// Lo que responde `toolchain_store_status` si la medición no pudo terminar
 /// (el hilo de trabajo acabó con un pánico): la carpeta, sin tamaños.
@@ -1404,12 +1667,50 @@ mod tests {
         ai_models: true,
         tools: true,
         repl_history: true,
+        toolchains: false,
+        programs: true,
+        projects: false,
     };
 
     /// Lo de antes de centralizarlo todo: sin herramientas ni historial.
+    #[test]
+    fn las_toolchains_solo_se_reubican_si_no_estaban_ya_instaladas() {
+        let home = Path::new("C:/Users/ana");
+        let toolchains: Vec<&CacheDef> = CACHES
+            .iter()
+            .filter(|cache| cache.category == Category::Toolchains)
+            .collect();
+        assert_eq!(toolchains.len(), 6);
+        for cache in &toolchains {
+            // Cada una sabe dónde vive cuando no se centraliza: es lo que se
+            // comprueba antes de reubicarla.
+            assert!(
+                system_location(cache, true, home, None, None, Path::new("C:/tmp")).is_some(),
+                "{} sin ubicación de siempre",
+                cache.id
+            );
+        }
+        // Las demás categorías no pasan por esta regla.
+        assert!(CACHES
+            .iter()
+            .filter(|cache| cache.category != Category::Toolchains)
+            .all(|cache| !toolchain_preinstalled(cache)));
+        // Apagada de fábrica: ninguna variable de toolchain sin activarla.
+        let overrides = overrides_for(
+            Some(Path::new("C:/store")),
+            CATEGORIAS_DE_FABRICA,
+            false,
+            &|_| false,
+        );
+        assert!(!overrides
+            .iter()
+            .any(|(variable, _)| variable == "RUSTUP_HOME" || variable == "GRADLE_USER_HOME"));
+    }
+
     const SOLO_CACHES_DESCARGAS_E_IA: Categories = Categories {
         tools: false,
         repl_history: false,
+        programs: false,
         ..CATEGORIAS_DE_FABRICA
     };
 
@@ -1520,6 +1821,72 @@ mod tests {
         assert!(
             extra_path_dirs(Some(root), SOLO_CACHES_DESCARGAS_E_IA, true, &|_| false).is_empty()
         );
+    }
+
+    #[test]
+    fn la_integracion_publica_pythonuserbase_solo_si_su_bin_existe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let todo = Categories {
+            tools: true,
+            ..CATEGORIAS_DE_FABRICA
+        };
+        let overrides = overrides_for(Some(root), todo, false, &|_| false);
+        let names = |pairs: Vec<(String, String)>| {
+            pairs.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
+        };
+        // Sin nada instalado con `pip --user` no hay Scripts: no se publica.
+        let before = required_variables(Some(root), todo, true, &overrides, &|_| false);
+        assert!(!names(before).contains(&"PYTHONUSERBASE".to_string()));
+
+        std::fs::create_dir_all(root.join("herramientas/python/Python312/Scripts")).unwrap();
+        let after = required_variables(Some(root), todo, true, &overrides, &|_| false);
+        assert_eq!(
+            after,
+            vec![(
+                "PYTHONUSERBASE".to_string(),
+                root.join("herramientas")
+                    .join("python")
+                    .to_string_lossy()
+                    .into_owned()
+            )]
+        );
+        // `cargo install` y npm global funcionan sin su variable.
+        assert!(!after.iter().any(|(name, _)| name == "CARGO_INSTALL_ROOT"));
+        // Si el usuario definió la suya, su bin no se publica ni la variable.
+        let user = required_variables(Some(root), todo, true, &overrides, &|variable| {
+            variable == "PYTHONUSERBASE"
+        });
+        assert!(user.is_empty());
+        // Sin la categoría, nada.
+        assert!(required_variables(
+            Some(root),
+            SOLO_CACHES_DESCARGAS_E_IA,
+            true,
+            &overrides,
+            &|_| { false }
+        )
+        .iter()
+        .all(|(name, _)| name != "PYTHONUSERBASE"));
+    }
+
+    #[test]
+    fn la_variable_publicada_por_wterminal_no_cuenta_como_del_usuario() {
+        let root = PathBuf::from(r"E:\WTerminal\entornos");
+        let ours = cache_path(
+            &root,
+            CACHES.iter().find(|cache| cache.id == "pip-user").unwrap(),
+        );
+        assert!(same_dir(
+            &ours,
+            &PathBuf::from(format!("{}/", ours.display()))
+        ));
+        assert!(!same_dir(&ours, &PathBuf::from(r"D:\mi-python")));
+        // Sin la variable en el entorno nunca es del usuario.
+        assert!(!defined_by_user(
+            Some(&root),
+            "WTERMINAL_VARIABLE_QUE_NO_EXISTE"
+        ));
     }
 
     #[test]

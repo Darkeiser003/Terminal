@@ -7,6 +7,30 @@
       "webviewInstallMode": {
         "type": "offlineInstaller",
         "silent": true
+      },
+      "nsis": {
+        "installMode": "perMachine",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "sidebarImage": "windows/installer/sidebar.bmp",
+        "headerImage": "windows/installer/header.bmp",
+        "uninstallerHeaderImage": "windows/installer/header-uninstall.bmp",
+        "installerHooks": "windows/installer/hooks.nsh",
+        "displayLanguageSelector": true,
+        "languages": [
+          "Spanish",
+          "English",
+          "French",
+          "German",
+          "Italian",
+          "Portuguese",
+          "Russian",
+          "Ukrainian",
+          "Arabic",
+          "Japanese",
+          "Korean",
+          "SimpChinese"
+        ]
       }
     }
   }

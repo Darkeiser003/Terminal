@@ -748,6 +748,19 @@ pub fn detect_environments(quick: bool) -> Inventory {
             {
                 detected.retain(|environment| environment.language.as_deref() != Some("fsharp"));
             }
+            // IPython es un lanzador de pip: puede estar en el PATH sin que su
+            // Python encuentre el módulo (p. ej. instalado con `pip --user` y
+            // sin `PYTHONUSERBASE`). Solo se ofrece si de verdad arranca.
+            if let Some(ipython) = detected
+                .iter()
+                .find(|environment| environment.language.as_deref() == Some("ipython"))
+                .map(|environment| environment.exe.clone())
+            {
+                if !python_launcher_keeps(&python_launcher_probe(&ipython)) {
+                    detected
+                        .retain(|environment| environment.language.as_deref() != Some("ipython"));
+                }
+            }
             detected
         });
         let docker = scope.spawn(move || {
@@ -836,6 +849,24 @@ pub fn detect_environments(quick: bool) -> Inventory {
     }
 }
 
+/// `--version` importa el módulo del lanzador: falla con
+/// «ModuleNotFoundError» si su Python no lo encuentra. Usa el mismo entorno
+/// que las pestañas (cachés y `PYTHONUSERBASE` de la carpeta propia).
+fn python_launcher_probe(exe: &str) -> crate::infrastructure::process::ProbeOutput {
+    crate::infrastructure::process::output_text_probe(
+        exe,
+        &["--version"],
+        std::time::Duration::from_secs(8),
+    )
+}
+
+/// Un lanzador lento (antivirus, disco en frío) sigue ofreciéndose: solo se
+/// descarta el que termina con error o ya no existe.
+fn python_launcher_keeps(outcome: &crate::infrastructure::process::ProbeOutput) -> bool {
+    use crate::infrastructure::process::ProbeOutput;
+    matches!(outcome, ProbeOutput::Success(_) | ProbeOutput::TimedOut)
+}
+
 fn dotnet_sdk_available() -> bool {
     let Some(dotnet) = which("dotnet") else {
         return false;
@@ -887,6 +918,16 @@ mod tests {
 
     fn fake(id: &str) -> Environment {
         Environment::new(id, id, ShellKind::Bash, "/bin/sh", &[])
+    }
+
+    #[test]
+    fn ipython_solo_se_ofrece_si_su_lanzador_arranca() {
+        use crate::infrastructure::process::ProbeOutput;
+        assert!(python_launcher_keeps(&ProbeOutput::Success("9.5.0".into())));
+        assert!(python_launcher_keeps(&ProbeOutput::TimedOut));
+        // «ModuleNotFoundError: No module named 'IPython'» sale con error.
+        assert!(!python_launcher_keeps(&ProbeOutput::Failed));
+        assert!(!python_launcher_keeps(&ProbeOutput::NotFound));
     }
 
     #[test]

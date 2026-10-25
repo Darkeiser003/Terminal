@@ -517,25 +517,54 @@ const fn win(
 
 // Estas son órdenes de ejecución, no sondas del filtro: no llevan el prefijo
 // interno `powershell:` porque la acción ya está marcada como PowerShell.
-const QEMU_VERSION: &str = "$qemu = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue; if ($qemu) { & $qemu.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe') --version } else { throw 'QEMU no está instalado.' }";
-const VIRTUALBOX_VERSION: &str = "$vbox = Get-Command VBoxManage.exe -ErrorAction SilentlyContinue; if ($vbox) { & $vbox.Source --version } elseif (Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe') --version } elseif (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe')) { & (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe') --version } else { throw 'VirtualBox no está instalado.' }";
+/// Carpetas que un programa dejó registradas en «Aplicaciones instaladas»
+/// (claves `Uninstall` de HKLM, WOW6432Node y HKCU) según su `DisplayName`.
+/// Con `winget --location` o un instalador al que se le cambió la carpeta,
+/// el programa no está en `Program Files` ni en el PATH y esta es la única
+/// pista fiable de dónde está. Las claves se leen una vez por proceso
+/// (`$global:wtUninstallEntries`): en el proceso único de sondas las comparten
+/// todas.
+macro_rules! registered_install_dirs {
+    ($pattern:literal) => {
+        concat!(
+            "@(& { if (-not $global:wtUninstallEntries) { $global:wtUninstallEntries = @(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*', 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*', 'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue) }; $global:wtUninstallEntries } | Where-Object { $_.DisplayName -like '",
+            $pattern,
+            "' } | ForEach-Object { if ($_.InstallLocation) { $_.InstallLocation.Trim('\"') } elseif ($_.DisplayIcon) { Split-Path (($_.DisplayIcon -split ',')[0].Trim('\"')) } } | Where-Object { $_ })"
+        )
+    };
+}
+
+/// Raíces posibles de MSYS2: las de siempre y la que registró su instalador.
+macro_rules! msys2_roots {
+    () => {
+        concat!(
+            "$roots = @(@('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')) + ",
+            registered_install_dirs!("MSYS2*"),
+            ");"
+        )
+    };
+}
+const MSYS2_ROOTS: &str = msys2_roots!();
+
+const QEMU_VERSION: &str = concat!("$qemu = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue; if ($qemu) { & $qemu.Source --version } else { $path = @(@($env:ProgramFiles, ${env:ProgramFiles(x86)}) | ForEach-Object { Join-Path $_ 'qemu' }) + ", registered_install_dirs!("QEMU*"), " | ForEach-Object { Join-Path $_ 'qemu-system-x86_64.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { & $path --version } else { throw 'QEMU no está instalado.' } }");
+const VIRTUALBOX_VERSION: &str = concat!("$vbox = Get-Command VBoxManage.exe -ErrorAction SilentlyContinue; if ($vbox) { & $vbox.Source --version } else { $path = @(@($env:ProgramFiles, ${env:ProgramFiles(x86)}) | ForEach-Object { Join-Path $_ 'Oracle\\VirtualBox' }) + ", registered_install_dirs!("Oracle VirtualBox*"), " | ForEach-Object { Join-Path $_ 'VBoxManage.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { & $path --version } else { throw 'VirtualBox no está instalado.' } }");
 // AutoHotkey se instala con ejecutables que no siempre quedan en PATH. La
 // sonda cubre la instalación normal de v2, instalaciones por usuario y v1/v2,
 // pero no da por instalado cualquier archivo llamado "ahk".
-const AUTOHOTKEY_DETECT: &str = "powershell:$paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')); if ((Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue) -or (Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
-const AUTOHOTKEY_VERSION: &str = "$command = Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue; if (-not $command) { $command = Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue }; if ($command) { (Get-Item $command.Source).VersionInfo.ProductVersion } else { $paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')); $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { (Get-Item $path).VersionInfo.ProductVersion } else { throw 'AutoHotkey no está instalado.' } }";
-const MSYS2_DETECT: &str = "powershell:$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { (Test-Path (Join-Path $_ 'gcc.exe')) -and (Test-Path (Join-Path $_ 'gfortran.exe')) -and (Test-Path (Join-Path $_ 'gdb.exe')) }) { exit 0 } else { exit 1 }";
+const AUTOHOTKEY_DETECT: &str = concat!("powershell:$paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')) + ", registered_install_dirs!("AutoHotkey*"), " | ForEach-Object { if ($_ -like '*.exe') { $_ } else { Join-Path $_ 'v2\\AutoHotkey64.exe'; Join-Path $_ 'AutoHotkey64.exe' } }; if ((Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue) -or (Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }");
+const AUTOHOTKEY_VERSION: &str = concat!("$command = Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue; if (-not $command) { $command = Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue }; if ($command) { (Get-Item $command.Source).VersionInfo.ProductVersion } else { $paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')) + ", registered_install_dirs!("AutoHotkey*"), " | ForEach-Object { if ($_ -like '*.exe') { $_ } else { Join-Path $_ 'v2\\AutoHotkey64.exe'; Join-Path $_ 'AutoHotkey64.exe' } }; $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { (Get-Item $path).VersionInfo.ProductVersion } else { throw 'AutoHotkey no está instalado.' } }");
+const MSYS2_DETECT: &str = concat!("powershell:", msys2_roots!(), " $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { (Test-Path (Join-Path $_ 'gcc.exe')) -and (Test-Path (Join-Path $_ 'gfortran.exe')) -and (Test-Path (Join-Path $_ 'gdb.exe')) }) { exit 0 } else { exit 1 }");
 const MSYS2_PACKAGES: &str =
     "mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-gdb";
 const MSYS2_OCAML_PACKAGE: &str = "mingw-w64-ucrt-x86_64-ocaml";
-const MSYS2_OCAML_DETECT: &str = "powershell:$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { Test-Path (Join-Path $_ 'ocaml.exe') }) { exit 0 } else { exit 1 }";
+const MSYS2_OCAML_DETECT: &str = concat!("powershell:", msys2_roots!(), " $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { Test-Path (Join-Path $_ 'ocaml.exe') }) { exit 0 } else { exit 1 }");
 const GHCUP_TOOLCHAIN_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghci.exe'), 'C:\\ghcup\\bin\\ghci.exe'); if ((Get-Command ghci.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
 const GHCUP_MANAGER_DETECT: &str = "powershell:$paths = @((Join-Path $env:USERPROFILE '.ghcup\\bin\\ghcup.exe'), 'C:\\ghcup\\bin\\ghcup.exe'); if ((Get-Command ghcup.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
 const ERLANG_WINGET_ID: &str = "Erlang.ErlangOTP";
 // El instalador de Clink no siempre añade su carpeta al PATH: se busca en las
 // rutas de instalación habituales (las mismas que usa la inicialización de cmd).
-const CLINK_DETECT: &str = "powershell:$paths = @((Join-Path ${env:ProgramFiles(x86)} 'clink\\clink.bat'), (Join-Path $env:ProgramFiles 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'Programs\\clink\\clink.bat')); if ((Get-Command clink -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }";
-const CLINK_VERSION: &str = "$paths = @((Join-Path ${env:ProgramFiles(x86)} 'clink\\clink.bat'), (Join-Path $env:ProgramFiles 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'Programs\\clink\\clink.bat')); $clink = Get-Command clink -ErrorAction SilentlyContinue; if ($clink) { & $clink.Source --version } else { $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { & $path --version } else { throw 'Clink no está instalado.' } }";
+const CLINK_DETECT: &str = concat!("powershell:$paths = @((Join-Path ${env:ProgramFiles(x86)} 'clink\\clink.bat'), (Join-Path $env:ProgramFiles 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'Programs\\clink\\clink.bat')) + ", registered_install_dirs!("Clink*"), " | ForEach-Object { if ($_ -like '*.bat') { $_ } else { Join-Path $_ 'clink.bat' } }; if ((Get-Command clink -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }");
+const CLINK_VERSION: &str = concat!("$paths = @((Join-Path ${env:ProgramFiles(x86)} 'clink\\clink.bat'), (Join-Path $env:ProgramFiles 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'clink\\clink.bat'), (Join-Path $env:LOCALAPPDATA 'Programs\\clink\\clink.bat')) + ", registered_install_dirs!("Clink*"), " | ForEach-Object { if ($_ -like '*.bat') { $_ } else { Join-Path $_ 'clink.bat' } }; $clink = Get-Command clink -ErrorAction SilentlyContinue; if ($clink) { & $clink.Source --version } else { $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { & $path --version } else { throw 'Clink no está instalado.' } }");
 // Windows PowerShell 5.1 trae PSReadLine 2.0, sin predicciones. La versión
 // actual se instala para el usuario en Windows PowerShell aunque la acción se
 // lance desde una pestaña de PowerShell 7 (que ya la incluye y tiene su
@@ -645,7 +674,14 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-haxe", "Haxe", "haxe", "HaxeFoundation.Haxe", Some("haxe --version"), LANGUAGES_GROUP),
     win("winget-octave", "GNU Octave", "octave", "GNU.Octave", Some("octave --version"), LANGUAGES_GROUP),
     win("winget-maxima", "Maxima", "maxima", "MaximaTeam.Maxima", Some("maxima --version"), LANGUAGES_GROUP),
-    win("winget-racket", "Racket", "racket", "Racket.Racket", Some("racket --version"), LANGUAGES_GROUP),
+    WindowsTool {
+        // El manifiesto de WinGet de Racket 9.3 quedó con un hash que no
+        // coincide con el instalador publicado (comprobado el 24-10-2026):
+        // WinGet aborta y Chocolatey es la alternativa.
+        choco_fallback: Some("racket"),
+        hint: Some("Usa WinGet; si su manifiesto falla (hash del instalador desactualizado), intenta el paquete racket de Chocolatey. Comprueba el origen antes de confirmar."),
+        ..win("winget-racket", "Racket", "racket", "Racket.Racket", Some("racket --version"), LANGUAGES_GROUP)
+    },
     win("winget-sbcl", "Common Lisp · SBCL", "sbcl", "SBCL.SBCL", Some("sbcl --version"), LANGUAGES_GROUP),
     win("winget-swipl", "Prolog · SWI", "swipl", "SWI-Prolog.SWI-Prolog", Some("swipl --version"), LANGUAGES_GROUP),
     win("winget-sqlite", "SQLite", "sqlite3", "SQLite.SQLite", Some("sqlite3 --version"), LANGUAGES_GROUP),
@@ -704,11 +740,11 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     win("winget-aws-cli", "AWS CLI", "aws", "Amazon.AWSCLI", Some("aws --version"), TOOLS_GROUP),
     win("winget-azure-cli", "Azure CLI", "az", "Microsoft.AzureCLI", Some("az version"), TOOLS_GROUP),
     WindowsTool {
-        detect: Some("powershell:if (Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'qemu\\qemu-system-x86_64.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'qemu\\qemu-system-x86_64.exe'))) { exit 0 } else { exit 1 }"),
+        detect: Some(concat!("powershell:$paths = @(@($env:ProgramFiles, ${env:ProgramFiles(x86)}) | ForEach-Object { Join-Path $_ 'qemu' }) + ", registered_install_dirs!("QEMU*"), " | ForEach-Object { Join-Path $_ 'qemu-system-x86_64.exe' }; if ((Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }")),
         ..win("winget-qemu", "QEMU", "qemu-system-x86_64", "SoftwareFreedomConservancy.QEMU", Some(QEMU_VERSION), VIRTUALIZATION_GROUP)
     },
     WindowsTool {
-        detect: Some("powershell:if (Get-Command VBoxManage.exe -ErrorAction SilentlyContinue) { exit 0 } elseif ((Test-Path (Join-Path $env:ProgramFiles 'Oracle\\VirtualBox\\VBoxManage.exe')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Oracle\\VirtualBox\\VBoxManage.exe'))) { exit 0 } else { exit 1 }"),
+        detect: Some(concat!("powershell:$paths = @(@($env:ProgramFiles, ${env:ProgramFiles(x86)}) | ForEach-Object { Join-Path $_ 'Oracle\\VirtualBox' }) + ", registered_install_dirs!("Oracle VirtualBox*"), " | ForEach-Object { Join-Path $_ 'VBoxManage.exe' }; if ((Get-Command VBoxManage.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }")),
         ..win("winget-virtualbox", "Oracle VirtualBox", "VBoxManage", "Oracle.VirtualBox", Some(VIRTUALBOX_VERSION), VIRTUALIZATION_GROUP)
     },
     WindowsTool {
@@ -759,9 +795,16 @@ static WINDOWS_CHOCOLATEY_TOOLS: &[ChocolateyTool] = &[
 /// Chocolatey se instala desde su procedimiento oficial y queda invocable en
 /// la misma sesión. El comando es visible en la terminal y se puede cancelar
 /// antes de aceptarlo, igual que el resto del catálogo.
+///
+/// Con «Programas» en la carpeta propia (`WTERMINAL_PROGRAMS`), Chocolatey se
+/// instala en `<carpeta>\chocolatey` y sus herramientas sueltas (`C:\tools` de
+/// siempre) en `<carpeta>\chocolatey-tools`, salvo que ya estén definidas.
 fn chocolatey_command(arguments: &str) -> String {
     format!(
-        "$choco = Get-Command choco.exe -ErrorAction SilentlyContinue; \
+        "if ($env:WTERMINAL_PROGRAMS) {{ \
+         if (-not $env:ChocolateyInstall -and -not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {{ $env:ChocolateyInstall = Join-Path $env:WTERMINAL_PROGRAMS 'chocolatey' }}; \
+         if (-not $env:ChocolateyToolsLocation) {{ $env:ChocolateyToolsLocation = Join-Path $env:WTERMINAL_PROGRAMS 'chocolatey-tools' }} }}; \
+         $choco = Get-Command choco.exe -ErrorAction SilentlyContinue; \
          if (-not $choco) {{ Set-ExecutionPolicy Bypass -Scope Process -Force; \
          [System.Net.ServicePointManager]::SecurityProtocol = \
          [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; \
@@ -787,7 +830,14 @@ fn chocolatey_tool_actions(tool: &ChocolateyTool, t: &Translator) -> Vec<Install
             ],
             "Instalar {tool} ({source})",
         ),
-        chocolatey_command(&format!("install {} -y --no-progress", tool.pkg)),
+        if tool.pkg == "elixir" {
+            format!(
+                "{}; {ELIXIR_PATH_SETUP}",
+                chocolatey_install_command(tool.pkg)
+            )
+        } else {
+            chocolatey_install_command(tool.pkg)
+        },
     )
     .short(t.tp(
         "action.installShort",
@@ -859,9 +909,65 @@ const WINGET_INSTALL_FLAGS: &str = "-e --source winget --accept-source-agreement
 const WINGET_QUERY_FLAGS: &str =
     "-e --source winget --accept-source-agreements --disable-interactivity";
 
+/// Instalar con WinGet. Con «Programas (WinGet)» activo en Entornos y
+/// descargas, WTerminal pasa `WTERMINAL_PROGRAMS` a sus pestañas
+/// (`config::toolchain_store`) y la instalación va a `<esa carpeta>\<id>` con
+/// `--location`. Muchos instaladores lo respetan; los que no (Octave, .NET,
+/// Julia o Swift en la VM con todo el catálogo) acaban en Program Files o en
+/// `%LOCALAPPDATA%\Programs`: la acción lo detecta comparando esas carpetas
+/// antes y después, lo dice y ofrece moverlos a la carpeta propia dejando una
+/// unión en su sitio (rutas, accesos directos y registro siguen valiendo).
+/// Mover pide permisos de administrador una vez. Sin la variable, la orden es
+/// la de siempre.
 fn winget_install_command(pkg: &str) -> String {
-    format!("winget install --id {pkg} {WINGET_INSTALL_FLAGS}")
+    centralized_install(
+        pkg,
+        "--location",
+        &format!("winget install --id {pkg} {WINGET_INSTALL_FLAGS} @wtLocation"),
+    )
 }
+
+/// El PHP de WinGet llega sin `php.ini`: sin intl, mbstring, openssl, zip o
+/// curl, Composer no puede instalar casi ningún framework del catálogo
+/// (CakePHP pide intl, Laravel zip…; comprobado en la VM con todo instalado).
+/// Tras instalarlo se crea `php.ini` a partir de `php.ini-production` con
+/// esas extensiones, solo si no existe ya uno.
+const PHP_INI_SETUP: &str = r#"if ($LASTEXITCODE -eq 0) { $wtPhpDirs = @(@($wtTarget) + @((Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'), (Join-Path $env:ProgramFiles 'WinGet\Packages')) | Where-Object { $_ -and (Test-Path $_) } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Depth 2 -Filter 'php.ini-production' -ErrorAction SilentlyContinue } | Where-Object { $_.FullName -match 'PHP' -or $wtTarget } | ForEach-Object DirectoryName | Select-Object -Unique); foreach ($wtPhpDir in $wtPhpDirs) { $wtIni = Join-Path $wtPhpDir 'php.ini'; if (-not (Test-Path $wtIni)) { $wtText = Get-Content (Join-Path $wtPhpDir 'php.ini-production') -Raw; $wtText = $wtText -replace '(?m)^;\s*extension_dir\s*=\s*"ext"', 'extension_dir = "ext"'; foreach ($wtExt in 'intl', 'mbstring', 'openssl', 'zip', 'curl', 'fileinfo', 'pdo_sqlite', 'sqlite3', 'sodium', 'gd') { $wtText = $wtText -replace "(?m)^;\s*extension\s*=\s*$wtExt\s*$", "extension=$wtExt" }; Set-Content -LiteralPath $wtIni -Value $wtText -Encoding Ascii; Write-Host "php.ini preparado con intl, mbstring, openssl, zip y curl: $wtIni" } } }"#;
+
+/// Chocolatey despliega Elixir en `lib\elixir\tools\bin` sin añadirlo al
+/// PATH: `elixir` y `mix` no se encontraban tras instalarlo (comprobado en la
+/// VM) y el panel seguía ofreciendo instalarlo. Se añade al PATH del usuario.
+const ELIXIR_PATH_SETUP: &str = r#"$wtElixir = Join-Path $env:ChocolateyInstall 'lib\elixir\tools\bin'; if ($env:ChocolateyInstall -and (Test-Path (Join-Path $wtElixir 'elixir.bat'))) { $wtUserPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($wtUserPath -split ';') -contains $wtElixir)) { [Environment]::SetEnvironmentVariable('Path', (($wtUserPath.TrimEnd(';') + ';' + $wtElixir).Trim(';')), 'User') }; $env:Path = $wtElixir + ';' + $env:Path; Write-Host "Elixir añadido al PATH: $wtElixir" }"#;
+
+/// Instalar con Chocolatey. `--install-directory` es una opción de las
+/// ediciones de pago (la libre la rechaza: comprobado en la VM), así que no
+/// se pasa: los paquetes portables ya quedan en la carpeta propia porque
+/// Chocolatey vive en `<carpeta>\chocolatey` y sus herramientas sueltas en
+/// `<carpeta>\chocolatey-tools` ([`chocolatey_command`]); si un paquete trae un
+/// instalador que va a Program Files, la acción ofrece moverlo a
+/// `<carpeta>\<paquete>` como con WinGet.
+fn chocolatey_install_command(pkg: &str) -> String {
+    centralized_install(
+        pkg,
+        "",
+        &chocolatey_command(&format!("install {pkg} -y --no-progress")),
+    )
+}
+
+/// Envuelve una orden de instalación que admite una carpeta de destino:
+/// `__INSTALL__` recibe `@wtLocation` (vacío sin `WTERMINAL_PROGRAMS`, o
+/// `<opción> <carpeta>\<nombre>`). Después comprueba si el instalador la
+/// respetó y, si no, ofrece moverlo dejando una unión en su sitio.
+fn centralized_install(leaf: &str, flag: &str, install: &str) -> String {
+    CENTRALIZED_INSTALL
+        .replace("__LEAF__", leaf)
+        .replace("__FLAG__", flag)
+        .replace("__INSTALL__", install)
+}
+
+/// Plantilla de [`centralized_install`]; sin `format!` para no duplicar cada
+/// llave de PowerShell.
+const CENTRALIZED_INSTALL: &str = r#"$wtTarget = $null; $wtBefore = @(); $wtWatch = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ -and (Test-Path $_) }; if ($env:WTERMINAL_PROGRAMS) { $wtTarget = Join-Path $env:WTERMINAL_PROGRAMS '__LEAF__'; $wtBefore = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object FullName }) }; $wtLocation = @(); if ($wtTarget -and '__FLAG__') { $wtLocation = @('__FLAG__', $wtTarget) }; __INSTALL__; $wtCode = $LASTEXITCODE; if ($wtTarget -and $wtCode -eq 0 -and -not (Get-ChildItem -LiteralPath $wtTarget -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { $wtNew = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue } | Where-Object { $wtBefore -notcontains $_.FullName -and -not $_.LinkType } | ForEach-Object FullName); if ($wtNew.Count -eq 0) { if ('__FLAG__') { Write-Host "__LEAF__ no usó la carpeta propia ($wtTarget) y no se encontró una carpeta nueva en Program Files ni en LOCALAPPDATA\Programs." } } else { Write-Host "__LEAF__ no se instaló en la carpeta propia; está en: $($wtNew -join ', ')"; $wtAnswer = Read-Host '¿Moverlo a la carpeta propia y dejar una unión en su sitio? Pide permisos de administrador (s/N)'; if ($wtAnswer -match '^[sSyY]') { $wtQuote = { param($text) "'" + ($text -replace "'", "''") + "'" }; $wtFlags = '/E /MOVE /IS /IT /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP'; $wtLines = @(); foreach ($wtDir in $wtNew) { $wtDest = Join-Path $wtTarget (Split-Path $wtDir -Leaf); Get-Process | Where-Object { $_.Path -like "$wtDir\*" } | Stop-Process -Force -ErrorAction SilentlyContinue; $wtSrc = & $wtQuote $wtDir; $wtDst = & $wtQuote $wtDest; $wtLines += "robocopy $wtSrc $wtDst $wtFlags | Out-Null; if (@(Get-ChildItem -LiteralPath $wtSrc -Recurse -File -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $wtSrc -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Junction -Path $wtSrc -Target $wtDst | Out-Null } else { robocopy $wtDst $wtSrc $wtFlags | Out-Null }" }; $wtScript = Join-Path $env:TEMP ('wterminal-move-' + [guid]::NewGuid().ToString() + '.ps1'); Set-Content -LiteralPath $wtScript -Value $wtLines -Encoding UTF8; Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$wtScript`"" -Verb RunAs -Wait -WindowStyle Hidden; Remove-Item -LiteralPath $wtScript -ErrorAction SilentlyContinue; foreach ($wtDir in $wtNew) { $wtItem = Get-Item -LiteralPath $wtDir -Force -ErrorAction SilentlyContinue; if ($wtItem -and $wtItem.LinkType -eq 'Junction') { Write-Host "Movido: $wtDir -> $(@($wtItem.Target)[0])" } else { Write-Host "No se pudo mover $wtDir (¿algún archivo en uso?): sigue en su sitio." } } } } }; $global:LASTEXITCODE = $wtCode"#;
 
 /// RubyGems compila extensiones nativas de muchas gemas (Rails, Nokogiri,
 /// Jekyll, etc.) y en Windows necesita `make`.  La acción de Ruby prepara
@@ -949,10 +1055,14 @@ fn windows_tool_actions(tool: &WindowsTool, t: &Translator) -> Vec<InstallAction
     let subgroup = label.clone();
     let install_command = if tool.install_id == "winget-ruby" {
         ruby_install_command()
+    } else if tool.install_id == "winget-php" {
+        format!("{}; {PHP_INI_SETUP}", winget_install_command(tool.pkg))
     } else if let Some(choco_pkg) = tool.choco_fallback {
-        let fallback = chocolatey_command(&format!("install {choco_pkg} -y --no-progress"));
+        let fallback = chocolatey_install_command(choco_pkg);
+        // El mensaje nombra la herramienta (antes decía siempre PostgreSQL 18).
+        let name = tool.label.replace('\'', "''");
         format!(
-            "{}; if ($LASTEXITCODE -ne 0) {{ Write-Host 'WinGet no pudo instalar PostgreSQL 18; se prueba Chocolatey.'; {} }}",
+            "{}; if ($LASTEXITCODE -ne 0) {{ Write-Host 'WinGet no pudo instalar {name}; se prueba Chocolatey.'; {} }}",
             winget_install_command(tool.pkg), fallback
         )
     } else {
@@ -2143,7 +2253,18 @@ fn elixir_otp_action(platform: &str, pkg_manager: Option<&str>) -> InstallAction
             _ => "sudo apt update && sudo apt install -y erlang-dev erlang-public-key".to_string(),
         },
     };
-    InstallAction::new("pkg-elixir-otp", "Preparar OTP para Mix (public_key)", command)
+    let action = InstallAction::new(
+        "pkg-elixir-otp",
+        "Preparar OTP para Mix (public_key)",
+        command,
+    );
+    // En Windows es la orden de WinGet del catálogo, escrita en PowerShell.
+    let action = if platform == "windows" {
+        action.powershell()
+    } else {
+        action
+    };
+    action
         .short("Instalar la dependencia TLS de Erlang")
         .group(LANGUAGES_GROUP)
         .subgroup("Elixir")
@@ -2752,7 +2873,11 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
         actions.push(ecosystem_action(
             id,
             &format!("{label} (Ruby)"),
-            format!("gem install --user-install {package}"),
+            // Sin documentación: generar el RDoc de Rails falla en RubyInstaller
+            // 3.3 (`rdoc/markup/inline_parser`) aunque las gemas ya estén
+            // instaladas, y tarda más que la instalación. El paquete sigue
+            // siendo la última palabra: la sonda lo lee de ahí.
+            format!("gem install --user-install --no-document {package}"),
             "Ruby · frameworks y herramientas",
             "Necesita Ruby y RubyGems. Se instala en el perfil de gemas del usuario.",
         ));
@@ -2767,7 +2892,10 @@ fn ecosystem_actions(python_cmd: &'static str, npm_cmd: &'static str) -> Vec<Ins
         (
             "framework-aspnet-codegenerator",
             "ASP.NET Code Generator",
-            "dotnet tool install --global dotnet-aspnet-codegenerator",
+            // La última versión ya no trae `DotnetToolSettings.xml` para el
+            // SDK 8 que instala el catálogo y falla (comprobado en la VM el
+            // 24-10-2026); la rama 8 es la que corresponde a ese SDK.
+            "dotnet tool install --global dotnet-aspnet-codegenerator --version 8.0.23",
         ),
         (
             "framework-csharpier",
@@ -3403,7 +3531,7 @@ fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
         // Si la distro no respondió no se inventan instalaciones pendientes:
         // podrían estar ya presentes. El selector la conserva y el usuario
         // puede refrescar cuando WSL vuelva a estar disponible.
-        if distro.probe_error {
+        if distro.probe_error || distro.listing_error {
             continue;
         }
         let subgroup = format!("{} · {}", distro.name, distro.shell);
@@ -3729,14 +3857,14 @@ fn windows_actions(
 /// ficticia de la base de MSYS2.
 fn windows_msys2_toolchain_actions() -> Vec<InstallAction> {
     let install = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar la toolchain UCRT64.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; $env:Path = $bin + ';' + $env:Path",
+        "{MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; {MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar la toolchain UCRT64.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; $env:Path = $bin + ';' + $env:Path",
         winget_install_command("MSYS2.MSYS2")
     );
     let update = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar la toolchain UCRT64.' }}"
+        "{MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar la toolchain UCRT64.' }}"
     );
     let uninstall = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar la toolchain UCRT64.' }}"
+        "{MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_PACKAGES}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar la toolchain UCRT64.' }}"
     );
     vec![
         InstallAction::new(
@@ -3777,7 +3905,7 @@ fn windows_msys2_toolchain_actions() -> Vec<InstallAction> {
         InstallAction::new(
             "windows-msys2-toolchain-version",
             "Ver versión de GCC (MSYS2 UCRT64)",
-            "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $gcc = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin\\gcc.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($gcc) { & $gcc --version } else { throw 'GCC de MSYS2 no está instalado.' }",
+            concat!(msys2_roots!(), " $gcc = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin\\gcc.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($gcc) { & $gcc --version } else { throw 'GCC de MSYS2 no está instalado.' }"),
         )
         .short("Ver versión instalada")
         .powershell()
@@ -3793,16 +3921,16 @@ fn windows_msys2_toolchain_actions() -> Vec<InstallAction> {
 /// GFortran y GDB.
 fn windows_msys2_ocaml_actions() -> Vec<InstallAction> {
     let install = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar OCaml.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; [Environment]::SetEnvironmentVariable('OCAMLLIB', $lib, 'User'); $env:Path = $bin + ';' + $env:Path; $env:OCAMLLIB = $lib",
+        "{MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ {}; {MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1 }}; if (-not $root) {{ throw 'MSYS2 se instaló, pero no se encontró su raíz.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo instalar OCaml.' }}; $bin = Join-Path $root 'ucrt64\\bin'; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not (($userPath -split ';') -contains $bin)) {{ [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).Trim(';')), 'User') }}; [Environment]::SetEnvironmentVariable('OCAMLLIB', $lib, 'User'); $env:Path = $bin + ';' + $env:Path; $env:OCAMLLIB = $lib",
         winget_install_command("MSYS2.MSYS2")
     );
     let update = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar OCaml.' }}; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; [Environment]::SetEnvironmentVariable('OCAMLLIB', $lib, 'User')"
+        "{MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Syu --noconfirm; pacman -S --needed --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo actualizar OCaml.' }}; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; [Environment]::SetEnvironmentVariable('OCAMLLIB', $lib, 'User')"
     );
     let uninstall = format!(
-        "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar OCaml.' }}; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; if ([Environment]::GetEnvironmentVariable('OCAMLLIB', 'User') -eq $lib) {{ [Environment]::SetEnvironmentVariable('OCAMLLIB', $null, 'User') }}"
+        "{MSYS2_ROOTS} $root = $roots | Where-Object {{ Test-Path (Join-Path $_ 'usr\\bin\\bash.exe') }} | Select-Object -First 1; if (-not $root) {{ throw 'MSYS2 no está instalado.' }}; $bash = Join-Path $root 'usr\\bin\\bash.exe'; & $bash -lc 'pacman -Rns --noconfirm {MSYS2_OCAML_PACKAGE}'; if ($LASTEXITCODE -ne 0) {{ throw 'MSYS2 no pudo desinstalar OCaml.' }}; $lib = Join-Path $root 'ucrt64\\lib\\ocaml'; if ([Environment]::GetEnvironmentVariable('OCAMLLIB', 'User') -eq $lib) {{ [Environment]::SetEnvironmentVariable('OCAMLLIB', $null, 'User') }}"
     );
-    let version = "$roots = @('C:\\msys64', (Join-Path $env:ProgramFiles 'MSYS2'), (Join-Path $env:LOCALAPPDATA 'msys64')); $ocaml = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin\\ocaml.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($ocaml) { & $ocaml -version } else { throw 'OCaml de MSYS2 no está instalado.' }";
+    let version = concat!(msys2_roots!(), " $ocaml = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin\\ocaml.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($ocaml) { & $ocaml -version } else { throw 'OCaml de MSYS2 no está instalado.' }");
     vec![
         InstallAction::new(
             "windows-msys2-ocaml",
@@ -5219,6 +5347,7 @@ mod tests {
             tools: vec![],
             detailed: true,
             probe_error: false,
+            listing_error: false,
             unrunnable: vec![],
         }
     }
@@ -5850,6 +5979,90 @@ mod tests {
     }
 
     #[test]
+    fn las_sondas_de_programas_movibles_miran_tambien_su_carpeta_registrada() {
+        // AutoHotkey, Clink, QEMU, VirtualBox y MSYS2 instalados con
+        // `winget --location` (o en otra carpeta) no están en Program Files
+        // ni en el PATH: la sonda y la orden de versión leen la carpeta que el
+        // instalador dejó en las claves de desinstalación.
+        for (name, script) in [
+            ("AutoHotkey", AUTOHOTKEY_DETECT),
+            ("AutoHotkey (versión)", AUTOHOTKEY_VERSION),
+            ("Clink", CLINK_DETECT),
+            ("Clink (versión)", CLINK_VERSION),
+            ("MSYS2", MSYS2_DETECT),
+            ("OCaml de MSYS2", MSYS2_OCAML_DETECT),
+            ("QEMU (versión)", QEMU_VERSION),
+            ("VirtualBox (versión)", VIRTUALBOX_VERSION),
+        ] {
+            assert!(
+                script.contains("CurrentVersion\\Uninstall\\*")
+                    && script.contains("$global:wtUninstallEntries"),
+                "{name}: {script}"
+            );
+        }
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "winget-qemu",
+            "winget-virtualbox",
+            "windows-msys2-toolchain-update",
+        ] {
+            let action = buscar(&actions, id);
+            let text = format!(
+                "{} {:?} {:?}",
+                action.command, action.check_cmd, action.requires_cmd
+            );
+            assert!(text.contains("$global:wtUninstallEntries"), "{id}: {text}");
+        }
+        // Tras instalar MSYS2 con WinGet la lista de raíces se vuelve a leer.
+        let install = buscar(&actions, "windows-msys2-toolchain").command.clone();
+        assert_eq!(
+            install.matches("$global:wtUninstallEntries =").count(),
+            2,
+            "{install}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn las_carpetas_registradas_se_leen_sin_errores_en_windows_powershell() {
+        let script = concat!(
+            "$ErrorActionPreference = 'Stop'; $dirs = ",
+            registered_install_dirs!("*"),
+            "; $again = ",
+            registered_install_dirs!("*"),
+            "; if ($dirs.Count -eq $again.Count) { 'ok' } else { 'distinto' }"
+        );
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .expect("powershell");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.trim() == "ok",
+            "{stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn todas_las_sondas_de_powershell_del_catalogo_van_en_el_proceso_unico() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let scripts: Vec<&str> = actions
+            .iter()
+            .flat_map(|action| [action.check_cmd.as_deref(), action.requires_cmd.as_deref()])
+            .flatten()
+            .filter_map(|command| command.strip_prefix("powershell:"))
+            .collect();
+        assert!(scripts.len() >= 5, "{scripts:?}");
+        for script in scripts {
+            assert!(
+                crate::packages::commands::powershell_batchable(script),
+                "una sonda nueva debe poder ir en el proceso único (exit 0/1 de primer nivel): {script}"
+            );
+        }
+    }
+
+    #[test]
     fn las_sondas_de_virtualizacion_no_dependen_de_un_exe_en_path() {
         let actions = get_install_actions(&contexto("windows"), &t());
         for id in ["winget-qemu", "winget-virtualbox"] {
@@ -5938,6 +6151,141 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn instalar_con_winget_usa_la_carpeta_de_programas_solo_si_existe_la_variable() {
+        let command = winget_install_command("Git.Git");
+        assert!(command.contains("winget install --id Git.Git -e --source winget"));
+        assert!(command.contains("Join-Path $env:WTERMINAL_PROGRAMS 'Git.Git'"));
+        assert!(command.contains("@wtLocation"));
+        assert!(!command.contains("__PKG__") && !command.contains("__FLAGS__"));
+        // Mover a la carpeta propia es opcional y pide permiso: nunca sin preguntar.
+        assert!(command.contains("Read-Host") && command.contains("-Verb RunAs"));
+        // El código de salida de winget no se pierde con la comprobación final.
+        assert!(command.ends_with("$global:LASTEXITCODE = $wtCode"));
+    }
+
+    #[test]
+    fn chocolatey_tambien_respeta_la_carpeta_de_programas() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let kotlin = buscar(&actions, "choco-kotlin");
+        assert!(kotlin.command.contains("install kotlinc -y --no-progress"));
+        // `--install-directory` solo existe en las ediciones de pago: la libre
+        // rechaza la orden entera (comprobado en la VM).
+        assert!(!kotlin.command.contains("--install-directory"));
+        assert!(kotlin
+            .command
+            .contains("Join-Path $env:WTERMINAL_PROGRAMS 'chocolatey'"));
+        assert!(kotlin.command.contains("$env:ChocolateyToolsLocation"));
+        // Si su instalador acaba en Program Files, se ofrece moverlo igual.
+        assert!(kotlin
+            .command
+            .contains("Join-Path $env:WTERMINAL_PROGRAMS 'kotlinc'"));
+        let postgres = buscar(&actions, "winget-postgresql");
+        assert!(postgres
+            .command
+            .contains("install postgresql -y --no-progress"));
+        assert!(!postgres.command.contains("--install-directory"));
+        // Elixir de Chocolatey no entra en el PATH por sí solo.
+        let elixir = buscar(&actions, "choco-elixir");
+        assert!(elixir.command.contains("lib\\elixir\\tools\\bin"));
+        assert!(elixir.command.contains("SetEnvironmentVariable('Path'"));
+    }
+
+    #[test]
+    fn php_de_winget_queda_con_php_ini_y_las_extensiones_que_pide_composer() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let php = buscar(&actions, "winget-php");
+        assert!(php.command.contains("--id PHP.PHP.8.5 "));
+        for ext in ["intl", "mbstring", "openssl", "zip", "curl"] {
+            assert!(php.command.contains(&format!("'{ext}'")), "{ext}");
+        }
+        // Un php.ini que ya exista no se toca.
+        assert!(php.command.contains("if (-not (Test-Path $wtIni))"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn instalar_con_winget_tiene_sintaxis_powershell_valida_en_todo_el_catalogo() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let parser = r#"
+$source = [Environment]::GetEnvironmentVariable('LTERMINAL_WINGET_SYNTAX_SOURCE')
+$tokens = $null; $errors = $null
+[System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors) | Out-Null
+if ($errors.Count -gt 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }
+exit 0
+"#;
+        let commands: Vec<&InstallAction> = actions
+            .iter()
+            .filter(|action| action.command.contains("winget install --id"))
+            .collect();
+        assert!(commands.len() > 40, "{}", commands.len());
+        for action in commands {
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", parser])
+                .env("LTERMINAL_WINGET_SYNTAX_SOURCE", &action.command)
+                .output()
+                .expect("Windows PowerShell");
+            assert!(
+                output.status.success(),
+                "{}: {}",
+                action.id,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// Con un `winget` simulado: con la variable instala en `<carpeta>\<id>` y
+    /// no pregunta nada; sin ella, la orden es la de siempre (sin --location).
+    #[cfg(windows)]
+    #[test]
+    fn instalar_con_winget_va_a_la_carpeta_de_programas_con_un_winget_simulado() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("winget.cmd"),
+            "@echo off\r\necho %*>\"%~dp0args.txt\"\r\n:loop\r\nif \"%~1\"==\"\" goto end\r\nif \"%~1\"==\"--location\" (mkdir \"%~2\" & echo x>\"%~2\\app.exe\")\r\nshift\r\ngoto loop\r\n:end\r\nexit /b 0\r\n",
+        )
+        .unwrap();
+        let programs = dir.path().join("programas");
+        let path = format!(
+            "{};{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = |with_programs: bool| {
+            let mut command = std::process::Command::new("powershell.exe");
+            command
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("{}; exit $LASTEXITCODE", winget_install_command("Git.Git")),
+                ])
+                .env("PATH", &path);
+            if with_programs {
+                command.env("WTERMINAL_PROGRAMS", &programs);
+            } else {
+                command.env_remove("WTERMINAL_PROGRAMS");
+            }
+            let output = command.output().expect("Windows PowerShell");
+            let args = std::fs::read_to_string(bin.join("args.txt")).unwrap_or_default();
+            (output, args)
+        };
+        let (output, args) = run(true);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(args.contains("--location"), "{args}");
+        assert!(programs.join("Git.Git").join("app.exe").is_file());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("no respetó"));
+        let (output, args) = run(false);
+        assert!(output.status.success());
+        assert!(!args.contains("--location"), "{args}");
+    }
+
     #[test]
     fn los_comandos_de_virtualizacion_y_sus_scripts_elevados_tienen_sintaxis_powershell_valida() {
         let actions = get_install_actions(&contexto("windows"), &t());
@@ -6139,6 +6487,30 @@ exit 0
             .contains("https://community.chocolatey.org/install.ps1"));
         assert!(!install.command.contains("--id PostgreSQL.PostgreSQL "));
         assert!(!actions.iter().any(|action| action.id == "choco-postgresql"));
+        assert!(install
+            .command
+            .contains("WinGet no pudo instalar PostgreSQL + psql;"));
+    }
+
+    #[test]
+    fn las_gemas_se_instalan_sin_documentacion_y_la_sonda_sigue_viendo_el_paquete() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let rails = buscar(&actions, "framework-rails");
+        assert_eq!(
+            rails.command,
+            "gem install --user-install --no-document rails"
+        );
+        assert_eq!(rails.check_cmd.as_deref(), Some("ecosystem:gem|gem|rails"));
+    }
+
+    #[test]
+    fn racket_prueba_chocolatey_si_el_manifiesto_de_winget_falla() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let install = buscar(&actions, "winget-racket");
+        assert!(install.command.contains("--id Racket.Racket"));
+        assert!(install.command.contains("install racket -y"));
+        assert!(install.command.contains("WinGet no pudo instalar Racket;"));
+        assert!(!install.command.contains("PostgreSQL"));
     }
 
     #[test]
@@ -6429,6 +6801,21 @@ exit 0
     fn una_distro_que_no_respondio_a_la_sonda_no_genera_instalaciones_inventadas() {
         let mut ubuntu = distro("Ubuntu", "apt");
         ubuntu.probe_error = true;
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![ubuntu],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context, &t());
+        assert!(!actions.iter().any(|a| a.id.starts_with("wsl-ubuntu-")));
+
+        // Shell comprobada pero inventario sin terminar: tampoco se inventan.
+        let mut ubuntu = distro("Ubuntu", "apt");
+        ubuntu.detailed = false;
+        ubuntu.listing_error = true;
         let context = InstallContext {
             wsl: Some(WslContext {
                 available: true,
@@ -7029,6 +7416,14 @@ exit 0
     #[test]
     fn paket_usa_una_version_con_manifiesto_compatible_con_dotnet_8() {
         let actions = get_install_actions(&contexto("windows"), &t());
+        let codegen = buscar(&actions, "framework-aspnet-codegenerator");
+        assert!(
+            codegen
+                .command
+                .ends_with("dotnet-aspnet-codegenerator --version 8.0.23"),
+            "{}",
+            codegen.command
+        );
         let paket = buscar(&actions, "framework-paket");
         assert_eq!(
             paket.command,

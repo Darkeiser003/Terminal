@@ -1089,7 +1089,7 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 4px;
-        padding: 7px 0;
+        padding: 7px var(--space-min, 6px);
         border-bottom: 1px solid var(--border);
         background: var(--surface);
     }
