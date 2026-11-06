@@ -69,6 +69,9 @@ shortcutExplorerFollow = ""
 shortcutExplorerCd = ""
 shortcutClearTerminal = ""
 shortcutSearchTerminal = "Ctrl+Shift+F"
+shortcutSearchHistory = "Ctrl+Shift+R"
+shortcutPreviousCommand = "Ctrl+Shift+ArrowUp"
+shortcutNextCommand = "Ctrl+Shift+ArrowDown"
 shortcutUiScaleUp = "Ctrl+Alt+Equal"
 shortcutUiScaleDown = "Ctrl+Alt+Minus"
 shortcutUiScaleReset = "Ctrl+Alt+0"
@@ -108,6 +111,7 @@ terminalScrollback = 5000
 terminalCursorBlink = true
 # Enlaces clicables en la salida (Ctrl+clic): http, https y file, validados en
 # el backend; con confirmación, el destino se muestra antes de abrirlo.
+terminalCommandMarks = true
 terminalLinks = true
 terminalLinksConfirm = true
 terminalScrollSensitivity = 3
@@ -118,15 +122,23 @@ suggestRepositoryImport = true
 lowPowerMode = false
 lowPowerSuggest = true
 githubSessionMode = "onExhausted"
+# Privacidad y red: lo que WTerminal hace por su cuenta al arrancar.
+checkUpdatesOnStartup = true
+checkPackageUpdatesOnStartup = true
+# Si falta WebView2 (Windows): "ask" (preguntar), "download" (descargarlo de
+# Microsoft) o "never" (solo avisar).
+webview2Missing = "ask"
 
 defaultEnvironmentId = ""
 terminalAdminByDefault = false
 # Cachés de lenguajes y gestores de paquetes en una carpeta propia. Vacía = la
 # de fábrica, «WTerminal/entornos» dentro de los datos locales del usuario.
 toolchainStoreEnabled = true
-# Categorías además de las cachés, todas activas: descargas del panel, modelos
-# de IA, herramientas nuevas (npm -g, cargo install, go install, pip --user) e
-# historial de los REPL. Las carpetas bin de las herramientas van delante en el
+# Categorías además de las cachés, todas activas salvo los proyectos de GitHub
+# (siguen en Documentos): descargas del panel, modelos de IA, herramientas
+# nuevas (npm -g, cargo install, go install, pip --user), historial de los
+# REPL, toolchains completas (solo las que aún no estaban instaladas) y
+# programas de WinGet y Chocolatey. Las carpetas bin de las herramientas van delante en el
 # PATH de WTerminal y, con la integración con el PATH, también en el del
 # usuario (`path_integration::sync_tool_bins`), así que se ven en cualquier
 # terminal. Lo ya instalado no se mueve.
@@ -134,7 +146,7 @@ toolchainStoreDownloads = true
 toolchainStoreAiModels = true
 toolchainStoreTools = true
 toolchainStoreReplHistory = true
-toolchainStoreToolchains = false
+toolchainStoreToolchains = true
 toolchainStorePrograms = true
 toolchainStoreProjects = false
 # Sugerencias del historial y colores en la línea de órdenes (Clink en cmd,

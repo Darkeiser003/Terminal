@@ -62,17 +62,21 @@ pub const UNINSTALL_CLEANUP_ARG: &str = "--wterminal-uninstall-cleanup";
 /// herramientas en el PATH de HKCU (solo las que añadió él), los menús «Abrir
 /// con WTerminal», App Paths y el protocolo `wterminal://`, y la marca
 /// RUNASADMIN. Sin esto, tras desinstalar quedaban entradas apuntando a un
-/// ejecutable que ya no existe. No toca ajustes ni la carpeta propia: eso lo
-/// decide la casilla «Borrar los datos» del desinstalador. Devuelve el código
-/// de salida (0 si todo fue bien).
+/// ejecutable que ya no existe. Lo que registró otra copia que sigue existiendo
+/// (un portable) se queda como está. No toca ajustes ni la carpeta propia: eso
+/// lo decide la casilla «Borrar los datos» del desinstalador. Devuelve el
+/// código de salida (0 si todo fue bien).
 #[cfg(windows)]
 pub fn uninstall_cleanup() -> i32 {
     let mut failures = 0;
-    if let Err(error) = path_integration::path_integration_set(false) {
+    // Quita lo añadido y olvida el estado: sin la preferencia «desactivada»
+    // que dejaría `path_integration_set(false)`, una reinstalación vuelve a
+    // añadirse sola al PATH.
+    if let Err(error) = path_integration::uninstall_cleanup() {
         eprintln!("PATH: {error}");
         failures += 1;
     }
-    if let Err(error) = windows_integration::set_enabled(false) {
+    if let Err(error) = windows_integration::uninstall_cleanup() {
         eprintln!("Integración de Windows: {error}");
         failures += 1;
     }

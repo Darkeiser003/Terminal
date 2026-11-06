@@ -243,6 +243,16 @@ export async function importProfile(): Promise<ProfileTransferResult | null> {
     return typeof path === 'string' ? invokeLogged<ProfileTransferResult>('profile_import', { path }) : null;
 }
 
+/** Devuelve la ruta elegida, o null si se cancela el diálogo. La ruta la decide
+ *  el backend con el diálogo nativo: por IPC solo viaja el texto. */
+export const saveTerminalOutput = (fileName: string, text: string) =>
+    invokeLogged<string | null>('terminal_save_output', { fileName, text });
+
+export const systemDriveFreeBytes = () => invokeLogged<number | null>('system_drive_free_bytes');
+
+/** Hace parpadear la ventana en la barra de tareas si no tiene el foco. */
+export const requestWindowAttention = () => invokeLogged<void>('window_request_attention');
+
 export const listPlugins = () => invokeLogged<PluginInfo[]>('plugins_list');
 export const setPluginEnabled = (id: string, enabled: boolean) =>
     invokeLogged<PluginInfo[]>('plugins_set_enabled', { id, enabled });
@@ -301,8 +311,10 @@ export const openTerminalLink = (url: string) =>
 export const clearToolchainCaches = () =>
     invokeLogged<number>('toolchain_store_clear_caches');
 
-export const resize = (tabId: string, cols: number, rows: number) =>
-    invokeLogged<void>('pty_resize', { tabId, cols, rows });
+/** `exact`: la PTY toma justo esas columnas, sin la reserva mínima de las
+ *  shells; lo usan los programas a pantalla completa (`full-screen-app.ts`). */
+export const resize = (tabId: string, cols: number, rows: number, exact = false) =>
+    invokeLogged<void>('pty_resize', { tabId, cols, rows, exact });
 
 export const printBanner = (tabId: string) => invokeLogged<boolean>('pty_print_banner', { tabId });
 
@@ -383,6 +395,11 @@ export const openEntry = (tabId: string, itemPath: string) =>
 
 export const renameEntry = (tabId: string, itemPath: string, newName: string) =>
     invokeLogged<FsResult>('explorer_rename', { tabId, itemPath, newName });
+
+/** Lo que ocupa una carpeta de la vista; `null` si ya no está o no es carpeta.
+ *  `truncated`: se paró en el tope (15 s o 300 000 entradas) y es un mínimo. */
+export const folderSize = (tabId: string, itemPath: string) =>
+    invokeLogged<{ bytes: number; files: number; truncated: boolean } | null>('explorer_size', { tabId, itemPath });
 
 /** Copiar o cortar. Lo recuerda el backend, no el frontend, para que la ruta de
  *  origen sea siempre una que se validó contra la carpeta abierta. */
@@ -560,6 +577,8 @@ export const githubRuns = (fullName: string) => invokeLogged<GhRun[]>('github_ru
 export const githubRunRerun = (fullName: string, id: number) =>
     invokeLogged<GhResult>('github_run_rerun', { fullName, id });
 export const gitLocalStatus = (fullName: string) => invokeLogged<LocalGitStatus>('git_local_status', { fullName });
+/** Lo mismo para cualquier repositorio de Descargados, también los importados. */
+export const gitDownloadedStatus = (fullName: string) => invokeLogged<LocalGitStatus>('git_downloaded_status', { fullName });
 export const gitLocalCommit = (fullName: string, message: string) =>
     invokeLogged<GhResult>('git_local_commit', { fullName, message });
 export const gitLocalBranch = (fullName: string, action: GitBranchAction, name: string) =>
@@ -581,6 +600,10 @@ export const listInstallActions = () => invokeLogged<InstallList>('install_list'
 
 /** Construye solo la estructura del panel; no ejecuta detecciones. */
 export const loadInstallCatalog = () => invokeLogged<InstallList>('install_catalog');
+/** Fase de la detección completa en curso (clave de traducción) o `null`.
+ *  Se consulta cada segundo mientras se espera: sin métricas para no llenar
+ *  el log. */
+export const installDetectionStage = () => tauriInvoke<string | null>('install_detection_stage');
 
 /** Comprueba una herramienta concreta cuando el usuario la abre. */
 export const checkInstallAction = (actionId: string) =>

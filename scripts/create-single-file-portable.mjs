@@ -23,7 +23,9 @@ const FORMAT = 1;
 export const EMBEDDED_FILES = [
     { name: 'conpty.dll', required: true },
     { name: 'OpenConsole.exe', required: true },
-    { name: 'MicrosoftEdgeWebView2Setup.exe', required: true },
+    // Solo en las builds `-WebView2 Offline`: de serie, si falta WebView2, el
+    // portable usa uno junto al .exe o lo descarga de Microsoft.
+    { name: 'MicrosoftEdgeWebView2Setup.exe', required: false },
     { name: 'THIRD-PARTY-NOTICES.txt', required: true },
 ];
 

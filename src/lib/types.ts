@@ -166,6 +166,9 @@ export interface Preferences {
     shortcutExplorerCd: string;
     shortcutClearTerminal: string;
     shortcutSearchTerminal: string;
+    shortcutSearchHistory: string;
+    shortcutPreviousCommand: string;
+    shortcutNextCommand: string;
     shortcutOpenSystemExplorer: string;
     shortcutUiScaleUp: string;
     shortcutUiScaleDown: string;
@@ -200,6 +203,7 @@ export interface Preferences {
     terminalScrollback: number;
     terminalCursorBlink: boolean;
     /** Enlaces clicables (Ctrl+clic) en la salida de la terminal. */
+    terminalCommandMarks: boolean;
     terminalLinks: boolean;
     /** Confirmar con el destino a la vista antes de abrir un enlace. */
     terminalLinksConfirm: boolean;
@@ -215,6 +219,12 @@ export interface Preferences {
     /** Sugerir el modo de bajo consumo si el equipo va justo. */
     lowPowerSuggest: boolean;
     githubSessionMode: 'always' | 'onExhausted' | 'never';
+    /** Buscar versión nueva de WTerminal al arrancar. */
+    checkUpdatesOnStartup: boolean;
+    /** Pedir al gestor de paquetes las actualizaciones de programas al arrancar. */
+    checkPackageUpdatesOnStartup: boolean;
+    /** Si falta WebView2 (Windows). */
+    webview2Missing: 'ask' | 'download' | 'never';
     defaultEnvironmentId: string;
     terminalAdminByDefault: boolean;
     toolchainStoreEnabled: boolean;

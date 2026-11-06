@@ -50,6 +50,7 @@ de seguridad se reciben por el canal privado de [SECURITY.md](SECURITY.md).
 - [Explorador de archivos](#explorador-de-archivos)
 - [Pestañas, división y ciclo de vida](#pestañas-división-y-ciclo-de-vida)
 - [Atajos de teclado](#atajos-de-teclado)
+- [Marcas de orden](#marcas-de-orden)
 - [Paleta de comandos](#paleta-de-comandos)
 - [Configuración](#configuración)
 - [Internacionalización](#internacionalización)
@@ -66,10 +67,13 @@ de seguridad se reciben por el canal privado de [SECURITY.md](SECURITY.md).
 ## Requisitos
 
 **Para usar la aplicación** no hace falta nada adicional en la distribución
-instalable. En Windows, la build completa incluye el instalador offline de
-WebView2 junto al ejecutable desempaquetado y dentro del portable de un solo
-archivo; el arranque comprueba el runtime del sistema y usa ese recurso cuando
-falta. En Linux,
+instalable. En Windows la interfaz usa el runtime WebView2 de Microsoft, que
+Windows 11 y los Windows 10 al día ya traen. Las releases no llevan su
+instalador dentro (son unos 215 MB de los ~223 de cada paquete): si falta, el
+arranque lo detecta antes de crear la ventana y lo instala desde Microsoft, o
+desde un instalador puesto junto al ejecutable, sin necesitar nada más (ver
+[WebView2: si falta el runtime](#webview2-si-falta-el-runtime)). Para equipos
+sin Internet existe la variante `-WebView2 Offline` de la build. En Linux,
 el AppImage necesita las bibliotecas de escritorio habituales (WebKitGTK 2.40
 o posterior), que cualquier distribución mantenida ya trae. El JavaScript se
 compila para un único estándar, ES2023, igual en Windows (WebView2) y Linux
@@ -185,29 +189,32 @@ incluye los recursos junto al ejecutable.
 
 **Windows portable.** La release nativa publica la carpeta desempaquetada,
 su ZIP y un único `WTerminal-<versión>-Portable.exe`. La carpeta y el ZIP
-traen `wterminal.exe`, `conpty.dll`, `OpenConsole.exe`,
-`WebView2Loader.dll` y el instalador offline completo de WebView2. El
+traen `wterminal.exe`, `conpty.dll`, `OpenConsole.exe` y
+`WebView2Loader.dll`. El
 `-Portable.exe` es la misma aplicación en un solo archivo: se abre con doble
 clic, sin diálogo de extracción ni archivos a su lado. Lleva dentro
-`conpty.dll`, `OpenConsole.exe`, el instalador de WebView2 y los avisos de
+`conpty.dll`, `OpenConsole.exe` y los avisos de
 terceros, añadidos al final del ejecutable y fuera de la imagen PE, así que
 Windows no los carga al arrancar. La app coloca en silencio su ConPTY en
 `%LOCALAPPDATA%\WTerminal\runtime\<huella>`, verificado por SHA-256 y
-reutilizado mientras no cambie. Solo saca el instalador de WebView2 a una
-carpeta temporal, y lo borra después, si el runtime falta. El cargador de
+reutilizado mientras no cambie. El cargador de
 WebView2 va enlazado en el ejecutable. Se actualiza solo descargando el
 `-Portable.exe` nuevo, que reemplaza al que corre, como un AppImage. En
-cualquiera de las tres formas, si falta el runtime, la aplicación lo instala
-en silencio antes de crear la ventana, sin necesitar red. No crea accesos
+cualquiera de las tres formas, si falta el runtime de WebView2, el arranque lo
+resuelve antes de crear la ventana (ver
+[WebView2: si falta el runtime](#webview2-si-falta-el-runtime)). No crea accesos
 directos. Las operaciones de sistema se descubren desde
-LTools / WinSlim Tools. La build cruzada de Windows desde Linux puede usar el
-bootstrapper web cuando no dispone del instalador offline.
+LTools / WTools.
 
 **Windows instalable.** La release completa (`npm run dist:win`) y su alias
-explícito `npm run dist:win:installer` generan un NSIS con el instalador
-offline de WebView2 incluido y lo publican como
-`release/WTerminal-<versión>-x64-setup.exe`. Es la opción recomendada
-para equipos recortados, instalaciones limpias o despliegues sin Internet.
+explícito `npm run dist:win:installer` generan un NSIS y lo publican como
+`release/WTerminal-<versión>-x64-setup.exe`. De serie usa el
+`downloadBootstrapper` de Tauri: si al instalar falta WebView2, el asistente
+lo descarga de Microsoft; si ya está, no descarga nada. Con
+`windows\build.ps1 -WebView2 Offline` el NSIS lleva el instalador offline
+completo (pasa de unos 8 a unos 220 MB), y la carpeta y el portable reutilizan
+ese mismo instalador: es la variante para equipos recortados o despliegues sin
+Internet.
 El asistente lleva el icono y las imágenes de WTerminal (barra lateral de
 bienvenida y final, cabeceras del instalador y del desinstalador, en
 `src-tauri/windows/installer/`, generadas con
@@ -218,7 +225,8 @@ japonés, coreano o chino. Al desinstalar, el propio `wterminal.exe`
 registró en el perfil del usuario: su carpeta y las `bin` de herramientas que
 añadió al PATH de HKCU, los menús «Abrir con WTerminal», App Paths, el
 protocolo `wterminal://` y la marca RUNASADMIN; antes quedaban apuntando a un
-ejecutable borrado. La casilla **Borrar los datos de la aplicación** borra
+ejecutable borrado. Lo que registró otra copia que sigue existiendo (un portable
+junto a la instalada) se queda como está. La casilla **Borrar los datos de la aplicación** borra
 además `%APPDATA%\wterminal` (ajustes y registros) y `%LOCALAPPDATA%\WTerminal`
 (carpeta propia de fábrica, perfil de Clink y caché del portable); una carpeta
 propia movida a otra ruta no se toca. En una actualización (`/UPDATE`) no se
@@ -226,7 +234,26 @@ deshace nada (`src-tauri/windows/installer/hooks.nsh`).
 `scripts/capture-installer-pages.ps1` recorre el asistente de forma visible y
 captura cada página del instalador y del desinstalador.
 
-**Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta.
+**Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta. Lleva
+todo dentro, funciona en cualquier distribución con WebKitGTK y se actualiza
+solo, como el portable de Windows. Además están preparados tres formatos más,
+que saldrán en la misma release que Windows cuando `linux/build.sh` los genere
+y valide en Linux nativo (hoy solo genera el AppImage):
+
+| Formato | Para quién | Cómo se instala | Cómo se actualiza |
+|---|---|---|---|
+| `LTerminal-<versión>-x86_64.AppImage` | Cualquier distribución, sin instalar | `chmod +x` y doble clic | Sola: el AppImage nuevo sustituye al que corre |
+| `LTerminal_<versión>_amd64.deb` | Debian, Ubuntu, Mint, Pop!_OS, Kali… | `sudo apt install ./LTerminal_<versión>_amd64.deb` | Desde la app, con `pkexec` + `apt-get` (pide la contraseña con el diálogo del escritorio) |
+| `LTerminal-<versión>-1.x86_64.rpm` | Fedora, RHEL, openSUSE… | `sudo dnf install ./LTerminal-<versión>-1.x86_64.rpm` (o `zypper install`) | Desde la app, con `pkexec` + `dnf`, `zypper` o `rpm -U` |
+| `LTerminal-Unpacked-<versión>-x86_64.tar.gz` | Quien prefiere una carpeta, como la unpacked de Windows | Descomprimir y ejecutar `lterminal` | Sola, copiando encima, como la carpeta de Windows |
+
+Con `.deb` o `.rpm` la app queda en el menú del escritorio, con su icono y sus
+metadatos AppStream (también en los centros de software), y el gestor del
+sistema sabe qué versión hay y qué archivos son suyos: se desinstala desde el
+gestor de paquetes o el centro de software sin dejar restos. El
+AppImage es el formato obligatorio de cada release; los demás son opcionales.
+No hay Flatpak ni Snap: su aislamiento impide que una terminal vea las shells,
+toolchains y archivos del sistema. AUR queda para más adelante.
 
 **Carpeta propia: cachés, descargas, modelos, herramientas e historial.**
 Lo que descargan y crean desde WTerminal los gestores de paquetes, las
@@ -240,14 +267,15 @@ Linux, bajo `~/.local/share/LTerminal/entornos`), por categorías:
 | Modelos de IA | `ia\` | `HF_HOME`; `OLLAMA_MODELS` solo si aún no hay modelos en la carpeta de siempre de Ollama | activa |
 | Herramientas y lenguajes nuevos | `herramientas\` | `npm_config_prefix`, `CARGO_INSTALL_ROOT`, `GOBIN`, `PYTHONUSERBASE`, y su carpeta de programas delante en el PATH de WTerminal y, con la integración con el PATH, también en el del usuario | activa |
 | Historial de los REPL | `historial\` | `NODE_REPL_HISTORY`, `PYTHON_HISTORY` (3.13+), `SQLITE_HISTORY`, `PSQL_HISTORY` | activa |
-| Toolchains completas | `toolchains\` | `RUSTUP_HOME`, `CARGO_HOME` (con su `bin`), `GOPATH` (con su `bin`), `GRADLE_USER_HOME`, `DOTNET_CLI_HOME`, `ANDROID_USER_HOME`; cada una solo si no existe ya su carpeta de siempre (`~\.rustup`, `~\.cargo`, `~\go`…) | apagada |
+| Toolchains completas | `toolchains\` | `RUSTUP_HOME`, `CARGO_HOME` (con su `bin`), `GOPATH` (con su `bin`), `GRADLE_USER_HOME`, `DOTNET_CLI_HOME`, `ANDROID_USER_HOME`; cada una solo si no existe ya su carpeta de siempre (`~\.rustup`, `~\.cargo`, `~\go`…) | activa |
 | Proyectos de GitHub | `proyectos\<propietario>\<repositorio>` | Carpeta de Proyectos de fábrica (`projects::github::projects_folder`) si no elegiste otra en Ajustes; los que ya tenías en Documentos no se mueven | apagada |
 | Programas (WinGet y Chocolatey) | `programas\<id>` | `WTERMINAL_PROGRAMS`: las acciones «Instalar» de WinGet añaden `--location`; Chocolatey va a `programas\chocolatey` (sus paquetes, en su `lib\`) y sus herramientas sueltas a `programas\chocolatey-tools` | activa |
 
 WTerminal exporta esas variables estándar solo a los procesos que lanza
 (pestañas y sondas de detección): no toca las variables del sistema, respeta
 las que el usuario ya tenga definidas y **nunca mueve nada ya instalado**. De
-fábrica se centralizan todas menos «Toolchains completas», que va apagada:
+fábrica se centralizan todas menos «Proyectos de GitHub», que siguen en
+Documentos:
 
 - **Herramientas y lenguajes nuevos** cambia dónde se instala lo nuevo. Lo que
   ya tenías sigue donde estaba y se sigue detectando. Las carpetas `bin`
@@ -268,8 +296,10 @@ fábrica se centralizan todas menos «Toolchains completas», que va apagada:
 - **Toolchains completas** instala rustup, cargo, Go, Gradle, .NET o el perfil
   de Android en la carpeta propia, pero solo los que aún no tenías en su sitio
   de siempre (`toolchain_preinstalled`): con la variable apuntando a una
-  carpeta vacía, lo ya instalado dejaría de verse. Fuera de WTerminal no se ven
-  salvo que definas esas variables en tu usuario.
+  carpeta vacía, lo ya instalado dejaría de verse. Con la integración con el PATH, las
+  carpetas `bin` de cargo y Go se publican en el PATH del usuario junto a
+  `CARGO_HOME` y `RUSTUP_HOME` (`BIN_REQUIRES`), así que Rust y Go también
+  funcionan fuera de WTerminal.
 - **Programas (WinGet y Chocolatey)**, activa de fábrica, lleva también los
   programas a la carpeta propia: cada acción «Instalar» del catálogo pasa por
   `centralized_install`, que añade `--location <carpeta>\programas\<id>` a
@@ -376,7 +406,75 @@ si se pulsa «Actualizar y reiniciar». También se consulta el gestor nativo de
 paquetes (WinGet en Windows; apt, dnf, pacman, zypper o apk en Linux); ese aviso
 solo informa y abre Entorno y dependencias. No instala aplicaciones en segundo
 plano. El gestor puede refrescar su propia caché durante la consulta, que tiene
-un timeout y nunca bloquea la interfaz.
+un timeout y nunca bloquea la interfaz. Las dos consultas al arrancar se pueden
+apagar por separado en Ajustes › Privacidad y red (ver
+[Privacidad y red](#privacidad-y-red)); el panel de Dependencias sigue pudiendo
+buscar actualizaciones a mano.
+
+### Cómo se actualiza cada forma de distribución
+
+Cada copia sabe cómo se instaló (`self_update::PackageKind`) y solo acepta su
+propio adjunto de la release (`asset_for_package`, por el final del nombre y,
+en Linux, descartando otras arquitecturas):
+
+| Copia | Cómo se reconoce | Adjunto | Cómo se aplica |
+|---|---|---|---|
+| Portable de un solo archivo | Lleva la cola `WTPORT01` | `-Portable.exe` | El archivo nuevo sustituye al que corre (renombrado a `.old`) y la app se reinicia |
+| Carpeta desempaquetada | Ni portable ni `uninstall.exe` | `.zip` | Se extrae, se copia a `<nombre>.new` y, solo si todo copió bien, se renombra; si algo falla se deshace |
+| Instalada con el NSIS | `uninstall.exe` junto al ejecutable | `-setup.exe` | Se baja a `%LOCALAPPDATA%\WTerminal\update`, un aviso de UAC y el instalador en modo pasivo (`/P /UPDATE /R`), que mantiene desinstalador, registro y accesos directos |
+| AppImage | `$APPIMAGE`, que exporta su runtime | `.AppImage` | Como el portable: el archivo nuevo, con permiso de ejecución, sustituye al que corre |
+| `.deb` | Binario bajo `/usr` que `dpkg-query -S` reclama | `.deb` | Se baja a `~/.cache/lterminal/update` y se instala con `pkexec apt-get install -y` (o `dpkg -i`); cancelar la contraseña no cambia nada |
+| `.rpm` | Binario bajo `/usr` que `rpm -qf` reclama | `.rpm` (nunca el `.src.rpm`) | Igual, con `pkexec` y `dnf`, `zypper` o `rpm -U` |
+| Carpeta del `.tar.gz` | Lo demás (home, `/opt`, `/usr/local`) | `.tar.gz` | Como la carpeta de Windows, con el binario comprobado como ELF |
+
+A `dpkg` y `rpm` solo se les pregunta por un binario bajo `/usr` (y no
+`/usr/local`), una vez por arranque. En todos los casos el paquete se verifica
+contra el `SHA256SUMS.txt` firmado antes de tocar nada. Sin `pkexec` o sin
+gestor, la app dice dónde dejó el paquete verificado para instalarlo a mano.
+
+### WebView2: si falta el runtime
+
+Antes de crear la ventana, `platform/windows/webview2.rs` (`ensure_runtime`)
+comprueba si el runtime está instalado. Si falta:
+
+1. Usa un instalador puesto **junto al ejecutable**
+   (`MicrosoftEdgeWebView2Setup.exe`,
+   `MicrosoftEdgeWebView2RuntimeInstallerX64.exe`, que es el offline de
+   Microsoft, o `WebView2Bootstrapper.exe`) o el que lleva dentro el portable
+   de una build `-WebView2 Offline` (la carpeta de esa build lo trae a su lado
+   como `MicrosoftEdgeWebView2Setup.exe`).
+2. Si no hay ninguno, descarga el bootstrapper oficial
+   (`go.microsoft.com/fwlink/p/?LinkId=2124703`, como mucho 20 MB).
+3. Antes de ejecutar cualquiera, comprueba su firma Authenticode con
+   `WinVerifyTrust`: tiene que estar firmado por Microsoft Corporation con una
+   CA de Microsoft. Un archivo con otro firmante o sin firma no se ejecuta.
+4. Si nada funciona, un diálogo de Windows (sin la interfaz web, que es lo que
+   falta) ofrece reintentar la descarga, elegir un instalador del disco, abrir
+   la página de Microsoft o salir.
+
+Ajustes › Privacidad y red › «Si falta WebView2» decide qué hace el arranque:
+**preguntar** (de fábrica: el diálogo, antes de descargar nada),
+**descargar sin preguntar** o **no descargar nunca** (solo un instalador
+local; si no hay, el diálogo sin la opción de descarga). La misma lógica se
+puede lanzar a mano, por ejemplo para preparar un equipo sin Internet con el
+instalador offline de Microsoft. `wterminal.exe` es una aplicación de ventana:
+lanzado tal cual, PowerShell y cmd no esperan a que termine. Con
+`Start-Process -Wait` (o `start /wait` en cmd) se espera y se lee el código de
+salida, y los mensajes salen en la misma consola:
+
+```powershell
+# Busca un instalador junto al .exe o lo descarga
+(Start-Process wterminal.exe -ArgumentList '--install-webview2' -NoNewWindow -Wait -PassThru).ExitCode
+# Con un instalador concreto
+(Start-Process wterminal.exe -ArgumentList '--install-webview2', 'D:\MicrosoftEdgeWebView2RuntimeInstallerX64.exe' -NoNewWindow -Wait -PassThru).ExitCode
+```
+
+Termina con código 0 si el runtime queda instalado (o ya lo estaba), 1 si falla
+y 2 si la firma del instalador no es de Microsoft. Para despliegues automatizados,
+`LTERMINAL_WEBVIEW2_AUTO_INSTALL=0` desactiva todo el preflight y
+`LTERMINAL_WEBVIEW2_NO_DIALOG=1` lo deja sin diálogo (si no se resuelve solo,
+la app sigue y Tauri informa al crear la ventana). Todo queda en el log de
+arranque («WebView2 Runtime ausente», con la opción elegida y cada intento).
 
 ## Entorno de desarrollo
 
@@ -496,20 +594,24 @@ catálogo versionado y LTerminal las descubre y ejecuta de forma segura.
 | `npm run test:version-restore` | Fuerza fallos de build y una copia de seguridad ausente; comprueba que no se anuncia éxito y que los cuatro manifiestos quedan byte a byte como estaban al terminar la prueba. |
 | `npm run test:e2e-report` | Prueba que el validador acepta una batería E2E completa y rechaza estados fallidos, fases ausentes o una Biblioteca sin el contrato único de LTools. |
 | `npm run test:e2e-native-driver` | Comprueba la detección de versión WebView2 y la selección de un Edge WebDriver compatible por build. |
-| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. En Windows encuentra el Edge WebDriver compatible con WebView2 en PATH o en la caché de `src-tauri/target/e2e-driver/`; se puede fijar con `TAURI_NATIVE_DRIVER`. `E2E_CAPTURE_VIDEO=1` exige que `ffmpeg` esté disponible y hace fallar la pasada si no produce un MP4 válido. `E2E_SKIP_DEPENDENCY_REFRESH=1` omite solo el refresco completo para aislar pruebas visuales de matriz; la detección se valida aparte con `E2E_DEPENDENCY_AUDIT_ONLY=1`. Esa auditoría espera hasta quince minutos por cada detección completa; se puede ajustar con `E2E_DEPENDENCY_TIMEOUT_MS` sin cambiar el comportamiento de la aplicación. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` detecta y prueba todos los shells/REPL seguros disponibles; `E2E_DEPENDENCY_AUDIT_ONLY=1` recorre todas las secciones, grupos y acciones y verifica el estado individual `installed`, `absent`, `unknown` o `not-applicable`; desplaza cada tarjeta visible al centro del panel sin pulsar operaciones destructivas. `E2E_FULL_VISUAL_AUDIT=1` añade Ajustes, transiciones 1→2→3→4→1, entradas largas con comillas, `clear`, reflow, barras de progreso y scroll horizontal; `npm run e2e:dependencies` activa esta cobertura, captura cada acción y genera segmentos de vídeo con la resolución nativa de cada cambio de ventana. La captura solicita 30 FPS por defecto en la auditoría completa (8 FPS en smoke); `E2E_VIDEO_FPS` admite hasta 60 para diagnósticos. El informe distingue la frecuencia solicitada de la efectiva, que puede ser menor bajo carga: para auditar parpadeos breves se debe medir la frecuencia real del MP4 y revisar frames contiguos. Los frames nativos de arranque se conservan como evidencia separada sin mezclarlos en el MP4; también se valida continuidad de origen y se publica la cobertura real, incluida la omisión de NSudo/k9s/Hyprland cuando el host no puede ejecutarlos. `E2E_DEPENDENCY_VISUAL_ACTIONS=0` desactiva solo ese recorrido y `E2E_DEPENDENCY_ACTION_HOLD_MS` ajusta la permanencia de cada tarjeta en el vídeo; `E2E_LANGUAGE_ONLY=1` cambia varios catálogos, valida las anclas traducidas y restaura el idioma automático del sistema; `E2E_PROGRESS_LAYOUT_ONLY=1` simula barras de `update`/`upgrade`, mide el overflow y verifica que el ancho se recupera; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel; `E2E_TERMINAL_ONLY_ONLY=1` activa el modo de terminal limpia, comprueba que ocupa la ventana sin overflow, captura el estado y lo recupera con `Ctrl+Shift+M`. `E2E_HORIZONTAL_SEQUENCE_COUNT` permite acotar la sonda de secuencia para diagnósticos locales sin reducir la cobertura por defecto. |
+| `npm run e2e` | Ejecuta el smoke WebDriver contra el binario existente indicado por `E2E_BINARY`; no compila. En Windows encuentra el Edge WebDriver compatible con WebView2 en PATH o en la caché de `src-tauri/target/e2e-driver/`; se puede fijar con `TAURI_NATIVE_DRIVER`. `E2E_CAPTURE_VIDEO=1` exige que `ffmpeg` esté disponible y hace fallar la pasada si no produce un MP4 válido. `E2E_SKIP_DEPENDENCY_REFRESH=1` omite solo el refresco completo para aislar pruebas visuales de matriz; la detección se valida aparte con `E2E_DEPENDENCY_AUDIT_ONLY=1`. Esa auditoría y el resto de esperas del E2E a una detección completa llegan hasta quince minutos (180 s fijos se quedaban justos con el anfitrión ocupado; el informe guarda `detectionRetryMs` para ver si empeora); se puede ajustar con `E2E_DEPENDENCY_TIMEOUT_MS` sin cambiar el comportamiento de la aplicación. `E2E_MOUSE_SELECTION_ONLY=1` prueba el arrastre real para seleccionar texto; `E2E_SHELL_MATRIX_ONLY=1` detecta y prueba todos los shells/REPL seguros disponibles; `E2E_DEPENDENCY_AUDIT_ONLY=1` recorre todas las secciones, grupos y acciones y verifica el estado individual `installed`, `absent`, `unknown` o `not-applicable`; desplaza cada tarjeta visible al centro del panel sin pulsar operaciones destructivas. `E2E_FULL_VISUAL_AUDIT=1` añade Ajustes, transiciones 1→2→3→4→1, entradas largas con comillas, `clear`, reflow, barras de progreso y scroll horizontal; `npm run e2e:dependencies` activa esta cobertura, captura cada acción y genera segmentos de vídeo con la resolución nativa de cada cambio de ventana. La captura solicita 30 FPS por defecto en la auditoría completa (8 FPS en smoke); `E2E_VIDEO_FPS` admite hasta 60 para diagnósticos. El informe distingue la frecuencia solicitada de la efectiva, que puede ser menor bajo carga: para auditar parpadeos breves se debe medir la frecuencia real del MP4 y revisar frames contiguos. Los frames nativos de arranque se conservan como evidencia separada sin mezclarlos en el MP4; también se valida continuidad de origen y se publica la cobertura real, incluida la omisión de NSudo/k9s/Hyprland cuando el host no puede ejecutarlos. `E2E_DEPENDENCY_VISUAL_ACTIONS=0` desactiva solo ese recorrido y `E2E_DEPENDENCY_ACTION_HOLD_MS` ajusta la permanencia de cada tarjeta en el vídeo; `E2E_LANGUAGE_ONLY=1` cambia varios catálogos, valida las anclas traducidas y restaura el idioma automático del sistema; `E2E_PROGRESS_LAYOUT_ONLY=1` simula barras de `update`/`upgrade`, mide el overflow y verifica que el ancho se recupera; `E2E_ADB_REFRESH_ONLY=1` crea un dispositivo ADB falso temporal y valida tres salidas visibles sin resize ni cambios de panel; `E2E_TERMINAL_ONLY_ONLY=1` activa el modo de terminal limpia, comprueba que ocupa la ventana sin overflow, captura el estado y lo recupera con `Ctrl+Shift+M`. `E2E_HORIZONTAL_SEQUENCE_COUNT` permite acotar la sonda de secuencia para diagnósticos locales sin reducir la cobertura por defecto. |
 | `npm run e2e:admin` | Ejecuta `windows/e2e-elevated.ps1` desde una PowerShell elevada contra `release\WTerminal-1.0.0\wterminal.exe`. Usa un perfil aislado, comprueba el token administrativo efectivo, el escenario `windows-admin-permissions` (`E2E_WINDOWS_ADMIN_ONLY=1`) con NSudo abierto directo y sin «Reiniciar como administrador», que el ejecutable no lleva `RUNASADMIN` y que AppCompat queda exactamente como estaba. |
 | `npm run metadata:sync` | Propaga los datos editados en `src-tauri/config/package-metadata.json` a npm, Cargo y Tauri. |
 | `npm run build` | Solo el frontend, con precomprobación de permisos y sincronización de metadatos. `LTERMINAL_SKIP_CHECKS=1` conserva Vite pero omite las sondas externas y `svelte-check`. |
 | `npm run build:preview` | Genera un frontend navegable en `dist-preview/` con un backend simulado; no usa Tauri, no abre PTY y no modifica el equipo. |
 | `npm run preview` | Sirve `dist-preview/` en `http://127.0.0.1:4173`; si no existe, lo genera automáticamente. Acepta `--port 4174` y `--build` para regenerar antes de servir. Es el preview web funcional, separado de `dist/`. |
 | `npm run build:fast` | Atajo multiplataforma para `build` con `LTERMINAL_SKIP_CHECKS=1`; útil durante el desarrollo, no sustituye una release completa. |
-| `npm run dist:win` | Ejecuta la release completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera carpeta desempaquetada, ZIP, portable de un solo EXE e instalador NSIS. Los tres formatos incluyen WebView2 offline. |
+| `npm run dist:win` | Ejecuta la release completa de Windows, incluida la batería de herramientas y el E2E WebDriver; comprueba recursos, valida y genera carpeta desempaquetada, ZIP, portable de un solo EXE e instalador NSIS. Ninguno lleva el instalador de WebView2: si falta, lo instala el arranque o el NSIS (para la variante offline, `windows\build.ps1 -WebView2 Offline`). |
 | `npm run dist:win:fast` | Build de desarrollo rápida de Windows: usa compilación incremental, omite LTO y conserva símbolos; ejecuta solo el smoke mínimo y salta las comprobaciones previas. No es una release. |
-| `npm run dist:win:installer` | Genera el instalador NSIS de Windows con WebView2 offline incluido y ejecuta la batería ampliada/E2E. |
+| `npm run dist:win:installer` | Genera el instalador NSIS de Windows (descarga WebView2 solo si falta) y ejecuta la batería ampliada/E2E. |
 | `npm run dist:win:validate` | Release completa con `-ReleaseValidation`: además de la batería, vídeo, descargas reales, auditoría del catálogo e instalación real del NSIS (pide UAC y lo desinstala). |
+| `npm run dist:win:quick` | La misma release con `-QuickValidation`: prueba lo mismo sin repetirlo (un solo recorrido completo con vídeo, y prueba corta del portable y de lo instalado). |
 | `npm run e2e:suite` | Ejecuta suites E2E estandarizadas (`focused`, `full`, `video`, `downloads`, `dependency-audit`, `installer`) contra un binario existente y escribe `summary.json`/`summary.md`. |
 | `npm run e2e:installer` | Instala de verdad el NSIS indicado (un UAC), lo verifica, ejecuta el E2E sobre lo instalado y lo desinstala. |
+| `npm run dev:test` | Bucle rápido para desarrollo: compila con el perfil de Cargo `fast` (release sin LTO e incremental; `target/fast/`) y ejecuta solo lo pedido: `--only` escenarios del catálogo, `--matrix` la matriz de shells con unos entornos, `--rust` tests filtrados, `--js` scripts sueltos, con `--video`, `--repeat N` y `--env CLAVE=valor`. Apaga WSL al empezar y al terminar la tanda (no entre escenarios: cada arranque de WTerminal sondea las distros y forzaría un arranque en frío) y deja `summary.md` en `artifacts/dev-test/`. `--list` enseña los escenarios. Lo que compila lleva dentro las claves públicas del actualizador, como una release, y deja en `firma/` el manifiesto del binario con sus firmas Ed25519 y SSHSIG verificadas (claves de `--keys-dir` o de la carpeta que recuerda `windows/build.ps1`; sin claves completas avisa y sigue sin firmar, y `--no-sign` lo omite). No sustituye a la build completa. |
 | `npm run test:e2e-suite` | Comprueba sin abrir la app el catálogo de suites, el ejecutor, su resumen y la comparación de binarios del instalador. |
+| `npm run test:dev-test` | Comprueba sin compilar los argumentos de `dev:test`, la búsqueda de escenarios, el binario de cada perfil, que el perfil `fast` sigue siendo release sin LTO y la firma, con claves de usar y tirar. |
+| `npm run test:e2e-shell-tools` | Comprueba sin WSL cómo `prepareWslBashWithBlesh` elige la distro del E2E de bash. |
 | `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64, verifica los binarios nativos y ejecuta el smoke headless de Wine; el smoke GUI/WebView2 es optativo. |
 | `npm run dist:win:linux:fast` | Build cruzada Windows GNU x64 rápida para desarrollo; omite las comprobaciones previas y conserva la salida portable para probarla en Wine/Windows. |
 | `npm run dist:linux` | Ejecuta la build Linux completa: solicita la versión, valida y genera el AppImage. |
@@ -546,6 +648,11 @@ cada shell/REPL con sonda segura disponible; exige ver el eco y el resultado
 evaluado en el PTY, registra las herramientas omitidas con su motivo, rechaza
 errores del inicializador y restaura el entorno original. No inicia servicios
 de bases de datos, contenedores, elevaciones ni dispositivos ADB reales.
+`E2E_SHELL_MATRIX_IDS=lang:haskell,lang:scala,lang:haskell,lang:scala` limita
+la matriz a esos entornos, en ese orden y con repeticiones, para repetir un
+REPL intermitente. Los REPL de lenguajes tienen 60 s para enseñar su prompt
+tras el arranque: los de JVM, .NET, GHC o Julia no pintan nada hasta su banner
+y, con la máquina cargada, Scala pasó de 30 s.
 `npm run test:e2e-environment-probes` comprueba localmente que los 89 REPL
 declarados entre el código y el catálogo tienen una sonda o una omisión segura.
 
@@ -680,7 +787,20 @@ windows\build.ps1          # ruta directa: EXE + NSIS + checks + smoke + E2E
 windows\build.ps1 -Fast -NoExtendedTests -SkipChecks  # iteración rápida de desarrollo
 windows\build.ps1 -NoInstaller -NoRun  # solo portable, si se necesita explícitamente
 windows\build.ps1 -NoRun -NonInteractive -ReleaseValidation  # validación completa para dar una release por buena
+windows\build.ps1 -NoRun -NonInteractive -QuickValidation    # la misma validación sin repetir el recorrido completo
+windows\build.ps1 -WebView2 Offline  # variante sin Internet: NSIS, carpeta y portable con el instalador offline de WebView2
 ```
+
+`-WebView2 Download` (de serie) deja los tres paquetes en unos pocos MB más
+la aplicación: el NSIS usa el `downloadBootstrapper` de Tauri y la carpeta y el
+portable no llevan instalador, porque el arranque lo resuelve si falta (ver
+[WebView2: si falta el runtime](#webview2-si-falta-el-runtime)).
+`-WebView2 Offline` escribe una configuración temporal con
+`webviewInstallMode = offlineInstaller`, saca con 7-Zip el instalador offline
+de ese NSIS y lo reutiliza en la carpeta (como `MicrosoftEdgeWebView2Setup.exe`)
+y dentro del portable. La build comprueba el tamaño según el modo: un NSIS
+Offline de menos de 100 MB o uno Download de 100 MB o más la paran, porque
+significa que el modo no se aplicó.
 
 ```bash
 linux/build.sh
@@ -690,7 +810,7 @@ linux/build.sh --fast --no-extended-tests --skip-checks  # iteración rápida de
 Al ejecutar `windows\build.ps1` o `linux/build.sh` sin argumentos desde una
 consola interactiva aparece un selector previo. Sus valores predeterminados son
 la release más completa: perfil optimizado, checks estrictos, artefacto final,
-smoke, batería ampliada y E2E; en Windows incluye EXE y NSIS offline, y en
+smoke, batería ampliada y E2E; en Windows incluye EXE y NSIS, y en
 Linux incluye el AppImage. Enter conserva esos valores. Las ejecuciones con
 argumentos explícitos, `-NonInteractive`/`--non-interactive` o entrada
 redirigida no preguntan nada y mantienen igualmente la ruta completa, salvo que
@@ -792,6 +912,7 @@ escenario.
 | `-NoExtendedTests` | Solo el smoke mínimo de arranque (iteración de desarrollo). |
 | Por defecto o `-FullTests` | Checks, sondas de shells/herramientas, recorrido E2E completo sobre el ejecutable y sobre el portable de un solo archivo (copiado solo a una carpeta vacía), y la suite `focused` de regresiones (pie de Ajustes, Entornos y descargas, PATH, escribir tras redimensionar, entrada en cola, primera orden en pestañas nuevas ×3 y con la carrera forzada, casilla diminuta que crece, seguimiento del cursor en entradas largas, integridad horizontal, estilos ANSI, parpadeo del cursor, selección con el ratón, anchos Unicode, imágenes Sixel, sugerencias con el color elegido en Ajustes en cada shell, asistentes de IA con Claude Code de la app de escritorio y una acción de cmd en una sola línea, y apariencia: temas sobre la base neutra, recolorear todo, tema propio, paleta ANSI propia y Biblioteca abierta al marcar). |
 | `-ReleaseValidation` | Todo lo anterior más el recorrido completo con vídeo, descargas reales con pip/npm/Deno/Bun/Go (necesita red), la auditoría completa del catálogo de dependencias y una instalación real del NSIS: un único aviso de UAC, comprobación de archivos, registro, accesos directos y binario, E2E sobre lo instalado y desinstalación verificada. Es el nivel que permite dar una release por buena. |
+| `-QuickValidation` | Las mismas comprobaciones sin repetirlas: un solo recorrido completo, con vídeo y sobre la carpeta desempaquetada; la suite `distribution` (shells, un REPL, paneles y PATH) sobre el portable y sobre lo instalado, que llevan los mismos archivos comprobados por hash; `focused`, descargas e instalador igual; y la auditoría solo recorre acción por acción en su segunda pasada, con menos fotogramas por segundo y sin segmentos nativos. Tarda alrededor de un tercio menos. |
 
 Las piezas de `-ReleaseValidation` también se pueden pedir sueltas con
 `-VideoTest`, `-DownloadTests`, `-DependencyAudit` e `-InstallerTest`, y
@@ -889,8 +1010,8 @@ su E2E y lo instalado en la suite `installer`.
 
 | Plataforma | Artefacto |
 |---|---|
-| Windows | `WTerminal-<versión>-x64-setup.exe` (NSIS offline) + `WTerminal-<versión>-Portable.exe` (un solo archivo) + `WTerminal-Unpacked-<versión>.zip` + `SHA256SUMS.txt`, `.sig` y `.sshsig` |
-| Linux | `LTerminal-<versión>-<arch>.AppImage` |
+| Windows | `WTerminal-<versión>-x64-setup.exe` (NSIS; WebView2 solo si falta) + `WTerminal-<versión>-Portable.exe` (un solo archivo) + `WTerminal-Unpacked-<versión>.zip` + `SHA256SUMS.txt`, `.sig` y `.sshsig` |
+| Linux | `LTerminal-<versión>-<arch>.AppImage` (y, cuando `linux/build.sh` los genere, `.deb`, `.rpm` y `LTerminal-Unpacked-<versión>-<arch>.tar.gz`) |
 
 En Windows, `release/` contiene **exactamente lo que se sube a GitHub**: esos
 seis archivos. El ZIP no es opcional: la actualización automática de las copias
@@ -900,7 +1021,10 @@ firmas, no claves: las privadas nunca salen de tu perfil). La carpeta
 desempaquetada y todo lo de las builds rápidas (`-dev`) son salidas intermedias
 y viven en `src-tauri/target/dist/`. Antes de publicar, la build completa
 aparta lo que no sea de esa versión a `src-tauri/target/dist/release-anterior/`
-sin borrarlo. `target/` sigue siendo la salida interna de Tauri/Cargo. `-NoInstaller` omite explícitamente ese artefacto. La
+sin borrarlo. Si la build termina con validaciones pendientes (una suite en rojo,
+una prueba omitida), deja además `release/NO-PUBLICAR.txt` con la lista: los
+artefactos y sus firmas son correctos, pero esa build no se publica ni se
+reparte. `target/` sigue siendo la salida interna de Tauri/Cargo. `-NoInstaller` omite explícitamente ese artefacto. La
 build portable no genera instalador ni accesos directos.
 
 La comprobación automática solo ofrece una release estable que tenga un
@@ -925,13 +1049,19 @@ Una release oficial falla si no recibe
 `LTERMINAL_SIGNING_PRIVATE_KEY` en el entorno de CI. La clave privada nunca se
 guarda en el repositorio ni se entrega a los jobs que compilan los binarios.
 
-El workflow de publicación compila Linux y Windows sin permisos de escritura
-ni acceso a la clave privada. Después de que ambos builds suban sus artefactos,
-un único job reúne los archivos, genera un manifiesto SHA-256 común y lo firma
-con Ed25519 y OpenSSH antes de adjuntar todo a la release. Así se evita que dos jobs
+El workflow de publicación (`.github/workflows/release.yml`) solo se lanza a
+mano, con el tag como parámetro: antes también saltaba al subir una etiqueta,
+compilaba otros binarios (sin la validación larga ni el vídeo) y reemplazaba
+los validados que ya estuvieran subidos. Compila Linux y Windows sin permisos
+de escritura ni acceso a la clave privada. Después de que ambos builds suban
+sus artefactos, un único job reúne los archivos, genera un manifiesto SHA-256
+común y lo firma con Ed25519 y OpenSSH. Así se evita que dos jobs
 reemplacen entre sí el manifiesto o su firma; solo el job final recibe
-`contents: write` y la clave privada. La clave pública se pasa también a los
-builds para incrustarlas en el actualizador. Los builders locales aceptan
+`contents: write` y la clave privada. Si la release de ese tag ya tiene
+adjuntos, se detiene sin tocarlos; si no existe, la crea como **borrador**
+(`--draft`) y sube sin `--clobber`, para revisarla antes de publicarla. La
+clave pública se pasa también a los builds para incrustarlas en el
+actualizador. Los builders locales aceptan
 `LTERMINAL_SSH_SIGNING_KEY_FILE`, `LTERMINAL_SSH_SIGNING_PUBLIC_KEY_FILE` y
 `LTERMINAL_SSH_SIGNING_IDENTITY`; también reutilizan
 `~/.ssh/lterminal-release-signing` y, por compatibilidad con `Tools`,
@@ -949,7 +1079,9 @@ builder con `-NonInteractive`, la pregunta la hace el menú y le pasa
 build dice cuáles encontró. El builder ya no rebusca claves por su cuenta en
 el perfil, el Escritorio o Documentos, donde podía recoger una clave antigua
 sin avisar. Con `-NonInteractive` y sin `-KeysDir` la release sale sin firmar
-(o falla si `LTERMINAL_REQUIRE_SIGNING=1`). `linux/build.sh` acepta igual
+(o falla si `LTERMINAL_REQUIRE_SIGNING=1`). `npm run dev:test` busca las
+mismas claves con los mismos nombres, en `--keys-dir <carpeta>` o en la que
+recuerda ese archivo, y firma lo que compila. `linux/build.sh` acepta igual
 `--keys-dir <carpeta>`; sin él sigue cargando las claves desde
 `~/.config/lterminal/` y `~/.ssh/`. Las variables
 `LTERMINAL_SIGNING_PRIVATE_KEY_FILE`, `LTERMINAL_UPDATE_PUBLIC_KEY_FILE` y
@@ -959,9 +1091,52 @@ una firma es válida hasta verificarla con la clave pública, y elimina una firm
 antigua si se intenta generar una build sin material de firma.
 
 Los payloads comprimidos se inspeccionan antes de extraerse: se rechazan rutas
-absolutas, `..`, separadores Windows, enlaces simbólicos, archivos especiales,
-archivos excesivos y expansiones superiores a 512 MiB. El bootstrap de perfil
+absolutas, `..`, `./`, separadores Windows, enlaces simbólicos, archivos especiales,
+archivos excesivos y expansiones superiores a 512 MiB. Por eso el `.tar.gz` de
+Linux tiene que empaquetarse con los nombres sin `./` delante (`tar -czf
+<salida> -C <padre> LTerminal-<versión>/`) y con el binario `lterminal` en la
+raíz de esa carpeta. El bootstrap de perfil
 también exige el checksum del ZIP y limita sus hosts de descarga a GitHub.
+
+### Publicar una release
+
+Windows y Linux salen **juntos**, en una sola release con un solo
+`SHA256SUMS.txt`: el actualizador de cada copia busca en ese manifiesto el hash
+de su propio adjunto. Lo que se sube es exactamente lo que pasó la validación
+larga, sin recompilar. Se prepara así:
+
+1. Una build larga firmada de cada sistema, en verde y sin
+   `release/NO-PUBLICAR.txt`. Cada una deja su carpeta con sus binarios, su
+   `SHA256SUMS.txt` y las dos firmas.
+2. Se ensamblan con `scripts/assemble-release.mjs`:
+
+   ```bash
+   node scripts/assemble-release.mjs --from <release-windows> --from <release-linux> --out <carpeta-vacía>/v1.0.0
+   ```
+
+   Se niega si un origen tiene `NO-PUBLICAR.txt`, si un archivo no coincide
+   con el hash de su manifiesto o si el manifiesto no lleva sus dos firmas
+   válidas (los bytes son los validados). Copia solo lo publicable a una
+   carpeta nueva y vacía, vuelve a calcular cada hash tras copiar, crea el
+   manifiesto común con `create-release-manifest.mjs`, lo firma con Ed25519 y
+   SSH y verifica las dos firmas. Deja un informe **al lado** de la carpeta
+   (`v1.0.0.informe.txt`, con tamaño, hash y origen de cada archivo), no dentro,
+   para que no se suba. Las claves se buscan como en `dev:test`
+   (`--keys-dir <carpeta>`, de serie `Escritorio\Claves SSH`) y nunca se
+   imprimen. `--platforms windows` permite, solo si se pide, una release sin
+   Linux; `--no-sign` es para las pruebas.
+3. Se crea la release del tag en GitHub y se suben **todos** los archivos de
+   esa carpeta, tal cual:
+
+| Sistema | Archivos | ¿Obligatorio? |
+|---|---|---|
+| Windows | `WTerminal-<versión>-x64-setup.exe`, `WTerminal-<versión>-Portable.exe`, `WTerminal-Unpacked-<versión>.zip` | Sí, los tres: cada uno es el adjunto que actualiza una forma de distribución |
+| Linux | `LTerminal-<versión>-x86_64.AppImage` | Sí |
+| Linux | `LTerminal_<versión>_amd64.deb`, `LTerminal-<versión>-1.x86_64.rpm`, `LTerminal-Unpacked-<versión>-x86_64.tar.gz` | Si existen |
+| Común | `SHA256SUMS.txt`, `SHA256SUMS.txt.sig`, `SHA256SUMS.txt.sshsig` | Sí: sin el manifiesto y sus dos firmas, ninguna copia ofrece la actualización |
+
+El workflow `release.yml` sigue disponible a mano para compilar en CI, pero
+solo crea borradores y nunca toca una release con adjuntos.
 
 El workflow `Wine` ejecuta la batería Rust Windows con Wine sin requerir
 WebView2. El smoke headless se lanza con `--wine-smoke` y
@@ -989,12 +1164,12 @@ nativo.
 | Nada en marcha (puerto 1420, proceso de la app) | Windows no deja borrar un archivo en uso y `npm ci` empieza vaciando `node_modules`: con un servidor de desarrollo abierto falla con un `EPERM` sobre `esbuild.exe` que no dice cuál es la causa. |
 | Recursos ConPTY oficiales verificados | El build los descarga si faltan y aborta si no puede verificar el paquete o la pareja DLL/host. |
 | WebKitGTK (Linux) | Su ausencia son cientos de líneas de error de enlazado a mitad de la compilación. |
-| Solo el artefacto esperado | Un `.deb` que se cuele acabaría publicado en una release sin que nadie lo haya probado. |
+| Solo el artefacto esperado | Un `.deb` o `.rpm` que se cuele acabaría publicado en una release sin que nadie lo haya probado. Hasta que `linux/build.sh` los valide, `tauri.linux.conf.json` deja `targets: ["appimage"]`, aunque ya lleva la configuración de los dos paquetes (sección `utils`, metadatos AppStream). |
 | Comprobación de humo | Que compile no significa que arranque. |
 | Release al día (menú `build-tools/build.ps1`) | Al abrir el menú se compara `release\SHA256SUMS.txt` con los archivos de la app (`src`, `src-tauri`, configuración): si hay alguno más nuevo, avisa de que la release es anterior a los cambios y conviene recompilar antes de probarla o publicarla. |
 | Espacio libre en la unidad del repositorio (Windows) | Por debajo de 5 GB la build se detiene con un mensaje claro; por debajo de 12 GB avisa. Antes se quedaba sin disco a mitad y fallaba con un `os error 112` que no decía la causa. |
 | Pruebas con depuración ligera (Windows) | Durante `npm run check` se compila con `CARGO_PROFILE_DEV_DEBUG=line-tables-only` y `CARGO_INCREMENTAL=0` (salvo que ya vengan definidas): los pánicos siguen dando archivo y línea, y `target\debug` ocupa unos pocos GB en vez de más de 8. |
-| Linker, 7-Zip y ffmpeg (Windows) | `rust-lld` solo se usa si hay bibliotecas del SDK y del CRT; si no, se instalan las Build Tools. 7-Zip (para sacar WebView2 del NSIS) y ffmpeg (vídeo del E2E) se instalan al principio si faltan, no a mitad de build. |
+| Linker, 7-Zip y ffmpeg (Windows) | `rust-lld` solo se usa si hay bibliotecas del SDK y del CRT; si no, se instalan las Build Tools. 7-Zip (solo con `-WebView2 Offline`, para sacar WebView2 del NSIS) y ffmpeg (vídeo del E2E) se instalan al principio si faltan, no a mitad de build. |
 
 ## Arquitectura
 
@@ -1310,17 +1485,20 @@ flowchart TD
   C --> D["security::verify_signature (Ed25519)"]
   D --> E["security::verify_ssh_signature (OpenSSH)"]
   E --> F["security::verify_checksum del adjunto"]
-  F --> G["self_update::validate_payload_tree"]
-  G --> H{"PackageKind"}
-  H -->|"WindowsSingleFile o AppImage"| I["sustituir solo el ejecutable"]
-  H -->|"zip desempaquetado"| J["self_update::apply sobre la carpeta"]
+  F --> H{"PackageKind"}
+  H -->|"WindowsInstalled, LinuxDeb, LinuxRpm"| S["installer_staging + launch_installer:<br/>NSIS con UAC o pkexec + apt-get/dnf/zypper/rpm"]
+  H -->|"WindowsSingleFile o LinuxAppImage"| G["self_update::validate_payload_tree"]
+  H -->|"WindowsFolder (.zip) o LinuxFolder (.tar.gz)"| X["extract + payload_root"]
+  X --> G
+  G -->|"un solo archivo"| I["sustituir solo el ejecutable"]
+  G -->|"carpeta"| J["self_update::apply sobre la carpeta"]
 ```
 
 ### Portable de un solo archivo
 
 ```mermaid
 flowchart LR
-  B["scripts/create-single-file-portable.mjs"] --> P["wterminal.exe + conpty.dll + OpenConsole.exe +<br/>WebView2 offline + índice JSON + trailer WTPORT01"]
+  B["scripts/create-single-file-portable.mjs"] --> P["wterminal.exe + conpty.dll + OpenConsole.exe +<br/>WebView2 solo en la variante Offline + índice JSON + trailer WTPORT01"]
   P --> R["config/single_file.rs current / is_single_file"]
   R --> M["Payload::materialize en runtime_cache_root"]
   M --> S["terminal/pty.rs sideloaded_conpty<br/>LoadLibraryExW del conpty.dll extraído"]
@@ -1477,9 +1655,10 @@ activa `LTERMINAL_E2E_TESTING` con una ruta absoluta.
 | `LEGACY_USER_DATA_DIR` | Datos antiguos bajo el nombre visible | `config/migration.rs` los migra al slug estable |
 | `documents/<nombre de proyectos>` | Carpeta inicial de repositorios descargados | `projects/commands.rs`, ajustable por usuario |
 | `temp/<slug>/<pid>/` | Archivos de inicialización, banner y ayuda de esta sesión | `terminal/session_files.rs`; cada proceso usa su PID |
-| `release/` | Solo lo que se sube a GitHub: instalador, portable de un solo archivo, ZIP desempaquetado y `SHA256SUMS.txt` con sus firmas `.sig`/`.sshsig` | `windows/build.ps1`; la build completa aparta lo demás a `src-tauri/target/dist/release-anterior/` |
+| `release/` | Solo lo que se sube a GitHub: instalador, portable de un solo archivo, ZIP desempaquetado y `SHA256SUMS.txt` con sus firmas `.sig`/`.sshsig`; con validaciones pendientes, también `NO-PUBLICAR.txt` | `windows/build.ps1`; la build completa aparta lo demás a `src-tauri/target/dist/release-anterior/` |
 | `src-tauri/target/dist/` | Carpeta desempaquetada (`WTerminal-<versión>`), salidas de las builds rápidas (`dev/`, `-dev`) y release anterior apartada | `windows/build.ps1`; ignorada por git |
 | Directorio `E2E_CAPTURE_DIR` | Capturas, vídeo, segmentos nativos y frames de checkpoints | `tests/e2e/smoke.mjs` |
+| `tests/e2e/fake-ai-tui.mjs` | Simulador de una IA de terminal (como `gh.cmd` para GitHub): caja del ancho que anuncia la PTY, spinner redibujado unas 20 veces por segundo con salida sincronizada, modo en línea o `--alt`, eco de lo escrito y respuesta; anota en `FAKE_AI_REPORT` las columnas y filas que vio. Lo usa el escenario `E2E_AI_TUI_ONLY`. |
 
 La caché de detección acelera la primera pintura, pero `install_refresh`
 ejecuta sondas reales y actualiza el estado. Un valor cacheado debe etiquetarse
@@ -1540,6 +1719,7 @@ cinco herramientas salían como no instaladas.
 | `src/components/TerminalPane.svelte` | Crea xterm/FitAddon/SearchAddon, enruta entrada, mide y redimensiona rejilla, conserva scrollback, foco y cursor. La liberación del ancho horizontal usa `wideReleaseTimer`; el ajuste tardío usa `fitQuietTimer`, de modo que el segundo no cancele al primero tras una salida corta. Carga `@xterm/addon-web-links` y el `linkHandler` de los OSC 8 según `terminalLinks` (`syncTerminalLinks`), abre solo con Ctrl+clic, enseña la confirmación `terminal-link-dialog` y delega en `api.openTerminalLink`. Registra `openSearch` y `submitLineFromApp` en `terminalRegistry.ts` para la paleta de comandos: la línea se teclea con `term.input`, de modo que el interceptor de `:` (`runInternal` + `writeInternal`, que resincroniza su salida con ConPTY) o la shell la reciben como una orden escrita a mano. |
 | `src/components/Panel.svelte` | Contenedor común de los paneles, cabecera y cierre. |
 | `src/components/CommandPalette.svelte` | Paleta de comandos (`Ctrl+Shift+P`): diálogo modal con un `combobox` que controla un `listbox` agrupado (`role="group"` por sección) y anuncia la opción activa con `aria-activedescendant`, así el foco no sale del buscador. Flechas, RePág/AvPág, Intro y Escape (que no cierra el panel de detrás); Tab no escapa del diálogo. Pide el catálogo de LTools con una caché de 60 s (`LTOOLS_CACHE_MS`) y resuelve las fijadas con los helpers de `ltools-selection.ts`. Al cerrar devuelve el foco a donde estaba (cancelar) o a la terminal activa (ejecutar), salvo que la acción se lo haya llevado a un panel o al buscador. |
+| `src/components/HistorySearch.svelte` | Búsqueda en las órdenes escritas (`Ctrl+Shift+R`): diálogo como la paleta (`combobox` + `listbox`) sobre `app.commandHistory`; Intro deja la orden escrita sin ejecutarla con `insertLine` y un rechazo (`draft`, `busy`) se enseña sin cerrar. |
 | `src/components/SettingsPanel.svelte` | Edita tema, terminal, atajos, idioma, integración, perfiles y plugins; guarda el borrador por `app.savePreferences`. |
 | `src/components/DependenciesPanel.svelte` | Muestra secciones y acciones, combina catálogo con estado cacheado, consulta acciones pendientes y solicita refresco o ejecución. |
 | `src/components/ProjectsPanel.svelte` | Busca repositorios, gestiona favoritos, releases y acciones de proyecto. |
@@ -1550,14 +1730,18 @@ cinco herramientas salían como no instaladas.
 | `src/lib/appState.svelte.ts` | `AppStore`: pestañas, paneles, inventario, preferencias y serialización de operaciones de ciclo de vida. |
 | `src/lib/types.ts` | Tipos compartidos de respuestas IPC, acciones, preferencias, inventarios y eventos. |
 | `src/lib/panels.svelte.ts` | Panel activo y navegación entre superficies. |
-| `src/lib/terminalRegistry.ts` | Relación `tabId → Terminal` que usa el listener único de `App.svelte`, y `tabId → TerminalControls` (`openSearch`, `submitLine`) que cada `TerminalPane` registra para la paleta de comandos. `submitLine` teclea con `term.input` (la ruta de `onData`, nunca escribe en xterm) y rechaza sin tocar nada si la shell no está lista (`not-ready`), hay un programa a pantalla completa o ningún prompt (`busy`) o la línea tiene texto sin enviar (`draft`). |
+| `src/lib/terminalRegistry.ts` | Relación `tabId → Terminal` que usa el listener único de `App.svelte`, y `tabId → TerminalControls` (`openSearch`, `saveOutput`, `copyLastOutput`, `jumpToCommand`, `submitLine`, `insertLine`) que cada `TerminalPane` registra para la paleta de comandos y la búsqueda en las órdenes escritas. `submitLine` teclea con `term.input` (la ruta de `onData`, nunca escribe en xterm) y rechaza sin tocar nada si la shell no está lista (`not-ready`), hay un programa a pantalla completa o ningún prompt (`busy`) o la línea tiene texto sin enviar (`draft`). |
 | `src/lib/command-palette.ts` | Registro y filtrado de la paleta, puro para probarlo en Node: `PALETTE_APP_ACTIONS` (acciones de `runAppAction` con su atajo y su comando `:` equivalente), `PALETTE_INTERNAL_COMMANDS` (los `:` que informan en la terminal), `buildPaletteEntries` (entradas a partir de preferencias, entornos, temas, fuentes, idiomas y acciones fijadas de LTools, con el motivo si están deshabilitadas), `filterPaletteEntries` (sin tildes, por palabras, comando y sinónimos; subsecuencia como último recurso; deshabilitadas detrás), `paletteResults` (ofrece una línea `:` nueva tal cual), `nextPaletteIndex`, `formatShortcut` y la traducción de grupos de entornos que comparte con `Toolbar.svelte`. |
+| `src/lib/command-marks.ts` | Marcas OSC 133, puro para probarlo en Node: `CommandTracker` (qué es una orden, cómo acabó y cuánto tardó), `outputRange` y `formatDuration`. |
+| `src/lib/command-history.ts` | Órdenes escritas, puro para probarlo en Node: `rememberCommand` (sin vacías, sin duplicados, sin pegados de varias líneas, hasta 1000) y `searchCommands` (palabras en cualquier orden, la más reciente primero). Solo recibe lo escrito sobre un prompt marcado con OSC 133. |
 | `src/lib/terminal-columns.ts` | Cálculo de columnas de reserva, entrada y salida visible. |
 | `src/lib/floating-tip.ts` | Posición de tarjetas flotantes (`position: fixed`) dentro de un panel: `placeFloatingTip` calcula en coordenadas de la ventana junto a la fila (debajo, o encima si no caben unos 170 px) y `fitFloatingTip` devuelve el desplazamiento que mete la tarjeta ya medida dentro del panel por los cuatro lados, sin bucle si es más grande que él. La usa la tarjeta de carpetas de Ajustes. |
 | `src/lib/terminal-links.ts` | Enlaces de la salida: `TERMINAL_LINK_REGEX` (la expresión estricta de `@xterm/addon-web-links` ampliada a `file://`; las rutas sueltas no se detectan para no subrayar cada prompt), `isLinkActivation` (solo Ctrl + botón principal), `checkTerminalLink` (espejo de `validate_link` sin la parte del disco: esquemas `TERMINAL_LINK_SCHEMES`, longitud, caracteres ocultos, credenciales; devuelve la URL normalizada y el host que enseña la confirmación) y `linkRejectionMessageKey` (aviso por código de rechazo). |
 | `src/lib/settings-search.ts` | Buscador de Ajustes: `foldSearchText` (sin mayúsculas ni tildes), `settingsSearchVisibility` (qué títulos de sección, encabezados, filas y notas se ven para una búsqueda) y `visibleSettingsRows` (el recuento). `SettingsPanel` recorre su formulario como bloques y solo esconde lo que esta función diga; también construye el índice de apartados y pone a cada fila su explicación como `title`. |
 | `src/lib/input-selection.ts` | Cortar o borrar una selección de la línea que se escribe: `promptInputStart` (dónde acaba el prompt), `columnAtTextIndex`/`contentEndColumn` (texto a celdas, caracteres anchos), `inputSelectionEdit` (flechas hasta el final de la selección y un DEL por carácter, solo dentro de lo escrito o tocando el cursor) y `selectionSearchText` (texto para «Buscar» del menú). |
-| `src/lib/banner-image.ts` | Imagen a la izquierda del banner: `findBannerBlocks` reconoce cada banner por su título tras un margen de 10 a 42 espacios, el que dejó el backend al imprimirlo (`bannerImagePadding`, `BANNER_IMAGE_GAP` igual que en Rust) y `attachBannerImages` coloca una decoración de xterm anclada a ese título (encima del margen y centrada en él con el mismo hueco a cada lado, `bannerImageBox`; sin pasar por ConPTY), la retira si el texto cambia y sigue a la configuración y a la imagen elegida. |
+| `src/lib/banner-image.ts` | Imagen a la izquierda del banner: `findBannerBlocks` reconoce cada banner por su título tras un margen de 10 a 42 espacios, el que dejó el backend al imprimirlo (`bannerImagePadding`, `BANNER_IMAGE_GAP` igual que en Rust) y `attachBannerImages` coloca una decoración de xterm anclada a ese título (encima del margen y centrada en él con el mismo hueco a cada lado, `bannerImageBox`, y también debajo, `bannerImageHeight`, para que un prompt pegado al banner no toque la imagen; sin pasar por ConPTY), la retira si el texto cambia y sigue a la configuración y a la imagen elegida. |
+| `src/lib/link-cache.ts` | `invalidateLinkCache`: xterm guarda por fila los enlaces bajo el ratón y no los vuelve a pedir mientras el ratón siga en esa fila; tras cada escritura se olvida esa fila para que un enlace (URL u OSC 8) escrito bajo el ratón se detecte y abra con Ctrl+clic. Toca dos campos internos del `Linkifier`; `test:frontend-logic` comprueba que la versión de xterm los mantiene. |
+| `src/lib/full-screen-app.ts` | Modo pantalla completa de una pestaña: `fullScreenTransition` decide, a partir de los DECSET/DECRST que pasan por xterm, cuándo un programa usa la pantalla alternativa (`?1049`: Amp, OpenCode, vim) o la salida sincronizada en línea (`?2026`: Ink, es decir Claude Code o Gemini) y cuándo termina; las pestañas `ai:*` lo están siempre. En ese modo `TerminalPane` da a la PTY el ancho visible exacto (`pty_resize` con `exact`) en vez de la reserva de 1024 columnas de las shells, que hacía dibujar a esas IA fuera de la vista. |
 | `src/lib/sixel-conpty.ts` | Imágenes Sixel alineadas con ConPTY: ConPTY las mide como un VT340 (celda virtual de 10×20 y píxel 2:1 salvo atributos de trama) y baja `floor(alto·aspecto/20)` filas; antes de que `@xterm/addon-image` coloque la imagen se encaja, sin deformarla, en esa caja de celdas para que el cursor de xterm acabe en la misma fila. Solo en Windows. |
 | `src/lib/terminal-prompt.ts` | Reconocimiento de prompt y señales de disponibilidad de REPL. |
 | `src/lib/terminal-ready.ts` | Reintento acotado del handshake de disponibilidad. |
@@ -1589,7 +1773,7 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/config/preferences.rs` | Esquema, defaults, validación y persistencia de preferencias. Temas: `effective_palette` y `NEUTRAL_THEME_ID`, temas propios (`CustomTheme`, como mucho 24, ids `custom-…`), paleta ANSI de 16 colores y fuente propia validada; aspecto de las sugerencias (`shellAssistSuggestionColor`…`shellAssistListView`). Atajos: `safe_shortcut` normaliza cada `shortcut*`, conserva `""` como «sin asignar» y devuelve el de fábrica si falta o no es un atajo válido. |
 | `src-tauri/src/config/migration.rs` | Traslada datos de ubicaciones anteriores al slug estable. |
 | `src-tauri/src/config/install_dir.rs` | Determina ubicación instalada y portable. |
-| `src-tauri/src/config/single_file.rs` | Portable de un solo `.exe`: lee los archivos añadidos tras la imagen PE (respetando una firma Authenticode posterior), coloca `conpty.dll`/`OpenConsole.exe` en `%LOCALAPPDATA%\WTerminal\runtime\<huella>` verificados por SHA-256, saca el instalador de WebView2 solo si falta el runtime y valida el `-Portable.exe` que descarga el actualizador. |
+| `src-tauri/src/config/single_file.rs` | Portable de un solo `.exe`: lee los archivos añadidos tras la imagen PE (respetando una firma Authenticode posterior), coloca `conpty.dll`/`OpenConsole.exe` en `%LOCALAPPDATA%\WTerminal\runtime\<huella>` verificados por SHA-256, saca el instalador de WebView2 (solo lo lleva la variante Offline) si falta el runtime y valida el `-Portable.exe` que descarga el actualizador. |
 | `src-tauri/src/config/i18n.rs` | Catálogos y traductor backend. |
 | `src-tauri/src/config/plugins.rs` | Inventario y operaciones del sistema de plugins. |
 | `src-tauri/src/config/toolchain_store.rs` | Carpeta propia (`%LOCALAPPDATA%\WTerminal\entornos`) por categorías (`Category`: cachés, descargas del panel, modelos de IA, herramientas nuevas, historial de los REPL; `Categories::from_preferences`): variables estándar inyectadas solo en procesos de WTerminal (`overrides_for`), carpetas `bin` de las herramientas nuevas delante del PATH de WTerminal (`extra_path_dirs` → `process::set_extra_path`, que aplican `child_environment`, `hidden_command` y `path_env::which`), `OLLAMA_MODELS` solo si no había modelos, tamaños y vaciado (solo la categoría de cachés); las ubicaciones de siempre de las categorías apagadas se miden con `cached_system_size` y se reutilizan 10 min, las propias se miden siempre. Además mide y explica cada ubicación: `app_locations` (ajustes, scripts, plugins, registros, caché de detección, datos del WebView, temporales de sesión, proyectos, runtime del portable, perfil de Clink) y `external_locations` (Cargo, rustup, Go, Bun, Ollama, cachés de npm/pip/pnpm/Yarn/uv/Deno, WinGet, Docker, Chocolatey, Scoop y el disco de cada distro WSL leído de `HKCU\…\Lxss`). Cada una lleva `LocationInfo` (para qué sirve, si se puede borrar y `Safety`: `safe`/`regenerates`/`caution`/`keep`), que Ajustes enseña en una tarjeta al pasar el ratón. |
@@ -1601,7 +1785,7 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/platform/path_integration.rs` | Integración del ejecutable en PATH (HKCU). Ajustes bloquea la casilla mientras se aplica: dos escrituras cruzadas dejaban entradas sueltas. El E2E guarda y repone una copia exacta de `HKCU\Environment\Path` y `HKCU\Software\WTerminal\PathIntegration`, porque el perfil aislado no cubre el registro. |
 | `src-tauri/src/platform/windows_integration.rs` | Estado y activación de integración Windows (menús, App Paths, `wterminal://`) y de los permisos de administrador: `WindowsIntegrationStatus` lleva `elevated`, `nsudoLauncher`, `gsudoPath` y `windowsSudo`; `StartElevation::should_relaunch` decide «Iniciar siempre como administrador»; `relaunch_elevated` y el IPC `app_restart_as_admin` relanzan con `--elevated-relaunch`; `relaunch_unelevated` y el IPC `app_restart_unelevated` vuelven sin permisos (con `unelevated_restart_blocker` como guarda). |
 | `src-tauri/src/platform/windows/mod.rs` | Adaptador Windows. |
-| `src-tauri/src/platform/windows/webview2.rs` | Verifica runtime WebView2 e instala desde carga offline si procede. |
+| `src-tauri/src/platform/windows/webview2.rs` | Preflight de WebView2 antes de la ventana: instalador local, embebido (variante Offline) o descargado de Microsoft, siempre tras comprobar con `WinVerifyTrust` que lo firma Microsoft; diálogo nativo (`TaskDialogIndirect`) si nada funciona; `--install-webview2 [ruta]`. Ver [WebView2: si falta el runtime](#webview2-si-falta-el-runtime). |
 | `src-tauri/src/platform/windows/path.rs` | Rutas y localización de herramientas en Windows. |
 | `src-tauri/src/platform/windows/elevation.rs` | Token efectivo (`is_process_elevated`), modo del sudo de Windows leído del registro (`WindowsSudo`), ruta de gsudo, citado de argumentos con las reglas de `CommandLineToArgvW` y `run_elevated` (ShellExecuteW «runas»; el código 5 es el UAC cancelado). |
 | `src-tauri/src/platform/linux/mod.rs` | Adaptador Linux. |
@@ -1632,6 +1816,7 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/terminal/shell_assist.rs` | Sugerencias del historial y colores en la línea de órdenes con la herramienta de cada shell: inyecta Clink en cmd con un perfil propio (`default_settings` con sugerencias en línea y colores; las pestañas arrancan con `/d` y no pasan por su AutoRun), activa las predicciones de PSReadLine si nadie las configuró y carga ble.sh o los plugins de zsh si existen. `UNIX_PLUGINS` es la única tabla de rutas y marcadores de ble.sh y los plugins de zsh: de ella salen la línea de bash/zsh, la detección del catálogo en Linux (`packages::commands`, por marcador) y el fragmento que imprime el marcador en la sonda de WSL. Preferencias `shellAssist` y, por shell, `shellAssistCmd`/`shellAssistPowershell`/`shellAssistBash`/`shellAssistZsh`. `AssistStyle` traduce el aspecto elegido en Ajustes a cada herramienta (`clink_default_settings`, `psreadline_style_lines`, `blesh_style_commands`, `zsh_highlight_styles`); sin cambios produce exactamente los valores de fábrica. IPC `shell_assist_status` (estado por shell para Ajustes; con `refresh` hace el inventario detallado de WSL). En E2E se desactiva con `LTERMINAL_E2E_DISABLE_SHELL_ASSIST` salvo en `E2E_SHELL_ASSIST_ONLY`, que además elige en Ajustes un color de sugerencia (#ff00ff) y exige verlo en PSReadLine, Clink y ble.sh, y `LTERMINAL_E2E_BLESH_PATH` (solo con `LTERMINAL_E2E_TESTING=1`, ruta absoluta sin caracteres de shell) carga un ble.sh instalado en el `/tmp` de la distro de pruebas. |
 | `src-tauri/src/terminal/shell_paths.rs` | Ubicación de ejecutables de shells. |
 | `src-tauri/src/terminal/spawn_cwd.rs` | Selección segura del cwd de una sesión nueva. |
+| `src-tauri/src/environments/ai_cli_defaults.rs` | Valores por defecto de sistema para Gemini CLI y Qwen Code (`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, `QWEN_CODE_SYSTEM_DEFAULTS_PATH`, `general.enableAutoUpdate: false`): sin ellos, al arrancar lanzaban `npm install -g` en una consola aparte que Windows abría en otra ventana o pestaña de Windows Terminal. Siguen avisando de la versión nueva; los ajustes del usuario y sus variables mandan (`process::set_base_environment`). |
 | `src-tauri/src/environments/mod.rs` | Modelo `Environment`/inventario; detección rápida y completa; selección por defecto. |
 | `src-tauri/src/environments/wsl.rs` | Estado de WSL y distribuciones: sonda rápida (`printenv SHELL`, 15 s y un reintento para la VM en frío) y, al abrir Dependencias, inventario detallado con `LISTING_SCRIPT` (sin un `basename` por archivo ni el PATH de Windows en `/mnt/<unidad>`) más los marcadores de `shell_assist::plugin_probe_script`. Todo con `wsl.exe --exec`: con `--` la login shell de la distro expande `$1`/`$HOME` antes que `sh` y el inventario salía con error. Comprueba que cada intérprete ELF se ejecuta (`runnable_probe_script`, marca `wterminal-unrunnable:`; los que dan 126 van a `unrunnable`) y lanza los REPL con `repl_launch_args` (shell de login + `USER_BIN_DIRS`, las mismas carpetas que recorre la sonda). `cached_installed` devuelve la última detección sin arrancar nada. |
 | `src-tauri/src/environments/docker.rs` | Contenedores y disponibilidad de Docker. |
@@ -1707,7 +1892,7 @@ cinco herramientas salían como no instaladas.
 | `.github/ISSUE_TEMPLATE/` | Formularios de incidencias y propuestas; orientan qué evidencia adjuntar. |
 | `.github/dependabot.yml` | Programación de actualizaciones de dependencias. |
 | `.github/workflows/ci.yml`, `workflow-security.yml` | Validación de cambios y guardas de workflows. |
-| `.github/workflows/release.yml` | Empaquetado/publicación desde una etiqueta de versión o lanzamiento manual. |
+| `.github/workflows/release.yml` | Empaquetado en CI, solo a mano (`workflow_dispatch`): sube a un borrador y nunca reemplaza adjuntos ya publicados. |
 | `.github/workflows/wine.yml`, `fuzz.yml` | Smoke bajo Wine y fuzzing automatizado. |
 | `.github/workflows/codeql.yml`, `dependency-review.yml`, `scorecard.yml` | Análisis estático, revisión de dependencias y prácticas de seguridad del repositorio. |
 
@@ -1817,6 +2002,17 @@ prompt. Por eso:
 - La reserva de columnas del primer eco (`localInputGridPinned`) solo dura
   mientras hay entrada en cola; mantenerla bloqueaba el ajuste de filas en los
   resize siguientes. `data-fit-skip` publica por qué se aplazó un ajuste.
+- El scroll horizontal es solo del host. Al cruzar las 1024 columnas, el
+  navegador desplazaba `.xterm-scrollable-element` (con overflow oculto) para
+  enseñar el textarea de xterm: el texto se movía sin cambiar el scroll del
+  host y el prompt siguiente quedaba fuera de la vista.
+  `onInnerHorizontalScroll` (en captura) devuelve a 0 cualquier desplazamiento
+  horizontal interior, salvo el del propio textarea, y el E2E `input-follow`
+  lo vigila (`innerScroll`). Tras un reajuste, la posición horizontal
+  restaurada ya no pisa el eco de una tecla escrita mientras tanto.
+  Si el cursor cabe en la primera pantalla, la línea se enseña desde el
+  principio (`keepCursorHorizontallyVisible`): un resto de scroll cortaba la
+  primera columna.
 
 - La salida del inicializador no llega a xterm: el backend la sustituye por
   `banner_text` tras el marcador. El archivo que la shell imprime con `type`
@@ -1888,7 +2084,8 @@ El E2E lo vigila con `assertNoDetachedCommandEcho` y los escenarios enfocados
 `E2E_NEW_TAB_ECHO_ONLY` (con `E2E_NEW_TAB_ECHO_ROTATE=1 E2E_NEW_TAB_ECHO_SWITCH=1`),
 `E2E_QUEUED_INPUT_RESIZE_ONLY` (entrada escrita antes del prompt y resize) y
 `E2E_RESIZE_TYPE_ONLY` (escribir justo tras cambiar la altura, también al
-volver a una pestaña que estaba oculta) y `E2E_TINY_GROW_ONLY` (casilla de 1-2 filas
+volver a una pestaña que estaba oculta; `E2E_RESIZE_TYPE_ATTEMPTS` repite la
+parte oculta) y `E2E_TINY_GROW_ONLY` (casilla de 1-2 filas
 cuyo historial se desplaza y que después crece, al volver a un panel o al
 agrandar la ventana).
 El buffer de xterm conserva el historial. El tamaño de la barra horizontal por
@@ -2031,6 +2228,8 @@ herramientas de pip, npm, cargo, go, dotnet, gem y cabal):
   reales, que si no ganaban a los simulados, y se las oculta también al PATH
   persistente que la app vuelve a leer del registro
   (`LTERMINAL_E2E_HIDDEN_PATH_DIRS`, solo con `LTERMINAL_E2E_TESTING=1`);
+  `ai-tui` hace lo mismo con Amp y Claude Code para usar el simulador, y
+  `ai-real` usa precisamente las reales (una que no esté instalada se omite);
 - la descarga real (`downloads`) se salta los gestores cuya variable de caché
   ya define el usuario (`userDefinedSkipped` en el informe): WTerminal respeta
   su carpeta y no hay nada que comprobar en la propia;
@@ -2045,14 +2244,25 @@ entradas largas, integridad horizontal, estilos ANSI, parpadeo del cursor,
 selección con el ratón y enlaces clicables con Ctrl+clic, `terminal-links`, que
 comprueba qué se pide abrir sin lanzar el navegador, y la paleta de comandos,
 `command-palette`, que la maneja con el teclado y comprueba el efecto de cada
-acción, y los permisos de administrador, `admin-permissions`, que recorre
+acción, las marcas de orden en cmd, PowerShell y Git Bash, `command-marks`,
+renombrar pestañas y guardar la salida, `tab-tools`, y los permisos de administrador, `admin-permissions`, que recorre
 también la ruta de NSudo a través de un gsudo simulado sin pedir nunca el
 UAC; además la sugerencia de importar repositorios al hacer `cd`,
-`import-suggestion`; el tamaño de la interfaz al 80–200 % con sus atajos,
-`ui-scale`; la sugerencia del modo de bajo consumo en un equipo de 2 hilos
+`import-suggestion`; el tamaño de la interfaz escrito a mano (80, 137, 150,
+200, 300 y 500 %, con el tope por el ancho de la ventana) y sus atajos,
+`ui-scale`; las IA de terminal a pantalla completa con un simulador
+(`tests/e2e/fake-ai-tui.mjs`): ancho visible en su pestaña y al redimensionar,
+lanzadas desde cmd en pantalla alternativa y en línea, sin parpadeo ni
+bloqueo, y la shell intacta al salir, `ai-tui`; las IA reales que haya
+instaladas (Claude Code, Gemini, Codex, OpenCode, Qwen, Amp) sin teclear
+nada que inicie sesión, escribiendo sin enviar en las que ya enseñan su caja,
+`ai-real`; la sugerencia del modo de bajo consumo en un equipo de 2 hilos
 simulado, `low-power`; y el banner con fastfetch en cmd, PowerShell y Git Bash
 a varios tamaños, `fastfetch-matrix`), `full`, `video`, `downloads` (descarga real,
-necesita red), `dependency-audit` e `installer`. `scripts/run-e2e-suite.mjs` las ejecuta
+necesita red), `dependency-audit`, `distribution` (prueba corta de una forma de
+distribución) e `installer`. Un escenario puede llevar un bloque `quick` con las
+variables y el límite del modo reducido (`--quick` o `--level quick`), que se
+suman a las suyas sin cambiar el modo largo. `scripts/run-e2e-suite.mjs` las ejecuta
 contra cualquier binario mediante `tests/e2e/run-scenario.mjs` (salida, informe
 y log por escenario, límite de tiempo que mata el árbol de procesos) y escribe
 `summary.json` y `summary.md`. No se detiene en el primer fallo, avisa si el
@@ -2076,9 +2286,9 @@ verificando que no queda nada. Suelto, `node scripts/test-installer.mjs
 además ese recorrido sin repetir la suite `video`.
 
 `windows/build.ps1` añade `focused` a la batería ampliada (salvo
-`-NoFocusedTests`) y con `-ReleaseValidation` (o `-VideoTest`,
-`-DownloadTests`, `-DependencyAudit`, `-InstallerTest`) el resto, siempre
-contra los artefactos ya firmados. El resumen queda en
+`-NoFocusedTests`) y con `-ReleaseValidation` o `-QuickValidation` (o
+`-VideoTest`, `-DownloadTests`, `-DependencyAudit`, `-InstallerTest`) el resto,
+siempre contra los artefactos ya firmados. El resumen queda en
 `artifacts/release-validation/WTerminal-<versión>-<fecha>/summary.md`; un
 fallo o una validación omitida se listan al final y el código de salida es 1.
 `scripts/test-e2e-suite.mjs` comprueba sin abrir la app el catálogo, los
@@ -2099,6 +2309,9 @@ instalador.
 | `scripts/capture-installer-pages.ps1` | Pasada visible del instalador y del desinstalador NSIS: se eleva si hace falta, avanza cada página con su botón por defecto (id 1) y guarda una captura PNG por página en la carpeta indicada, más `pages.json`. Complementa la instalación silenciosa de `test-installer.mjs`. |
 | `scripts/generate-installer-art.ps1` | Genera `src-tauri/windows/installer/*.bmp` (barra lateral y cabeceras del asistente NSIS) a partir del icono y los colores del tema de fábrica. Se ejecuta a mano si cambian. |
 | `scripts/test-e2e-suite.mjs` | Prueba sin app del catálogo de suites, el ejecutor y la comparación de binarios del instalador. |
+| `scripts/dev-test.mjs` | `npm run dev:test`: compila con el perfil `fast` (release sin LTO e incremental) y ejecuta solo los escenarios, la matriz limitada, los tests de Rust o los scripts pedidos, con vídeo y repeticiones si se piden; firma lo que compila y resume en `artifacts/dev-test/`. |
+| `scripts/test-dev-test.mjs` | Prueba sin compilar los argumentos de `dev:test`, la búsqueda de escenarios, el binario de cada perfil, que `fast` hereda de release y la firma. |
+| `scripts/test-e2e-shell-tools.mjs` | Prueba sin WSL la elección de distro del E2E de bash: orden de preferencia, reintentos, distros sin las órdenes de ble.sh y fallos de instalación. |
 | `scripts/prepare-e2e-shell-tools.mjs` | Solo para `E2E_SHELL_ASSIST_ONLY`: descarga a `artifacts/e2e-tools` (ignorado por git) Clink portable y el PSReadLine actual con versión y SHA-256 fijados, comprueba la firma de Microsoft de PSReadLine y los reutiliza; el smoke los pone delante en `PATH` y `PSModulePath`. No instala nada. |
 | `scripts/test-single-file-portable.mjs` | Prueba sin app del empaquetador del portable de un solo `.exe`: formato, contenido, alteraciones y contrato con `single_file.rs`. |
 | `windows/e2e-elevated.ps1` | E2E elevado con UAC en host Windows. |
@@ -2106,7 +2319,7 @@ instalador.
 | `linux/validate-release.sh`, `linux/exercise-host.sh` | Integridad de release y ejercicio del host Linux. |
 | `scripts/prebuild.mjs`, `build-frontend.mjs`, `build-fast.mjs` | Precondiciones, bundle UI y ruta rápida de desarrollo. |
 | `scripts/create-single-file-portable.mjs`, `finalize-offline-webview2.ps1`, `prepare-conpty.mjs` | Portable EXE único y recursos Windows necesarios. |
-| `scripts/create-release-manifest.mjs`, `sign-release-manifest.mjs`, `sign-release-ssh.mjs`, `update-release-hash.mjs`, `verify-release-artifacts.mjs` | Manifiesto, hash, firmas y verificación de artefactos. |
+| `scripts/create-release-manifest.mjs`, `assemble-release.mjs`, `sign-release-manifest.mjs`, `sign-release-ssh.mjs`, `update-release-hash.mjs`, `verify-release-artifacts.mjs` | Manifiesto, ensamblado de la release conjunta, hash, firmas y verificación de artefactos. |
 | `scripts/e2e-native-driver.mjs`, `e2e-environment-probes.mjs`, `run-dependency-audit.mjs` | Driver, sondeos seguros y variante de dependencias. |
 | `scripts/audit-video-frames.py`, `extract-video-frames.py`, `create-e2e-contact-sheet.py` | Decodificación de todos los frames, extracción precisa e índice visual de capturas. |
 | `tests/e2e/smoke.mjs` | Escenarios E2E, acciones UI, vídeo, capturas e informe estructurado. |
@@ -2140,9 +2353,10 @@ entrada en `package.json`.
 | `scripts/run-rust-tool.mjs` | Invocación de Cargo/herramientas Rust con entorno del proyecto. |
 | `scripts/prepare-conpty.mjs` | Preparación y verificación del recurso ConPTY. |
 | `scripts/probe-windows-tools.ps1` | Disponibilidad de herramientas Windows para build y prueba. |
-| `scripts/create-single-file-portable.mjs` | Crea el portable de un solo `.exe` (`wterminal.exe` + `conpty.dll`, `OpenConsole.exe`, instalador de WebView2 y avisos tras la imagen PE, índice JSON y cola `WTPORT01`); `--verify` lo compara con la carpeta unpacked. No es un autoextraíble: arranca con doble clic. La build lo copia solo a una carpeta vacía, pasa el E2E completo con `E2E_EXPECT_SINGLE_FILE=1` (ConPTY desde la caché de runtime) y exige que no deje nada a su lado. |
+| `scripts/create-single-file-portable.mjs` | Crea el portable de un solo `.exe` (`wterminal.exe` + `conpty.dll`, `OpenConsole.exe`, los avisos y, solo en la variante `-WebView2 Offline`, el instalador de WebView2, tras la imagen PE, con índice JSON y cola `WTPORT01`); `--verify` lo compara con la carpeta unpacked. No es un autoextraíble: arranca con doble clic. La build lo copia solo a una carpeta vacía, pasa el E2E completo con `E2E_EXPECT_SINGLE_FILE=1` (ConPTY desde la caché de runtime) y exige que no deje nada a su lado. |
 | `scripts/finalize-offline-webview2.ps1` | Completa recursos offline WebView2 en un artefacto Windows. |
-| `scripts/create-release-manifest.mjs` | Inventario de artefactos y hashes de release. |
+| `scripts/create-release-manifest.mjs` | Inventario de artefactos y hashes de release. `--platforms windows,linux` (de serie los dos) decide qué es obligatorio: zip, setup y Portable de Windows y el AppImage de Linux; `.deb`, `.rpm` y `.tar.gz` entran si están. |
+| `scripts/assemble-release.mjs` | Prepara la carpeta que se sube a GitHub a partir de builds ya validadas: comprueba hashes y firmas de cada origen, rechaza `NO-PUBLICAR.txt`, copia a una carpeta vacía, crea el manifiesto común y lo firma. Ver [Publicar una release](#publicar-una-release). |
 | `scripts/sign-release-manifest.mjs` | Firma Ed25519 del manifiesto. |
 | `scripts/sign-release-ssh.mjs` | Firma OpenSSH del manifiesto. |
 | `scripts/lib/ssh-signing.mjs` | Funciones compartidas del formato de firma SSH. |
@@ -2169,7 +2383,8 @@ entrada en `package.json`.
 | `scripts/verify-e2e-report.mjs` | Estructura y coherencia del informe E2E. |
 | `scripts/verify-fuzzing.mjs` | Configuración de fuzzing. |
 | `scripts/verify-github-security.mjs` | Seguridad de workflows y referencias fijadas. |
-| `scripts/verify-i18n.mjs` | Claves y catálogos traducidos. |
+| `scripts/verify-i18n.mjs` | Claves y catálogos traducidos, textos que siguen en español y textos copiados del inglés. |
+| `scripts/i18n-identical-allowlist.json` | Textos revisados que coinciden con el español de verdad, por idioma, y cuántos siguen copiados del inglés en cada uno (esa cifra puede bajar, no subir). |
 | `scripts/verify-install-sources.mjs` | Fuentes permitidas de instalación. |
 | `scripts/verify-links.mjs` | Destinos HTTP/Git citados por código y docs. |
 | `scripts/verify-logic-surface.mjs` | Presencia de guardas de lógica de frontend/backend. |
@@ -2193,7 +2408,8 @@ entrada en `package.json`.
 | `scripts/test-preventive.mjs` | Guardas de UI/layout y rutas históricas. |
 | `scripts/test-preview.mjs` | Generación y arranque de preview. |
 | `scripts/test-release-hash.mjs` | Hashes de artefactos. |
-| `scripts/test-release-manifest.mjs` | Construcción de manifiesto. |
+| `scripts/test-release-manifest.mjs` | Construcción de manifiesto: los dos sistemas, los paquetes Linux opcionales y los obligatorios que faltan. |
+| `scripts/test-assemble-release.mjs` | Ensamblado de la release conjunta con builds de prueba: carpeta limpia, hashes de origen, salida no vacía, `NO-PUBLICAR.txt` y sistemas obligatorios. |
 | `scripts/test-release-publish.mjs` | Publicación local de artefactos. |
 | `scripts/test-release-signature.mjs` | Firma Ed25519. |
 | `scripts/test-release-ssh-signature.mjs` | Firma OpenSSH. |
@@ -2996,7 +3212,7 @@ responden en la terminal se teclean en la pestaña activa como si se escribieran
 | `:language list` / `:language <id>` | Enumera o cambia el idioma (`es`, `en`, `auto`, etc.). También acepta `:lang` y `:idioma`. |
 | `:terminal list` | Muestra todos los parámetros editables de xterm y sus valores actuales. |
 | `:terminal <parámetro> <valor>` | Cambia tamaño/familia/peso de fuente, interlineado, espaciado, padding, scrollback, sensibilidad, cursor, parpadeo, selección, densidad y colores. Ejemplos: `:terminal font-size 14`, `:terminal cursor beam`, `:terminal cursor-blink off`, `:terminal background #080808`. `:term` es equivalente. |
-| `:panes 1\|2\|3\|4` / `:panes cycle` | Fija o rota el número de terminales visibles en la rejilla. `:layout` y `:grid` son equivalentes. |
+| `:panes 1\|2\|3\|4` / `:panes cycle` | Fija o rota el número de terminales visibles en la rejilla, sin cerrar pestañas; `:panes <n>` va directo y solo abre las que falten para llegar a `n`. Con la vista dividida, el botón «Separar» de la tira de pestañas hace lo mismo que `:panes 1`. `:layout` y `:grid` son equivalentes. |
 | `:explorer-here` | Abre el gestor de archivos del sistema en la ruta actual de la terminal en Windows o Linux. `:open-here` y `:reveal-here` son equivalentes. |
 | `:banner list` / `:banner hide|show|toggle <campo>` / `:banner preset compact\|full` | Consulta o cambia los campos del fastfetch. Los campos son `system`, `host`, `kernel`, `environment`, `motherboard`, `cpu`, `gpu`, `memory`, `storage`, `uptime` y `datetime`. El campo `storage` resume cada unidad en una línea: `Disco  2 unidades - (C:) 250 GB (99%) / (D:) 450 GB (70%)` (letra o ruta de montaje, tamaño y porcentaje de uso; una ruta de más de 20 caracteres se acorta a `…/<carpeta final>`; `system_info::storage_rows`). |
 | `:quick-actions list` | Comando heredado: informa de que las acciones fijadas se gestionan desde el catálogo de LTools. `on`, `off` y `toggle` ya no cambian la interfaz. |
@@ -3153,7 +3369,11 @@ recomendados, sin cambiar el Clink que uses fuera. En PowerShell 7 ya viene de s
 (PSReadLine); Windows PowerShell 5.1 trae PSReadLine 2.0 sin predicciones y
 «PSReadLine con predicciones» lo actualiza para tu usuario. En bash se carga
 ble.sh (`~/.local/share/blesh`) y en zsh zsh-autosuggestions y
-zsh-syntax-highlighting. fish lo trae de serie. Desactivado, no se añade nada
+zsh-syntax-highlighting. fish lo trae de serie. Antes de instalar ble.sh en
+una distro WSL se comprueban, además del descargador y del extractor, las 18
+órdenes que ble.sh exige al cargarse (`BLESH_REQUIRED_COMMANDS`): sin `awk`,
+que falta en FedoraLinux-44 recién instalada, `ble.sh --install` no termina
+nunca; la acción se detiene antes con la orden que lo añade. Desactivado, no se añade nada
 y cada shell conserva su configuración.
 
 Todo Windows PowerShell 5.1 que lanza WTerminal (pestañas y sondas) recibe un
@@ -3293,6 +3513,13 @@ y **No volver a sugerir** (`dismissedRepositories`); sale solo cuando no hay
 otro aviso abajo y se apaga en **Ajustes › Comportamiento › Sugerir importar
 repositorios** (`suggestRepositoryImport`). Hoy solo se importan repositorios
 con un `origin` de GitHub.
+
+**Estado de Git** (en Descargados) enseña bajo cada repositorio su rama, los
+cambios sin confirmar y los commits por delante (↑) o por detrás (↓) según el
+último `fetch`. Solo lee (`git status` y la lista de ramas), no consulta la red
+y va de tres en tres repositorios. Como las demás acciones, el panel manda el
+nombre y el backend saca la carpeta de la misma lista de Descargados
+(`git_downloaded_status`).
 
 **Release** (en «⋯» de cada repositorio) abre la última release y sus adjuntos
 bajo la fila de ese repositorio. Se cierra con «✕», pulsando **Release** otra
@@ -3556,6 +3783,12 @@ vacíos, renombrar, copiar, cortar, pegar, enviar a la papelera, copiar la ruta,
 abrir un archivo con la aplicación predeterminada y llevar la terminal a la
 carpeta que se está viendo.
 
+**Calcular tamaño** (menú de una carpeta) suma lo que hay dentro, subcarpetas
+incluidas, y lo enseña en su fila y con el número de archivos. No sigue enlaces
+ni uniones (apuntan a otra parte del disco y una unión puede formar un ciclo),
+salta lo que no se puede leer y se para a los 15 s o a las 300 000 entradas:
+entonces sale «≥», porque es un mínimo.
+
 Crear algo solo se admite dentro de la carpeta mostrada: el nombre no puede
 contener separadores, `..`, caracteres de control ni los nombres reservados de
 Windows, y nunca se sobrescribe nada existente.
@@ -3593,6 +3826,29 @@ inferior, cuatro en cuadrantes. Al llegar a cuatro, el botón vuelve a dejar
 una sola. Cada panel sigue siendo una pestaña normal; la que tiene el foco se
 distingue por un borde de acento.
 
+Para **renombrar una pestaña**: doble clic sobre ella, `F2` con la pestaña
+enfocada o la paleta de comandos. Intro guarda, `Esc` cancela y un nombre vacío
+devuelve el del entorno. El nombre sigue ahí al cambiar de shell, pero solo dura
+mientras la pestaña está abierta.
+
+El **menú de la pestaña** (clic derecho, tecla de menú o `Mayús+F10` con la
+pestaña enfocada) reúne renombrar, un **color** que marca su borde izquierdo
+(ocho colores o ninguno), **sacarla de la vista dividida** sin cerrarla ni tocar
+las demás, o **verla junto a la pestaña activa** si no se ve, y cerrarla. Las
+flechas recorren el menú y `Esc` lo cierra sin cambiar nada. Como el nombre, el
+color dura mientras la pestaña está abierta.
+
+**Órdenes escritas** (`Ctrl+Shift+R`, se cambia en Ajustes, o la paleta): un
+buscador con lo que se ha escrito en todas las pestañas, la última primero, que
+acepta varias palabras en cualquier orden. Intro deja la orden escrita en el
+prompt de la pestaña activa **sin ejecutarla**; solo lo hace si la línea está
+vacía, como la paleta. Solo se guarda lo tecleado sobre un prompt que la shell
+marca con OSC 133 (cmd, PowerShell y bash, con «Marcar dónde empieza y acaba
+cada orden» activado): lo que se escribe mientras corre una orden, como la
+contraseña de `sudo` o un `Read-Host`, no llega con prompt y nunca entra. Vive
+en memoria y se pierde al cerrar WTerminal; cada shell sigue guardando su
+propio historial.
+
 Cambiar de entorno no es instantáneo (una distro WSL en frío o una imagen
 Docker tardan segundos), así que el panel muestra un aviso **Cargando a:
 _entorno_** con un indicador en movimiento, y lo retira en cuanto la sesión
@@ -3611,9 +3867,18 @@ contenido hacia la derecha. Al escribir o recibir salida, el cursor vuelve a
 mantenerse visible automáticamente.
 
 El menú contextual de la terminal (clic derecho) ofrece copiar, cortar
-entrada, borrar entrada, pegar, **buscar** y Ajustes, cada uno con su atajo a la
-vista (Ctrl+Shift+C, Ctrl+Shift+X, Supr, Ctrl+Shift+V, el de buscar de Ajustes),
-para que nadie tenga que sabérselos:
+entrada, borrar entrada, pegar, **buscar**, **guardar la salida**, **copiar la
+salida de la última orden** y Ajustes, cada uno con su atajo a la vista
+(Ctrl+Shift+C, Ctrl+Shift+X, Supr, Ctrl+Shift+V, el de buscar de Ajustes), para
+que nadie tenga que sabérselos:
+
+- **Guardar la salida…** escribe todo el historial de la pestaña en el archivo
+  que se elija en el diálogo del sistema, con las líneas partidas unidas. Con
+  una IA o un editor a pantalla completa se guarda la terminal normal, no esa
+  pantalla.
+- **Copiar la salida de la última orden** copia solo lo que escribió, sin el
+  prompt ni la orden. Hace falta que la shell marque sus órdenes (ver
+  [Marcas de orden](#marcas-de-orden)).
 
 - **Buscar «…»**: con texto seleccionado abre la búsqueda de la terminal con
   esa selección ya escrita (la primera línea con texto, hasta 200 caracteres)
@@ -3659,6 +3924,8 @@ como salida en lugar de anunciar un atajo que ya no existe.
 |---|---|
 | `Ctrl+Shift+P` | Abrir o cerrar la [paleta de comandos](#paleta-de-comandos) (también desde un campo de texto) |
 | `Ctrl+Shift+F` | Buscar en el historial de la terminal |
+| `Ctrl+Shift+R` | Buscar en las órdenes escritas y volver a escribir una sin ejecutarla |
+| `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Ir a la orden anterior o siguiente ([marcas de orden](#marcas-de-orden)) |
 | `Ctrl+Shift+T` | Nueva pestaña del entorno actual |
 | `Ctrl+Shift+E` | Mostrar u ocultar el explorador de archivos |
 | `Ctrl+Shift+Backslash` | Añadir una sesión a la vista dividida (o volver a una) |
@@ -3703,6 +3970,25 @@ esquina de la terminal.
 
 ---
 
+## Marcas de orden
+
+cmd, PowerShell y bash (Git Bash y WSL) marcan en su prompt dónde empieza y
+acaba cada orden con las secuencias OSC 133. Las marcas no ocupan columnas ni se
+ven; con ellas la terminal puede:
+
+- **Saltar entre órdenes** con `Ctrl+Shift+Up` y `Ctrl+Shift+Down`.
+- **Señalar las que fallan** con una barra roja junto a su prompt. Al pasar el
+  ratón por encima enseña el código de salida y lo que tardó. cmd no da el código
+  de salida en su prompt, así que ahí no hay barra roja.
+- **Copiar la salida de la última orden** desde el menú contextual o la paleta.
+- **Avisar al acabar una orden de 10 segundos o más**: enseña lo que tardó y, si
+  la ventana no tiene el foco, parpadea en la barra de tareas.
+
+Se apagan en `Ajustes › Terminal` con «Marcar dónde empieza y acaba cada orden»,
+y el cambio vale para las pestañas nuevas. El prompt propio de la persona se
+respeta: las marcas lo envuelven sin cambiarlo. En zsh, fish y las demás shells
+no se añaden, pero si la shell las emite por su cuenta, la terminal las aprovecha.
+
 ## Paleta de comandos
 
 `Ctrl+Shift+P` (se cambia en `Ajustes › Comportamiento › Atajos de teclado`,
@@ -3714,8 +4000,8 @@ entrada ejecuta exactamente lo mismo que su atajo, botón, selector o comando
 | Grupo | Qué contiene |
 |---|---|
 | Paneles | Ajustes, Biblioteca, Proyectos, Entorno y dependencias, mostrar u ocultar el explorador, seguir la carpeta de la terminal, llevar la terminal a la carpeta del explorador, abrir la carpeta actual en el explorador del sistema y cerrar los paneles. Un panel oculto en Ajustes aparece deshabilitado con el motivo. |
-| Terminal | Buscar en el historial, limpiar (`clear`) y alternar el modo de terminal limpia. |
-| Pestañas y división | Nueva pestaña, dividir (añadir una terminal), ver 1, 2, 3 o 4 terminales (`:panes`), pestaña siguiente y anterior. |
+| Terminal | Buscar en el historial, guardar la salida, copiar la salida de la última orden, ir a la orden anterior o siguiente, limpiar (`clear`) y alternar el modo de terminal limpia. |
+| Pestañas y división | Nueva pestaña, renombrar la pestaña, dividir (añadir una terminal), ver 1, 2, 3 o 4 terminales (`:panes`), pestaña siguiente y anterior. |
 | Shells y entornos | Cambiar la pestaña activa a cualquier entorno del selector (shells, WSL, Docker, Android, REPL, asistentes de IA), abrir un REPL en una pestaña nueva (`:repl`) y volver a detectar entornos (`:reload`). El entorno actual y los no disponibles se ven deshabilitados con su motivo. |
 | Apariencia e idioma | Cada tema (también los propios), fuente de terminal e idioma, con el vigente marcado (`:theme`, `:font`, `:language`). |
 | Comandos internos (`:`) | `:help`, `:help internos`, `:alias`, `:shell list`, `:shell current`, `:theme list`, `:font list`, `:language list`, `:terminal list`, `:banner list` y `:banner preset compact\|full`: los que responden dentro de la terminal. |
@@ -3822,11 +4108,14 @@ editarlos, ejecutar
 | `fastfetchColor` | `#rrggbb` | color del banner de información del sistema |
 | `terminalCursorColor` | `#rrggbb` | color del cursor |
 | `uiDensity` | `comfortable`, `compact`: separaciones y margen mínimo de cada control respecto al borde de su panel (`--space-min`: 8 px en cómoda, 4 px en compacta, nunca 0) | `comfortable` |
-| `uiScale` | 80–200 (%): tamaño de barra, pestañas, explorador, avisos, paleta y contenido de los paneles; las casillas de terminal no se escalan. Atajos `Ctrl+Alt+=`, `Ctrl+Alt+-`, `Ctrl+Alt+0` y paleta | `100` |
+| `uiScale` | 80–500 (%), escrito en un cuadro numérico (se aplica con Intro o al salir de él): tamaño de barra, pestañas, explorador, avisos, paleta y contenido de los paneles; las casillas de terminal no se escalan. Por encima del 200 % se aplica como mucho lo que deja la interfaz en 480 px de ancho (`effectiveUiScale`) y Ajustes lo avisa. Atajos `Ctrl+Alt+=`, `Ctrl+Alt+-` (pasos de 10), `Ctrl+Alt+0` y paleta | `100` |
 | `githubSessionMode` | `onExhausted`, `always`, `never`: cuándo usar la sesión de `gh` en Explorar GitHub | `onExhausted` |
 | `suggestRepositoryImport` | booleano: sugerir importar el repositorio de GitHub de la carpeta de una pestaña | `true` |
 | `lowPowerMode` | booleano: modo de bajo consumo. La precarga del catálogo de Dependencias no se hace al arrancar (se construye al abrir el panel), la comprobación de actualizaciones de WinGet espera dos minutos y las sondas de ecosistema van de una en una. Se aplica en el siguiente arranque | `false` |
 | `lowPowerSuggest` | booleano: sugerir abajo el modo de bajo consumo cuando el equipo tiene 2 hilos de CPU o menos, menos de 8 GB de memoria, o la primera pestaña tarda más de 8 s en dar el prompt (una vez por sesión; «No volver a sugerir» lo apaga) | `true` |
+| `checkUpdatesOnStartup` | booleano: buscar una versión nueva de WTerminal en GitHub al arrancar ([Privacidad y red](#privacidad-y-red)) | `true` |
+| `checkPackageUpdatesOnStartup` | booleano: preguntar al gestor de paquetes por actualizaciones al arrancar | `true` |
+| `webview2Missing` | `ask`, `download`, `never`: qué hace el arranque de Windows si falta WebView2 | `ask` |
 | `showSystemBanner` | booleano | `true` |
 | `bannerHiddenItems` | lista de campos | `host,kernel,environment,motherboard,gpu,storage,datetime` (**Solo esencial**, 5–8 líneas) |
 | `bannerImage` | booleano: imagen a la izquierda del banner | `true` |
@@ -3848,7 +4137,7 @@ editarlos, ejecutar
 | `toolchainStoreDir` | ruta absoluta o vacía (la de fábrica) | `""` |
 | `toolchainStoreDownloads`, `toolchainStoreAiModels` | booleanos: categorías activas de la carpeta propia | `true` |
 | `toolchainStoreTools`, `toolchainStoreReplHistory` | booleanos: herramientas nuevas (con sus `bin` en el PATH) e historial de los REPL en la carpeta propia | `true` |
-| `toolchainStoreToolchains` | booleano: toolchains completas (rustup, cargo, GOPATH, Gradle, .NET, Android) en la carpeta propia, solo si no estaban instaladas | `false` |
+| `toolchainStoreToolchains` | booleano: toolchains completas (rustup, cargo, GOPATH, Gradle, .NET, Android) en la carpeta propia, solo si no estaban instaladas | `true` |
 
 **Temas.** Hay 15, agrupados por color y con al menos dos variantes cada uno
 (`THEME_FAMILIES` en `config/preferences.rs`, que un test mantiene: cada tema
@@ -3883,6 +4172,24 @@ terminal para que la primera sesión de la próxima ejecución nazca ya con él.
 
 Si el entorno inicial guardado deja de existir, se usa el entorno automático
 del sistema.
+
+### Privacidad y red
+
+WTerminal no envía telemetría. Lo único que hace por su cuenta contra la red
+o contra el sistema al arrancar tiene su propia opción en Ajustes ›
+Comportamiento › **Privacidad y red** (`data-testid="settings-privacy-network"`),
+porque cada comportamiento automático de la app se tiene que poder apagar:
+
+| Opción | Clave | De fábrica | Qué hace al apagarla |
+|---|---|---|---|
+| Buscar actualizaciones de WTerminal al arrancar | `checkUpdatesOnStartup` | `true` | `update_check_on_startup` no consulta GitHub: no hay aviso de versión nueva. Ajustes y el panel de Dependencias pueden seguir buscándola a mano |
+| Buscar actualizaciones de programas al arrancar | `checkPackageUpdatesOnStartup` | `true` | `package_updates_check` no pregunta a WinGet ni al gestor de la distribución (lo deja en el log); en Dependencias se sigue pudiendo actualizar |
+| Si falta WebView2 (solo Windows) | `webview2Missing` | `ask` | `ask` pregunta antes de descargar nada, `download` lo descarga de Microsoft sin preguntar y `never` solo usa un instalador local (ver [WebView2: si falta el runtime](#webview2-si-falta-el-runtime)) |
+
+Lo demás que toca la red lo pide siempre el usuario: clonar o explorar en
+GitHub, instalar desde Dependencias, descargar modelos o abrir enlaces. El
+modo de bajo consumo (`lowPowerMode`) además retrasa dos minutos la consulta de
+actualizaciones de programas.
 
 ---
 
@@ -3948,6 +4255,14 @@ desarrollo del WebView) devuelve las llamadas en vuelo con su antigüedad
 (`api::pendingIpcCalls`); el E2E la vuelca cuando un guardado de Ajustes no
 termina. Así se encontró que nueve `toolchain_store_external_sizes`
 esperando a la misma medición dejaban sin hilos el runtime asíncrono.
+`window.__wtTerminalState(tabId)` devuelve, solo para leerlo, el estado de un
+xterm: filas, desplazamiento (`viewportY`/`baseY`), si su renderer está en
+pausa y las dimensiones del área de scroll de su Viewport. Con él se vio que,
+al volver a una pestaña oculta, el reajuste llegaba con el renderer aún en
+pausa si el aviso de visibilidad de xterm tardaba más que el plazo de reserva
+de 200 ms: el Viewport recortaba el scroll con el alto viejo y la vista dejaba
+de seguir la salida. `fitAndReport` reanuda antes el renderer si la casilla ya
+tiene tamaño (`resumeRendererIfVisible`).
 
 También se registran métricas segmentadas del WebView: `sinceStartMs` es el
 tiempo desde que cargó el frontend y `durationMs` la operación concreta.
@@ -4185,6 +4500,14 @@ Deno. Así los lenguajes instalados con gestores de versiones no vuelven a
 aparecer como faltantes. Si `wsl.exe -d <distro> -- printenv SHELL` no responde,
 la distro aparece igualmente en el selector como «(sin comprobar)».
 
+Si una distro que ya se inventarió bien en esta sesión falla después (no
+responde o su inventario no llega a tiempo), conserva su última detección
+buena (`wsl.rs` `apply_last_good`, `previous_inventory`): el catálogo y el
+estado de Ajustes siguen mostrando sus acciones y herramientas en vez de
+vaciarse hasta el siguiente refresco (en la auditoría, las 79 de Alpine). El
+selector sigue avisando «(sin comprobar)» y se reintenta pronto; refrescar no
+borra esa última detección.
+
 **Virtualización en Windows.** KVM, libvirt y virt-manager son componentes de
 Linux y, cuando procede, se ofrecen dentro de WSL. Windows nativo dispone de
 acciones separadas para Hyper-V, Virtual Machine Platform y Windows Sandbox,
@@ -4274,7 +4597,8 @@ visible y ConPTY real deben validarse en Windows nativo.
 
 Desarrollado por [Darkeiser003](https://github.com/Darkeiser003). Las acciones
 operativas se publican y mantienen en
-[LTools / WinSlim Tools](https://github.com/Darkeiser003/Tools).
+[LTools / WTools](https://github.com/Darkeiser003/Tools).
 
-En colaboracion con [Christianlg97](https://github.com/Christianlg97).
-Desarrollador del proyecto winslim.
+En colaboración con [Christianlg97](https://github.com/Christianlg97),
+desarrollador del proyecto WinSlim, que ha aportado a WTerminal sus ideas, sus
+conocimientos de Windows y su tiempo.

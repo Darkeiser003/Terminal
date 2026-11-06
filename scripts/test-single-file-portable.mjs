@@ -54,6 +54,16 @@ try {
     await writeFile(tamperedPath, tampered);
     await assert.rejects(() => verifySingleFilePortable(tamperedPath, input), /conpty\.dll no coincide/u);
 
+    // De serie (`-WebView2 Download`) no va el instalador de WebView2: el
+    // portable se crea igual y no lo lleva dentro.
+    await rm(join(input, 'MicrosoftEdgeWebView2Setup.exe'));
+    const lean = join(root, 'out', 'sin-webview2.exe');
+    await createSingleFilePortable({ inputDir: input, outputPath: lean });
+    const leanFiles = (await readSingleFilePortable(lean)).files.map((file) => file.name);
+    assert(!leanFiles.includes('MicrosoftEdgeWebView2Setup.exe'), 'sin el modo offline no se embebe WebView2');
+    assert(leanFiles.includes('conpty.dll') && leanFiles.includes('OpenConsole.exe'), 'lo obligatorio sigue dentro');
+    await verifySingleFilePortable(lean, input);
+
     // Un archivo obligatorio ausente impide crear el portable.
     await rm(join(input, 'OpenConsole.exe'));
     await assert.rejects(() => createSingleFilePortable({ inputDir: input, outputPath: join(root, 'x.exe') }), /Falta OpenConsole\.exe/u);

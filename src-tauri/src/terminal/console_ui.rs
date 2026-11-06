@@ -360,8 +360,42 @@ fn cmd_file_echo(line: &Line) -> String {
 /// Los dos archivos que rodean una acción en cmd: la cabecera (`ini`) y el
 /// cierre (`fin`). No llevan `echo off`: al terminar un `call` desde el
 /// prompt, cmd no siempre restaura el eco, y cada línea ya empieza por `@`.
-fn cmd_frame_scripts(notice: &Notice, pause: Option<&str>, t: &Translator) -> (String, String) {
-    let mut ini = vec!["@echo.".to_string()];
+/// Lo que instala una acción (WinGet, Chocolatey, npm…) suele añadir su
+/// carpeta al PATH del registro, pero la shell de la pestaña conserva el PATH
+/// con el que arrancó: `claude` recién instalado «no se reconocía». Al cerrar
+/// cada acción se añaden a la sesión las carpetas nuevas del PATH de máquina y
+/// de usuario, sin quitar ni reordenar nada (las de WTerminal siguen delante).
+const PATH_REFRESH_PS: &str = "$wtPath = $env:Path.TrimEnd(';'); foreach ($wtEntry in ([Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')).Split(';')) { if ($wtEntry -and ($wtPath.Split(';') -notcontains $wtEntry)) { $wtPath += ';' + $wtEntry } }";
+
+/// La misma actualización para cmd: PowerShell calcula el PATH nuevo y `set`
+/// lo aplica en la sesión. La ruta va sin comillas a propósito: en `for /f`
+/// una orden que empieza por comillas pierde las suyas (y `%SystemRoot%` no
+/// lleva espacios). `percent` es `%` en la línea tecleada y `%%` en un .cmd.
+fn cmd_path_refresh(percent: &str) -> String {
+    format!(
+        r#"for /f "usebackq delims=" {percent}W in (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "{PATH_REFRESH_PS}; $wtPath"`) do @set "PATH={percent}W""#
+    )
+}
+
+/// Borra la línea que cmd acaba de repetir: subir, vaciar la fila y subir otra
+/// vez, porque `echo` baja una al terminar. La orden real sigue a la vista en
+/// la cabecera, sin los dos `call` de la decoración.
+const CMD_ERASE_TYPED_LINE: &str = "@echo \x1b[1A\x1b[2K\x1b[1A";
+/// Hasta dónde se puede borrar: una fila de cmd mide 1024 columnas y el prompt
+/// puede llegar a 260 (`MAX_PATH`). Una línea más larga ocuparía varias filas.
+const CMD_ERASE_TYPED_LINE_MAX: usize = 1024 - 260 - 4;
+
+fn cmd_frame_scripts(
+    notice: &Notice,
+    pause: Option<&str>,
+    t: &Translator,
+    erase_typed_line: bool,
+) -> (String, String) {
+    let mut ini = Vec::new();
+    if erase_typed_line {
+        ini.push(CMD_ERASE_TYPED_LINE.to_string());
+    }
+    ini.push("@echo.".to_string());
     ini.extend(cmd_header_lines(notice).iter().map(cmd_file_echo));
     ini.push("@echo.".to_string());
     let mut fin = vec![
@@ -383,6 +417,7 @@ fn cmd_frame_scripts(notice: &Notice, pause: Option<&str>, t: &Translator) -> (S
             .map(cmd_file_echo),
     );
     fin.push(":wsterm_end".to_string());
+    fin.push(format!("@{}", cmd_path_refresh("%%")));
     if pause.is_some() {
         fin.push("@pause >nul".to_string());
     }
@@ -409,10 +444,12 @@ fn cmd_framed(
     dir: &std::path::Path,
 ) -> Option<String> {
     let seq = CMD_FRAME_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let (ini, fin) = cmd_frame_scripts(notice, pause, t);
+    let line = cmd_one_line(command, seq);
+    let erase_typed_line = line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX;
+    let (ini, fin) = cmd_frame_scripts(notice, pause, t, erase_typed_line);
     std::fs::write(dir.join(format!("ui-{seq}-ini.cmd")), ini).ok()?;
     std::fs::write(dir.join(format!("ui-{seq}-fin.cmd")), fin).ok()?;
-    Some(cmd_one_line(command, seq))
+    Some(line)
 }
 
 /// Envuelve el comando con su cabecera y su cierre, en la sintaxis de esta
@@ -478,6 +515,7 @@ fn decorate_in(
                 ok.iter()
                     .map(|item| format!("if not errorlevel 1 {}", cmd_echo(item))),
             );
+            parts.push(cmd_path_refresh("%"));
             if pause {
                 parts.push("pause >nul".to_string());
             }
@@ -493,6 +531,7 @@ fn decorate_in(
             parts.push("Write-Host ''".to_string());
             parts.push(format!("$global:LASTEXITCODE = 0; {command}"));
             parts.push("$wstermOk = $?  -and ($LASTEXITCODE -eq 0)".to_string());
+            parts.push(format!("{PATH_REFRESH_PS}; $env:Path = $wtPath"));
             parts.push("Write-Host ''".to_string());
             let bien = ok
                 .iter()
@@ -838,6 +877,25 @@ mod tests {
         assert!(ini.contains("\x1b[36m┌─ INSTALAR"));
         assert!(ini.contains("Editor ^(VS Code^) 100%%"));
         assert!(ini.lines().all(|line| line.starts_with('@')), "{ini}");
+        // La línea tecleada se borra antes de la cabecera…
+        assert!(ini.starts_with(CMD_ERASE_TYPED_LINE), "{ini}");
+        // …salvo si por su longitud podría ocupar más de una fila.
+        let larga = "x".repeat(CMD_ERASE_TYPED_LINE_MAX);
+        let linea_larga = decorate_in(
+            &larga,
+            &aviso(),
+            ShellKind::Cmd,
+            false,
+            &t(),
+            Some(dir.path()),
+        );
+        let seq_larga: String = linea_larga["call \"%WSTERM_UI%\\ui-".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let ini_larga =
+            std::fs::read_to_string(dir.path().join(format!("ui-{seq_larga}-ini.cmd"))).unwrap();
+        assert!(!ini_larga.contains(CMD_ERASE_TYPED_LINE), "{ini_larga}");
         assert!(fin.contains("@if errorlevel 1 goto wsterm_fail"));
         assert!(fin.contains("@pause >nul"));
         assert!(fin.contains("✔") && fin.contains("✘"));
@@ -890,6 +948,72 @@ mod tests {
         assert!(
             !compuesta.contains("no-debe-salir") && compuesta.contains("[31m"),
             "{compuesta}"
+        );
+    }
+
+    /// Lo que instala una acción se ve en la misma pestaña al terminar: la
+    /// sesión recoge las carpetas del PATH del registro que no tenía. Se
+    /// arranca con un PATH recortado (sin `System32\wbem`, que está en el de
+    /// máquina) y se comprueba que vuelve tras la acción, sin perder lo suyo.
+    #[cfg(windows)]
+    #[test]
+    fn tras_una_accion_la_shell_ve_lo_que_se_anadio_al_path() {
+        use std::os::windows::process::CommandExt;
+        let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let wbem = format!(r"{windows}\System32\Wbem");
+        let corto = format!(r"C:\wterminal-propio;{windows}\System32");
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = decorate_in(
+            "echo instalado",
+            &aviso(),
+            ShellKind::Cmd,
+            false,
+            &t(),
+            Some(dir.path()),
+        );
+        let salida = std::process::Command::new("cmd.exe")
+            .args(["/d", "/v:on", "/c"])
+            .raw_arg(format!("{cmd} & echo PATH=!PATH!"))
+            .env(CMD_FRAME_DIR_VAR, dir.path())
+            .env("PATH", &corto)
+            .output()
+            .unwrap();
+        let texto = String::from_utf8_lossy(&salida.stdout).to_lowercase();
+        let path = texto
+            .lines()
+            .find(|line| line.starts_with("path="))
+            .unwrap_or("");
+        assert!(path.contains(&wbem.to_lowercase()), "cmd: {texto}");
+        assert!(
+            path.starts_with(r"path=c:\wterminal-propio;"),
+            "cmd conserva lo suyo delante: {path}"
+        );
+
+        let ps = decorate_in(
+            "Write-Output instalado",
+            &aviso(),
+            ShellKind::Powershell,
+            false,
+            &t(),
+            None,
+        );
+        let salida = std::process::Command::new(format!(
+            r"{windows}\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ))
+        .args(["-NoProfile", "-Command"])
+        .arg(format!("{ps}; Write-Output ('PATH=' + $env:Path)"))
+        .env("PATH", &corto)
+        .output()
+        .unwrap();
+        let texto = String::from_utf8_lossy(&salida.stdout).to_lowercase();
+        let path = texto
+            .lines()
+            .find(|line| line.starts_with("path="))
+            .unwrap_or("");
+        assert!(path.contains(&wbem.to_lowercase()), "powershell: {texto}");
+        assert!(
+            path.starts_with(r"path=c:\wterminal-propio;"),
+            "powershell conserva lo suyo delante: {path}"
         );
     }
 

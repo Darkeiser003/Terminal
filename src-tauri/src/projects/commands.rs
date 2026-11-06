@@ -543,7 +543,7 @@ fn download_asset(url: &str, destination: &Path, t: &Translator) -> Result<u64, 
 pub(crate) fn download_asset_to_with_progress(
     url: &str,
     destination: &Path,
-    progress: impl FnMut(u64, Option<u64>),
+    progress: impl FnMut(u64, Option<u64>) + Send,
 ) -> Result<u64, String> {
     download_asset_with_progress(
         url,
@@ -558,6 +558,14 @@ pub(crate) fn download_asset_to_with_progress(
 /// Descarga metadatos pequeños directamente en memoria, con un límite estricto
 /// y sin dejar temporales en el staging de la instalación.
 pub(crate) fn download_asset_bytes_limited(
+    url: &str,
+    max_bytes: u64,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    github::off_async_runtime(|| download_asset_bytes_limited_blocking(url, max_bytes, timeout))
+}
+
+fn download_asset_bytes_limited_blocking(
     url: &str,
     max_bytes: u64,
     timeout: std::time::Duration,
@@ -596,6 +604,19 @@ pub(crate) fn download_asset_bytes_limited(
 }
 
 fn download_asset_with_progress(
+    url: &str,
+    destination: &Path,
+    t: &Translator,
+    max_bytes: u64,
+    timeout: std::time::Duration,
+    progress: impl FnMut(u64, Option<u64>) + Send,
+) -> Result<u64, String> {
+    github::off_async_runtime(|| {
+        download_asset_with_progress_blocking(url, destination, t, max_bytes, timeout, progress)
+    })
+}
+
+fn download_asset_with_progress_blocking(
     url: &str,
     destination: &Path,
     t: &Translator,

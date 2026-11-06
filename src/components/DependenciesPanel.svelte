@@ -18,6 +18,9 @@
     import type { InstallAction, UpdateStatus } from '../lib/types';
     import Panel from './Panel.svelte';
 
+    /** Por debajo de esto, «Actualizar todo» pide confirmación antes de empezar. */
+    const LOW_DISK_BYTES = 5 * 1024 ** 3;
+
     let actions = $state<InstallAction[]>([]);
     // Conserva el tamaño del catálogo estructural antes de que las sondas
     // perezosas retiren familias no aplicables. La auditoría puede así
@@ -28,6 +31,31 @@
     let catalogComplete = $state(false);
     let error = $state('');
     let loading = $state(false);
+    // La primera detección puede tardar más de un minuto con WSL: el contador
+    // deja claro que sigue trabajando.
+    let detectionSeconds = $state(0);
+    // Y qué está comprobando en cada momento (WSL, WinGet…): con varias
+    // distros la primera vez son minutos y un contador solo no lo explica.
+    let detectionStage = $state<string | null>(null);
+    $effect(() => {
+        if (!loading) {
+            detectionSeconds = 0;
+            detectionStage = null;
+            return;
+        }
+        const startedAt = Date.now();
+        const timer = window.setInterval(() => {
+            detectionSeconds = Math.round((Date.now() - startedAt) / 1000);
+            void api.installDetectionStage().then((stage) => { detectionStage = stage; }).catch(() => {});
+        }, 1000);
+        return () => window.clearInterval(timer);
+    });
+    const stageLabels: Record<string, string> = {
+        'deps.stage.wsl': 'WSL: distribuciones y sus herramientas',
+        'deps.stage.ecosystems': 'gestores de lenguajes (pip, cargo, npm…)',
+        'deps.stage.winget': 'programas de WinGet',
+        'deps.stage.powershell': 'módulos de PowerShell',
+    };
     /** Detección completa solicitada desde el botón visible del panel. Se
      *  separa de `loading` porque la lista anterior debe seguir visible mientras
      *  se vuelven a consultar PATH, WinGet, WSL y los gestores de paquetes. */
@@ -802,12 +830,24 @@
         }
     }
 
+    /** «Actualizar todo» llegó a dejar C: con 0,03 GB y programas rotos. Si no
+     *  se puede medir el disco, no se molesta con un aviso. */
+    async function confirmLowDisk(action: InstallAction): Promise<boolean> {
+        if (action.id !== 'winget-upgrade') return true;
+        const free = await api.systemDriveFreeBytes().catch(() => null);
+        if (free === null || free >= LOW_DISK_BYTES) return true;
+        return window.confirm(app
+            .t('deps.lowDiskConfirm', 'Solo quedan {free} GB libres en el disco del sistema. Actualizar todo puede llenarlo y dejar programas a medias. ¿Quieres continuar?')
+            .replace('{free}', (free / 1024 ** 3).toFixed(1)));
+    }
+
     async function run(action: InstallAction): Promise<void> {
         const tabId = app.activeTabId;
         if (!tabId || running) return;
         running = action.id;
         error = '';
         try {
+            if (!(await confirmLowDisk(action))) return;
             const result = await api.runInstallAction(tabId, action.id);
             if (!result.ok) {
                 error = result.error ?? app.t('deps.actionFailed', 'No se pudo preparar la acción.');
@@ -943,7 +983,12 @@
     </div>
     {#if loading && confirmedSectionIds.length === 0}
         <div class="detection-placeholder" data-testid="dependency-detection-placeholder" aria-live="polite">
-            {app.t('deps.detectingAll', 'Comprobando todas las secciones antes de mostrarlas…')}
+            {app.t('deps.detectingAll', 'Comprobando todas las secciones antes de mostrarlas…')}{#if detectionSeconds >= 5}{` · ${detectionSeconds} s`}{/if}
+            {#if detectionStage && stageLabels[detectionStage]}
+                <span class="detection-stage" data-testid="dependency-detection-stage">
+                    {app.t('deps.stage.now', 'Ahora: {stage}').replace('{stage}', app.t(detectionStage, stageLabels[detectionStage]))}
+                </span>
+            {/if}
         </div>
     {:else}
     {#if loading}
@@ -1055,6 +1100,8 @@
                                             // para que una tarjeta visible nunca conserve
                                             // «Comprobar» por falta de evento.
                                             if (entry.children.length > 0) {
+                                                // Las del propio padre se ven en cuanto se abre.
+                                                if (entry.actions.length > 0) checkEntry({ ...entry, children: [] });
                                                 for (const child of entry.children) {
                                                     const childKey = accordionKey('subgroup', group, child);
                                                     if (accordionIsOpen(childKey, true)) checkEntry(child);
@@ -1072,9 +1119,15 @@
                                                 <small>{entry.description}</small>
                                             {/if}
                                         </span>
-                                        <span class="count">{entry.children.length}</span>
+                                        <span class="count">{entry.children.length + entry.actions.length}</span>
                                     </summary>
                                     <div class="subgroup-children">
+                                        <!-- Las acciones del propio padre van antes que sus hijos:
+                                             «Actualizar paquetes» o «Instalar paru» son de la distro
+                                             entera, no de una herramienta, y sin esto no salían. -->
+                                        {#each entry.actions as action (action.id)}
+                                            {@render item(action, true, undefined, undefined, !entry.description)}
+                                        {/each}
                                         {#each entry.children as child (child.actions[0]?.id ?? child.name)}
                                             {@const childKey = accordionKey('subgroup', group, child)}
                                             <details
@@ -1279,6 +1332,12 @@
         gap: 6px;
         padding: 6px;
         border-bottom: 1px solid var(--border);
+    }
+
+    .detection-stage {
+        display: block;
+        margin-top: 4px;
+        opacity: 0.85;
     }
 
     .detection-placeholder {

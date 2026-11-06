@@ -1,4 +1,4 @@
-//! Integración opcional con LTools / WinSlim-Tools.
+//! Integración opcional con LTools / WTools.
 //!
 //! LTools publica un catálogo declarativo (`ltools-actions-v1`) para que los
 //! hosts no tengan que duplicar sus botones ni construir comandos de shell.

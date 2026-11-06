@@ -98,10 +98,10 @@ const webviewInstallMode = windowsInstallerConfig.bundle?.windows?.webviewInstal
 if (
   windowsInstallerConfig.bundle?.active !== true ||
   !windowsInstallerConfig.bundle.targets?.includes("nsis") ||
-  webviewInstallMode?.type !== "offlineInstaller"
+  webviewInstallMode?.type !== "downloadBootstrapper"
 ) {
   throw new Error(
-    "La configuración del instalador Windows debe activar NSIS con WebView2 offline."
+    "La configuración del instalador Windows debe activar NSIS y descargar WebView2 solo si falta (el modo offline lo pide build.ps1 -WebView2 Offline)."
   );
 }
 // El empaquetador de Tauri fusiona la configuración de plataforma y la del
@@ -120,6 +120,14 @@ if (
   linuxConfig.identifier !== "com.lterminal.terminal"
 ) {
   throw new Error("La configuración Linux no conserva la identidad de LTerminal.");
+}
+// El AppImage, el .deb y el .rpm llevan los mismos metadatos AppStream, para
+// que los centros de software muestren la app igual se instale como se instale.
+const linuxMetainfoTarget = "usr/share/metainfo/com.lterminal.terminal.metainfo.xml";
+for (const format of ["appimage", "deb", "rpm"]) {
+  if (linuxConfig.bundle?.linux?.[format]?.files?.[linuxMetainfoTarget] !== "resources/com.lterminal.terminal.metainfo.xml") {
+    throw new Error(`El paquete Linux ${format} no incluye los metadatos AppStream.`);
+  }
 }
 const linuxMetainfo = readFileSync(
   resolve(root, "src-tauri/resources/com.lterminal.terminal.metainfo.xml"),

@@ -183,12 +183,51 @@
         })
     );
 
-    function size(entry: ExplorerEntry): string {
-        if (entry.kind === 'directory') return '';
-        const kb = entry.size / 1024;
-        if (kb < 1) return `${entry.size} B`;
+    function formatBytes(bytes: number): string {
+        const kb = bytes / 1024;
+        if (kb < 1) return `${bytes} B`;
         if (kb < 1024) return `${Math.round(kb)} KB`;
-        return `${(kb / 1024).toFixed(1)} MB`;
+        const mb = kb / 1024;
+        if (mb < 1024) return `${mb.toFixed(1)} MB`;
+        return `${(mb / 1024).toFixed(1)} GB`;
+    }
+
+    /** Lo medido con «Calcular tamaño», por ruta, de la carpeta que se ve. */
+    let folderSizes = $state<Record<string, string>>({});
+    // Solo al cambiar de carpeta: volver a listar la misma no los borra.
+    const listedDir = $derived(listing?.dir ?? '');
+    $effect(() => {
+        listedDir;
+        folderSizes = {};
+    });
+
+    function size(entry: ExplorerEntry): string {
+        if (entry.kind === 'directory') return folderSizes[entry.path] ?? '';
+        return formatBytes(entry.size);
+    }
+
+    /** Recorre la carpeta en el backend, sin seguir enlaces ni uniones. Con
+     *  el tope de tiempo o de entradas sale «≥»: es un mínimo. */
+    async function measure(entry: ExplorerEntry): Promise<void> {
+        const tabId = app.activeTabId;
+        if (!tabId) return;
+        folderSizes = { ...folderSizes, [entry.path]: '…' };
+        const result = await api.folderSize(tabId, entry.path).catch(() => null);
+        if (!result) {
+            const { [entry.path]: _failed, ...rest } = folderSizes;
+            folderSizes = rest;
+            statusError = true;
+            status = app.t('explorer.sizeFailed', 'No se pudo medir esa carpeta.');
+            return;
+        }
+        const text = `${result.truncated ? '≥ ' : ''}${formatBytes(result.bytes)}`;
+        folderSizes = { ...folderSizes, [entry.path]: text };
+        statusError = false;
+        status = app
+            .t('explorer.sizeResult', '«{name}»: {size} en {files} archivos')
+            .replace('{name}', entry.name)
+            .replace('{size}', text)
+            .replace('{files}', result.files.toLocaleString(app.catalog.language));
     }
 
     function openEntry(entry: ExplorerEntry): void {
@@ -508,6 +547,12 @@
                     role="menuitem"
                     onclick={() => fromMenu((target) => void openFolderInSystem(target.path))}
                 >{app.t('explorer.openInSystem', 'Abrir en el gestor de archivos')}</button>
+                <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="explorer-menu-size"
+                    onclick={() => fromMenu((target) => void measure(target))}
+                >{app.t('explorer.size', 'Calcular tamaño')}</button>
             {/if}
             <button
                 type="button"

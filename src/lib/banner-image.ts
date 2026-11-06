@@ -20,6 +20,18 @@ import type { IDecoration, IDisposable, IMarker, Terminal } from '@xterm/xterm';
 
 /** Columnas entre la imagen y el texto; igual que `BANNER_IMAGE_GAP` en Rust. */
 export const BANNER_IMAGE_GAP = 2;
+/**
+ * Alto de la imagen dentro de las filas del banner: deja debajo el mismo
+ * hueco que a los lados (`BANNER_IMAGE_GAP` columnas, medidas con el ancho de
+ * celda real). El banner acaba en su última línea de datos y lo siguiente lo
+ * pone la shell: cmd y Git Bash dejan una línea en blanco antes del prompt,
+ * pero PowerShell 7, bash de WSL o NSudo lo pintan en la fila de al lado y
+ * quedaba pegado al borde de la imagen.
+ */
+export function bannerImageHeight(cellWidth: number): string {
+    const gap = Number.isFinite(cellWidth) && cellWidth > 0 ? BANNER_IMAGE_GAP * cellWidth : 0;
+    return `calc(100% - ${gap.toFixed(2)}px)`;
+}
 /** Columnas posibles de la imagen (`bannerImageColumns`, 8–40). */
 export const BANNER_IMAGE_MIN_COLUMNS = 8;
 export const BANNER_IMAGE_MAX_COLUMNS = 40;
@@ -102,7 +114,7 @@ interface PlacedImage {
     url: string;
 }
 
-function renderImage(element: HTMLElement, url: string): void {
+function renderImage(element: HTMLElement, url: string, columns: number): void {
     element.classList.add('banner-image-decoration');
     let image = element.querySelector('img');
     if (!image) {
@@ -110,15 +122,24 @@ function renderImage(element: HTMLElement, url: string): void {
         image.alt = '';
         image.draggable = false;
         image.dataset.bannerImage = '';
+        // Sin esto el texto del banner se pinta antes que su imagen.
+        image.decoding = 'sync';
         element.appendChild(image);
     }
     if (image.getAttribute('src') !== url) image.src = url;
+    // La decoración mide `columns` celdas de ancho: de ahí el ancho de celda.
+    const width = element.getBoundingClientRect().width;
+    if (width <= 0) return;
+    const height = bannerImageHeight(width / Math.max(1, columns));
+    if (image.style.height !== height) image.style.height = height;
 }
 
 /**
  * Coloca y retira las imágenes de los banners visibles. Se revisa la vista
  * tras cada escritura (como mucho una vez por fotograma), al redimensionar y
- * al desplazarse; los banners que salen de la vista conservan su imagen.
+ * al desplazarse; los banners que salen de la vista conservan su imagen. La
+ * primera escritura de cada fotograma se revisa en el acto, antes de que xterm
+ * pinte: esperar al fotograma siguiente dejaba ver el texto sin su imagen.
  */
 export function attachBannerImages(
     terminal: Terminal,
@@ -126,7 +147,10 @@ export function attachBannerImages(
 ): BannerImageController {
     const placed: PlacedImage[] = [];
     let frame: number | undefined;
+    let pending = false;
     let disposed = false;
+    // La imagen se descodifica una vez por adelantado y queda en memoria.
+    let preloaded: HTMLImageElement | undefined;
 
     const remove = (entry: PlacedImage): void => {
         const index = placed.indexOf(entry);
@@ -136,12 +160,16 @@ export function attachBannerImages(
     };
 
     const scan = (): void => {
-        frame = undefined;
         if (disposed) return;
         const current = config();
         if (!current?.enabled || !current.url || !current.title) {
             for (const entry of [...placed]) remove(entry);
             return;
+        }
+        if (preloaded?.getAttribute('src') !== current.url && typeof Image !== 'undefined') {
+            preloaded = new Image();
+            preloaded.src = current.url;
+            void preloaded.decode?.().catch(() => undefined);
         }
         const buffer = terminal.buffer.active;
         // Con un programa a pantalla completa (vim, less) xterm oculta las
@@ -187,7 +215,8 @@ export function attachBannerImages(
             }
             const entry: PlacedImage = { marker, decoration, rows: block.rows, padding: block.padding, url: current.url };
             const url = current.url;
-            decoration.onRender((element) => renderImage(element, url));
+            const columns = box.width;
+            decoration.onRender((element) => renderImage(element, url, columns));
             marker.onDispose(() => {
                 const index = placed.indexOf(entry);
                 if (index >= 0) {
@@ -199,12 +228,28 @@ export function attachBannerImages(
         }
     };
 
+    const afterFrame = (): void => {
+        frame = undefined;
+        if (!pending) return;
+        pending = false;
+        scan();
+    };
     const schedule = (): void => {
-        if (disposed || frame !== undefined) return;
-        frame = window.requestAnimationFrame(scan);
+        if (disposed) return;
+        pending = true;
+        frame ??= window.requestAnimationFrame(afterFrame);
+    };
+    const scanWrite = (): void => {
+        if (disposed) return;
+        if (frame !== undefined) {
+            pending = true;
+            return;
+        }
+        scan();
+        frame = window.requestAnimationFrame(afterFrame);
     };
     const subscriptions: IDisposable[] = [
-        terminal.onWriteParsed(schedule),
+        terminal.onWriteParsed(scanWrite),
         terminal.onResize(schedule),
         terminal.onScroll(schedule),
     ];

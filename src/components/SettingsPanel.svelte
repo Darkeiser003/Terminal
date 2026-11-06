@@ -26,7 +26,7 @@
     } from "../lib/shortcuts";
     import type { CustomTheme, ToolchainStoreCategory, PathIntegrationStatus, PluginInfo, Preferences, ShellAssistComponent, ShellAssistStatus, StorageLocationInfo, ThemePreset, ToolchainStoreLocation, ToolchainStoreStatus, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
     import Panel from "./Panel.svelte";
-    import { ANSI_COLOR_KEYS, DEFAULT_ANSI_COLORS, effectivePalette, themePreferencePatch } from "../lib/theme";
+    import { ANSI_COLOR_KEYS, clampUiScale, DEFAULT_ANSI_COLORS, effectivePalette, effectiveUiScale, themePreferencePatch, UI_SCALE_MAX, UI_SCALE_MIN } from "../lib/theme";
 
     type Section = "appearance" | "terminal" | "behavior" | "about";
 
@@ -517,6 +517,26 @@
         headings?.[index]?.scrollIntoView({ block: "start", behavior: "smooth" });
     }
 
+    /** El tamaño de la interfaz se escribe a mano: se aplica al confirmar
+     *  (Intro o salir del cuadro), no con cada tecla, para que escribir «150»
+     *  no pase antes por 1 % y 15 %. Un valor vacío vuelve al guardado. */
+    function commitUiScale(input: HTMLInputElement): void {
+        if (!draft) return;
+        if (!Number.isFinite(input.valueAsNumber)) {
+            input.value = String(draft.uiScale);
+            return;
+        }
+        const value = clampUiScale(input.valueAsNumber);
+        input.value = String(value);
+        if (value !== draft.uiScale) {
+            draft.uiScale = value;
+            scheduleAutoSave();
+        }
+    }
+
+    let viewportWidth = $state(window.innerWidth);
+    const appliedUiScale = $derived(draft ? effectiveUiScale(draft.uiScale, viewportWidth) : 100);
+
     function scheduleAutoSave(): void {
         if (!draft) return;
         draftRevision += 1;
@@ -884,7 +904,7 @@
             hint: app.t("settings.storeCategoryReplHistoryHint", "El historial de Node, Python 3.13+, SQLite y psql abiertos desde WTerminal.") },
         { id: "toolchains" as ToolchainStoreCategory, preference: "toolchainStoreToolchains" as StoreCategoryPreference,
             title: app.t("settings.storeCategoryToolchains", "Toolchains completas"),
-            hint: app.t("settings.storeCategoryToolchainsHint", "Rust (rustup y cargo), Go, Gradle, .NET y Android instalados desde WTerminal. Solo si aún no los tenías: lo ya instalado no se mueve. Fuera de WTerminal no se ven salvo que definas sus variables en tu usuario.") },
+            hint: app.t("settings.storeCategoryToolchainsHint", "Rust (rustup y cargo), Go, Gradle, .NET y Android instalados desde WTerminal. Solo si aún no los tenías: lo ya instalado no se mueve. Con la integración con el PATH, Rust y Go también funcionan fuera de WTerminal.") },
         { id: "programs" as ToolchainStoreCategory, preference: "toolchainStorePrograms" as StoreCategoryPreference,
             title: app.t("settings.storeCategoryPrograms", "Programas (WinGet y Chocolatey)"),
             hint: app.t("settings.storeCategoryProgramsHint", "Las acciones «Instalar» de WinGet y Chocolatey instalan cada programa en su propia carpeta aquí (--location); Chocolatey y sus herramientas, también. Si un instalador no lo respeta, la acción te dice dónde quedó y te ofrece moverlo dejando una unión en su sitio. Lo ya instalado no se mueve.") },
@@ -1044,6 +1064,8 @@
         { id: "about", label: app.t("settings.about", "Información") },
     ]);
 </script>
+
+<svelte:window bind:innerWidth={viewportWidth} />
 
 <Panel
     id="settings"
@@ -1309,16 +1331,25 @@
                             </select>
                         </label>
                         <label class="field">
-                            <span>{app.t("settings.uiScale", "Tamaño de la interfaz")}: {draft.uiScale} %</span>
-                            <input
-                                data-testid="settings-ui-scale"
-                                type="range"
-                                min="80"
-                                max="200"
-                                step="10"
-                                bind:value={draft.uiScale}
-                            />
-                            <small>{app.t("settings.uiScaleHint", "Botones, paneles, desplegables y textos; la terminal conserva su letra. Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0.")}</small>
+                            <span>{app.t("settings.uiScale", "Tamaño de la interfaz")}</span>
+                            <span class="ui-scale-value">
+                                <input
+                                    data-testid="settings-ui-scale"
+                                    type="number"
+                                    inputmode="numeric"
+                                    min={UI_SCALE_MIN}
+                                    max={UI_SCALE_MAX}
+                                    step="1"
+                                    value={draft.uiScale}
+                                    onchange={(event) => commitUiScale(event.currentTarget)}
+                                    onkeydown={(event) => { if (event.key === "Enter") commitUiScale(event.currentTarget); }}
+                                />
+                                <span aria-hidden="true">%</span>
+                            </span>
+                            {#if appliedUiScale < draft.uiScale}
+                                <small data-testid="settings-ui-scale-limited">{app.t("settings.uiScaleLimited", "Aplicado: {scale} %. La ventana es demasiado estrecha para más; al ensancharla se aplica lo pedido.").replace("{scale}", String(appliedUiScale))}</small>
+                            {/if}
+                            <small>{app.t("settings.uiScaleHint", "Escribe un valor entre 80 y 500 %. Botones, paneles, desplegables y textos; la terminal conserva su letra. Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0.")}</small>
                         </label>
                     </div>
 
@@ -1557,6 +1588,27 @@
                                 >{app.t(
                                     "settings.cursorBlinkHint",
                                     "Facilita localizar el punto de escritura.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-terminal-command-marks"
+                            bind:checked={draft.terminalCommandMarks}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.terminalCommandMarks",
+                                    "Marcar dónde empieza y acaba cada orden",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.terminalCommandMarksHint",
+                                    "Permite saltar entre órdenes, señalar las fallidas y copiar su salida en cmd, PowerShell y bash. Se aplica a las pestañas nuevas.",
                                 )}</small
                             >
                         </span>
@@ -2061,6 +2113,23 @@
                         </select>
                         <small>{app.t("settings.githubSessionHint", "Con sesión de GitHub CLI el límite es de 5.000 consultas por hora (30 búsquedas por minuto). WTerminal no lee ni guarda tu token: la consulta la hace gh.")}</small>
                     </label>
+                    <div class="heading" data-testid="settings-privacy-network">
+                        <strong>{app.t("settings.privacyNetwork", "Privacidad y red")}</strong>
+                        <span>{app.t("settings.privacyNetworkHint", "Lo que WTerminal hace por su cuenta. Todo lo demás (instalar, descargar, GitHub, asistentes de IA) solo ocurre cuando tú lo pides.")}</span>
+                    </div>
+                    <label class="check"><input data-testid="settings-check-updates-on-startup" type="checkbox" bind:checked={draft.checkUpdatesOnStartup} /><span><strong>{app.t("settings.checkUpdatesOnStartup", "Buscar versión nueva de WTerminal al arrancar")}</strong><small>{app.t("settings.checkUpdatesOnStartupHint", "Consulta en GitHub si hay una release nueva. Sin esta opción puedes comprobarlo a mano desde Entorno y dependencias.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-check-package-updates-on-startup" type="checkbox" bind:checked={draft.checkPackageUpdatesOnStartup} /><span><strong>{app.t("settings.checkPackageUpdatesOnStartup", "Buscar actualizaciones de programas al arrancar")}</strong><small>{app.t("settings.checkPackageUpdatesOnStartupHint", "Pide a winget o al gestor de paquetes del sistema la lista de programas con versión nueva, sin instalar nada.")}</small></span></label>
+                    {#if app.appInfo?.platform === "windows"}
+                        <label class="field">
+                            <span>{app.t("settings.webview2Missing", "Si falta WebView2")}</span>
+                            <select data-testid="settings-webview2-missing" bind:value={draft.webview2Missing}>
+                                <option value="ask">{app.t("settings.webview2Ask", "Preguntar")}</option>
+                                <option value="download">{app.t("settings.webview2Download", "Descargarlo de Microsoft e instalarlo")}</option>
+                                <option value="never">{app.t("settings.webview2Never", "No descargar nada, solo avisar")}</option>
+                            </select>
+                            <small>{app.t("settings.webview2MissingHint", "WebView2 dibuja la ventana de WTerminal; Windows 11 y Windows 10 actualizado ya lo traen. Si falta, primero se usa un instalador puesto junto al ejecutable, y nada se ejecuta sin comprobar que lo firma Microsoft.")}</small>
+                        </label>
+                    {/if}
                     <label class="check"><input data-testid="settings-show-library" type="checkbox" bind:checked={draft.showScriptsPanel} /><span><strong>{app.t("toolbar.scripts", "Biblioteca")}</strong><small>{app.t("settings.showLibraryHint", "Tus scripts y los de la carpeta actual, listos para ejecutar.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-explorer" type="checkbox" bind:checked={draft.showExplorerPanel} /><span><strong>{app.t("toolbar.explorer", "Explorador")}</strong><small>{app.t("settings.showExplorerHint", "Árbol de archivos de la carpeta de la terminal, con vistas previas.")}</small></span></label>
                     <div class="heading">
@@ -2619,6 +2688,16 @@
 </Panel>
 
 <style>
+    .ui-scale-value {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .ui-scale-value input {
+        width: 7ch;
+    }
+
     .settings-search {
         display: flex;
         gap: 8px;

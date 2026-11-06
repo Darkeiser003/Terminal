@@ -84,6 +84,13 @@ pub struct PtySession {
     /// a la vez; sin esta compuerta cmd podía procesar el comando con la
     /// anchura anterior y envolverlo antes de que xterm recibiera el resize.
     operation: Mutex<()>,
+    /// Al cerrar, matar también los procesos que lanzó el de la pestaña. Solo
+    /// en los REPL: `elm.CMD` abre cmd → node → elm.exe → node, y matar solo
+    /// cmd dejaba huérfano a elm.exe con su caché bloqueada; el siguiente REPL
+    /// de Elm moría con «resource busy (file is locked)». Una shell no lo usa:
+    /// un programa con ventana que se abra desde ella debe sobrevivir a la
+    /// pestaña, como en cualquier terminal.
+    kill_tree: std::sync::atomic::AtomicBool,
 }
 
 enum PtyBackend {
@@ -140,7 +147,23 @@ impl PtySession {
         Ok(())
     }
 
+    /// Ver `kill_tree`.
+    pub fn kill_whole_tree_on_close(&self) {
+        self.kill_tree
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn kill(&self) {
+        // El árbol primero, mientras el padre sigue vivo: `taskkill /T`
+        // recorre los hijos desde él y con el padre muerto ya no los encuentra.
+        #[cfg(windows)]
+        if self.kill_tree.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(pid) = self.process_id {
+                let _ = crate::process::hidden_command("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .status();
+            }
+        }
         // Un pty ya terminado devuelve error aquí; no es un fallo.
         match &self.backend {
             PtyBackend::Native { killer, .. } => {
@@ -307,6 +330,7 @@ where
         },
         process_id,
         operation: Mutex::new(()),
+        kill_tree: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -407,6 +431,7 @@ where
         },
         process_id,
         operation: Mutex::new(()),
+        kill_tree: std::sync::atomic::AtomicBool::new(false),
     })
 }
 

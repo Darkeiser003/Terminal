@@ -315,6 +315,69 @@ pub fn scripts_pick_target(app: AppHandle, mode: String) -> Option<String> {
     }
 }
 
+/// Guarda el historial de una terminal. La ruta sale del diálogo nativo y no de
+/// la interfaz: así un comando IPC no puede escribir en una ruta sin que nadie
+/// la haya elegido. El E2E, que no puede pulsar el diálogo, usa su propia ruta.
+#[tauri::command(async)]
+pub fn terminal_save_output(
+    app: AppHandle,
+    file_name: String,
+    text: String,
+) -> Result<Option<String>, String> {
+    let name = Path::new(&file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("terminal.txt")
+        .to_string();
+    let chosen = e2e_save_output_path().or_else(|| {
+        app.dialog()
+            .file()
+            .set_file_name(name)
+            .add_filter("Texto", &["txt", "log"])
+            .blocking_save_file()
+            .map(|path| path.to_string())
+    });
+    let Some(path) = chosen else {
+        return Ok(None);
+    };
+    std::fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(Some(path))
+}
+
+/// Una orden larga terminó con la ventana en segundo plano: la barra de tareas
+/// avisa sin robar el foco.
+#[tauri::command]
+pub fn window_request_attention(window: tauri::WebviewWindow) {
+    let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+}
+
+/// Bytes libres en la unidad del sistema, o `None` si no se puede medir.
+#[tauri::command(async)]
+pub fn system_drive_free_bytes() -> Option<u64> {
+    let root = if cfg!(windows) {
+        format!("{}\\", std::env::var("SystemDrive").ok()?)
+    } else {
+        "/".to_string()
+    };
+    sysinfo::Disks::new_with_refreshed_list()
+        .list()
+        .iter()
+        .find(|disk| {
+            disk.mount_point()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&root)
+        })
+        .map(|disk| disk.available_space())
+}
+
+fn e2e_save_output_path() -> Option<String> {
+    if std::env::var("LTERMINAL_E2E_TESTING").as_deref() != Ok("1") {
+        return None;
+    }
+    let path = std::env::var("LTERMINAL_E2E_SAVE_OUTPUT_PATH").ok()?;
+    Path::new(&path).is_absolute().then_some(path)
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionResult {
@@ -883,6 +946,23 @@ pub fn explorer_open(
         .map(|ext| format!(".{}", ext.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
     open_with_system(&app, &item_path, &extension)
+}
+
+/// `explorer:size`: lo que ocupa una carpeta de la vista, cuando se pide. Como
+/// abrir o borrar, solo vale para una entrada de la carpeta que se enseña.
+#[tauri::command(async)]
+pub fn explorer_size(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    item_path: String,
+) -> Option<file_explorer::FolderSize> {
+    entry_in_current_dir(&state, &tab_id, &item_path)?;
+    let path = Path::new(&item_path);
+    if !path.is_dir() {
+        return None;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    Some(file_explorer::folder_size(path, deadline))
 }
 
 /// `explorer:rename`

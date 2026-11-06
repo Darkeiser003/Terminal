@@ -262,6 +262,29 @@ pub async fn git_local_status(full_name: String) -> Result<LocalGitStatus, Strin
         .unwrap_or_else(|_| Err("git no terminó.".to_string()))
 }
 
+/// La carpeta de un repositorio de Descargados, clonado o importado. Sale de la
+/// misma lista que enseña el panel: el frontend da un nombre, nunca una ruta.
+fn downloaded_path(full_name: &str) -> Result<PathBuf, String> {
+    let github = crate::projects::github::list_local_repositories(
+        &crate::projects::github::projects_folder(),
+    );
+    github
+        .into_iter()
+        .chain(crate::projects::github::list_imported_repositories())
+        .find(|local| local.full_name.eq_ignore_ascii_case(full_name))
+        .map(|local| PathBuf::from(local.path))
+        .ok_or_else(|| "El repositorio ya no está en Descargados.".to_string())
+}
+
+/// Estado de Git de un repositorio de Descargados, para verlos todos de un
+/// vistazo sin abrir cada uno. Solo lee: `git status` y la lista de ramas.
+#[tauri::command]
+pub async fn git_downloaded_status(full_name: String) -> Result<LocalGitStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || status_at(&downloaded_path(&full_name)?))
+        .await
+        .unwrap_or_else(|_| Err("git no terminó.".to_string()))
+}
+
 #[tauri::command]
 pub async fn git_local_commit(full_name: String, message: String) -> GhResult {
     tauri::async_runtime::spawn_blocking(move || match local_clone(&full_name) {

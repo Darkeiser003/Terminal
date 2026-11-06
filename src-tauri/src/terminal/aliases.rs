@@ -429,18 +429,20 @@ fn clear_command_with_toggle(
     let (Some(banner), Some(flag)) = (banner_path, clear_banner_flag_path) else {
         return body;
     };
+    // Tras el banner, el mismo hueco que en el arranque (`banner_gap_command`).
+    let gap = banner_gap_command(kind).map_or(String::new(), |gap| format!("; {gap}"));
     let print_banner = match kind {
         ShellKind::Cmd => format!("if exist \"{flag}\" @type \"{banner}\""),
         ShellKind::Powershell => format!(
-            "if (Test-Path -LiteralPath '{flag}') {{ Write-Host (Get-Content -Raw -Encoding UTF8 '{banner}') -NoNewline }}"
+            "if (Test-Path -LiteralPath '{flag}') {{ Write-Host (Get-Content -Raw -Encoding UTF8 '{banner}') -NoNewline{gap} }}"
         ),
         ShellKind::Fish => format!(
-            "if test -f '{}'; cat '{}'; end",
+            "if test -f '{}'; cat '{}'{gap}; end",
             unix_path_for(flag, transport),
             unix_path_for(banner, transport)
         ),
         _ => format!(
-            "if [ -f '{}' ]; then cat '{}'; fi",
+            "if [ -f '{}' ]; then cat '{}'{gap}; fi",
             unix_path_for(flag, transport),
             unix_path_for(banner, transport)
         ),
@@ -448,6 +450,29 @@ fn clear_command_with_toggle(
     let separator = if kind == ShellKind::Cmd { " $T " } else { "; " };
     format!("{body}{separator}{print_banner}")
 }
+
+/// Lo que deja una línea en blanco entre el banner y el prompt, igual en todas
+/// las shells. cmd ya la deja él solo antes de cada prompt; PowerShell nunca;
+/// en bash, zsh y sh depende del `PS1` de cada distro (Git Bash lo empieza con
+/// un salto, Ubuntu no), así que lo decide `__wt_banner_gap` en la propia shell.
+/// Va siempre DESPUÉS del marcador de arranque: así pasa por ConPTY como salida
+/// normal y xterm la sigue sin descuadrar la fila del cursor.
+fn banner_gap_command(kind: ShellKind) -> Option<&'static str> {
+    match kind {
+        ShellKind::Powershell => Some("Write-Host ''"),
+        ShellKind::Fish => Some("echo"),
+        ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => Some("__wt_banner_gap"),
+        _ => None,
+    }
+}
+
+/// `__wt_banner_gap`: quita del principio del prompt las secuencias que no se
+/// ven (`\[…\]` de bash, `%{…%}` de zsh) y solo imprime el salto si el prompt
+/// no empieza ya con uno (`\n` escrito o un salto de verdad). Kali
+/// (`NEWLINE_BEFORE_PROMPT=yes`, en bash y en zsh) deja la línea en blanco
+/// antes de cada prompt menos el primero, y este script se teclea después del
+/// primero: con el salto quedaban dos líneas en blanco.
+const BANNER_GAP_FUNCTION: &str = r#"__wt_banner_gap() { [ "${NEWLINE_BEFORE_PROMPT-}" = yes ] && return 0; __wt_p=${PS1-};__wt_nl=$(printf '\n_'); __wt_nl=${__wt_nl%_}; while :; do case "$__wt_p" in '\['*'\]'*) __wt_p=${__wt_p#*\\]} ;; '%{'*'%}'*) __wt_p=${__wt_p#*%\}} ;; *) break ;; esac; done; case "$__wt_p" in '\n'*|"$__wt_nl"*) ;; *) printf '\n' ;; esac; unset __wt_p __wt_nl; }"#;
 
 fn quote_windows_double(path: &str) -> String {
     format!("\"{}\"", path.replace('"', "\"\""))
@@ -1290,7 +1315,7 @@ fn render_credit(lines: &mut Vec<String>, t: &Translator, kind: CreditKind) {
         lines.push(format!("    {line}"));
     }
     if matches!(kind, CreditKind::Darkeiser) {
-        lines.push("    LTools / WinSlim Tools: https://github.com/Darkeiser003/Tools".to_string());
+        lines.push("    LTools / WTools: https://github.com/Darkeiser003/Tools".to_string());
     }
     lines.push(String::new());
 }
@@ -1453,6 +1478,48 @@ pub struct InitOptions<'a> {
     /// impriman al cargarse queda borrado (ble.sh avisa cuando regenera su
     /// caché de `tput`) y no deja a ConPTY filas por debajo de xterm.
     pub assist_lines: &'a [String],
+    /// Añade al prompt las marcas OSC 133 (`command_mark_lines`).
+    pub command_marks: bool,
+}
+
+/// Hace que la shell marque con OSC 133 dónde empieza y acaba cada orden. Las
+/// marcas no ocupan columnas, así que no mueven el cursor de ConPTY ni el de
+/// xterm; `D` va antes de `A` porque la shell solo sabe cómo acabó una orden al
+/// volver a pintar el prompt. cmd no puede dar el código de salida en su prompt.
+fn command_mark_lines(kind: ShellKind) -> Vec<String> {
+    let lines: &[&str] = match kind {
+        ShellKind::Powershell => &[
+            "if (-not $global:wtOriginalPrompt) {",
+            "    $global:wtOriginalPrompt = $function:prompt",
+            "    function global:prompt {",
+            "        $wtCode = if ($?) { 0 } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }",
+            "        $wtText = (& $global:wtOriginalPrompt) -join ''",
+            "        $wtOsc = [char]27 + ']133;'",
+            "        $wtEnd = [char]7",
+            "        \"${wtOsc}D;${wtCode}${wtEnd}${wtOsc}A${wtEnd}${wtText}${wtOsc}B${wtEnd}\"",
+            "    }",
+            "}",
+        ],
+        ShellKind::Cmd => &[
+            "if not defined PROMPT set \"PROMPT=$P$G\"",
+            "set \"PROMPT=$e]133;D$e\\$e]133;A$e\\%PROMPT%$e]133;B$e\\\"",
+        ],
+        ShellKind::Bash => &[
+            "if [ -z \"${__wt_command_marks:-}\" ]; then",
+            "    __wt_command_marks=1",
+            "    __wt_command_mark() { local code=$?; printf '\\033]133;D;%s\\007\\033]133;A\\007' \"$code\"; return \"$code\"; }",
+            "    if [[ \"$(declare -p PROMPT_COMMAND 2>/dev/null)\" == \"declare -a\"* ]]; then",
+            "        PROMPT_COMMAND=(__wt_command_mark \"${PROMPT_COMMAND[@]}\")",
+            "    else",
+            "        PROMPT_COMMAND=\"__wt_command_mark${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"",
+            "    fi",
+            "    PS1=\"${PS1}\\[\\033]133;B\\007\\]\"",
+            "    PS0=\"${PS0:-}\\033]133;C\\007\"",
+            "fi",
+        ],
+        _ => &[],
+    };
+    lines.iter().map(|line| line.to_string()).collect()
 }
 
 pub struct InitScript {
@@ -1647,10 +1714,20 @@ pub fn build_init_script(
         options.transport,
     ));
     lines.push(help_compat_line(kind, options.help_path));
+    if options.command_marks {
+        lines.extend(command_mark_lines(kind));
+    }
+    if matches!(kind, ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh) {
+        lines.push(BANNER_GAP_FUNCTION.to_string());
+    }
     // El marcador de arranque va al final: hasta aquí la shell ha terminado
     // de registrar aliases y el siguiente prompt ya puede liberarse sin
     // quedar en una línea vacía durante una transición de paneles.
     lines.push(initialization_done_command(kind, options.app_name));
+    // El hueco tras el banner, después del marcador (ver `banner_gap_command`).
+    if initial_banner_path.is_some() {
+        lines.extend(banner_gap_command(kind).map(str::to_string));
+    }
 
     let help_options = HelpOptions {
         app_name: options.app_name,
@@ -1818,7 +1895,25 @@ mod tests {
             windows_manager: Some("winget"),
             initial_banner: true,
             assist_lines: &[],
+            command_marks: false,
         }
+    }
+
+    #[test]
+    fn las_marcas_de_orden_solo_van_si_estan_activadas() {
+        for (kind, mark) in [
+            (ShellKind::Cmd, "]133;D$e"),
+            (ShellKind::Powershell, "]133;"),
+            (ShellKind::Bash, "]133;D;%s"),
+        ] {
+            let mut opts = options(Transport::Native);
+            assert!(!build(kind, &opts).content.contains(mark));
+            opts.command_marks = true;
+            assert!(build(kind, &opts).content.contains(mark));
+        }
+        let mut opts = options(Transport::Native);
+        opts.command_marks = true;
+        assert!(!build(ShellKind::Fish, &opts).content.contains("]133;"));
     }
 
     fn build(kind: ShellKind, options: &InitOptions<'_>) -> InitScript {
@@ -1872,13 +1967,72 @@ mod tests {
             let assist_at = script.content.find(line).expect("línea de sugerencias");
             let banner_at = script.content.find("banner.txt").expect("banner inicial");
             assert!(assist_at < banner_at, "{kind:?}: {}", script.content);
-            assert!(script
-                .content
-                .trim_end()
-                .lines()
-                .last()
-                .is_some_and(|last| last.contains(CLEAR_MARKER)));
+            // Tras el marcador solo puede ir el hueco del banner.
+            let mut tail = script.content.trim_end().lines().rev();
+            let last = tail.next().unwrap_or_default();
+            let marker = if Some(last) == banner_gap_command(kind) {
+                tail.next().unwrap_or_default()
+            } else {
+                last
+            };
+            assert!(
+                marker.contains(CLEAR_MARKER),
+                "{kind:?}: {}",
+                script.content
+            );
         }
+    }
+
+    #[test]
+    fn el_hueco_tras_el_banner_va_despues_del_marcador_salvo_en_cmd() {
+        for kind in [
+            ShellKind::Powershell,
+            ShellKind::Bash,
+            ShellKind::Zsh,
+            ShellKind::Sh,
+            ShellKind::Fish,
+        ] {
+            let mut opts = options(Transport::Native);
+            opts.banner_path = Some("/tmp/banner.txt");
+            let script = build(kind, &opts);
+            let lines: Vec<&str> = script.content.trim_end().lines().collect();
+            let gap = banner_gap_command(kind).unwrap();
+            assert_eq!(
+                lines.last().copied(),
+                Some(gap),
+                "{kind:?}: {}",
+                script.content
+            );
+            assert!(lines[lines.len() - 2].contains(CLEAR_MARKER), "{kind:?}");
+            // Al limpiar con el banner activado, el mismo hueco tras el banner.
+            let clear = clear_command_with_toggle(
+                kind,
+                Some("/tmp/banner.txt"),
+                Some("/tmp/flag"),
+                false,
+                Transport::Native,
+                "App",
+            );
+            assert!(clear.contains(gap), "{kind:?}: {clear}");
+        }
+        // cmd ya deja la línea en blanco antes de cada prompt.
+        let mut opts = options(Transport::Native);
+        opts.banner_path = Some("C:\\tmp\\banner.txt");
+        let cmd = build(ShellKind::Cmd, &opts);
+        assert!(cmd
+            .content
+            .trim_end()
+            .lines()
+            .last()
+            .is_some_and(|last| last.contains(CLEAR_MARKER)));
+        assert_eq!(banner_gap_command(ShellKind::Cmd), None);
+        // Sin banner no hay hueco que dejar.
+        let plain = build(ShellKind::Powershell, &options(Transport::Native));
+        assert!(
+            !plain.content.trim_end().ends_with("Write-Host ''"),
+            "{}",
+            plain.content
+        );
     }
 
     // ---- clear ----

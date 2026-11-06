@@ -29,11 +29,16 @@ param(
     [switch]$Fast,
     [switch]$CrossLinux,
     [switch]$ReleaseValidation,
+    [switch]$QuickValidation,
     [switch]$VideoTest,
     [switch]$DownloadTests,
     [switch]$DependencyAudit,
     [switch]$InstallerTest,
     [switch]$NoFocusedTests,
+    # Download (de serie): los paquetes no llevan WebView2 y, si falta, se
+    # descarga de Microsoft. Offline: como antes, con el instalador completo
+    # dentro (215 MB), para imágenes recortadas sin Internet; no se publica.
+    [ValidateSet('Download', 'Offline')][string]$WebView2 = 'Download',
     [string]$KeysDir
 )
 
@@ -58,6 +63,9 @@ if ($NoExtendedTests.IsPresent -and ($FullTests.IsPresent -or $StrictTests.IsPre
 }
 # -ReleaseValidation es el nivel que permite dar una release por buena: la
 # batería completa más todas las suites estandarizadas (tests/e2e/suites.mjs).
+if ($QuickValidation.IsPresent -and $ReleaseValidation.IsPresent) {
+    throw '-QuickValidation y -ReleaseValidation son dos niveles distintos: elige uno.'
+}
 if ($ReleaseValidation.IsPresent) {
     $FullTests = [switch]::new($true)
     $VideoTest = [switch]::new($true)
@@ -65,9 +73,18 @@ if ($ReleaseValidation.IsPresent) {
     $DependencyAudit = [switch]::new($true)
     $InstallerTest = [switch]::new($true)
 }
+# -QuickValidation prueba lo mismo sin repetirlo: un solo recorrido completo,
+# con vídeo y sobre la carpeta desempaquetada, y una prueba corta del portable y
+# de lo instalado, que llevan los mismos archivos (tests/e2e/suites.mjs).
+if ($QuickValidation.IsPresent) {
+    $FullTests = [switch]::new($true)
+    $DownloadTests = [switch]::new($true)
+    $DependencyAudit = [switch]::new($true)
+    $InstallerTest = [switch]::new($true)
+}
 $extraSuiteRequested = $VideoTest.IsPresent -or $DownloadTests.IsPresent -or $DependencyAudit.IsPresent -or $InstallerTest.IsPresent
-if ($NoExtendedTests.IsPresent -and ($extraSuiteRequested -or $ReleaseValidation.IsPresent)) {
-    throw '-NoExtendedTests no se puede combinar con -ReleaseValidation, -VideoTest, -DownloadTests, -DependencyAudit ni -InstallerTest.'
+if ($NoExtendedTests.IsPresent -and ($extraSuiteRequested -or $ReleaseValidation.IsPresent -or $QuickValidation.IsPresent)) {
+    throw '-NoExtendedTests no se puede combinar con -ReleaseValidation, -QuickValidation, -VideoTest, -DownloadTests, -DependencyAudit ni -InstallerTest.'
 }
 if ($InstallerTest.IsPresent -and $NoInstaller.IsPresent) {
     throw '-InstallerTest necesita el instalador: no se puede combinar con -NoInstaller.'
@@ -171,7 +188,9 @@ if ($Help) {
     Write-Host '  -StrictTests          Hace fallar la build si faltan sondas opcionales.'
     Write-Host '  -AllowOfflineChecks   Convierte comprobaciones externas en avisos.'
     Write-Host '  -CrossLinux            Ejecuta tambien la build Linux dentro de WSL.'
-    Write-Host '  -Installer             Activa el instalador NSIS offline (ya es predeterminado).'
+    Write-Host '  -Installer             Activa el instalador NSIS (ya es predeterminado).'
+    Write-Host '  -WebView2 Download     De serie: sin WebView2 dentro; si falta, se descarga de Microsoft.'
+    Write-Host '  -WebView2 Offline      Mete el instalador completo de WebView2 (215 MB) en los paquetes, para equipos sin Internet. No se publica.'
     Write-Host '  -NoInstaller           Desactiva el instalador NSIS predeterminado.'
     Write-Host '  -SingleFile            Genera también el portable de un solo .exe (sin extraer nada).'
     Write-Host '  -NoSingleFile          Omite el portable de un solo .exe.'
@@ -181,6 +200,7 @@ if ($Help) {
     Write-Host '  -DependencyAudit       Añade la auditoría completa del catálogo de dependencias (larga).'
     Write-Host '  -InstallerTest         Instala el NSIS (un UAC), ejecuta el E2E sobre lo instalado y desinstala.'
     Write-Host '  -ReleaseValidation     -FullTests + vídeo + descargas + auditoría + instalador: el nivel para dar una release por buena.'
+    Write-Host '  -QuickValidation       Lo mismo sin repetir: un solo recorrido completo con vídeo y prueba corta del portable y lo instalado.'
     Write-Host '  -InstallE2eDriver     Compatibilidad: el E2E ya prepara tauri-driver automáticamente.'
     Write-Host '  -Version X.Y.Z        Sobrescribe la version del paquete.'
     Write-Host '  -NonInteractive        No espera entrada del usuario.'
@@ -1558,10 +1578,11 @@ function Find-SevenZip {
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
 }
 
-# Con instalador, la carpeta desempaquetada y el portable reutilizan el
-# WebView2 offline que se extrae del NSIS con 7-Zip. Se comprueba aquí, antes
-# de compilar, para no descubrir la falta tras la batería completa.
-if ($Installer) {
+# Con instalador y -WebView2 Offline, la carpeta desempaquetada y el portable
+# reutilizan el WebView2 offline que se extrae del NSIS con 7-Zip. Se comprueba
+# aquí, antes de compilar, para no descubrir la falta tras la batería completa.
+# De serie (Download) no se extrae nada y 7-Zip no hace falta.
+if ($Installer -and $WebView2 -eq 'Offline') {
     if (Find-SevenZip) {
         Write-Ok '7-Zip disponible para extraer WebView2 offline del NSIS'
     } elseif (Test-Command 'winget') {
@@ -1584,8 +1605,8 @@ if ($Installer) {
     }
 }
 
-# El recorrido con vídeo (-VideoTest, incluido en -ReleaseValidation) codifica
-# los fotogramas con ffmpeg. En un Windows limpio no está y la suite fallaba al
+# El recorrido con vídeo (-VideoTest, incluido en -ReleaseValidation, y el de
+# -QuickValidation) codifica los fotogramas con ffmpeg. En un Windows limpio no está y la suite fallaba al
 # final, tras ~10 minutos de recorrido, sin vídeo. El E2E lo busca también
 # dentro de los paquetes de WinGet, que es donde lo deja esta instalación.
 function Find-Ffmpeg {
@@ -1597,7 +1618,7 @@ function Find-Ffmpeg {
         Select-Object -First 1 -ExpandProperty FullName
 }
 
-if ($VideoTest) {
+if ($VideoTest -or $QuickValidation) {
     if (Find-Ffmpeg) {
         Write-Ok 'ffmpeg disponible para el vídeo del E2E'
     } elseif (Test-Command 'winget') {
@@ -1975,12 +1996,21 @@ if ($Installer) {
     if ($code -ne 0) { throw "La compilacion del binario fallo (codigo $code)." }
     Ensure-WebView2Loader | Out-Null
 
-    Write-Step 'Empaquetando (Tauri + instalador NSIS offline de WebView2)'
+    Write-Step "Empaquetando (Tauri + instalador NSIS, WebView2 $WebView2)"
     # El binario ya se compiló en la pasada --no-bundle anterior. `bundle`
     # reutiliza ese ejecutable y evita una segunda compilación LTO completa;
     # `build --config` volvía a enlazar todo el crate aunque solo se necesitara
     # generar el instalador.
-    $code = Invoke-TauriBuild @('run', 'tauri', '--', 'bundle', '--config', 'src-tauri/tauri.windows.installer.conf.json')
+    $installerConfig = 'src-tauri/tauri.windows.installer.conf.json'
+    if ($WebView2 -eq 'Offline') {
+        # La misma configuración con el instalador offline de WebView2 dentro.
+        $offlineConfig = Get-Content (Join-Path $ProjectRoot $installerConfig) -Raw | ConvertFrom-Json
+        $offlineConfig.bundle.windows.webviewInstallMode = [pscustomobject]@{ type = 'offlineInstaller'; silent = $true }
+        New-Item -ItemType Directory -Force -Path $script:BuildTempDir | Out-Null
+        $installerConfig = Join-Path $script:BuildTempDir 'tauri.windows.installer.offline.conf.json'
+        $offlineConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $installerConfig -Encoding utf8
+    }
+    $code = Invoke-TauriBuild @('run', 'tauri', '--', 'bundle', '--config', $installerConfig)
 } else {
     Write-Step 'Compilando (tauri build --no-bundle)'
     # --no-bundle es redundante con bundle.active:false de tauri.windows.conf.json,
@@ -1997,14 +2027,16 @@ if ($Installer) {
         throw "La compilacion termino sin generar instalador NSIS en $nsisDir."
     }
     $installerPath = $installers[0]
-    # `offlineInstaller` incluye el runtime Evergreen completo de WebView2.
-    # Un NSIS de unos pocos megabytes es el bootstrapper online y dejaría sin
-    # conexión a una instalación nueva; rechazarlo aquí evita publicarlo con
-    # la etiqueta de instalador offline.
-    if ($installerPath.Length -lt 100MB) {
+    # `offlineInstaller` incluye el runtime Evergreen completo de WebView2 y
+    # `downloadBootstrapper` lo descarga de Microsoft solo si falta. Un tamaño
+    # que no cuadra con el modo pedido es una configuración equivocada.
+    if ($WebView2 -eq 'Offline' -and $installerPath.Length -lt 100MB) {
         throw "El instalador NSIS no contiene el runtime WebView2 offline ($($installerPath.Length) bytes): $($installerPath.FullName)."
     }
-    Write-Ok "Instalador NSIS con WebView2 offline: $($installerPath.FullName)"
+    if ($WebView2 -eq 'Download' -and $installerPath.Length -ge 100MB) {
+        throw "El instalador NSIS lleva el runtime WebView2 offline ($($installerPath.Length) bytes) y debía descargarlo: $($installerPath.FullName)."
+    }
+    Write-Ok "Instalador NSIS (WebView2 $WebView2): $($installerPath.FullName) ($([math]::Round($installerPath.Length / 1MB, 1)) MB)"
 }
 
 # Evita publicar por accidente un frontend anterior (por ejemplo, una copia
@@ -2073,7 +2105,11 @@ New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 Ensure-WebView2Loader | Out-Null
 
 $payload = @('wterminal.exe') + $conptyFiles + @('WebView2Loader.dll')
-$portableWebView2Bootstrapper = if ($Installer -and $installerPath) {
+$portableWebView2Bootstrapper = if ($WebView2 -eq 'Download') {
+    # De serie no se mete ningún instalador de WebView2: si falta, el
+    # preflight de Rust usa uno puesto junto al .exe o lo descarga de Microsoft.
+    $null
+} elseif ($Installer -and $installerPath) {
     # El NSIS ya contiene el runtime completo. Reutilizar exactamente ese
     # instalador permite que unpacked y el portable arranquen sin red en una
     # máquina limpia, sin descargar ni compilar una segunda copia.
@@ -2081,7 +2117,7 @@ $portableWebView2Bootstrapper = if ($Installer -and $installerPath) {
 } else {
     Find-PortableWebView2Bootstrapper
 }
-if ($SingleFile -and -not $portableWebView2Bootstrapper) {
+if ($SingleFile -and $WebView2 -eq 'Offline' -and -not $portableWebView2Bootstrapper) {
     # El portable debe poder reparar WebView2 en una máquina limpia. El
     # bootstrapper va dentro del .exe y el preflight de Rust solo lo saca y ejecuta si
     # el runtime no existe; no se reinstala en cada apertura normal.
@@ -2137,8 +2173,8 @@ Write-Ok 'Estructura PE x64 y runtime Windows verificados'
 $singleFileCreated = $false
 if ($SingleFile) {
     Write-Step 'Creando el portable de un solo archivo (.exe autónomo, sin extracción)'
-    if (-not $portableWebView2Bootstrapper) {
-        throw 'El portable de un solo archivo requiere el bootstrapper WebView2; no se pudo preparar.'
+    if ($WebView2 -eq 'Offline' -and -not $portableWebView2Bootstrapper) {
+        throw 'El portable de un solo archivo offline requiere el instalador de WebView2; no se pudo preparar.'
     }
     $singleFileCode = Invoke-Native 'node' @(
         'scripts/create-single-file-portable.mjs',
@@ -2495,7 +2531,12 @@ if ($runExtendedTests) {
         $previousE2eLogFile = $env:LTERMINAL_LOG_FILE
         $previousNativeE2eDriver = $env:TAURI_NATIVE_DRIVER
         $previousE2eCaptureDir = $env:E2E_CAPTURE_DIR
+        $previousE2eVideo = $env:E2E_CAPTURE_VIDEO
         $e2eUnpackedDir = Join-Path (Get-BuildArtifactsDir) 'e2e-desempaquetado'
+        # Un fallo del E2E del desempaquetado no se salta el del portable: se
+        # anota y se relanza cuando han corrido los dos (antes, un solo fallo
+        # dejaba el portable sin probar).
+        $unpackedE2eFailure = $null
         try {
             # El smoke activa CDP mediante la API de WebView2 al lanzar la app.
             # Probar la propia release evita una segunda compilación y asegura
@@ -2504,6 +2545,9 @@ if ($runExtendedTests) {
             New-Item -ItemType Directory -Force -Path $e2eUnpackedDir | Out-Null
             $env:LTERMINAL_SMOKE_REPORT = Join-Path $e2eUnpackedDir 'e2e-report.json'
             $env:E2E_CAPTURE_DIR = Join-Path $e2eUnpackedDir 'capturas'
+            # Con -QuickValidation este es el único recorrido completo: el
+            # vídeo de la suite «video» se graba aquí en vez de repetirlo.
+            if ($QuickValidation.IsPresent) { $env:E2E_CAPTURE_VIDEO = '1' }
             $e2eUnpackedStartedAt = [DateTime]::UtcNow
             $env:TAURI_NATIVE_DRIVER = $nativeE2eDriver
             # El binario lanzado por tauri-driver debe escribir en el mismo
@@ -2526,12 +2570,13 @@ if ($runExtendedTests) {
                 throw "El informe E2E está incompleto (código $reportCode): $e2eReportPath"
             }
             Write-Ok 'E2E confirmó todas las fases: ventana, terminal, paneles, comandos, preferencias y redimensionado'
-            Add-BuildTest 'E2E completo del desempaquetado' 'OK' ('{0:N0} s' -f ([DateTime]::UtcNow - $e2eUnpackedStartedAt).TotalSeconds)
+            Add-BuildTest "E2E completo del desempaquetado$(if ($QuickValidation.IsPresent) { ' (con vídeo)' })" 'OK' ('{0:N0} s' -f ([DateTime]::UtcNow - $e2eUnpackedStartedAt).TotalSeconds)
         } catch {
             Add-BuildTest 'E2E completo del desempaquetado' 'FALLO' $_.Exception.Message
-            throw
+            $unpackedE2eFailure = $_.Exception.Message
         } finally {
             if ($null -eq $previousE2eCaptureDir) { Remove-Item Env:E2E_CAPTURE_DIR -ErrorAction SilentlyContinue } else { $env:E2E_CAPTURE_DIR = $previousE2eCaptureDir }
+            if ($null -eq $previousE2eVideo) { Remove-Item Env:E2E_CAPTURE_VIDEO -ErrorAction SilentlyContinue } else { $env:E2E_CAPTURE_VIDEO = $previousE2eVideo }
             if ($null -eq $previousE2eBinary) {
                 Remove-Item Env:E2E_BINARY -ErrorAction SilentlyContinue
             } else {
@@ -2595,21 +2640,29 @@ if ($runExtendedTests) {
                     $env:TAURI_NATIVE_DRIVER = $nativeE2eDriver
                     $env:LTERMINAL_LOG_FILE = $logPath
                     $singleE2eReportPath = $env:LTERMINAL_SMOKE_REPORT
-                    Write-Host "    Informe E2E portable: $singleE2eReportPath" -ForegroundColor DarkGray
-                    $singleE2eCode = Invoke-Native 'npm' @('run', 'e2e')
-                    if ($singleE2eCode -ne 0) { throw "E2E del portable falló (código $singleE2eCode). Revisa el informe y el log en $logPath." }
-                    Assert-E2eReport $singleE2eReportPath
-                    $singleReportCode = Invoke-Native 'node' @('scripts/verify-e2e-report.mjs', $singleE2eReportPath) -CaptureOutput
-                    $singleReportOutputFailed = $script:LastNativeOutput -match '(?im)(?:^\s*Error:|^\s*El E2E no\b|\binforme E2E (?:incompleto|no es|no valid[oó]|fall[oó])\b)'
-                    if ($singleReportCode -ne 0 -or $singleReportOutputFailed) {
-                        throw "El informe E2E del portable está incompleto (código $singleReportCode): $singleE2eReportPath"
+                    if ($QuickValidation.IsPresent) {
+                        # El portable lleva lo mismo que la carpeta (comprobado
+                        # arriba por SHA256): basta probar lo que cambia.
+                        $singleE2eCode = Invoke-Native 'node' @('scripts/run-e2e-suite.mjs', '--binary', $portableAlone, '--suite', 'distribution', '--out', $e2ePortableDir)
+                        if ($singleE2eCode -ne 0) { throw "La prueba corta del portable falló (código $singleE2eCode). Resumen: $(Join-Path $e2ePortableDir 'summary.md')" }
+                    } else {
+                        Write-Host "    Informe E2E portable: $singleE2eReportPath" -ForegroundColor DarkGray
+                        $singleE2eCode = Invoke-Native 'npm' @('run', 'e2e')
+                        if ($singleE2eCode -ne 0) { throw "E2E del portable falló (código $singleE2eCode). Revisa el informe y el log en $logPath." }
+                        Assert-E2eReport $singleE2eReportPath
+                        $singleReportCode = Invoke-Native 'node' @('scripts/verify-e2e-report.mjs', $singleE2eReportPath) -CaptureOutput
+                        $singleReportOutputFailed = $script:LastNativeOutput -match '(?im)(?:^\s*Error:|^\s*El E2E no\b|\binforme E2E (?:incompleto|no es|no valid[oó]|fall[oó])\b)'
+                        if ($singleReportCode -ne 0 -or $singleReportOutputFailed) {
+                            throw "El informe E2E del portable está incompleto (código $singleReportCode): $singleE2eReportPath"
+                        }
                     }
                     $portableLeftovers = @(Get-ChildItem -LiteralPath $portableAloneDir -Force | Where-Object { $_.FullName -ne $portableAlone })
                     if ($portableLeftovers.Count -gt 0) {
                         throw "El portable dejó archivos junto a sí: $(($portableLeftovers | ForEach-Object Name) -join ', ')"
                     }
-                    Write-Ok 'E2E confirmó todas las fases con el portable solo en su carpeta, sin dejar nada a su lado'
-                    Add-BuildTest "E2E completo del portable$(if ($VideoTest.IsPresent) { ' (con vídeo)' })" 'OK' ('{0:N0} s' -f ([DateTime]::UtcNow - $e2ePortableStartedAt).TotalSeconds)
+                    Write-Ok "$(if ($QuickValidation.IsPresent) { 'Prueba corta' } else { 'E2E' }) del portable solo en su carpeta, sin dejar nada a su lado"
+                    $portableTestName = if ($QuickValidation.IsPresent) { 'Prueba corta del portable (con vídeo)' } else { "E2E completo del portable$(if ($VideoTest.IsPresent) { ' (con vídeo)' })" }
+                    Add-BuildTest $portableTestName 'OK' ('{0:N0} s' -f ([DateTime]::UtcNow - $e2ePortableStartedAt).TotalSeconds)
                 } catch {
                     Add-BuildTest 'E2E completo del portable' 'FALLO' $_.Exception.Message
                     throw
@@ -2627,6 +2680,9 @@ if ($runExtendedTests) {
             }
         }
 
+        if ($unpackedE2eFailure) {
+            throw $unpackedE2eFailure
+        }
         if ($strictProbeFailure) {
             throw 'La batería ampliada detectó herramientas instaladas que fallaron, o ausencias bajo -StrictTests. Revisa el diagnóstico anterior.'
         }
@@ -2739,7 +2795,10 @@ if ($Installer) {
     $installerReleasePath = Join-Path $releaseOut "WTerminal-$version$zipSuffix-x64-setup.exe"
     Copy-Item -LiteralPath $installerPath.FullName -Destination $installerReleasePath -Force
     $publishedInstaller = Get-Item -LiteralPath $installerReleasePath
-    if ($publishedInstaller.Length -ne $installerPath.Length -or $publishedInstaller.Length -lt 100MB) {
+    # El tamaño según el modo de WebView2 ya se comprobó al generarlo; aquí
+    # basta con que la copia sea idéntica (después, también por SHA256). Un
+    # mínimo fijo de 100 MB rechazaba el instalador que descarga WebView2.
+    if ($publishedInstaller.Length -ne $installerPath.Length -or $publishedInstaller.Length -le 0) {
         throw "La copia del instalador NSIS en release es incompleta: $installerReleasePath"
     }
     $installerHash = Get-Sha256Hash $installerReleasePath
@@ -2877,9 +2936,12 @@ if ($runExtendedTests -and -not [string]::IsNullOrWhiteSpace($e2eReportPath)) {
     try {
         $env:WTERMINAL_EXPECTED_RELEASE_ARTIFACTS = ($publishedArtifacts -join ';')
         # Solo se exigen las firmas que esta build generó: sin clave local la
-        # release queda sin firmar con un aviso, no rota.
-        $env:WTERMINAL_EXPECTED_RELEASE_SIGNATURES = (@('SHA256SUMS.txt.sig', 'SHA256SUMS.txt.sshsig') |
+        # release queda sin firmar con un aviso, no rota. Sin ninguna se pasa
+        # `none`: en PowerShell `$env:X = ''` borra la variable y el script
+        # volvía a exigir las dos firmas.
+        $expectedSignatures = (@('SHA256SUMS.txt.sig', 'SHA256SUMS.txt.sshsig') |
             Where-Object { $signingRequired -or (Test-Path -LiteralPath (Join-Path $releaseOut $_) -PathType Leaf) }) -join ';'
+        $env:WTERMINAL_EXPECTED_RELEASE_SIGNATURES = if ($expectedSignatures) { $expectedSignatures } else { 'none' }
         $env:WTERMINAL_REQUIRE_E2E_REPORT = '1'
         $env:WTERMINAL_E2E_REPORT = $e2eReportPath
         $env:LTERMINAL_RELEASE_DIR = $releaseOut
@@ -2919,6 +2981,7 @@ if ($suiteNames.Count -gt 0) {
     $suiteOut = Join-Path $ProjectRoot ("artifacts\release-validation\WTerminal-$version-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     $script:SuiteOutDir = $suiteOut
     $suiteArgs = @('scripts/run-e2e-suite.mjs', '--binary', (Join-Path $distDir 'wterminal.exe'), '--suite', ($suiteNames -join ','), '--out', $suiteOut)
+    if ($QuickValidation.IsPresent) { $suiteArgs += '--quick' }
     if ($InstallerTest.IsPresent) {
         if ($installerReleasePath -and (Test-Path -LiteralPath $installerReleasePath -PathType Leaf)) {
             $suiteArgs += @('--installer', $installerReleasePath, '--release-dir', $distDir)
@@ -2980,6 +3043,19 @@ if ($script:PostBuildIssues.Count -gt 0) {
     Write-Host ''
     Write-Host 'La build terminó y publicó sus artefactos, pero quedaron validaciones pendientes:' -ForegroundColor Yellow
     foreach ($issue in $script:PostBuildIssues) { Write-Host "  - $issue" -ForegroundColor Yellow }
+    # Los artefactos ya están en release\ y tienen buena pinta, firmas incluidas:
+    # sin esta nota nada distingue una build con fallos de una release. La
+    # siguiente build la aparta en release-anterior\ con todo lo demás.
+    if (-not $Fast -and $releaseOut -and (Test-Path -LiteralPath $releaseOut -PathType Container)) {
+        $blockedNote = Join-Path $releaseOut 'NO-PUBLICAR.txt'
+        $noteLines = @(
+            "WTerminal $version · $(Get-Date -Format 'yyyy-MM-dd HH:mm')",
+            'Esta build terminó con validaciones pendientes: no la publiques ni la repartas.',
+            ''
+        ) + @($script:PostBuildIssues | ForEach-Object { "- $_" })
+        Set-Content -LiteralPath $blockedNote -Value $noteLines -Encoding UTF8
+        Write-Host "Marcada como no publicable: $blockedNote" -ForegroundColor Yellow
+    }
     Write-Host 'El código de salida es 1 para que CI no ignore estos diagnósticos.' -ForegroundColor Yellow
     exit 1
 }

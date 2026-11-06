@@ -38,6 +38,18 @@ fn same_windows_dir(left: &str, right: &str) -> bool {
     normalize(left) == normalize(right)
 }
 
+/// Lo registrado es de otra copia de WTerminal (un portable junto a la
+/// instalada, por ejemplo) si apunta a otro sitio que sigue existiendo: al
+/// desinstalar esta copia no se toca, o la otra perdería su integración. Si ya
+/// no existe, nadie lo usa y se limpia como propio.
+pub fn owned_by_other_copy(
+    registered: Option<&str>,
+    own: &str,
+    exists: &dyn Fn(&str) -> bool,
+) -> bool {
+    registered.is_some_and(|path| !same_windows_dir(path, own) && exists(path))
+}
+
 /// PATH de usuario con las carpetas `bin` de las herramientas centralizadas.
 /// Quita las que WTerminal añadió antes y ya no tocan, añade al final las que
 /// faltan (al final: no tapan nada que el usuario ya tuviera) y devuelve
@@ -395,6 +407,28 @@ mod host {
             return Ok(());
         }
         set_enabled(true).map(|_| ())
+    }
+
+    pub fn registered_by_other_copy() -> Result<bool, String> {
+        let own = exe_directory()?;
+        Ok(super::owned_by_other_copy(
+            registered_path().as_deref(),
+            &own.to_string_lossy(),
+            &|path| Path::new(path).exists(),
+        ))
+    }
+
+    /// Borra todo el estado de la integración (`RegisteredPath`, `AutoAdd`,
+    /// carpetas y variables propias). Solo tras `set_enabled(false)`, que ya
+    /// ha usado ese estado para saber qué quitar.
+    pub fn forget_state() -> Result<(), String> {
+        match RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(STATE) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "No se pudo borrar el estado de la integración con el PATH: {error}"
+            )),
+        }
     }
 
     const TOOL_BINS: &str = "ToolBinDirs";
@@ -792,6 +826,16 @@ mod host {
         Ok(())
     }
 
+    /// En Linux no hay desinstalador que llame a esto.
+    pub fn registered_by_other_copy() -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// En Linux no hay desinstalador que llame a esto.
+    pub fn forget_state() -> Result<(), String> {
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn update_block_for_test(
         contents: &str,
@@ -830,6 +874,14 @@ mod host {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    pub fn registered_by_other_copy() -> Result<bool, String> {
+        Ok(false)
+    }
+
+    pub fn forget_state() -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub use host::{set_enabled, status};
@@ -842,6 +894,22 @@ pub fn ensure_default_enabled() -> Result<(), String> {
         return Ok(());
     }
     host::ensure_default_enabled()
+}
+
+/// Desinstalación: quita lo que WTerminal añadió (su carpeta en el PATH, las
+/// carpetas `bin` y las variables de herramientas) y después olvida su estado.
+/// Antes se usaba `set_enabled(false)`, que además guarda «el usuario la
+/// desactivó» (`AutoAdd = 0`): esa preferencia sobrevivía a la desinstalación
+/// y una reinstalación ya no se añadía sola al PATH. La suite del instalador
+/// lo detectaba como «PATH del usuario intacto» fallido. Si la integración es
+/// de otra copia, se queda como está: desinstalar esta le quitaba el PATH y las
+/// herramientas al portable (también fallaba esa comprobación).
+pub fn uninstall_cleanup() -> Result<(), String> {
+    if host::registered_by_other_copy()? {
+        return Ok(());
+    }
+    host::set_enabled(false)?;
+    host::forget_state()
 }
 
 #[tauri::command]
@@ -940,6 +1008,24 @@ mod tests {
         assert!(super::should_auto_enable(Some(true), false));
         assert!(!super::should_auto_enable(Some(false), false));
         assert!(!super::should_auto_enable(None, true));
+    }
+
+    #[test]
+    fn al_desinstalar_no_se_toca_lo_registrado_por_otra_copia() {
+        let own = r"C:\Program Files\WTerminal";
+        let portable = r"D:\Portable";
+        let exists = |_: &str| true;
+        let gone = |_: &str| false;
+        assert!(super::owned_by_other_copy(Some(portable), own, &exists));
+        // Es la propia, con otra grafía: se limpia.
+        assert!(!super::owned_by_other_copy(
+            Some(r"c:/program files/wterminal/"),
+            own,
+            &exists
+        ));
+        // Nada registrado, o la otra copia ya no existe: se limpia.
+        assert!(!super::owned_by_other_copy(None, own, &exists));
+        assert!(!super::owned_by_other_copy(Some(portable), own, &gone));
     }
 
     #[test]

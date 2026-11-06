@@ -419,6 +419,157 @@ static ADB_UNINSTALL_PS: Lazy<String> = Lazy::new(|| {
     .join("; ")
 });
 
+/// Kotlin en Windows desde la release oficial de JetBrains en GitHub,
+/// comprobando la suma SHA-256 que publica junto al zip.
+///
+/// Por qué no Chocolatey: su paquete `kotlinc` se quedó en la 1.5.20 (2021),
+/// que no arranca con un JDK reciente («IllegalArgumentException: 27» al
+/// leer la versión de Java). Va a `WTERMINAL_PROGRAMS\kotlin` (Programas de
+/// la carpeta propia) o, sin ella, a `%LOCALAPPDATA%\Programs\kotlin`, y su
+/// `bin` al PATH del usuario. Sin comillas dobles, como `ADB_INSTALL_PS`.
+#[rustfmt::skip]
+static KOTLIN_INSTALL_PS: Lazy<String> = Lazy::new(|| {
+    [
+        "$ErrorActionPreference = 'Stop'",
+        "[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072",
+        "$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JetBrains/kotlin/releases/latest' -Headers @{ 'User-Agent' = 'WTerminal' }",
+        "$asset = $release.assets | Where-Object { $_.name -match '^kotlin-compiler-[0-9.]+\\.zip$' } | Select-Object -First 1",
+        "if (-not $asset) { throw ('La version ' + $release.tag_name + ' de JetBrains/kotlin no trae kotlin-compiler-*.zip') }",
+        "$sumAsset = $release.assets | Where-Object { $_.name -eq ($asset.name + '.sha256') } | Select-Object -First 1",
+        "if (-not $sumAsset) { throw ('La version ' + $release.tag_name + ' no publica la suma SHA-256 del compilador') }",
+        "$base = if ($env:WTERMINAL_PROGRAMS) { $env:WTERMINAL_PROGRAMS } else { Join-Path $env:LOCALAPPDATA 'Programs' }",
+        "$dest = Join-Path $base 'kotlin'",
+        "$downloads = if ($env:WTERMINAL_DOWNLOADS) { $env:WTERMINAL_DOWNLOADS } else { $env:TEMP }",
+        "New-Item -ItemType Directory -Force -Path $downloads | Out-Null",
+        "$zip = Join-Path $downloads $asset.name",
+        "Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing",
+        // GitHub sirve el .sha256 como binario: PowerShell lo devuelve en bytes.
+        "$raw = (Invoke-WebRequest -Uri $sumAsset.browser_download_url -UseBasicParsing).Content",
+        "if ($raw -is [byte[]]) { $raw = [System.Text.Encoding]::ASCII.GetString($raw) }",
+        "$expected = ($raw.Trim() -split '\\s+')[0].ToLowerInvariant()",
+        "$actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()",
+        "if ($actual -ne $expected) { Remove-Item $zip -Force; throw ('La suma SHA-256 de ' + $asset.name + ' no coincide: se ha borrado la descarga') }",
+        "if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }",
+        "Expand-Archive -Path $zip -DestinationPath $dest -Force",
+        "Remove-Item $zip -Force",
+        "$bin = Join-Path $dest 'kotlinc\\bin'",
+        "$userPath = [Environment]::GetEnvironmentVariable('Path','User')",
+        "if (-not $userPath) { $userPath = '' }",
+        "if (($userPath -split ';') -notcontains $bin) { $nuevo = if ($userPath) { $userPath.TrimEnd(';') + ';' + $bin } else { $bin }; [Environment]::SetEnvironmentVariable('Path', $nuevo, 'User') }",
+        "if (($env:Path -split ';') -notcontains $bin) { $env:Path = $bin + ';' + $env:Path }",
+        "& (Join-Path $bin 'kotlinc.bat') -version",
+        // El paquete viejo de Chocolatey sigue antes en el PATH de máquina y
+        // taparía a este: se avisa, no se borra por su cuenta.
+        "$viejo = Get-Command kotlinc.exe -ErrorAction SilentlyContinue",
+        "if ($viejo -and $viejo.Source -like '*chocolatey*') { Write-Host ('Aviso: ' + $viejo.Source + ' (kotlinc 1.5 de Chocolatey) va antes en el PATH. Quitalo con: choco uninstall kotlinc -y') -ForegroundColor Yellow }",
+        "Write-Host ('Kotlin ' + $release.tag_name + ' instalado en ' + $dest + ' y anadido al PATH - abre una pestana nueva para usar kotlinc') -ForegroundColor Green",
+    ]
+    .join("; ")
+});
+
+/// Desinstalación de Kotlin: solo lo que instaló `KOTLIN_INSTALL_PS`.
+#[rustfmt::skip]
+static KOTLIN_UNINSTALL_PS: Lazy<String> = Lazy::new(|| {
+    [
+        "$base = if ($env:WTERMINAL_PROGRAMS) { $env:WTERMINAL_PROGRAMS } else { Join-Path $env:LOCALAPPDATA 'Programs' }",
+        "$dest = Join-Path $base 'kotlin'",
+        "$bin = Join-Path $dest 'kotlinc\\bin'",
+        "if (Test-Path $dest) { Remove-Item -Recurse -Force $dest; Write-Host ('Eliminado ' + $dest) -ForegroundColor Green } else { Write-Host 'No hay una instalacion propia de Kotlin.' -ForegroundColor Yellow }",
+        "$userPath = [Environment]::GetEnvironmentVariable('Path','User')",
+        "if ($userPath) { $limpio = ($userPath -split ';' | Where-Object { $_ -and $_ -ne $bin }) -join ';'; [Environment]::SetEnvironmentVariable('Path', $limpio, 'User') }",
+    ]
+    .join("; ")
+});
+
+fn windows_kotlin_actions() -> Vec<InstallAction> {
+    in_subgroup(
+        LANGUAGES_GROUP,
+        "Kotlin",
+        vec![
+            InstallAction::new(
+                "kotlin-install",
+                "Instalar Kotlin (descarga oficial de JetBrains)",
+                KOTLIN_INSTALL_PS.clone(),
+            )
+            .short("Instalar (descarga oficial de JetBrains)")
+            .powershell()
+            .hint(
+                "Descarga la última versión del compilador desde las releases de JetBrains en \
+                 GitHub y comprueba su SHA-256. Necesita un JDK. No usa el paquete de Chocolatey: \
+                 se quedó en Kotlin 1.5.20, que no arranca con un JDK reciente.",
+            )
+            .check(Some("kotlinc")),
+            InstallAction::new(
+                "kotlin-update",
+                "Actualizar Kotlin a la última versión",
+                KOTLIN_INSTALL_PS.clone(),
+            )
+            .short("Actualizar a la última versión")
+            .powershell()
+            .verb("Actualizar")
+            .requires(Some("kotlinc")),
+            InstallAction::new(
+                "kotlin-version",
+                "Ver versión de Kotlin",
+                "kotlinc -version",
+            )
+            .short("Ver versión instalada")
+            .verb("Versión")
+            .requires(Some("kotlinc")),
+            InstallAction::new(
+                "kotlin-uninstall",
+                "Desinstalar Kotlin",
+                KOTLIN_UNINSTALL_PS.clone(),
+            )
+            .short("Desinstalar del sistema")
+            .powershell()
+            .verb("Desinstalar")
+            .requires(Some("kotlinc"))
+            .hint("Borra la carpeta que instaló esta app y limpia su entrada del PATH de usuario."),
+        ],
+    )
+}
+
+/// El compilador de AutoHotkey, bajo el mismo plegable que AutoHotkey v2:
+/// su instalador ya no lo incluye y solo lo descarga si se pide.
+fn windows_ahk2exe_actions() -> Vec<InstallAction> {
+    in_subgroup(
+        LANGUAGES_GROUP,
+        "AutoHotkey v2",
+        vec![
+            InstallAction::new(
+                "ahk2exe-install",
+                "Instalar Ahk2Exe (compilador de AutoHotkey)",
+                AHK2EXE_INSTALL,
+            )
+            .short("Instalar el compilador Ahk2Exe")
+            .powershell()
+            .hint(
+                "Convierte scripts .ahk en .exe. AutoHotkey v2 no lo incluye: se descarga con \
+                 el propio instalador de AutoHotkey desde sus releases de GitHub. En una \
+                 instalación para todo el equipo pide permisos de administrador.",
+            )
+            .check(Some(AHK2EXE_DETECT))
+            .requires(Some(AUTOHOTKEY_DETECT)),
+            InstallAction::new("ahk2exe-version", "Ver versión de Ahk2Exe", AHK2EXE_VERSION)
+                .short("Ver versión del compilador")
+                .powershell()
+                .verb("Versión")
+                .requires(Some(AHK2EXE_DETECT)),
+            InstallAction::new(
+                "ahk2exe-uninstall",
+                "Desinstalar Ahk2Exe",
+                AHK2EXE_UNINSTALL,
+            )
+            .short("Desinstalar el compilador")
+            .powershell()
+            .verb("Desinstalar")
+            .requires(Some(AHK2EXE_DETECT))
+            .hint("Borra la carpeta Compiler de AutoHotkey; el intérprete sigue instalado."),
+        ],
+    )
+}
+
 /// `true` si el texto conserva un parámetro sin sustituir (`{source}`).
 fn tiene_hueco(texto: &str) -> bool {
     let bytes = texto.as_bytes();
@@ -553,6 +704,20 @@ const VIRTUALBOX_VERSION: &str = concat!("$vbox = Get-Command VBoxManage.exe -Er
 // pero no da por instalado cualquier archivo llamado "ahk".
 const AUTOHOTKEY_DETECT: &str = concat!("powershell:$paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')) + ", registered_install_dirs!("AutoHotkey*"), " | ForEach-Object { if ($_ -like '*.exe') { $_ } else { Join-Path $_ 'v2\\AutoHotkey64.exe'; Join-Path $_ 'AutoHotkey64.exe' } }; if ((Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue) -or (Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue) -or ($paths | Where-Object { Test-Path $_ })) { exit 0 } else { exit 1 }");
 const AUTOHOTKEY_VERSION: &str = concat!("$command = Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue; if (-not $command) { $command = Get-Command AutoHotkey.exe -ErrorAction SilentlyContinue }; if ($command) { (Get-Item $command.Source).VersionInfo.ProductVersion } else { $paths = @((Join-Path $env:ProgramFiles 'AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path $env:ProgramFiles 'AutoHotkey\\v2\\AutoHotkey.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\AutoHotkey64.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\\AutoHotkey\\v2\\AutoHotkey64.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\AutoHotkey.exe'), (Join-Path ${env:ProgramFiles(x86)} 'AutoHotkey\\v2\\AutoHotkey.exe')) + ", registered_install_dirs!("AutoHotkey*"), " | ForEach-Object { if ($_ -like '*.exe') { $_ } else { Join-Path $_ 'v2\\AutoHotkey64.exe'; Join-Path $_ 'AutoHotkey64.exe' } }; $path = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($path) { (Get-Item $path).VersionInfo.ProductVersion } else { throw 'AutoHotkey no está instalado.' } }");
+// AutoHotkey v2 ya no trae el compilador: su instalación deja
+// `UX\install-ahk2exe.ahk`, que el Dash usa para descargar Ahk2Exe de
+// GitHub (AutoHotkey/Ahk2Exe) a `Compiler\`. Se usa ese mismo script con un
+// argumento para que no pregunte; en una instalación para todo el equipo
+// escribe en su carpeta y necesita permisos de administrador.
+macro_rules! ahk_install_dir {
+    () => {
+        "$ahkDir = @('HKCU:\\SOFTWARE\\AutoHotkey', 'HKLM:\\SOFTWARE\\AutoHotkey') | ForEach-Object { $key = Get-ItemProperty $_ -ErrorAction SilentlyContinue; if ($key.InstallDir) { [pscustomobject]@{ Dir = $key.InstallDir; Machine = $_ -like 'HKLM*' } } } | Where-Object { Test-Path (Join-Path $_.Dir 'UX\\install-ahk2exe.ahk') } | Select-Object -First 1; "
+    };
+}
+const AHK2EXE_DETECT: &str = concat!("powershell:", ahk_install_dir!(), "if ($ahkDir -and (Test-Path (Join-Path $ahkDir.Dir 'Compiler\\Ahk2Exe.exe'))) { exit 0 } else { exit 1 }");
+const AHK2EXE_INSTALL: &str = concat!("$ErrorActionPreference = 'Stop'; ", ahk_install_dir!(), "if (-not $ahkDir) { throw 'AutoHotkey v2 no está instalado: instálalo antes que su compilador.' }; $ux = Join-Path $ahkDir.Dir 'UX\\AutoHotkeyUX.exe'; $script = Join-Path $ahkDir.Dir 'UX\\install-ahk2exe.ahk'; $compiler = Join-Path $ahkDir.Dir 'Compiler\\Ahk2Exe.exe'; $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); $start = @{ FilePath = $ux; ArgumentList = @(('\"' + $script + '\"'), '/Y'); PassThru = $true }; if ($ahkDir.Machine -and -not $admin) { $start.Verb = 'RunAs' }; Write-Host 'Descargando Ahk2Exe con el instalador de AutoHotkey...'; $process = Start-Process @start; if (-not $process.WaitForExit(300000)) { throw 'El instalador de Ahk2Exe no terminó en 5 minutos.' }; if (-not (Test-Path $compiler)) { throw 'El instalador de AutoHotkey terminó sin dejar Compiler\\Ahk2Exe.exe.' }; Start-Sleep -Seconds 2; Get-Process Ahk2Exe -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $compiler } | Stop-Process -Force; Write-Host ('Ahk2Exe ' + (Get-Item $compiler).VersionInfo.FileVersion + ' instalado en ' + (Split-Path $compiler))");
+const AHK2EXE_VERSION: &str = concat!(ahk_install_dir!(), "$compiler = if ($ahkDir) { Join-Path $ahkDir.Dir 'Compiler\\Ahk2Exe.exe' }; if ($compiler -and (Test-Path $compiler)) { (Get-Item $compiler).VersionInfo.FileVersion } else { throw 'Ahk2Exe no está instalado.' }");
+const AHK2EXE_UNINSTALL: &str = concat!("$ErrorActionPreference = 'Stop'; ", ahk_install_dir!(), "$folder = if ($ahkDir) { Join-Path $ahkDir.Dir 'Compiler' }; if (-not $folder -or -not (Test-Path $folder)) { Write-Host 'Ahk2Exe no está instalado.'; exit 0 }; Get-Process Ahk2Exe -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ($folder + '\\*') } | Stop-Process -Force; $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); if ($ahkDir.Machine -and -not $admin) { $process = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile', '-Command', ('Remove-Item -LiteralPath ''' + $folder + ''' -Recurse -Force')); if ($process.ExitCode -ne 0) { throw 'No se pudo borrar la carpeta del compilador.' } } else { Remove-Item -LiteralPath $folder -Recurse -Force }; if (Test-Path $folder) { throw 'La carpeta del compilador sigue ahí.' }; Write-Host 'Ahk2Exe desinstalado; AutoHotkey v2 sigue instalado.'");
 const MSYS2_DETECT: &str = concat!("powershell:", msys2_roots!(), " $bins = $roots | ForEach-Object { Join-Path $_ 'ucrt64\\bin' }; if ($bins | Where-Object { (Test-Path (Join-Path $_ 'gcc.exe')) -and (Test-Path (Join-Path $_ 'gfortran.exe')) -and (Test-Path (Join-Path $_ 'gdb.exe')) }) { exit 0 } else { exit 1 }");
 const MSYS2_PACKAGES: &str =
     "mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-gdb";
@@ -584,7 +749,50 @@ const ZSH_PLUGIN_HINT: &str = "WTerminal lo carga en sus pestañas de zsh si est
 const BLESH_URL: &str = "https://github.com/akinomyoga/ble.sh/releases/download/nightly/ble-nightly-20260908%2Bd81fd54.tar.xz";
 const BLESH_SHA256: &str = "7a2445f138e7f099dd5dee749391a8b045646d1b8a605975885be5b34b6b5f7e";
 const BLESH_DIR_IN_TARBALL: &str = "ble-nightly-20260908+d81fd54";
-const BLESH_HINT: &str = "Se instala solo para tu usuario, sin sudo, en ~/.local/share/blesh, desde la versión fijada del repositorio oficial y comprobando su SHA-256. Necesita curl o wget y tar con xz, o Python 3 (de serie en Ubuntu, Debian y Arch). WTerminal lo carga en sus pestañas de bash si la opción «Sugerencias y colores en la línea de órdenes» (y la de bash) está activa; no toca tu .bashrc.";
+const BLESH_HINT: &str = "Se instala solo para tu usuario, sin sudo, en ~/.local/share/blesh, desde la versión fijada del repositorio oficial y comprobando su SHA-256. Necesita curl o wget, tar con xz o Python 3, y awk: Ubuntu, Kali y Arch lo traen todo; a Debian, openSUSE, Fedora y otras distros recién instaladas les falta algo, y la instalación se detiene diciendo qué paquetes añadir. WTerminal lo carga en sus pestañas de bash si la opción «Sugerencias y colores en la línea de órdenes» (y la de bash) está activa; no toca tu .bashrc.";
+
+/// Órdenes que ble.sh exige al cargarse (`_ble_init_posix_command_list` de
+/// la versión fijada). Si falta alguna, `ble.sh --install` no termina nunca:
+/// avisa de «insane environment» y se queda en un bucle de errores
+/// aritméticos. FedoraLinux-44 de WSL recién instalada no trae `awk`.
+const BLESH_REQUIRED_COMMANDS: &str =
+    "sed date rm mkdir mkfifo sleep stty tty sort awk chmod grep cat wc mv sh od cp ps";
+
+/// Comprobación previa a la instalación de ble.sh dentro de una distro WSL:
+/// sin descargador, o sin tar+xz y sin Python 3 de respaldo, o sin alguna de
+/// las órdenes que ble.sh necesita, se detiene con la orden exacta para
+/// añadir lo que falta. Medido en WSL recién instalado: Debian no trae curl,
+/// wget, xz ni Python; openSUSE Tumbleweed no trae tar ni Python; Fedora 44
+/// no trae awk. Sin comillas ni paréntesis, por la misma razón que
+/// `blesh_install_script`.
+fn blesh_prerequisite_check(package_manager: Option<&str>) -> String {
+    let (install, commands) = match package_manager {
+        Some("apt") => (
+            "sudo apt install -y curl tar xz-utils",
+            "sudo apt install -y gawk procps",
+        ),
+        Some("dnf") => (
+            "sudo dnf install -y curl tar xz",
+            "sudo dnf install -y gawk procps-ng",
+        ),
+        Some("zypper") => (
+            "sudo zypper install -y curl tar xz",
+            "sudo zypper install -y gawk procps",
+        ),
+        Some("pacman") => (
+            "sudo pacman -S --needed curl tar xz",
+            "sudo pacman -S --needed gawk procps-ng",
+        ),
+        Some("apk") => ("sudo apk add bash curl tar xz", "sudo apk add gawk procps"),
+        _ => (
+            "curl o wget, tar y xz con el gestor de paquetes de la distro",
+            "awk y ps con el gestor de paquetes de la distro",
+        ),
+    };
+    format!(
+        "if {{ ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; }} || {{ {{ ! command -v tar >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; }} && ! command -v python3 >/dev/null 2>&1; }}; then echo Faltan herramientas para instalar ble.sh: curl o wget, y tar con xz o Python 3. Para instalarlas: {install} >&2; exit 1; fi; missing=; for c in {BLESH_REQUIRED_COMMANDS}; do command -v $c >/dev/null 2>&1 || missing=${{missing:+$missing,}}$c; done; if test ${{#missing}} -gt 0; then echo Faltan programas que necesita ble.sh: $missing. Para instalarlos: {commands} >&2; exit 1; fi; "
+    )
+}
 
 /// Script de instalación de ble.sh en una sola línea, sin comillas de ningún
 /// tipo: se escribe tal cual dentro de `bash -c '…'` (Linux) y de
@@ -665,7 +873,7 @@ static WINDOWS_TOOLS: Lazy<Vec<WindowsTool>> = Lazy::new(|| vec![
     WindowsTool { label_key: Some("tool.nodeLts"), ..win("winget-node", "Node.js LTS", "node", "OpenJS.NodeJS.LTS", Some("node -v; npm -v"), LANGUAGES_GROUP) },
     WindowsTool {
         detect: Some(AUTOHOTKEY_DETECT),
-        hint: Some("Instala AutoHotkey v2 para crear y ejecutar scripts .ahk. Incluye el intérprete y las herramientas de desarrollo; el editor se elige aparte."),
+        hint: Some("Instala AutoHotkey v2 para crear y ejecutar scripts .ahk: el intérprete, el panel AutoHotkey Dash y Window Spy. El compilador Ahk2Exe se instala aparte y el editor se elige aparte."),
         ..win("winget-autohotkey", "AutoHotkey v2", "AutoHotkey64.exe", "AutoHotkey.AutoHotkey", Some(AUTOHOTKEY_VERSION), LANGUAGES_GROUP)
     },
     // Estas familias sí tienen instaladores Windows mantenidos en WinGet; no
@@ -783,7 +991,6 @@ struct ChocolateyTool {
 static WINDOWS_CHOCOLATEY_TOOLS: &[ChocolateyTool] = &[
     ChocolateyTool { install_id: "choco-nsudo",  label: "NSudo · elevación avanzada", cmd: "NSudoLC", pkg: "nsudo", verify: "NSudoLC -?", group: TOOLS_GROUP },
     ChocolateyTool { install_id: "choco-dart",   label: "Dart",         cmd: "dart",   pkg: "dart-sdk", verify: "dart --version",  group: LANGUAGES_GROUP },
-    ChocolateyTool { install_id: "choco-kotlin", label: "Kotlin",       cmd: "kotlinc", pkg: "kotlinc", verify: "kotlinc -version", group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-maven",  label: "Java · Maven", cmd: "mvn",     pkg: "maven",  verify: "mvn --version",    group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-gradle", label: "JVM · Gradle", cmd: "gradle",  pkg: "gradle", verify: "gradle --version", group: LANGUAGES_GROUP },
     ChocolateyTool { install_id: "choco-ant",    label: "Java · Ant",   cmd: "ant",     pkg: "ant",    verify: "ant -version",     group: LANGUAGES_GROUP },
@@ -3180,6 +3387,7 @@ fn wsl_tool_actions(
     distro: &crate::wsl_env::InstalledDistro,
     tool: &PkgTool,
     subgroup: &str,
+    item: &str,
     aur_helper: Option<&str>,
     t: &Translator,
 ) -> Vec<InstallAction> {
@@ -3268,6 +3476,7 @@ fn wsl_tool_actions(
             .powershell()
             .group(WSL_GROUP)
             .subgroup(subgroup)
+            .subgroup_item(item)
             .installed(false)
             .hint(hint.clone()),
         );
@@ -3283,6 +3492,7 @@ fn wsl_tool_actions(
                 .powershell()
                 .group(WSL_GROUP)
                 .subgroup(subgroup)
+                .subgroup_item(item)
                 .verb("Actualizar")
                 .installed(true)
                 .hint(hint.clone()),
@@ -3299,6 +3509,7 @@ fn wsl_tool_actions(
                 .powershell()
                 .group(WSL_GROUP)
                 .subgroup(subgroup)
+                .subgroup_item(item)
                 .verb("Desinstalar")
                 .installed(true)
                 .hint(hint.clone()),
@@ -3315,6 +3526,7 @@ fn wsl_tool_actions(
                 .powershell()
                 .group(WSL_GROUP)
                 .subgroup(subgroup)
+                .subgroup_item(item)
                 .verb("Ver")
                 .installed(true)
                 .hint(hint),
@@ -3335,37 +3547,47 @@ fn wsl_blesh_actions(distro: &crate::wsl_env::InstalledDistro) -> Vec<InstallAct
     let blesh = crate::terminal::shell_assist::BLESH;
     let present = distro.tools.iter().any(|tool| tool == blesh.marker);
     let id = format!("wsl-{}-blesh", safe_id(&distro.name));
-    let subgroup = BLESH_SUBGROUP;
+    // Bajo su distro, como el resto de herramientas de WSL. El título corto
+    // sigue llevando la distro: así se distingue en una búsqueda de «ble.sh».
+    let subgroup = format!("{} · {}", distro.name, distro.shell);
+    let install_script = format!(
+        "{}{}",
+        blesh_prerequisite_check(distro.package_manager.as_deref()),
+        blesh_install_script()
+    );
     let mut actions = Vec::new();
     if present {
+        let update = format!("Actualizar ble.sh en {}", distro.name);
         actions.push(
             InstallAction::new(
                 format!("{id}-update"),
-                format!("Actualizar ble.sh en {}", distro.name),
-                wsl_script(distro.name.as_str(), &blesh_install_script()),
+                &update,
+                wsl_script(distro.name.as_str(), &install_script),
             )
-            .short("Actualizar ble.sh")
+            .short(update)
             .verb("Actualizar")
             .installed(true),
         );
+        let uninstall = format!("Desinstalar ble.sh de {}", distro.name);
         actions.push(
             InstallAction::new(
                 format!("{id}-uninstall"),
-                format!("Desinstalar ble.sh de {}", distro.name),
+                &uninstall,
                 wsl_script(distro.name.as_str(), BLESH_UNINSTALL_SCRIPT),
             )
-            .short("Desinstalar ble.sh")
+            .short(uninstall)
             .verb("Desinstalar")
             .installed(true),
         );
     } else {
+        let install = format!("Instalar ble.sh en {}", distro.name);
         actions.push(
             InstallAction::new(
                 id,
-                format!("Instalar ble.sh en {}", distro.name),
-                wsl_script(distro.name.as_str(), &blesh_install_script()),
+                &install,
+                wsl_script(distro.name.as_str(), &install_script),
             )
-            .short("Instalar ble.sh")
+            .short(install)
             .installed(false),
         );
     }
@@ -3375,7 +3597,8 @@ fn wsl_blesh_actions(distro: &crate::wsl_env::InstalledDistro) -> Vec<InstallAct
             action
                 .powershell()
                 .group(WSL_GROUP)
-                .subgroup(subgroup)
+                .subgroup(subgroup.clone())
+                .subgroup_item(BLESH_SUBGROUP)
                 .hint(BLESH_HINT)
                 .description(action_description("blesh").unwrap_or_default())
         })
@@ -3530,8 +3753,10 @@ fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
     for distro in &wsl.installed {
         // Si la distro no respondió no se inventan instalaciones pendientes:
         // podrían estar ya presentes. El selector la conserva y el usuario
-        // puede refrescar cuando WSL vuelva a estar disponible.
-        if distro.probe_error || distro.listing_error {
+        // puede refrescar cuando WSL vuelva a estar disponible. Con una
+        // detección buena anterior se usa ese inventario: un fallo pasajero
+        // no borra todas sus acciones (79 en Alpine en la auditoría).
+        if (distro.probe_error || distro.listing_error) && !distro.previous_inventory {
             continue;
         }
         let subgroup = format!("{} · {}", distro.name, distro.shell);
@@ -3558,16 +3783,15 @@ fn wsl_actions(wsl: Option<&WslContext>, t: &Translator) -> Vec<InstallAction> {
             {
                 continue;
             }
-            let tool_subgroup = match tool.label_key {
+            // La distro es el subgrupo y la herramienta su hijo: antes cada
+            // herramienta era el subgrupo y repetía siete tarjetas, una por
+            // distro («Instalar Dart… dentro de Ubuntu», «… de Fedora»…).
+            let tool_item = match tool.label_key {
                 Some(key) => t.t(key, tool.label),
                 None => tool.label.to_string(),
             };
             actions.extend(wsl_tool_actions(
-                distro,
-                tool,
-                &tool_subgroup,
-                aur_helper,
-                t,
+                distro, tool, &subgroup, &tool_item, aur_helper, t,
             ));
         }
         if distro.shells.iter().any(|shell| shell == "bash") {
@@ -3682,6 +3906,8 @@ fn windows_actions(
             .iter()
             .flat_map(|tool| chocolatey_tool_actions(tool, t)),
     );
+    actions.extend(windows_ahk2exe_actions());
+    actions.extend(windows_kotlin_actions());
     actions.extend(windows_code_editor_actions(t));
     actions.extend(windows_virtualization_actions());
 
@@ -4022,9 +4248,12 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
     // una expresión PowerShell que imprime False sigue terminando con código 0.
     // Las sondas deben convertir explícitamente el estado en exit 0/1 para que
     // el panel no oculte la acción de activar una característica deshabilitada.
-    const HYPERV: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
-    const VMP: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
-    const SANDBOX: &str = "powershell:if ((Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
+    // `Get-WindowsOptionalFeature` exige administrador: sin elevar falla en
+    // silencio y una característica activa salía como ausente. WMI responde
+    // sin elevar; la segunda consulta conserva `EnablePending` si hay permisos.
+    const HYPERV: &str = "powershell:if ((Get-CimInstance Win32_OptionalFeature -Filter \"Name='Microsoft-Hyper-V-All'\" -ErrorAction SilentlyContinue).InstallState -eq 1) { exit 0 }; if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
+    const VMP: &str = "powershell:if ((Get-CimInstance Win32_OptionalFeature -Filter \"Name='VirtualMachinePlatform'\" -ErrorAction SilentlyContinue).InstallState -eq 1) { exit 0 }; if ((Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
+    const SANDBOX: &str = "powershell:if ((Get-CimInstance Win32_OptionalFeature -Filter \"Name='Containers-DisposableClientVM'\" -ErrorAction SilentlyContinue).InstallState -eq 1) { exit 0 }; if ((Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue).State -in @('Enabled','EnablePending')) { exit 0 } else { exit 1 }";
     let enable_feature = |feature: &str| {
         format!(
             "$script = '$ErrorActionPreference = ''Stop''; $feature = Get-WindowsOptionalFeature -Online -FeatureName {feature} -ErrorAction SilentlyContinue; if (-not $feature) {{ exit 2 }}; if ($feature.State -in @(''Enabled'',''EnablePending'')) {{ exit 0 }}; try {{ Enable-WindowsOptionalFeature -Online -FeatureName {feature} -All -NoRestart -ErrorAction Stop | Out-Null; exit 0 }} catch {{ exit 3 }}'; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script)); try {{ $elevated = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded) -ErrorAction Stop; if ($elevated.ExitCode -eq 2) {{ throw 'La característica de Windows {feature} no está disponible en esta edición.' }} elseif ($elevated.ExitCode -ne 0) {{ throw ('La activación de {feature} terminó con el código ' + $elevated.ExitCode) }} else {{ Write-Host 'La característica está activada; puede ser necesario reiniciar Windows.' }} }} catch {{ throw ('No se pudo solicitar la elevación o activar {feature}: ' + $_.Exception.Message) }}",
@@ -4070,7 +4299,7 @@ fn windows_virtualization_actions() -> Vec<InstallAction> {
         InstallAction::new(
             "windows-hyperv-check",
             "Comprobar Hyper-V y virtualización",
-            "Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All; Get-CimInstance Win32_ComputerSystem | Select-Object HypervisorPresent",
+            "Get-CimInstance Win32_OptionalFeature -Filter \"Name='Microsoft-Hyper-V-All'\" | Select-Object Name, InstallState; Get-CimInstance Win32_ComputerSystem | Select-Object HypervisorPresent",
         )
         .short("Ver estado de Hyper-V")
         .powershell()
@@ -5348,6 +5577,7 @@ mod tests {
             detailed: true,
             probe_error: false,
             listing_error: false,
+            previous_inventory: false,
             unrunnable: vec![],
         }
     }
@@ -5473,6 +5703,27 @@ mod tests {
             !sin_paquete.iter().any(|action| action.id == "pkg-ollama"),
             "apt no empaqueta Ollama"
         );
+    }
+
+    #[test]
+    fn ahk2exe_se_instala_aparte_con_el_script_oficial_de_autohotkey() {
+        let actions = windows_ahk2exe_actions();
+        let install = buscar(&actions, "ahk2exe-install");
+        assert_eq!(install.subgroup.as_deref(), Some("AutoHotkey v2"));
+        assert!(install.command.contains("install-ahk2exe.ahk"));
+        assert!(install.command.contains("'/Y'"), "no debe preguntar");
+        assert!(install.command.contains("Verb = 'RunAs'"));
+        assert_eq!(install.check_cmd.as_deref(), Some(AHK2EXE_DETECT));
+        assert_eq!(install.requires_cmd.as_deref(), Some(AUTOHOTKEY_DETECT));
+        assert!(AHK2EXE_DETECT.contains("Compiler\\Ahk2Exe.exe"));
+        let uninstall = buscar(&actions, "ahk2exe-uninstall");
+        assert!(uninstall
+            .command
+            .contains("Join-Path $ahkDir.Dir 'Compiler'"));
+        assert_eq!(uninstall.requires_cmd.as_deref(), Some(AHK2EXE_DETECT));
+        assert!(buscar(&actions, "ahk2exe-version")
+            .command
+            .contains("VersionInfo"));
     }
 
     #[test]
@@ -6107,6 +6358,24 @@ mod tests {
     }
 
     #[test]
+    fn las_caracteristicas_windows_se_detectan_sin_elevar() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        for id in [
+            "windows-hyperv-enable",
+            "windows-vmp-enable",
+            "windows-sandbox-enable",
+        ] {
+            let check = buscar(&actions, id).check_cmd.clone().unwrap();
+            let script = check.strip_prefix("powershell:").unwrap();
+            assert!(script.contains("Win32_OptionalFeature"), "{id}");
+            assert!(
+                crate::packages::commands::powershell_batchable(script),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
     fn las_caracteristicas_windows_se_elevan_y_dan_un_error_claro_si_no_existen() {
         let actions = get_install_actions(&contexto("windows"), &t());
         for (id, feature) in [
@@ -6165,21 +6434,59 @@ mod tests {
     }
 
     #[test]
+    fn kotlin_se_instala_de_jetbrains_con_su_suma_y_no_de_chocolatey() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        assert!(
+            !actions.iter().any(|a| a.id == "choco-kotlin"),
+            "Chocolatey trae kotlinc 1.5.20"
+        );
+        let install = buscar(&actions, "kotlin-install");
+        assert_eq!(install.group, LANGUAGES_GROUP);
+        assert_eq!(install.subgroup.as_deref(), Some("Kotlin"));
+        assert_eq!(install.check_cmd.as_deref(), Some("kotlinc"));
+        assert!(install
+            .command
+            .contains("https://api.github.com/repos/JetBrains/kotlin/releases/latest"));
+        assert!(install.command.contains("Get-FileHash -Algorithm SHA256"));
+        assert!(install.command.contains("($asset.name + '.sha256')"));
+        // La suma se comprueba antes de descomprimir nada.
+        assert!(
+            install.command.find("Get-FileHash").unwrap()
+                < install.command.find("Expand-Archive").unwrap()
+        );
+        assert!(install
+            .command
+            .contains("if ($env:WTERMINAL_PROGRAMS) { $env:WTERMINAL_PROGRAMS }"));
+        assert!(install.command.contains("'kotlinc\\bin'"));
+        for id in ["kotlin-update", "kotlin-version", "kotlin-uninstall"] {
+            assert_eq!(
+                buscar(&actions, id).requires_cmd.as_deref(),
+                Some("kotlinc"),
+                "{id}"
+            );
+        }
+        assert!(buscar(&actions, "kotlin-uninstall")
+            .command
+            .contains("-ne $bin"));
+        assert!(action_description("kotlin-install").is_some());
+    }
+
+    #[test]
     fn chocolatey_tambien_respeta_la_carpeta_de_programas() {
         let actions = get_install_actions(&contexto("windows"), &t());
-        let kotlin = buscar(&actions, "choco-kotlin");
-        assert!(kotlin.command.contains("install kotlinc -y --no-progress"));
+        let maven = buscar(&actions, "choco-maven");
+        assert!(maven.command.contains("install maven -y --no-progress"));
         // `--install-directory` solo existe en las ediciones de pago: la libre
         // rechaza la orden entera (comprobado en la VM).
-        assert!(!kotlin.command.contains("--install-directory"));
-        assert!(kotlin
+        assert!(!maven.command.contains("--install-directory"));
+        assert!(maven
             .command
             .contains("Join-Path $env:WTERMINAL_PROGRAMS 'chocolatey'"));
-        assert!(kotlin.command.contains("$env:ChocolateyToolsLocation"));
+        assert!(maven.command.contains("$env:ChocolateyToolsLocation"));
         // Si su instalador acaba en Program Files, se ofrece moverlo igual.
-        assert!(kotlin
+        assert!(maven
             .command
-            .contains("Join-Path $env:WTERMINAL_PROGRAMS 'kotlinc'"));
+            .contains("Join-Path $env:WTERMINAL_PROGRAMS 'maven'"));
         let postgres = buscar(&actions, "winget-postgresql");
         assert!(postgres
             .command
@@ -6447,7 +6754,6 @@ exit 0
         for (id, package) in [
             ("choco-nsudo", "install nsudo"),
             ("choco-dart", "install dart-sdk"),
-            ("choco-kotlin", "install kotlinc"),
             ("choco-maven", "install maven"),
             ("choco-gradle", "install gradle"),
             ("choco-ant", "install ant"),
@@ -6531,6 +6837,8 @@ exit 0
         // para invocarlo desde cmd.exe: una comilla doble dentro lo partiría.
         assert!(!ADB_INSTALL_PS.contains('"'));
         assert!(!ADB_UNINSTALL_PS.contains('"'));
+        assert!(!KOTLIN_INSTALL_PS.contains('"'));
+        assert!(!KOTLIN_UNINSTALL_PS.contains('"'));
     }
 
     #[test]
@@ -6611,8 +6919,13 @@ exit 0
         let gcc = buscar(&actions, "wsl-ubuntu-gcc");
         assert!(gcc.command.contains("apt install -y build-essential"));
         assert_eq!(gcc.group, WSL_GROUP);
+        // La distro es el subgrupo y la herramienta su hijo.
+        assert!(gcc
+            .subgroup
+            .as_deref()
+            .is_some_and(|subgroup| subgroup.starts_with("Ubuntu · ")));
         assert_eq!(
-            gcc.subgroup.as_deref(),
+            gcc.subgroup_item.as_deref(),
             Some("C/C++ · GCC y herramientas de compilación")
         );
 
@@ -6717,16 +7030,31 @@ exit 0
         let actions = get_install_actions(&context(ubuntu.clone()), &t());
         let install = buscar(&actions, "wsl-ubuntu-blesh");
         assert_eq!(install.group, WSL_GROUP);
-        assert_eq!(install.subgroup.as_deref(), Some(BLESH_SUBGROUP));
+        assert!(install
+            .subgroup
+            .as_deref()
+            .is_some_and(|subgroup| subgroup.starts_with("Ubuntu · ")));
+        assert_eq!(install.subgroup_item.as_deref(), Some(BLESH_SUBGROUP));
         assert!(install
             .command
-            .starts_with("wsl.exe -d 'Ubuntu' --exec bash -lc 'tmp=$(mktemp -d)"));
+            .starts_with("wsl.exe -d 'Ubuntu' --exec bash -lc 'if {"));
+        assert!(install.command.contains("tmp=$(mktemp -d)"));
         assert!(install.command.contains(BLESH_URL));
         assert!(install
             .command
             .contains(&format!("grep -q ^{BLESH_SHA256}")));
         assert!(install.command.contains("--install ~/.local/share;"));
-        assert!(!install.command.contains("sudo"));
+        // `sudo` solo aparece en el mensaje que dice qué instalar; nunca se ejecuta.
+        assert!(!install.command.contains("; sudo") && !install.command.contains("&& sudo"));
+        assert!(install
+            .command
+            .contains("Para instalarlas: sudo apt install -y curl tar xz-utils >&2; exit 1;"));
+        assert!(install.command.find("exit 1; fi;") < install.command.find("tmp=$(mktemp -d)"));
+        // El título de la tarjeta dice de qué distro es: comparten subgrupo.
+        assert_eq!(
+            install.short_label.as_deref(),
+            Some("Instalar ble.sh en Ubuntu")
+        );
         assert!(install.description.is_some());
         assert!(!actions.iter().any(|a| a.id == "wsl-ubuntu-blesh-update"));
 
@@ -6740,6 +7068,61 @@ exit 0
         assert!(buscar(&actions, "wsl-ubuntu-blesh-uninstall")
             .command
             .contains("rm -rf ~/.local/share/blesh"));
+    }
+
+    #[test]
+    fn la_comprobacion_previa_de_ble_sh_no_lleva_comillas_ni_parentesis() {
+        for manager in [
+            Some("apt"),
+            Some("dnf"),
+            Some("zypper"),
+            Some("pacman"),
+            Some("apk"),
+            None,
+        ] {
+            let check = blesh_prerequisite_check(manager);
+            assert!(!check.contains('\'') && !check.contains('"') && !check.contains('\n'));
+            // `echo` sin comillas: un paréntesis rompería la orden de sh.
+            let message = check.split("then echo").nth(1).unwrap();
+            assert!(!message.contains('(') && !message.contains(')'), "{check}");
+            assert!(
+                check.is_ascii(),
+                "PowerShell 5.1 no garantiza pasar tildes a wsl.exe"
+            );
+        }
+        assert!(
+            blesh_prerequisite_check(Some("zypper")).contains("sudo zypper install -y curl tar xz")
+        );
+        // Sin awk (Fedora 44 en WSL), `ble.sh --install` se queda en bucle:
+        // la comprobación lo detiene antes con el paquete que lo trae.
+        let fedora = blesh_prerequisite_check(Some("dnf"));
+        assert!(fedora.contains(&format!("for c in {BLESH_REQUIRED_COMMANDS}; do")));
+        assert!(BLESH_REQUIRED_COMMANDS
+            .split(' ')
+            .any(|command| command == "awk"));
+        assert!(fedora
+            .contains("Para instalarlos: sudo dnf install -y gawk procps-ng >&2; exit 1; fi; "));
+        assert!(fedora.ends_with("fi; "));
+    }
+
+    /// Ejecuta de verdad la comprobación previa en `sh` con un PATH sin
+    /// descargadores: debe detenerse con el mensaje y código 1.
+    #[cfg(unix)]
+    #[test]
+    fn la_comprobacion_previa_de_ble_sh_se_detiene_si_faltan_herramientas() {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{}echo SIGUE",
+                blesh_prerequisite_check(Some("apt"))
+            ))
+            .env("PATH", "/nonexistent")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("sudo apt install -y curl tar xz-utils"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SIGUE"));
     }
 
     #[test]
@@ -6826,6 +7209,23 @@ exit 0
         };
         let actions = get_install_actions(&context, &t());
         assert!(!actions.iter().any(|a| a.id.starts_with("wsl-ubuntu-")));
+
+        // Con la última detección buena (`previous_inventory`), el fallo de
+        // esta sonda no borra las acciones de la distro.
+        let mut ubuntu = distro("Ubuntu", "apt");
+        ubuntu.detailed = false;
+        ubuntu.probe_error = true;
+        ubuntu.previous_inventory = true;
+        let context = InstallContext {
+            wsl: Some(WslContext {
+                available: true,
+                installed: vec![ubuntu],
+                online: vec![],
+            }),
+            ..contexto("windows")
+        };
+        let actions = get_install_actions(&context, &t());
+        assert!(actions.iter().any(|a| a.id.starts_with("wsl-ubuntu-")));
     }
 
     #[test]
@@ -7277,7 +7677,9 @@ exit 0
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(lenguajes.first(), Some(&"winget-node"));
-        assert_eq!(lenguajes.last(), Some(&"choco-scala"));
+        // Kotlin va tras las herramientas de Chocolatey: ya no es una de ellas
+        // (descarga oficial de JetBrains).
+        assert_eq!(lenguajes.last(), Some(&"kotlin-install"));
     }
 
     #[test]

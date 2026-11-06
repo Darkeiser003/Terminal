@@ -1,7 +1,7 @@
 // Prueba real del instalador NSIS de Windows (cambia el equipo y lo deja
 // como estaba). Uso:
 //   node scripts/test-installer.mjs --installer release/WTerminal-X-x64-setup.exe
-//        [--release-dir src-tauri/target/dist/WTerminal-X] [--out artifacts/installer-test] [--video]
+//        [--release-dir src-tauri/target/dist/WTerminal-X] [--out artifacts/installer-test] [--video] [--quick]
 //
 // 0. Si hay un SHA256SUMS.txt junto al instalador, su huella debe coincidir.
 // 1. Se niega a actuar si ya hay un WTerminal instalado: nunca toca la
@@ -23,6 +23,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { runSmokeScenario } from '../tests/e2e/run-scenario.mjs';
+import { planSuites } from '../tests/e2e/suites.mjs';
 import { describeWindowsPathChange, restoreWindowsPathIntegration, sameWindowsPathSnapshot, snapshotWindowsPathIntegration } from '../tests/e2e/windows-path-guard.mjs';
 import { dropPowerShell7ModulePath } from '../tests/e2e/powershell-env.mjs';
 // Lanzado desde PowerShell 7, el PSModulePath heredado rompe los powershell.exe 5.1
@@ -133,7 +134,7 @@ function psQuote(value) {
 /**
  * @returns {Promise<{status: 'passed'|'failed'|'skipped', summary: string, durationMs: number, steps: object[], scenario?: object}>}
  */
-export async function runInstallerTest({ installer, releaseDir, out, smokeTimeoutMs = 45 * 60_000, video = false }) {
+export async function runInstallerTest({ installer, releaseDir, out, smokeTimeoutMs = 45 * 60_000, video = false, quick = false }) {
     const startedAt = Date.now();
     const steps = [];
     const step = (name, ok, detail = '') => {
@@ -208,18 +209,24 @@ Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Argume
             const same = sha256(await readFile(join(installDir, file))) === sha256(await readFile(join(releaseDir, file)));
             step(`${file} instalado = release`, same);
         }
-        process.stdout.write('  Recorrido E2E completo sobre la aplicación instalada…\n');
-        scenario = await runSmokeScenario({
-            projectRoot,
-            binary: join(installDir, 'wterminal.exe'),
-            id: 'installed-full',
-            // Con la suite de vídeo pedida, lo instalado también se graba:
-            // cada forma de distribución deja su propio vídeo.
-            env: video ? { E2E_CAPTURE_VIDEO: '1' } : {},
-            timeoutMs: smokeTimeoutMs,
-            outDir: out,
-        });
-        step('Recorrido E2E completo sobre lo instalado', scenario.status === 'passed', scenario.summary);
+        // Con la suite de vídeo pedida, lo instalado también se graba: cada
+        // forma de distribución deja su propio vídeo. En el modo reducido basta
+        // la prueba corta, porque los archivos ya se compararon arriba.
+        const scenarios = quick
+            ? planSuites(['distribution']).map((item) => ({ ...item, id: `installed-${item.id}` }))
+            : [{ id: 'installed-full', title: 'Recorrido E2E completo', env: video ? { E2E_CAPTURE_VIDEO: '1' } : {}, timeoutMs: smokeTimeoutMs }];
+        for (const item of scenarios) {
+            process.stdout.write(`  ${item.title} sobre la aplicación instalada…\n`);
+            scenario = await runSmokeScenario({
+                projectRoot,
+                binary: join(installDir, 'wterminal.exe'),
+                id: item.id,
+                env: item.env,
+                timeoutMs: item.timeoutMs,
+                outDir: out,
+            });
+            step(`${item.title} sobre lo instalado`, scenario.status === 'passed', scenario.summary);
+        }
     } catch (error) {
         failure = error;
         step('Prueba sobre la aplicación instalada', false, error.message);
@@ -250,7 +257,7 @@ Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Argume
 
     const failed = steps.filter((entry) => !entry.ok);
     const result = finish(failed.length === 0 && !failure ? 'passed' : 'failed',
-        failed.length === 0 ? `Instalado, verificado (${steps.length} comprobaciones), E2E completo y desinstalado sin restos` : `${failed.length} comprobaciones fallaron: ${failed.map((entry) => entry.name).join('; ')}`,
+        failed.length === 0 ? `Instalado, verificado (${steps.length} comprobaciones), E2E ${quick ? 'corto' : 'completo'} y desinstalado sin restos` : `${failed.length} comprobaciones fallaron: ${failed.map((entry) => entry.name).join('; ')}`,
         { scenario });
     await writeFile(join(out, 'installer-test.json'), JSON.stringify(result, null, 2));
     return result;
@@ -265,6 +272,8 @@ function parseArgs(argv) {
         else if (arg === '--out') options.out = argv[++index];
         // Graba el recorrido sobre lo instalado sin repetir la suite «video».
         else if (arg === '--video') options.video = true;
+        // Prueba corta de `distribution` en vez del recorrido completo.
+        else if (arg === '--quick') options.quick = true;
         else throw new Error(`Opción desconocida: ${arg}`);
     }
     return options;
@@ -272,7 +281,7 @@ function parseArgs(argv) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     const options = parseArgs(process.argv.slice(2));
-    if (!options.installer) throw new Error('Uso: node scripts/test-installer.mjs --installer <setup.exe> [--release-dir <carpeta>] [--out <carpeta>] [--video]');
+    if (!options.installer) throw new Error('Uso: node scripts/test-installer.mjs --installer <setup.exe> [--release-dir <carpeta>] [--out <carpeta>] [--video] [--quick]');
     const installerName = basename(options.installer);
     const version = installerName.match(/WTerminal-(.+)-x64-setup\.exe$/u)?.[1];
     options.releaseDir ??= join(dirname(options.installer), version ? `WTerminal-${version}` : '.');

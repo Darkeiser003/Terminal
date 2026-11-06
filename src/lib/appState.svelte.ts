@@ -6,12 +6,30 @@
 
 import * as api from './api';
 import defaultBannerLogo from '../assets/banner/logo.png';
+import { rememberCommand } from './command-history';
 import { createKeyedSerialQueue } from './keyed-serial-queue';
 import { platformBrandText } from './localization';
 
 /** Cuántas terminales caben a la vez en la rejilla. Cuatro es el límite en el
  *  que cada una sigue siendo usable a tamaño de ventana normal. */
 export const MAX_PANES = 4;
+
+/** Una pestaña mide como mucho 220 px: un nombre más largo no se llegaría a ver. */
+export const MAX_TAB_NAME = 60;
+
+/** Los colores que se pueden poner a una pestaña. Se leen bien sobre los temas
+ *  claros y oscuros porque solo pintan el borde izquierdo, no el texto. */
+export const TAB_COLORS = {
+    red: '#e5534b',
+    orange: '#e8912d',
+    yellow: '#d4b106',
+    green: '#3fb950',
+    cyan: '#39c5cf',
+    blue: '#4493f8',
+    purple: '#a371f7',
+    pink: '#db61a2',
+} as const;
+export type TabColor = keyof typeof TAB_COLORS;
 import { applyTheme } from './theme';
 import type {
     AppInfo,
@@ -62,6 +80,17 @@ class AppStore {
 
     /** El explorador lateral está a la vista. */
     explorerVisible = $state(false);
+
+    /** Nombres puestos a mano. Viven en la interfaz porque el backend reescribe
+     *  la etiqueta al cambiar de shell, y ese cambio no debe borrar el nombre. */
+    tabNames = $state<Record<string, string>>({});
+    /** Pestaña con el campo de renombrar abierto (doble clic, F2 o la paleta). */
+    renamingTabId = $state<string | null>(null);
+    /** Colores puestos a mano, igual que los nombres: solo de la interfaz. */
+    tabColors = $state<Record<string, TabColor>>({});
+    /** Órdenes escritas en todas las pestañas, la más reciente al final (ver
+     *  `command-history.ts`: qué entra y qué no). */
+    commandHistory = $state<string[]>([]);
 
     /** Evita que un refresco lento de entornos pueda devolver la lista a un
      *  estado anterior si el usuario pulsa refrescar varias veces. */
@@ -256,21 +285,53 @@ class AppStore {
     }
 
     /** Establece directamente el número de casillas visibles. Se usa por la
-     *  consola interna (`:panes 1|2|3|4`) además del botón que rota el diseño.
-     *  Reutilizar el ciclo existente conserva la lógica de abrir las pestañas
-     *  que falten y evita dos algoritmos que pudieran desincronizar la rejilla. */
+     *  consola interna (`:panes 1|2|3|4`) y por el botón «Separar». Va directo
+     *  al número pedido: pasar por el ciclo abría pestañas de las casillas
+     *  intermedias aunque se pidiera volver a una sola. */
     async setPaneCount(count: number): Promise<void> {
         const target = Math.min(MAX_PANES, Math.max(1, Math.trunc(count)));
-        for (let attempts = 0; attempts < MAX_PANES; attempts += 1) {
-            const current = this.panes.length < 2 ? 1 : this.panes.length;
-            if (current === target) return;
-            await this.cyclePanes();
+        await this.paneCyclePromise;
+        const current = this.panes.length < 2 ? 1 : this.panes.length;
+        if (current === target) return;
+        const operation = this.applyPaneCount(target).catch((error) => {
+            console.error('[AppStore] pane count failed', error);
+        });
+        this.paneCyclePromise = operation;
+        try {
+            await operation;
+        } finally {
+            if (this.paneCyclePromise === operation) this.paneCyclePromise = null;
         }
+    }
+
+    /** Saca una pestaña de la rejilla sin cerrarla ni tocar las demás. Si era
+     *  la activa se pasa a otra casilla: lo que se pidió es dejar de verla. */
+    removeFromPanes(tabId: string): void {
+        if (this.panes.length < 2 || !this.panes.includes(tabId)) return;
+        const rest = this.panes.filter((id) => id !== tabId);
+        this.panes = rest.length < 2 ? [] : rest;
+        if (this.activeTabId === tabId) void this.activateTab(rest[0]);
+    }
+
+    /** Pone una pestaña que no se ve junto a las que sí, sin abrir ninguna. */
+    addToPanes(tabId: string): void {
+        if (!this.canAddToPanes(tabId)) return;
+        const base = this.panes.length >= 2 ? this.panes : [this.activeTabId as string];
+        this.panes = [...base, tabId];
+    }
+
+    canAddToPanes(tabId: string): boolean {
+        if (!this.tabs.some((tab) => tab.id === tabId)) return false;
+        if (this.panes.length >= 2) return this.panes.length < MAX_PANES && !this.panes.includes(tabId);
+        return Boolean(this.activeTabId) && this.activeTabId !== tabId;
     }
 
     private async cyclePanesOnce(): Promise<void> {
         const actual = this.panes.length < 2 ? 1 : this.panes.length;
-        const siguiente = (actual % MAX_PANES) + 1;
+        await this.applyPaneCount((actual % MAX_PANES) + 1);
+    }
+
+    private async applyPaneCount(siguiente: number): Promise<void> {
         if (siguiente < 2) {
             this.panes = [];
             return;
@@ -432,6 +493,28 @@ class AppStore {
         });
     }
 
+    /** El nombre que se enseña: el puesto a mano o el del entorno. */
+    tabTitle(tab: TabSummary): string {
+        return this.tabNames[tab.id] ?? tab.label;
+    }
+
+    /** Un nombre vacío devuelve la pestaña al nombre de su entorno. */
+    renameTab(tabId: string, name: string): void {
+        const { [tabId]: _previous, ...others } = this.tabNames;
+        const clean = name.trim().slice(0, MAX_TAB_NAME);
+        this.tabNames = clean ? { ...others, [tabId]: clean } : others;
+    }
+
+    recordCommand(command: string): void {
+        this.commandHistory = rememberCommand(this.commandHistory, command);
+    }
+
+    /** `null` devuelve la pestaña a su aspecto normal. */
+    setTabColor(tabId: string, color: TabColor | null): void {
+        const { [tabId]: _previous, ...others } = this.tabColors;
+        this.tabColors = color && color in TAB_COLORS ? { ...others, [tabId]: color } : others;
+    }
+
     private enqueueTabLifecycle<T>(operation: () => Promise<T>): Promise<T> {
         const next = this.tabLifecycleQueue
             .catch(() => undefined)
@@ -448,6 +531,9 @@ class AppStore {
     handleTabClosed(tabId: string, activeTabId: string | null): void {
         this.tabs = this.tabs.filter((tab) => tab.id !== tabId);
         this.activeTabId = activeTabId;
+        this.renameTab(tabId, '');
+        this.setTabColor(tabId, null);
+        if (this.renamingTabId === tabId) this.renamingTabId = null;
         this.syncPanes();
     }
 

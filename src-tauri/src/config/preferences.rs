@@ -433,6 +433,7 @@ const CURSOR_STYLES: [&str; 5] = ["block", "underline", "bar", "beam", "underlin
 const FONT_WEIGHTS: [&str; 5] = ["light", "normal", "medium", "semibold", "bold"];
 const UI_DENSITIES: [&str; 2] = ["compact", "comfortable"];
 const GITHUB_SESSION_MODES: [&str; 3] = ["always", "onExhausted", "never"];
+const WEBVIEW2_MISSING_MODES: [&str; 3] = ["ask", "download", "never"];
 
 /// Las preferencias tal y como viajan al renderer y se guardan en disco. Los
 /// nombres son los mismos que en la versión Electron, así que un
@@ -503,6 +504,9 @@ pub struct Preferences {
     pub shortcut_explorer_cd: String,
     pub shortcut_clear_terminal: String,
     pub shortcut_search_terminal: String,
+    pub shortcut_search_history: String,
+    pub shortcut_previous_command: String,
+    pub shortcut_next_command: String,
     pub shortcut_open_system_explorer: String,
     pub shortcut_ui_scale_up: String,
     pub shortcut_ui_scale_down: String,
@@ -541,6 +545,9 @@ pub struct Preferences {
     pub terminal_padding: i64,
     pub terminal_scrollback: i64,
     pub terminal_cursor_blink: bool,
+    /// Que cmd, PowerShell y bash marquen con OSC 133 dónde empieza y acaba
+    /// cada orden. Cambia su prompt, así que vale para las pestañas nuevas.
+    pub terminal_command_marks: bool,
     /// Enlaces clicables en la salida: URL http/https, `file:` y OSC 8 se
     /// abren con Ctrl+clic tras validarlos en `terminal::links`.
     pub terminal_links: bool,
@@ -567,6 +574,15 @@ pub struct Preferences {
     /// Cuándo usar la sesión de `gh` para las consultas de Explorar GitHub:
     /// `always`, `onExhausted` (al agotar las 60 públicas por hora) o `never`.
     pub github_session_mode: String,
+    /// Privacidad y red: buscar versión nueva de WTerminal (GitHub) al
+    /// arrancar.
+    pub check_updates_on_startup: bool,
+    /// Privacidad y red: pedir al gestor de paquetes (winget, apt…) la lista
+    /// de actualizaciones de programas al arrancar.
+    pub check_package_updates_on_startup: bool,
+    /// Si falta WebView2 (Windows): `ask`, `download` (de Microsoft, sin
+    /// preguntar) o `never` (solo avisar).
+    pub webview2_missing: String,
     pub default_environment_id: String,
     /// Solicita elevación UAC al iniciar WTerminal para que las shells,
     /// intérpretes y herramientas hereden un token administrativo.
@@ -1259,6 +1275,18 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("shortcutSearchTerminal"),
             &defaults.shortcut_search_terminal,
         ),
+        shortcut_search_history: safe_shortcut(
+            get("shortcutSearchHistory"),
+            &defaults.shortcut_search_history,
+        ),
+        shortcut_previous_command: safe_shortcut(
+            get("shortcutPreviousCommand"),
+            &defaults.shortcut_previous_command,
+        ),
+        shortcut_next_command: safe_shortcut(
+            get("shortcutNextCommand"),
+            &defaults.shortcut_next_command,
+        ),
         shortcut_open_system_explorer: safe_shortcut(
             get("shortcutOpenSystemExplorer"),
             &defaults.shortcut_open_system_explorer,
@@ -1349,6 +1377,10 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("terminalCursorBlink"),
             defaults.terminal_cursor_blink,
         ),
+        terminal_command_marks: bool_or_default(
+            get("terminalCommandMarks"),
+            defaults.terminal_command_marks,
+        ),
         terminal_links: bool_or_default(get("terminalLinks"), defaults.terminal_links),
         terminal_links_confirm: bool_or_default(
             get("terminalLinksConfirm"),
@@ -1362,7 +1394,7 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
         ),
         copy_on_select: bool_or_default(get("copyOnSelect"), defaults.copy_on_select),
         ui_density: one_of(get("uiDensity"), &UI_DENSITIES, &defaults.ui_density),
-        ui_scale: integer_in_range(get("uiScale"), 80, 200, defaults.ui_scale),
+        ui_scale: integer_in_range(get("uiScale"), 80, 500, defaults.ui_scale),
         suggest_repository_import: bool_or_default(
             get("suggestRepositoryImport"),
             defaults.suggest_repository_import,
@@ -1373,6 +1405,19 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("githubSessionMode"),
             &GITHUB_SESSION_MODES,
             &defaults.github_session_mode,
+        ),
+        check_updates_on_startup: bool_or_default(
+            get("checkUpdatesOnStartup"),
+            defaults.check_updates_on_startup,
+        ),
+        check_package_updates_on_startup: bool_or_default(
+            get("checkPackageUpdatesOnStartup"),
+            defaults.check_package_updates_on_startup,
+        ),
+        webview2_missing: one_of(
+            get("webview2Missing"),
+            &WEBVIEW2_MISSING_MODES,
+            &defaults.webview2_missing,
         ),
         default_environment_id: safe_environment_id(get("defaultEnvironmentId")),
         terminal_admin_by_default: bool_or_default(

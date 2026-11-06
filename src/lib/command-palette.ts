@@ -47,9 +47,15 @@ export type PaletteAppAction =
     | 'explorerCd'
     | 'openSystemExplorer'
     | 'searchTerminal'
+    | 'searchHistory'
+    | 'saveTerminalOutput'
+    | 'copyLastOutput'
+    | 'previousCommand'
+    | 'nextCommand'
     | 'clearTerminal'
     | 'toggleTerminalOnly'
     | 'newTab'
+    | 'renameTab'
     | 'cyclePanes'
     | 'nextTab'
     | 'previousTab'
@@ -151,9 +157,15 @@ export const PALETTE_APP_ACTIONS: ReadonlyArray<AppActionDefinition> = [
     { action: 'uiScaleReset', group: 'panels', labelKey: 'palette.action.uiScaleReset', fallback: 'Tamaño de la interfaz al 100 %', shortcut: 'shortcutUiScaleReset', command: ':ui-scale 100', keywords: ['reset', 'zoom', 'ui'] },
     { action: 'closePanel', group: 'panels', labelKey: 'palette.action.closePanel', fallback: 'Cerrar los paneles', shortcut: 'shortcutClosePanel', command: ':panel close', keywords: ['close'] },
     { action: 'searchTerminal', group: 'terminal', labelKey: 'palette.action.searchTerminal', fallback: 'Buscar en el historial de la terminal', shortcut: 'shortcutSearchTerminal', keywords: ['search', 'find', 'scrollback'] },
+    { action: 'searchHistory', group: 'terminal', labelKey: 'palette.action.searchHistory', fallback: 'Buscar en las órdenes escritas', shortcut: 'shortcutSearchHistory', keywords: ['history', 'ctrl+r', 'reverse', 'search', 'command'] },
+    { action: 'saveTerminalOutput', group: 'terminal', labelKey: 'palette.action.saveTerminalOutput', fallback: 'Guardar la salida en un archivo', keywords: ['save', 'export', 'log', 'output'] },
+    { action: 'copyLastOutput', group: 'terminal', labelKey: 'menu.copyLastOutput', fallback: 'Copiar la salida de la última orden', keywords: ['copy', 'output', 'last'] },
+    { action: 'previousCommand', group: 'terminal', labelKey: 'palette.action.previousCommand', fallback: 'Ir a la orden anterior', shortcut: 'shortcutPreviousCommand', keywords: ['jump', 'previous', 'command'] },
+    { action: 'nextCommand', group: 'terminal', labelKey: 'palette.action.nextCommand', fallback: 'Ir a la orden siguiente', shortcut: 'shortcutNextCommand', keywords: ['jump', 'next', 'command'] },
     { action: 'clearTerminal', group: 'terminal', labelKey: 'palette.action.clearTerminal', fallback: 'Limpiar la terminal (clear)', shortcut: 'shortcutClearTerminal', command: 'clear', keywords: ['clear', 'cls'] },
     { action: 'toggleTerminalOnly', group: 'terminal', labelKey: 'palette.action.toggleTerminalOnly', fallback: 'Alternar el modo de terminal limpia', shortcut: 'shortcutToggleTerminalOnly', keywords: ['clean', 'fullscreen', 'terminal-only'] },
     { action: 'newTab', group: 'tabs', labelKey: 'palette.action.newTab', fallback: 'Nueva pestaña', shortcut: 'shortcutNewTab', keywords: ['tab', 'new'] },
+    { action: 'renameTab', group: 'tabs', labelKey: 'palette.action.renameTab', fallback: 'Renombrar la pestaña', keywords: ['tab', 'rename', 'title'] },
     { action: 'cyclePanes', group: 'tabs', labelKey: 'palette.action.cyclePanes', fallback: 'Dividir: añadir una terminal a la vista', shortcut: 'shortcutCyclePanes', command: ':panes cycle', keywords: ['split', 'panes', ':layout', ':grid'] },
     { action: 'nextTab', group: 'tabs', labelKey: 'palette.action.nextTab', fallback: 'Pestaña siguiente', shortcut: 'shortcutNextTab', keywords: ['tab', 'next'] },
     { action: 'previousTab', group: 'tabs', labelKey: 'palette.action.previousTab', fallback: 'Pestaña anterior', shortcut: 'shortcutPreviousTab', keywords: ['tab', 'previous'] },
@@ -189,11 +201,12 @@ const PANEL_VISIBILITY: Partial<Record<PaletteAppAction, keyof Preferences>> = {
 
 /** Acciones que necesitan una pestaña viva. */
 const NEEDS_TAB: ReadonlySet<PaletteAppAction> = new Set([
-    'searchTerminal', 'clearTerminal', 'openSystemExplorer', 'explorerCd', 'explorerFollow',
+    'searchTerminal', 'saveTerminalOutput', 'copyLastOutput', 'previousCommand', 'nextCommand', 'renameTab',
+    'clearTerminal', 'openSystemExplorer', 'explorerCd', 'explorerFollow', 'searchHistory',
 ]);
 
 /** Acciones que escriben una orden en la terminal y por tanto exigen shell. */
-const NEEDS_SHELL: ReadonlySet<PaletteAppAction> = new Set(['clearTerminal']);
+const NEEDS_SHELL: ReadonlySet<PaletteAppAction> = new Set(['clearTerminal', 'searchHistory']);
 
 const MODIFIER_LABELS: Record<string, string> = { ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Meta' };
 const KEY_LABELS: Record<string, string> = {

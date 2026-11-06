@@ -7,20 +7,22 @@
 //! | Cachés | `cache/` | npm, Yarn, Bun, Deno, pip, uv, Go, NuGet, Coursier, Composer | activa |
 //! | Descargas del panel | `descargas/` | Los archivos que bajan las acciones del panel (ADB…) | activa |
 //! | Modelos de IA | `ia/` | `HF_HOME`; `OLLAMA_MODELS` solo si aún no hay modelos de Ollama | activa |
-//! | Herramientas nuevas | `herramientas/` | `npm -g`, `cargo install`, `go install`, `pip --user`, con su `bin` en el PATH | apagada |
-//! | Historial de los REPL | `historial/` | Node, Python 3.13+, SQLite y psql | apagada |
-//! | Toolchains completas | `toolchains/` | rustup, cargo, GOPATH, Gradle, .NET, Android | apagada |
+//! | Herramientas nuevas | `herramientas/` | `npm -g`, `cargo install`, `go install`, `pip --user`, con su `bin` en el PATH | activa |
+//! | Historial de los REPL | `historial/` | Node, Python 3.13+, SQLite y psql | activa |
+//! | Toolchains completas | `toolchains/` | rustup, cargo, GOPATH, Gradle, .NET, Android; solo si aún no estaban instaladas | activa |
 //! | Programas | `programas/<id>` | `--location` de WinGet en las acciones «Instalar»; Chocolatey (con sus paquetes) y sus herramientas sueltas también | activa |
+//! | Proyectos de GitHub | `proyectos/` | La carpeta donde se clonan los proyectos | apagada |
 //!
 //! Cada herramienta ya permite elegir su carpeta con una variable de entorno
 //! estándar. WTerminal la inyecta solo en los procesos que lanza (terminales
 //! y sondas de detección): no toca las variables del sistema, no pisa las que
-//! el usuario ya haya definido y nunca mueve nada ya instalado. Por eso
-//! «Herramientas nuevas» va apagada de fábrica: lo que se instale con ella
-//! queda en el PATH solo dentro de WTerminal (y de la integración con el PATH
-//! si se activa), y lo que ya estaba instalado sigue donde estaba y se sigue
-//! detectando. Los navegadores de Playwright, los entornos de Poetry o
-//! `GRADLE_USER_HOME` (con credenciales) no se reubican nunca.
+//! el usuario ya haya definido y nunca mueve nada ya instalado: lo que ya
+//! estaba sigue donde estaba y se sigue detectando, y una toolchain ya
+//! instalada no se reubica. Las carpetas `bin` nuevas van en el PATH de
+//! WTerminal y, con la integración con el PATH, también en el del usuario
+//! junto a las variables que necesitan (`BIN_REQUIRES`). Los proyectos de
+//! GitHub siguen de fábrica en Documentos. Los navegadores de Playwright o los
+//! entornos de Poetry no se reubican nunca.
 //!
 //! Ajustes enseña además cada carpeta que usa WTerminal (ajustes, registros,
 //! datos de la interfaz, temporales…) y las ubicaciones habituales de otras
@@ -1667,7 +1669,7 @@ mod tests {
         ai_models: true,
         tools: true,
         repl_history: true,
-        toolchains: false,
+        toolchains: true,
         programs: true,
         projects: false,
     };
@@ -1695,10 +1697,14 @@ mod tests {
             .iter()
             .filter(|cache| cache.category != Category::Toolchains)
             .all(|cache| !toolchain_preinstalled(cache)));
-        // Apagada de fábrica: ninguna variable de toolchain sin activarla.
+        // Activa de fábrica; apagada, ninguna variable de toolchain.
+        assert!(CATEGORIAS_DE_FABRICA.toolchains && !CATEGORIAS_DE_FABRICA.projects);
         let overrides = overrides_for(
             Some(Path::new("C:/store")),
-            CATEGORIAS_DE_FABRICA,
+            Categories {
+                toolchains: false,
+                ..CATEGORIAS_DE_FABRICA
+            },
             false,
             &|_| false,
         );

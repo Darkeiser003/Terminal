@@ -226,11 +226,13 @@ for (const line of sums) {
     check(hash.toLowerCase() === match[1].toLowerCase(), `hash incorrecto para ${match[2]}`);
 }
 // Una release local sin clave de firma es válida (el builder avisa de que el
-// actualizador la rechazará); el build indica qué firmas generó. Sin esa
-// lista se exigen ambas, como en una release oficial.
+// actualizador la rechazará); el build indica qué firmas generó, o `none` si
+// no generó ninguna. Sin esa lista se exigen ambas, como en una release
+// oficial.
 const expectedSignatures = process.env.WTERMINAL_EXPECTED_RELEASE_SIGNATURES === undefined
     ? ['SHA256SUMS.txt.sig', 'SHA256SUMS.txt.sshsig']
-    : process.env.WTERMINAL_EXPECTED_RELEASE_SIGNATURES.split(';').map((name) => name.trim()).filter(Boolean);
+    : process.env.WTERMINAL_EXPECTED_RELEASE_SIGNATURES.split(';').map((name) => name.trim())
+        .filter((name) => name && name !== 'none');
 for (const signature of expectedSignatures) {
     const info = await stat(join(releaseRoot, signature)).catch(() => null);
     check(info !== null && info.size > 32, `firma ausente o vacía: ${signature}`);

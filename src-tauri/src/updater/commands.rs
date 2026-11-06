@@ -308,7 +308,11 @@ pub async fn update_check(app: AppHandle) -> UpdateStatus {
 /// seguir usando `update_check` para informar de una release manualmente.
 #[tauri::command]
 pub async fn update_check_on_startup(app: AppHandle) -> UpdateStatus {
-    if install_dir::staging().is_none() || !security::release_signing_configured() {
+    // Ajustes › Privacidad y red: sin la opción no se consulta GitHub.
+    if install_dir::staging().is_none()
+        || !security::release_signing_configured()
+        || !crate::preferences::current().check_updates_on_startup
+    {
         return local_status(&app);
     }
     update_check(app).await
@@ -328,6 +332,14 @@ pub fn package_updates_check(
     if std::env::var("LTERMINAL_E2E_TESTING").as_deref() == Ok("1")
         && std::env::var("LTERMINAL_E2E_PACKAGE_UPDATES").as_deref() != Ok("1")
     {
+        return package_updates::PackageUpdateStatus::default();
+    }
+    // Ajustes › Privacidad y red: sin la opción no se pregunta al gestor.
+    if !crate::preferences::current().check_package_updates_on_startup {
+        log_info!(
+            "Búsqueda de actualizaciones de programas al arrancar desactivada en Ajustes",
+            serde_json::json!({})
+        );
         return package_updates::PackageUpdateStatus::default();
     }
     let Some(manager) = package_updates::host_manager(state.inventory().pkg_manager.as_deref())
@@ -439,7 +451,13 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
     // La limpieza de restos de un arranque anterior no puede retirar un `.old`
     // o un archivo de staging mientras se descarga, aplica o hace rollback.
     let _files_guard = lock_update_files();
-    let Some(staging) = install_dir::staging() else {
+    let kind = self_update::PackageKind::current();
+    let staging = if kind.uses_system_installer() {
+        self_update::installer_staging()
+    } else {
+        install_dir::staging()
+    };
+    let Some(staging) = staging else {
         return failed("Esta copia no se puede actualizar sola: es una compilación de desarrollo.");
     };
     let Some(install) = install_dir::current() else {
@@ -522,6 +540,9 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
     if let Err(error) = security::verify_checksum(&manifest, &asset.name, &descarga) {
         return failed(error);
     }
+    if kind.uses_system_installer() {
+        return launch_installer(&app, &state, &descarga, &staging, &release.tag);
+    }
     let _ = app.emit(
         "update-progress",
         UpdateProgress {
@@ -589,12 +610,142 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
     app.restart();
 }
 
+/// La copia instalada se actualiza con su instalador, ya verificado. El aviso
+/// de UAC sale mientras la app sigue abierta: si se cancela, no se cierra nada
+/// y se dice. Si se acepta, el proceso elevado espera a que la app termine,
+/// abre el instalador en modo pasivo y este la vuelve a abrir al acabar.
+#[cfg(windows)]
+fn launch_installer(
+    app: &AppHandle,
+    state: &AppState,
+    installer: &Path,
+    staging: &Path,
+    tag: &str,
+) -> UpdateResult {
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgress {
+            stage: "complete",
+            bytes: 0,
+            total: None,
+            percent: Some(100),
+        },
+    );
+    let powershell = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let arguments = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+    ]
+    .iter()
+    .map(|argument| argument.to_string())
+    .chain(Some(self_update::installer_launch_script(
+        std::process::id(),
+        installer,
+    )))
+    .collect::<Vec<_>>();
+    if let Err(error) = crate::platform::run_elevated(&powershell, &arguments, staging) {
+        return failed(error);
+    }
+    log_info!(
+        "Instalador de la actualización lanzado; cerrando para que pueda sustituir la app",
+        serde_json::json!({ "version": tag, "instalador": installer.to_string_lossy() })
+    );
+    state.tabs.shutdown();
+    crate::session_files::cleanup();
+    app.exit(0);
+    UpdateResult {
+        ok: true,
+        version: Some(tag.to_string()),
+        ..Default::default()
+    }
+}
+
+/// La copia del `.deb` o del `.rpm` se actualiza con su gestor de paquetes y
+/// `pkexec`, que pide la contraseña con el diálogo del escritorio. En Linux el
+/// binario en marcha se puede sustituir, así que se espera a que termine y se
+/// reinicia; si se cancela el diálogo, no se cierra nada y se dice.
+#[cfg(not(windows))]
+fn launch_installer(
+    app: &AppHandle,
+    state: &AppState,
+    package: &Path,
+    _staging: &Path,
+    tag: &str,
+) -> UpdateResult {
+    let Some(orden) = self_update::linux_package_command(
+        self_update::PackageKind::current(),
+        package,
+        crate::path_env::which,
+    ) else {
+        return failed(format!(
+            "No se encontró pkexec o el gestor de paquetes. El paquete verificado está en {}: instálalo con apt, dnf o zypper y reinicia la app.",
+            package.display()
+        ));
+    };
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgress {
+            stage: "complete",
+            bytes: 0,
+            total: None,
+            percent: Some(100),
+        },
+    );
+    log_info!(
+        "Instalando la actualización con el gestor de paquetes",
+        serde_json::json!({ "version": tag, "orden": &orden })
+    );
+    let args: Vec<&str> = orden[1..].iter().map(String::as_str).collect();
+    let Some(salida) =
+        crate::process::run_with_timeout(&orden[0], &args, std::time::Duration::from_secs(15 * 60))
+    else {
+        return failed(
+            "El gestor de paquetes no respondió a tiempo; la versión instalada no cambió.",
+        );
+    };
+    if !salida.status.success() {
+        // 126 y 127: `pkexec` sin autorización (diálogo cancelado o denegado).
+        if matches!(salida.status.code(), Some(126 | 127)) {
+            return failed("Se canceló la autorización; la versión instalada no cambió.");
+        }
+        // Las últimas líneas de error son las que dicen qué pasó.
+        let detalle = String::from_utf8_lossy(&salida.stderr);
+        let lineas: Vec<&str> = detalle.trim().lines().collect();
+        return failed(format!(
+            "El gestor de paquetes no pudo instalar la actualización: {}",
+            lineas[lineas.len().saturating_sub(4)..].join(" ")
+        ));
+    }
+    log_info!(
+        "Actualización instalada con el gestor de paquetes; reiniciando",
+        serde_json::json!({ "version": tag })
+    );
+    let _ = std::fs::remove_file(package);
+    state.tabs.shutdown();
+    crate::session_files::cleanup();
+    app.restart();
+}
+
 /// Al arrancar, borrar restos de una actualización anterior. La consulta de
 /// red se inicia desde la interfaz una vez montada, y su resultado vuelve por
 /// la promesa IPC; así no se pierde un evento emitido antes de que exista el
 /// listener del frontend.
 pub fn on_startup() {
     let _files_guard = lock_update_files();
+    // El instalador o paquete descargado ya hizo su trabajo: si esta copia
+    // arranca, o se instaló o se canceló, y en ambos casos sobra.
+    if self_update::PackageKind::current().uses_system_installer() {
+        if let Some(staging) = self_update::installer_staging() {
+            let _ = std::fs::remove_dir_all(staging);
+        }
+    }
     if let Some(install) = install_dir::current() {
         let borrados = self_update::cleanup(&install);
         if borrados > 0 {

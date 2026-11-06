@@ -36,7 +36,9 @@ const ignoredFiles = new Set(['Cargo.lock', 'verify-install-sources.mjs', 'test-
 // ffmpeg.org solo sale en el mensaje que pide instalar ffmpeg a mano: el
 // builder lo instala con WinGet. Desde la VM, `fetch` de Node no conectaba con
 // él (UND_ERR_CONNECT_TIMEOUT) mientras PowerShell sí, y paraba la release.
-const nonBlockingHosts = new Set(['codeweavers.com', 'www.codeweavers.com', 'ffmpeg.org']);
+// www.7-zip.org es igual: solo sale en dos mensajes de error de
+// `windows/build.ps1`, y desde el 02-11 no resuelve ni con 1.1.1.1 ni con 8.8.8.8.
+const nonBlockingHosts = new Set(['codeweavers.com', 'www.codeweavers.com', 'ffmpeg.org', 'www.7-zip.org']);
 const execFileAsync = promisify(execFile);
 const urlPattern = /https?:\/\/[^\s<>"'`\\]+/g;
 const trailingPunctuation = /[),.;:!?\]}]+$/;

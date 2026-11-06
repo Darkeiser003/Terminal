@@ -61,6 +61,22 @@ github-target = { path = "crates/github-target", version = "1.0.0" }
 # Lectura directa del Registro: evita arrancar `reg.exe` decenas de veces al
 # construir por primera vez el banner del sistema.
 winreg = "0.56"
+# Preflight de WebView2: comprobar la firma Authenticode de su instalador
+# (WinTrust), el aviso nativo de cuando falta (TaskDialog), sin interfaz web, y
+# la consola de quien lanza `--install-webview2`.
+# Es la misma versión que ya trae Tauri: no añade un crate nuevo.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_System_Console",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -71,3 +87,13 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# Para iterar pruebas (`npm run dev:test`): el mismo código y las mismas
+# opciones que release, pero sin LTO, en muchas unidades y con compilación
+# incremental, para que un cambio se recompile en uno o dos minutos y no en
+# nueve. El binario queda en `target/fast/` y nunca se publica.
+[profile.fast]
+inherits = "release"
+codegen-units = 256
+incremental = true
+lto = false

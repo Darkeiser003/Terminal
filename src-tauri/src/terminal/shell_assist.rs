@@ -789,16 +789,19 @@ fn collect_status(refresh: bool) -> ShellAssistStatus {
             .iter()
             // zsh solo cuenta en las distros que lo tienen; sin inventario
             // detallado no se sabe, y se enseña igualmente como desconocido.
+            // Si la sonda falló pero hay una detección buena anterior, vale
+            // lo último conocido, como en el catálogo.
             .filter(|distro| {
                 kind != ShellKind::Zsh
-                    || !distro.detailed
+                    || !(distro.detailed || distro.previous_inventory)
                     || distro.shells.iter().any(|s| s == "zsh")
             })
             .flat_map(|distro| {
                 plugins_for(kind).map(move |plugin| ShellAssistComponent {
                     label: plugin.label.to_string(),
                     distro: Some(distro.name.clone()),
-                    installed: (distro.detailed && !distro.probe_error)
+                    installed: ((distro.detailed && !distro.probe_error)
+                        || distro.previous_inventory)
                         .then(|| distro.tools.iter().any(|tool| tool == plugin.marker)),
                     search: plugin.label.to_string(),
                 })
@@ -821,11 +824,12 @@ fn collect_status(refresh: bool) -> ShellAssistStatus {
                 shell: "powershell",
                 components: vec![
                     ShellAssistComponent {
-                        label: "PSReadLine ≥ 2.1 (Windows PowerShell)".into(),
+                        // El mismo mínimo que `PSREADLINE_DETECT` en el catálogo.
+                        label: "PSReadLine ≥ 2.2 (Windows PowerShell)".into(),
                         distro: None,
                         installed: Some(
                             windows_powershell_psreadline()
-                                .is_some_and(|version| version >= (2, 1)),
+                                .is_some_and(|version| version >= (2, 2)),
                         ),
                         search: "PSReadLine".into(),
                     },

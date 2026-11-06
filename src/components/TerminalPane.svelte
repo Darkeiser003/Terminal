@@ -6,7 +6,7 @@
     // Port de `createXtermForTab` y sus alrededores en renderer.js.
 
     import { onMount, onDestroy, tick } from 'svelte';
-    import { Terminal, type ILinkHandler } from '@xterm/xterm';
+    import { Terminal, type ILinkHandler, type IMarker } from '@xterm/xterm';
     import { FitAddon } from '@xterm/addon-fit';
     import { SearchAddon } from '@xterm/addon-search';
     import { ImageAddon } from '@xterm/addon-image';
@@ -14,6 +14,8 @@
     import { WebLinksAddon } from '@xterm/addon-web-links';
     import { alignSixelWithConpty } from '../lib/sixel-conpty';
     import { attachBannerImages, type BannerImageController } from '../lib/banner-image';
+    import { invalidateLinkCache } from '../lib/link-cache';
+    import { AI_COMMAND_MIN_MS, aiCommandName, flattenCsiParams, FULL_SCREEN_MIN_COLS, fullScreenTransition, isAiCommandLine, isAiEnvironmentId, type FullScreenAppReason } from '../lib/full-screen-app';
     import { columnAtTextIndex, comparePoints, contentEndColumn, inputSelectionEdit, promptInputStart, selectionSearchText, type BufferPoint, type InputSelectionEdit } from '../lib/input-selection';
     import { TERMINAL_LINK_REGEX, checkTerminalLink, isLinkActivation, linkRejectionMessageKey, type TerminalLinkScheme } from '../lib/terminal-links';
 
@@ -24,14 +26,17 @@
     import * as perf from '../lib/performance';
     import { retryUntilReady } from '../lib/terminal-ready';
     import { normalizeWheelDelta } from '../lib/terminal-scroll';
-    import { inputReservationColumns, isShellInputLine, longestVisibleLogicalLineWidth, occupiedTerminalColumns, requiredTerminalColumns } from '../lib/terminal-columns';
+    import { EMPTY_OUTPUT_LINE, inputReservationColumns, isShellInputLine, longestVisibleLogicalLineWidth, measureOutputChunk, occupiedTerminalColumns, requiredTerminalColumns, withoutTerminalControls, type OutputLineCarry } from '../lib/terminal-columns';
     import {
         interactiveReplBannerSignalsReady,
         interactiveReplInputLine,
         interactiveReplPromptIsVisible,
     } from '../lib/terminal-prompt';
     import { cursorInactiveStyle, cursorOptions, terminalFont, terminalFontWeight, terminalTheme, themePreferencePatch } from '../lib/theme';
+    import { CommandTracker, formatDuration, outputRange, type CommandRecord } from '../lib/command-marks';
     import {
+        bufferText,
+        outputFileName,
         registerTerminal,
         registerTerminalControls,
         unregisterTerminal,
@@ -131,7 +136,22 @@
     let linkDialog = $state<{ url: string; host: string; scheme: TerminalLinkScheme } | null>(null);
     let linkOpenButton = $state<HTMLButtonElement | undefined>(undefined);
     let linkNotice = $state<string | null>(null);
+    // Una IA tecleada en una shell con líneas más anchas que la vista no
+    // puede encoger (`setFullScreenApp`): se sugiere abrirla en su pestaña.
+    let aiTabHint = $state<{ name: string; envId: string | null } | null>(null);
     let linkNoticeTimer: number | undefined;
+    // Marcas OSC 133 de la shell (`command-marks.ts`). Si no emite ninguna, esto
+    // no llega a usarse y las acciones lo explican con un aviso.
+    let commandTracker: CommandTracker | null = null;
+    // Fila de la última marca `B` (fin del prompt). Una orden que la app
+    // escribe nada más abrir la pestaña (`gh auth login`) borra en cmd la
+    // línea del prompt al pintar su recuadro: la marca prueba que la shell ya
+    // arrancó aunque esa línea no se vea, y sin ella el teclado esperaba al
+    // seguro de 35 s con la pregunta Y/n de gh a la vista.
+    let lastPromptMark: IMarker | undefined;
+    // Con el prompt ya a la vista xterm no desplaza nada: sin recordar a qué
+    // fila se saltó, cada pulsación repetiría el mismo salto.
+    let commandJumpLine: number | null = null;
 
     const osc8LinkHandler: ILinkHandler = {
         // Los OSC 8 de cualquier esquema llegan al manejador, que solo deja
@@ -199,6 +219,10 @@
             default:
                 return;
         }
+        showTerminalNotice(text);
+    }
+
+    function showTerminalNotice(text: string): void {
         linkNotice = text;
         if (linkNoticeTimer !== undefined) window.clearTimeout(linkNoticeTimer);
         linkNoticeTimer = window.setTimeout(() => {
@@ -331,6 +355,8 @@
             searchAddon?.clearDecorations();
             return;
         }
+        // Saltar a una coincidencia es leer el historial, como la rueda.
+        lastVerticalGestureAt = performance.now();
         const found = backwards
             ? searchAddon.findPrevious(query, searchOptions)
             : searchAddon.findNext(query, searchOptions);
@@ -447,7 +473,18 @@
     // historial y devuelve el cursor a la fila/columna que conserva ConPTY.
     let internalWritesPending = 0;
     let internalBatchStart: { row: number; col: number } | null = null;
+    /** Orden interna (`:banner`…) que aún no se ha repetido en su salida. */
+    let pendingInternalEcho: string | null = null;
     function writeInternal(text: string): void {
+        // La orden interna se borra de la línea de la shell (si no, la shell
+        // la ejecutaría) y la fila de su prompt queda vacía. Se repite,
+        // atenuada y en su propia línea, al empezar su salida: la fila del
+        // prompt es de ConPTY y la repintaría con lo que la shell cree que hay.
+        if (pendingInternalEcho) {
+            const echo = pendingInternalEcho;
+            pendingInternalEcho = null;
+            text = `\r\n\x1b[2m${echo}\x1b[0m${text.startsWith('\r\n') ? '' : '\r\n'}${text}`;
+        }
         internalWritesPending += 1;
         internalOutputQueue = internalOutputQueue.then(() => new Promise<void>((resolve) => {
             if (destroyed || !term) {
@@ -939,6 +976,9 @@
         if (!['help', 'alias', 'darkeiser003', 'christianlg97'].includes(command.action)) {
             await api.sendInput(tabId, '\r');
             await new Promise((resolve) => window.setTimeout(resolve, 180));
+            // :help, :alias y los créditos ya dejan a la vista la orden
+            // `ayuda …` que ejecutan en la shell; el resto, la suya.
+            pendingInternalEcho = line.trim();
         }
         if (command.action === 'config') {
             window.dispatchEvent(new CustomEvent('winslim:open-settings'));
@@ -1019,6 +1059,9 @@
         // de la shell queda siempre después del bloque de salida, nunca en
         // medio de sus cabeceras o líneas largas.
         await flushInternalOutput();
+        // Una orden sin salida propia (abrir Ajustes o un panel) no deja eco
+        // pendiente para la siguiente.
+        pendingInternalEcho = null;
         return { handled: true, shellPrintsPrompt };
     }
 
@@ -1101,7 +1144,7 @@
     let commandPtyWarmupColumns = 0;
     let commandPtyWarmupQueue: Promise<void> = Promise.resolve();
     function warmupPtyForInput(): Promise<void> {
-        if (!term || destroyed) return commandPtyWarmupQueue;
+        if (!term || destroyed || fullScreenApp) return commandPtyWarmupQueue;
         // El primer `pty_resize` confirma la geometría y arranca la shell en
         // el backend; debe llevar las filas medidas por el primer fit, no las
         // 24 por defecto de xterm. Las columnas ya son >= 1024 en ambos lados.
@@ -1114,7 +1157,7 @@
             .then(() => resizeQueue)
             .then(async () => {
                 const rows = Math.max(1, term?.rows ?? 1);
-                await api.resize(tabId, target, rows);
+                await api.resize(tabId, target, rows, fullScreenApp);
                 lastPtySize = { cols: target, rows };
             })
             .catch(() => undefined);
@@ -1195,6 +1238,10 @@
     // datos. No volver a anclarlo al final en el siguiente idle: hacerlo daba
     // la impresión de que la rueda "saltaba" y ocultaba líneas anteriores.
     let userScrolledBack = false;
+    // Hasta cuándo un cambio de posición se atribuye a la rueda, a la barra o a
+    // las teclas de desplazamiento. Lo renueva cada gesto (`markVerticalGesture`).
+    const VERTICAL_GESTURE_WINDOW_MS = 1500;
+    let lastVerticalGestureAt = 0;
     // `display: none` reinicia el scroll del contenedor. Al volver a mostrar
     // una casilla cuyas filas cambiaron mientras estaba oculta, xterm quedaba
     // en la cima del historial (viewportY 0) y, creyendo que el usuario había
@@ -1257,6 +1304,22 @@
         fitAndReport();
         restoreScrollAfterActivation();
         closeActivationGeometryBarrier();
+    }
+    // Si el aviso de xterm tarda más que el plazo de reserva (página o VM
+    // ocupadas), el reajuste llegaba con su renderer aún en pausa: xterm
+    // aplazaba el resize del renderer y su Viewport calculaba el área de
+    // scroll con el alto viejo (23 filas sobre 26 líneas: máximo 3), recortaba
+    // la posición y arrastraba el búfer hacia arriba como si el usuario
+    // hubiera subido; la salida ya no se seguía y lo escrito quedaba debajo
+    // de la vista. Si la casilla ya tiene tamaño, se reanuda antes de medir.
+    function resumeRendererIfVisible(): void {
+        const renderService = (term as any)?._core?._renderService;
+        if (!renderService?._isPaused || typeof renderService._handleIntersectionChange !== 'function') return;
+        if (document.visibilityState !== 'visible') return;
+        const screen = term?.element?.querySelector<HTMLElement>('.xterm-screen');
+        const rect = screen?.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return;
+        renderService._handleIntersectionChange({ isIntersecting: true, intersectionRatio: 1 });
     }
     function openVisibilityGate(): void {
         const target = term?.element?.querySelector<HTMLElement>('.xterm-screen') ?? term?.element;
@@ -1348,7 +1411,7 @@
     // La salida de ConPTY puede partir una misma línea física en bloques que
     // no llevan CR/LF. Medir solo cada bloque deja la matriz en 151 columnas
     // y obliga a envolver WTERMSEQ, aunque la línea completa sea mucho mayor.
-    let outputLogicalLineColumns = 0;
+    let outputLineCarry: OutputLineCarry = EMPTY_OUTPUT_LINE;
 
     function flushOutputPtyResize(): Promise<void> {
         if (outputPtyResizeTimer !== undefined) {
@@ -1361,7 +1424,7 @@
     }
 
     function queueOutputPtyResize(requiredColumns: number): void {
-        if (!term || requiredColumns <= term.cols) return;
+        if (!term || requiredColumns <= term.cols || fullScreenApp) return;
         pendingOutputPtyColumns = Math.max(
             pendingOutputPtyColumns,
             Math.min(MAX_HORIZONTAL_COLS, Math.ceil(requiredColumns)),
@@ -1410,6 +1473,18 @@
     // Igual que `MIN_INTERACTIVE_COLS` en src-tauri/src/terminal/tabs.rs: la
     // rejilla de xterm nunca es más estrecha que la de ConPTY.
     const CONPTY_MIN_COLS = 1024;
+    // Programas a pantalla completa (Claude Code, Amp, Gemini, Codex, vim,
+    // htop…) dibujan para el ancho que les anuncia la PTY. Con la reserva de
+    // 1024 columnas pintaban una caja de 1024 columnas: casi todo quedaba
+    // fuera de la vista y cada redibujo desplazaba el host en horizontal. En
+    // este modo la rejilla y la PTY usan el ancho VISIBLE y no hay reservas.
+    // Se activa en las pestañas de IA (`ai:*`) y mientras un programa usa la
+    // pantalla alternativa o la salida sincronizada (`full-screen-app.ts`).
+    // En este modo la rejilla de xterm y la PTY usan el ancho visible: ver
+    // `term.resize`.
+    let fullScreenApp = false;
+    let fullScreenAppReason: FullScreenAppReason | null = null;
+    let fullScreenAppSince = 0;
     // Columnas que la vista quiere mostrar (lo que xterm tendría sin el
     // mínimo). Sustituye a `term.cols` donde la lógica significa «ancho
     // visible», no «ancho de la rejilla».
@@ -1495,7 +1570,7 @@
      * además que una petición antigua vuelva a envolver la línea después.
      */
     function queueInputPtyResize(requiredColumns: number): Promise<void> {
-        if (!term || requiredColumns <= 0) return resizeQueue;
+        if (!term || requiredColumns <= 0 || fullScreenApp) return resizeQueue;
         const cols = Math.min(MAX_HORIZONTAL_COLS, Math.max(term.cols, Math.ceil(requiredColumns)));
         const rows = Math.max(1, term.rows);
         // La rejilla local debe crecer antes de que xterm procese el eco; la
@@ -1526,7 +1601,7 @@
                     pendingInputPtyColumns = 0;
                     const targetRows = Math.max(1, term?.rows ?? rows);
                     await replayTransientShrink(targetRows);
-                    await api.resize(tabId, targetColumns, targetRows);
+                    await api.resize(tabId, targetColumns, targetRows, fullScreenApp);
                     lastPtySize = { cols: targetColumns, rows: targetRows };
                     if (destroyed || !term) return;
                     // El IPC confirma que ConPTY aceptó la petición antes de
@@ -1558,7 +1633,9 @@
                     if (confirmedColumns !== targetColumns || confirmedRows !== targetRows) {
                         pendingInputPtyColumns = Math.max(pendingInputPtyColumns, confirmedColumns);
                     }
-                    term.scrollToBottom();
+                    // El IPC puede tardar: si entretanto el usuario subió a
+                    // leer el historial, la tecla ya quedó atrás y no se le baja.
+                    if (!userScrolledBack) term.scrollToBottom();
                     keepCursorHorizontallyVisible();
                     terminalPromptVisible();
                     scheduleTerminalRepaint();
@@ -1721,9 +1798,9 @@
     // La salida puede llegar ya dividida por ConPTY antes de que xterm haya
     // podido marcar las filas envueltas. Medir el bloque original recibido
     // por la PTY conserva la anchura lógica de la línea y permite a xterm
-    // replegarla en una sola fila al aplicar el siguiente resize. Se eliminan
-    // las secuencias ANSI y los controles de cursor, pero se respetan CR/LF
-    // porque una barra de progreso puede actualizar la misma línea con CR.
+    // replegarla en una sola fila al aplicar el siguiente resize. Las
+    // secuencias ANSI no ocupan, pero los movimientos del cursor y CR/LF sí
+    // cuentan: una barra de progreso actualiza la misma línea con CR.
     function estimateOutputChunkColumns(data: string | undefined): number {
         if (!data) return 0;
         // Durante el eco de una orden normal, una ráfaga de ConPTY puede
@@ -1737,25 +1814,9 @@
             && (submittedCommand?.length ?? 0) <= MAX_INPUT_RESERVATION_COLS
             ? MAX_INPUT_RESERVATION_COLS
             : MAX_HORIZONTAL_COLS;
-        const plain = data
-            .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/gu, '')
-            .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '')
-            .replace(/\x1b[()][0-2A-Z]/gu, '')
-            .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/gu, '');
-        let longest = 0;
-        const lines = plain.split(/[\r\n]/u);
-        let logicalLine = outputLogicalLineColumns;
-        for (const [index, line] of lines.entries()) {
-            logicalLine += Array.from(line).length;
-            longest = Math.max(longest, logicalLine);
-            if (index < lines.length - 1) logicalLine = 0;
-            if (longest >= inputEchoLimit) {
-                outputLogicalLineColumns = 0;
-                return inputEchoLimit;
-            }
-        }
-        outputLogicalLineColumns = logicalLine;
-        return Math.min(inputEchoLimit, longest);
+        const measured = measureOutputChunk(data, outputLineCarry, inputEchoLimit);
+        outputLineCarry = measured.carry;
+        return measured.longest;
     }
 
     // La PTY puede crecer hasta la línea visible más larga. El host conserva
@@ -1764,6 +1825,11 @@
     // después de cambiar resolución o volver a una línea más corta.
     const MAX_HORIZONTAL_COLS = 16384;
     let horizontalCanScrollRight = $state(false);
+    // La flecha `›` ocupa el borde derecho: con el cursor debajo (una ventana
+    // mínima con el prompt justo en el borde) lo tapaba. Mientras esté ahí se
+    // aparta; vuelve en cuanto el cursor se mueve.
+    let horizontalIndicatorOverCursor = $state(false);
+    const HORIZONTAL_INDICATOR_PX = 28;
     let horizontalViewport: HTMLElement | undefined;
     let horizontalStateFrame: number | undefined;
     let horizontalRepaintFrame: number | undefined;
@@ -2157,7 +2223,7 @@
             }
         }
         const recentFirstRow = recentOutputStartRow(buffer, terminal);
-        return longestVisibleLogicalLineWidth(
+        const longest = longestVisibleLogicalLineWidth(
             buffer.length,
             recentFirstRow,
             buffer.length - recentFirstRow,
@@ -2188,8 +2254,9 @@
                         occupiedTerminalColumns(line, Math.max(terminal.cols, line.length), MAX_HORIZONTAL_COLS),
                         // Cuando xterm conserva una fila sobre el límite de
                         // columnas, translateToString mantiene sus glifos
-                        // aunque `line.length` ya refleje la rejilla vieja.
-                        Math.min(MAX_HORIZONTAL_COLS, line.translateToString(true).length),
+                        // aunque `line.length` ya refleje la rejilla vieja. Solo
+                        // recorta las celdas vacías: los espacios escritos no ocupan.
+                        Math.min(MAX_HORIZONTAL_COLS, line.translateToString(true).trimEnd().length),
                     )
                     : 0;
                 if (row === cursorAbsoluteRow) {
@@ -2221,6 +2288,9 @@
             // pero queda fuera del único scroll horizontal.
             MAX_HORIZONTAL_COLS,
         );
+        // La pantalla alternativa es una rejilla fija: nada dibujado en ella
+        // puede pedir más ancho que el suyo.
+        return buffer.type === 'alternate' ? Math.min(longest, terminal.cols) : longest;
     }
 
     // La salida que puede pedir ancho está entre la orden anterior y el
@@ -2245,6 +2315,10 @@
     function inferUnmarkedWrappedOutputColumns(): number {
         if (!term) return 0;
         const buffer = term.buffer.active;
+        // Un programa en la pantalla alternativa llena sus filas hasta el borde
+        // y no son una línea partida: el marco de una IA, seis filas de 1024,
+        // pasaba la PTY a 6144 columnas con el programa abierto.
+        if (buffer.type === 'alternate') return 0;
         const viewportColumns = Math.max(1, term.cols);
         const normalizedCommand = (submittedCommand ?? '').replace(/\s+/gu, ' ').trim();
         // ConPTY puede entregar el eco de una orden larga como varias filas
@@ -2345,6 +2419,15 @@
         if (terminalHost) terminalHost.style.overflowX = physicalOverflow ? 'auto' : 'hidden';
         horizontalCanScrollRight = canScrollRight && (visibleOverflow || physicalOverflow);
         if (host) host.dataset.horizontalOverflow = String(horizontalCanScrollRight);
+        const buffer = term?.buffer.active;
+        const cursorRowVisible = buffer !== undefined
+            && buffer.cursorY + buffer.baseY >= buffer.viewportY
+            && buffer.cursorY + buffer.baseY < buffer.viewportY + (term?.rows ?? 0);
+        const cursorRight = buffer && cellWidth > 0
+            ? (buffer.cursorX + 1) * cellWidth - viewport.scrollLeft
+            : 0;
+        horizontalIndicatorOverCursor = Boolean(cursorRowVisible)
+            && cursorRight > viewport.clientWidth - HORIZONTAL_INDICATOR_PX;
     }
 
     function scheduleHorizontalScrollState(): void {
@@ -2397,6 +2480,22 @@
             } catch (error) {
                 console.debug('[TerminalPane] repintado tras scroll horizontal omitido', error);
             }
+        });
+    }
+
+    // El eje X es solo del host. Para enseñar el textarea de xterm, que sigue
+    // al cursor, el navegador también desplaza contenedores interiores con
+    // overflow oculto (`.xterm-scrollable-element`) cuando la rejilla cruza
+    // las 1024 columnas: el texto se movía sin que cambiara el scroll del
+    // host y el prompt siguiente quedaba fuera de la vista. El textarea
+    // desplaza su propio texto dentro de su caja, y eso no mueve nada.
+    function onInnerHorizontalScroll(event: Event): void {
+        const target = event.target;
+        if (target === terminalHost || !(target instanceof HTMLElement) || target instanceof HTMLTextAreaElement) return;
+        if (target.scrollLeft === 0) return;
+        target.scrollLeft = 0;
+        window.requestAnimationFrame(() => {
+            if (!destroyed) keepCursorHorizontallyVisible();
         });
     }
 
@@ -2463,13 +2562,15 @@
         const cursorLeft = term.buffer.active.cursorX * cellWidth;
         const cursorRight = cursorLeft + cellWidth;
         // Unas celdas de margen: pegado al borde, el cursor queda bajo la
-        // barra vertical y el indicador de desbordamiento. Al volver hacia la
-        // izquierda, si el cursor cabe en el primer tercio, se enseña la línea
-        // desde el principio (con el prompt completo).
+        // barra vertical y el indicador de desbordamiento. Si el cursor cabe
+        // en la primera pantalla, se enseña la línea desde el principio (con
+        // el prompt completo): al borrar una línea que rozaba el borde derecho,
+        // el resto de scroll seguía cortando la primera columna.
         const margin = Math.min(viewport.clientWidth / 4, cellWidth * 3);
-        if (cursorLeft < viewport.scrollLeft + margin) {
-            const target = cursorLeft - margin;
-            setHorizontalScrollLeft(viewport, target < viewport.clientWidth / 3 ? 0 : target);
+        if (cursorRight + margin <= viewport.clientWidth) {
+            if (viewport.scrollLeft > 0) setHorizontalScrollLeft(viewport, 0);
+        } else if (cursorLeft < viewport.scrollLeft + margin) {
+            setHorizontalScrollLeft(viewport, cursorLeft - margin);
         } else if (cursorRight > viewport.scrollLeft + viewport.clientWidth - margin) {
             // El ancho desplazable lo publican varias rutas (reserva de
             // entrada, medición del DOM) y una medición puede dejarlo en lo
@@ -2606,7 +2707,10 @@
         // columnas y sus continuaciones quedarían sin marcar.
         await warmupPtyForInput();
         if (destroyed || inputReady || environmentSwitchPending) return;
-        if (term && term.cols < INPUT_PTY_WARMUP_COLS) {
+        // Una IA a pantalla completa no muestra prompt de shell y por eso
+        // nunca queda «lista»: sin esta excepción cada redimensionado volvía
+        // a imponerle la reserva de 1024 columnas.
+        if (term && !fullScreenApp && term.cols < INPUT_PTY_WARMUP_COLS) {
             // Mantener xterm ancho desde que la shell queda lista evita que
             // cmd redibuje una línea larga con retornos de carro sobre la
             // rejilla estrecha. El host permanece oculto mientras no haya
@@ -2690,36 +2794,50 @@
     function updateVerticalScrollIntent(): void {
         if (!term) return;
         const buffer = term.buffer.active;
-        const scrollable = terminalHost?.querySelector<HTMLElement>('.xterm-scrollable-element');
-        const domAtBottom = !scrollable
-            || scrollable.scrollTop >= scrollable.scrollHeight - scrollable.clientHeight - 2;
-        const atBottom = buffer.viewportY >= buffer.baseY - 1 || domAtBottom;
-        if (atBottom) {
+        if (buffer.viewportY >= buffer.baseY) {
             userScrolledBack = false;
-        } else if (!userEditing) {
+        } else if (!userEditing
+            && (horizontalPointerDown || performance.now() - lastVerticalGestureAt < VERTICAL_GESTURE_WINDOW_MS)) {
+            // Solo un gesto cuenta como leer el historial: un reflujo también
+            // deja la vista por encima del final y no debe cortar el seguimiento.
             userScrolledBack = true;
             outputStartedAtBottom = false;
         }
     }
 
+    // Una distro de WSL o un REPL pueden tardar segundos en escribir algo: sin
+    // aviso, la pestaña en blanco parece colgada.
+    const STARTUP_HINT_DELAY_MS = 2000;
+    const FULL_SCREEN_REPAINT_DELAY_MS = 300;
+    const FULL_SCREEN_REPAINT_PAUSE_MS = 120;
+    let fullScreenRepaintTimer: number | undefined;
+    let startupHintVisible = $state(false);
+    let startupHintTimer: number | undefined;
+    function clearStartupHint(): void {
+        if (startupHintTimer !== undefined) window.clearTimeout(startupHintTimer);
+        startupHintTimer = undefined;
+        startupHintVisible = false;
+    }
+    function armStartupHint(): void {
+        clearStartupHint();
+        startupHintTimer = window.setTimeout(() => {
+            startupHintTimer = undefined;
+            startupHintVisible = true;
+        }, STARTUP_HINT_DELAY_MS);
+    }
+
     function onTerminalOutputBusy(event: Event): void {
         if (!eventBelongsToPane(event)) return;
         const detail = (event as CustomEvent<{ tabId?: string; data?: string; kind?: string }>).detail;
+        // ConPTY manda secuencias invisibles nada más arrancar: el aviso sigue
+        // hasta que haya algo que leer.
+        if (detail?.data && withoutTerminalControls(detail.data).trim()) clearStartupHint();
         if (firstShellOutputAt === 0) firstShellOutputAt = performance.now();
         outputInputEpoch += 1;
         blockInputDuringOutput();
-        if (!terminalOutputBusy && term) {
-            const buffer = term.buffer.active;
-            // WebDriver y algunos eventos de rueda pueden mover directamente
-            // el viewport DOM sin actualizar todavía `buffer.viewportY`.
-            // Consultar ambos estados evita que una salida posterior se pinte
-            // arriba del scrollback y parezca haber perdido la orden corta.
-            const scrollable = terminalHost?.querySelector<HTMLElement>('.xterm-scrollable-element');
-            const domAtBottom = !scrollable
-                || scrollable.scrollTop >= scrollable.scrollHeight - scrollable.clientHeight - 2;
-            outputStartedAtBottom = !userScrolledBack
-                && (buffer.viewportY >= buffer.baseY - 1 || domAtBottom);
-        }
+        // No se mira la posición: xterm 6 no desplaza su elemento en el DOM y un
+        // reflujo puede dejar la vista arriba sin que nadie haya subido.
+        if (!terminalOutputBusy) outputStartedAtBottom = !userScrolledBack;
         if (detail?.kind === 'clear') {
             if (outputPtyResizeTimer !== undefined) {
                 window.clearTimeout(outputPtyResizeTimer);
@@ -2727,7 +2845,7 @@
             }
             outputPtyEarlyResizeScheduled = false;
             pendingOutputPtyColumns = 0;
-            outputLogicalLineColumns = 0;
+            outputLineCarry = EMPTY_OUTPUT_LINE;
             clearPending = true;
             suppressWideReservation = true;
             outputBurstWide = false;
@@ -2736,6 +2854,13 @@
             inputPtyWarmupDone = false;
             inputLogicalLength = 0;
             inputLineSubmitted = false;
+            // Sin `data` es el borrado del backend, que sustituye la sesión: una
+            // orden abierta en la anterior no la cierra el primer prompt de la
+            // nueva. Un `CSI 2J` dentro de la salida no acaba con ninguna orden.
+            if (detail.data === undefined) {
+                commandTracker?.clear();
+                commandJumpLine = null;
+            }
         }
         // Reservar el ancho a partir del bloque PTY antes de que App.svelte
         // lo escriba en xterm. Esto cubre salidas que ConPTY ya fragmentó
@@ -2748,6 +2873,13 @@
         // salida más ancha que la vista debe marcar `outputBurstWide` para que
         // el ajuste posterior mida la línea completa en vez de partirla.
         if (chunkColumns > currentDisplayCols()) {
+            // Para el E2E: qué bloque pidió más ancho que la vista.
+            if (terminalHost) {
+                terminalHost.dataset.wideOutputChunk = JSON.stringify({
+                    columns: chunkColumns,
+                    tail: detail?.data?.slice(-600) ?? '',
+                });
+            }
             // Una orden larga ya fue precalentada con la longitud acumulada de
             // su propia línea. El eco que llega por ConPTY puede contener el
             // bloque completo y `estimateOutputChunkColumns` lo ve como una
@@ -2814,6 +2946,15 @@
             if (!destroyed) terminalPromptVisible();
         });
         lastOutputFinishedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        // Al pulsar Intro la línea es `…>amp`, que no es un prompt vacío: no
+        // hace falta esperar para retirar el aviso.
+        if (aiTabHint && shellPromptAtCursor()) aiTabHint = null;
+        // La IA tecleada terminó cuando la shell vuelve a enseñar su prompt.
+        if (fullScreenAppReason === 'ai-command'
+            && Date.now() - fullScreenAppSince > AI_COMMAND_MIN_MS
+            && shellPromptAtCursor()) {
+            setFullScreenApp(null);
+        }
         // Aplicar la mayor reserva una sola vez, después de que la cola de
         // escritura de xterm haya quedado vacía. Durante la ráfaga se acumula
         // en `pendingOutputPtyColumns` para evitar reflows intermedios.
@@ -3122,6 +3263,10 @@
         if (detail?.tabId !== tabId || typeof detail.requestId !== 'number') return;
         environmentSwitchRequestId = detail.requestId;
         startupEnvironmentId = detail.envId;
+        armStartupHint();
+        // Una IA ocupa la pestaña entera; cualquier otro entorno empieza como
+        // shell aunque el anterior dejara la pantalla alternativa activa.
+        setFullScreenApp(isAiEnvironmentId(detail.envId) ? 'ai-environment' : null);
         if (!environmentSwitchPending) {
             environmentSwitchSnapshot = {
                 inputReady,
@@ -3142,10 +3287,13 @@
         outputPtyResizeTimer = undefined;
         outputPtyEarlyResizeScheduled = false;
         pendingOutputPtyColumns = 0;
-        outputLogicalLineColumns = 0;
+        outputLineCarry = EMPTY_OUTPUT_LINE;
         commandPtyWarmupColumns = 0;
         commandPtyWarmupQueue = Promise.resolve();
         localInputGridPinned = false;
+        // El prompt de la shell anterior no dice nada de la nueva.
+        lastPromptMark?.dispose();
+        lastPromptMark = undefined;
         if (host) host.dataset.environmentSwitchRequestId = String(detail.requestId);
         // La sonda de recuperación pertenece a la shell inicial. Si sobrevive
         // a un cambio de entorno, podría enviar Enter a la shell nueva antes
@@ -3201,6 +3349,9 @@
         // La petición ya fue aceptada: la cola y la línea de la shell anterior
         // no deben reaparecer si el PTY nuevo tarda en llegar.
         environmentSwitchSnapshot = undefined;
+        // El ancho exacto que se pidió al empezar el cambio pudo llegar a la
+        // sesión anterior, que ya no existe: la nueva (una IA) lo recibe ahora.
+        if (fullScreenApp) syncPtyWidthForFullScreen(true);
         void waitForFrontendReady()
             .then((ready) => {
                 if (destroyed || detail.requestId !== environmentSwitchRequestId) return;
@@ -3339,6 +3490,20 @@
         });
     }
 
+    /** La shell espera una orden nueva: el cursor está justo detrás de un
+     *  prompt vacío en su propia fila. Ver un prompt cerca no basta: la línea
+     *  con la que se abrió la IA (`C:\>claude`) sigue en pantalla. */
+    function shellPromptAtCursor(): boolean {
+        if (!term) return false;
+        const buffer = term.buffer.active;
+        if (buffer.type !== 'normal') return false;
+        const text = buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true).trimEnd() ?? '';
+        return text.length > 0
+            && buffer.cursorX >= text.length
+            && isShellInputLine(text)
+            && /[>$#❯]$/u.test(text);
+    }
+
     function terminalPromptVisible(): boolean {
         if (!term) return false;
         const buffer = term.buffer.active;
@@ -3462,8 +3627,9 @@
      *  su salida con ConPTY) por la ruta de siempre, y el eco lo pinta ConPTY.
      *  Solo se acepta con la shell lista, un prompt a la vista y la línea
      *  vacía: nunca se mezcla con lo que el usuario estuviera escribiendo ni
-     *  se teclea dentro de un programa a pantalla completa. */
-    function submitLineFromApp(line: string): TerminalLineRejection | null {
+     *  se teclea dentro de un programa a pantalla completa. Sin `enter` la
+     *  orden queda escrita para revisarla (búsqueda en el historial). */
+    function typeLineFromApp(line: string, enter: boolean): TerminalLineRejection | null {
         if (!term || destroyed || !inputReady || environmentSwitchPending) return 'not-ready';
         if (term.buffer.active.type === 'alternate') return 'busy';
         // El borrador va antes que el prompt: con texto escrito la fila ya no
@@ -3472,8 +3638,16 @@
         if (draft.trim()) return 'draft';
         if (!terminalPromptVisible()) return 'busy';
         term.input(line, true);
-        term.input('\r', true);
+        if (enter) term.input('\r', true);
         return null;
+    }
+
+    function submitLineFromApp(line: string): TerminalLineRejection | null {
+        return typeLineFromApp(line, true);
+    }
+
+    function insertLineFromApp(line: string): TerminalLineRejection | null {
+        return typeLineFromApp(line, false);
     }
 
     function paneIsRepl(): boolean {
@@ -3543,7 +3717,9 @@
         // esperar: exigir todavía el título de fastfetch retenía la entrada
         // hasta el temporizador de seguridad y hacía parecer que un resize o
         // el botón de dividir "despertaba" una shell que ya estaba lista.
-        if (app.preferences?.showSystemBanner === false) return reportStartupReady(terminalPromptVisible());
+        if (app.preferences?.showSystemBanner === false) {
+            return reportStartupReady(terminalPromptVisible() || promptMarkedBelow(-1));
+        }
         // En una casilla realmente baja el banner se omite por diseño. No usar
         // solo `term.rows`: durante el primer fit puede ser provisionalmente
         // 8 aunque el host físico ya tenga altura para el banner, y liberar
@@ -3552,8 +3728,11 @@
         const buffer = term.buffer.active;
         const start = Math.max(0, buffer.length - Math.max(term.rows + 20, 64));
         let text = '';
+        let titleRow = -1;
         for (let row = start; row < buffer.length; row += 1) {
-            text += `${buffer.getLine(row)?.translateToString(true) ?? ''}\n`;
+            const line = buffer.getLine(row)?.translateToString(true) ?? '';
+            if (/WTerminal|LTerminal/u.test(line)) titleRow = row;
+            text += `${line}\n`;
         }
         const titleIndex = Math.max(
             text.lastIndexOf('WTerminal'),
@@ -3569,9 +3748,16 @@
         const compactBannerComplete = separatorCount === 0
             && /(?:Uptime|Tiempo activo)/i.test(latestBanner)
             && /(?:Memory|Memoria)/i.test(latestBanner);
-        return reportStartupReady((terminalPromptVisible() || shellPromptAfterBanner(latestBanner))
+        return reportStartupReady((terminalPromptVisible()
+                || shellPromptAfterBanner(latestBanner)
+                || (titleRow >= 0 && promptMarkedBelow(titleRow)))
             && /(?:WTerminal|LTerminal)\s+\d/i.test(latestBanner)
             && (fullBannerComplete || compactBannerComplete));
+    }
+
+    /** La shell marcó el final de un prompt por debajo de `row`. */
+    function promptMarkedBelow(row: number): boolean {
+        return lastPromptMark !== undefined && !lastPromptMark.isDisposed && lastPromptMark.line > row;
     }
 
     /** Una línea de prompt de shell después del banner, aunque lleve una orden
@@ -3604,6 +3790,21 @@
         requestAnimationFrame(() => requestBannerPrint());
     }
 
+    /** En modo pantalla completa la rejilla no cambia al cambiar el ancho
+     *  visible, así que xterm no avisa: se lleva a la PTY directamente (y al
+     *  salir del modo, de vuelta a la reserva de la rejilla). */
+    function syncPtyWidthForFullScreen(force = false): void {
+        if (!term || destroyed || (initialResizePending && !force)) return;
+        resizeQueue = resizeQueue.catch(() => undefined).then(async () => {
+            if (destroyed || !term) return;
+            const rows = term.rows;
+            const cols = fullScreenApp ? protectedPtyColumns(term.cols) : term.cols;
+            if (!force && ptyAlreadyHas(cols, rows)) return;
+            await api.resize(tabId, cols, rows, fullScreenApp);
+            lastPtySize = { cols, rows };
+        });
+    }
+
     function ptyAlreadyHas(cols: number, rows: number): boolean {
         return cols === lastPtySize.cols && rows === lastPtySize.rows && xtermTransientShrink === null;
     }
@@ -3622,7 +3823,7 @@
         xtermTransientShrink = null;
         if (!shrink || shrink.rows >= finalRows || shrink.rows >= lastPtySize.rows) return;
         const cols = protectedPtyColumns(shrink.cols);
-        await api.resize(tabId, cols, shrink.rows);
+        await api.resize(tabId, cols, shrink.rows, fullScreenApp);
         lastPtySize = { cols, rows: shrink.rows };
     }
 
@@ -3630,6 +3831,9 @@
      *  activa. Las condiciones son las mismas que antes descartaban el resize
      *  completo; ahora solo impiden reducir columnas. */
     function protectedPtyColumns(cols: number): number {
+        // Un programa a pantalla completa recibe el ancho visible aunque la
+        // rejilla de xterm siga en la reserva de la shell.
+        if (fullScreenApp) return Math.max(FULL_SCREEN_MIN_COLS, currentDisplayCols());
         if (initialResizePending) return cols;
         const protectsWideInput = inputWideReservationColumns > 0
             && cols < inputWideReservationColumns;
@@ -3656,7 +3860,9 @@
     function syncPtyToTerminalAfterOutput(): void {
         resizeQueue = resizeQueue.then(async () => {
             if (destroyed || !term) return;
-            if (terminalOutputBusy) {
+            // Un programa a pantalla completa redibuja sin parar: esperar a
+            // que termine su salida dejaba la PTY con el tamaño viejo.
+            if (terminalOutputBusy && !fullScreenApp) {
                 ptySyncPendingAfterOutput = true;
                 return;
             }
@@ -3664,7 +3870,7 @@
             const targetCols = protectedPtyColumns(term.cols);
             if (ptyAlreadyHas(targetCols, rows)) return;
             await replayTransientShrink(rows);
-            await api.resize(tabId, targetCols, rows);
+            await api.resize(tabId, targetCols, rows, fullScreenApp);
             lastPtySize = { cols: targetCols, rows };
             if (!destroyed && term && term.cols !== targetCols) term.resize(targetCols, rows);
         }).catch((error) => {
@@ -3672,10 +3878,120 @@
         });
     }
 
+    /** Entra o sale del modo pantalla completa y vuelve a medir: la rejilla y
+     *  la PTY pasan al ancho visible, o recuperan la reserva de la shell. */
+    /** Si la pantalla de la shell tiene alguna línea más ancha que lo que se
+     *  ve. Al encoger, conhost y xterm partirían esa línea y, al volver, no
+     *  recolocan igual el cursor que guardó la pantalla alternativa: la shell
+     *  quedaba escribiendo una fila desplazada respecto a su prompt. */
+    function shellViewportHasLinesWiderThan(cols: number): boolean {
+        if (!term) return false;
+        const buffer = term.buffer.normal;
+        for (let row = buffer.baseY; row < buffer.baseY + term.rows; row += 1) {
+            const text = buffer.getLine(row)?.translateToString(true).trimEnd() ?? '';
+            if (text.length > cols) return true;
+        }
+        return false;
+    }
+
+    /** Columnas que caben en la vista ahora mismo. `displayCols` puede ser
+     *  mayor: tras una línea larga publica la reserva del scroll horizontal. */
+    function measuredVisibleColumns(): number {
+        const viewport = getHorizontalViewport();
+        const cellWidth = terminalCellWidth();
+        return viewport && cellWidth > 0
+            ? Math.max(1, Math.floor(viewport.clientWidth / cellWidth))
+            : currentDisplayCols();
+    }
+
+    function setFullScreenApp(reason: FullScreenAppReason | null): void {
+        if (reason === fullScreenAppReason) return;
+        // Lanzado desde una shell, solo se encoge si nada de lo que hay en
+        // pantalla se va a partir. Si no, la pestaña sigue con la reserva y
+        // lo indicado es abrir la IA en su propia pestaña (`ai:*`).
+        if ((reason === 'alternate-screen' || reason === 'ai-command')
+            && shellViewportHasLinesWiderThan(Math.max(FULL_SCREEN_MIN_COLS, measuredVisibleColumns()))) {
+            perf.mark('terminal.full-screen-app', { tabId, active: false, reason, skipped: 'wide-lines-on-screen' });
+            if (host) host.dataset.fullScreenSkipped = reason;
+            const name = reason === 'ai-command' ? aiCommandName(submittedCommand) : null;
+            if (name) {
+                const envId = `ai:${name}`;
+                aiTabHint = { name, envId: app.environments.some((environment) => environment.id === envId) ? envId : null };
+            }
+            return;
+        }
+        if (host) delete host.dataset.fullScreenSkipped;
+        fullScreenAppReason = reason;
+        fullScreenApp = reason !== null;
+        fullScreenAppSince = Date.now();
+        if (host) host.dataset.fullScreenApp = reason ?? 'false';
+        perf.mark('terminal.full-screen-app', { tabId, active: fullScreenApp, reason: reason ?? 'none' });
+        if (fullScreenApp) {
+            // Ninguna reserva horizontal de la shell sobrevive: el programa
+            // dibuja justo en lo que se ve.
+            inputWideReservationColumns = 0;
+            reservedOutputColumns = 0;
+            pendingOutputPtyColumns = 0;
+            pendingInputPtyColumns = 0;
+            outputBurstWide = false;
+            localInputGridPinned = false;
+            const viewport = getHorizontalViewport();
+            if (viewport) viewport.scrollLeft = 0;
+        }
+        if (!term) return;
+        term.resize(fullScreenApp ? measuredVisibleColumns() : currentDisplayCols(), term.rows);
+        fitAndReport(0, true);
+        syncPtyWidthForFullScreen();
+    }
+
+    /** El ajuste en modo pantalla completa: filas y columnas visibles, sin
+     *  reservas ni desplazamiento horizontal. La PTY lo recibe por
+     *  `term.resize` (columnas) y por el aviso de xterm (filas). */
+    function fitFullScreen(): void {
+        if (!term || !fitAddon || !terminalHost) return;
+        if (terminalHost.clientWidth === 0 || terminalHost.clientHeight === 0) return;
+        const dims = fitAddon.proposeDimensions();
+        if (!dims) return;
+        const cols = Math.max(FULL_SCREEN_MIN_COLS, measuredVisibleColumns());
+        const rows = Math.max(1, dims.rows);
+        terminalHost.style.setProperty('--terminal-content-width', `${terminalHost.clientWidth}px`);
+        terminalHost.dataset.horizontalTail = 'false';
+        syncTerminalRootWidth(terminalHost.clientWidth);
+        if (cols < term.cols) scheduleFullScreenRepaint();
+        if (cols !== currentDisplayCols() || cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
+        const viewport = getHorizontalViewport();
+        if (viewport && viewport.scrollLeft !== 0) viewport.scrollLeft = 0;
+    }
+
+    /** Al estrechar, lo que había en la columna que pasa a ser la última sigue
+     *  en ConPTY y en xterm. Amp no usa esa columna y quedaban letras sueltas de
+     *  la pantalla anterior. Una columna menos la recorta en ConPTY; volver al
+     *  ancho hace que repinte la pantalla entera sobre un xterm ya vacío, así que
+     *  vale para cualquier programa. Espera a que acabe el arrastre de la ventana. */
+    function scheduleFullScreenRepaint(): void {
+        if (fullScreenRepaintTimer !== undefined) window.clearTimeout(fullScreenRepaintTimer);
+        fullScreenRepaintTimer = window.setTimeout(() => {
+            fullScreenRepaintTimer = undefined;
+            resizeQueue = resizeQueue.catch(() => undefined).then(async () => {
+                if (destroyed || !term || !fullScreenApp || term.buffer.active.type !== 'alternate') return;
+                const rows = term.rows;
+                const cols = protectedPtyColumns(term.cols);
+                if (cols <= FULL_SCREEN_MIN_COLS) return;
+                await api.resize(tabId, cols - 1, rows, true);
+                await new Promise((resolve) => window.setTimeout(resolve, FULL_SCREEN_REPAINT_PAUSE_MS));
+                if (destroyed || !term) return;
+                term.write('\x1b[2J');
+                await api.resize(tabId, cols, rows, true);
+                lastPtySize = { cols, rows };
+            });
+        }, FULL_SCREEN_REPAINT_DELAY_MS);
+    }
+
     function fitAndReport(minimumCols = 0, forceReflow = false): void {
         if (destroyed || !term || !fitAddon || !active) return;
         // La compuerta de visibilidad hará este ajuste en cuanto xterm reanude.
         if (awaitingTerminalVisibility) return;
+        resumeRendererIfVisible();
         // Un resize o una división puede repintar el prompt sin emitir salida
         // de PTY. Reevaluarlo aquí sincroniza `startupReady` con la superficie
         // visible y libera la entrada cuando la shell ya está lista.
@@ -3689,6 +4005,13 @@
             }
         }
         enforceSingleHorizontalScrollContainer();
+        // Un programa a pantalla completa ocupa justo lo que se ve: las reglas
+        // de abajo (reservas de entrada, salida ancha, lectura horizontal) son
+        // para la línea de órdenes de una shell y aquí la dejaban sin encoger.
+        if (fullScreenApp) {
+            fitFullScreen();
+            return;
+        }
         // ResizeObserver también puede ser la primera señal después de una
         // división. No depender solo del evento de la PTY: si las filas que
         // se ven ya caben en el nuevo panel, descartar aquí la reserva de la
@@ -3791,6 +4114,7 @@
             : horizontalResizeNeeded();
         const needsImmediateInputResize = minimumCols > currentDisplayCols();
         if (!forceReflow
+            && !fullScreenApp
             && !needsImmediateInputResize
             && (terminalOutputBusy || (now - lastOutputFinishedAt < OUTPUT_QUIET_SETTLE_MS && !needsHorizontalResize))) {
             exposeFitSkip(terminalOutputBusy ? 'output-busy' : 'output-quiet');
@@ -3882,7 +4206,8 @@
                 // anchura de entrada desde este primer ajuste hace que PTY y
                 // xterm nazcan con la misma matriz; luego el host sigue oculto
                 // hasta que haya contenido que desplazar.
-                const startupGridWarmup = !inputReady
+                const startupGridWarmup = !fullScreenApp
+                    && !inputReady
                     && !environmentSwitchPending
                     && !terminalOutputBusy
                     && !inputLineSubmitted;
@@ -4062,6 +4387,13 @@
                         );
                     }
                 }
+                // Un programa en la pantalla alternativa dibuja justo lo que se
+                // le da: el margen de arriba le hacía redibujar más ancho y su
+                // caja nueva pedía otras dos columnas, sin fin (1026, 1028…).
+                // Solo el ancho de la vista puede hacerle crecer.
+                if (term.buffer.active.type === 'alternate') {
+                    dims.cols = Math.min(dims.cols, Math.max(term.cols, visibleCols));
+                }
                 // xterm refluye todo el scrollback incluso cuando recibe las
                 // mismas dimensiones. Durante una salida muy ancha ese
                 // reflow redundante puede descartar una línea corta que ya
@@ -4135,7 +4467,9 @@
                     // sin recuperar la reserva de 1024 columnas.
                     ? Math.ceil(measuredCellWidth * 40)
                     : 0;
-                const measuredPhysicalWidth = logicalContentWidth > 0
+                const measuredPhysicalWidth = fullScreenApp
+                    ? terminalHost.clientWidth
+                    : logicalContentWidth > 0
                     ? Math.max(
                         terminalHost.clientWidth,
                         logicalContentWidth + logicalTailPadding,
@@ -4175,6 +4509,11 @@
                             restoreAtHorizontalEnd ? currentMaximum : Math.min(restoreScrollLeft, currentMaximum),
                             3,
                         );
+                        // Una tecla escrita durante el reajuste ya movió la
+                        // vista hasta su eco; restaurar la posición de antes
+                        // la pisaba y el cursor quedaba fuera hasta la tecla
+                        // siguiente. Sin gesto del usuario, manda el cursor.
+                        if (userEditing) keepCursorHorizontallyVisible();
                         scheduleHorizontalScrollState();
                     };
                     requestAnimationFrame(restoreHorizontalPosition);
@@ -4186,9 +4525,11 @@
                     // después del resize. Reafirmar el anclaje al final en el
                     // siguiente frame evita que una línea corta recién
                     // escrita vuelva a quedar fuera de la vista mientras el
-                    // canvas termina de reenvolver una línea larga.
+                    // canvas termina de reenvolver una línea larga. Con la
+                    // máquina cargada ese frame llega tarde: si en medio el
+                    // usuario subió con la rueda, manda su lectura.
                     requestAnimationFrame(() => {
-                        if (!destroyed && term) term.scrollToBottom();
+                        if (!destroyed && term && !userScrolledBack) term.scrollToBottom();
                     });
                 }
                 // No volver a programar `fitAndReport` mientras la reserva
@@ -4262,7 +4603,7 @@
                 if (destroyed || sequence !== resizeSequence) return;
                 // Durante una ráfaga de salida no se cambia la geometría,
                 // pero tampoco se pierde: se reintenta al quedar inactiva.
-                if (terminalOutputBusy && !initialResizePending) {
+                if (terminalOutputBusy && !initialResizePending && !fullScreenApp) {
                     ptySyncPendingAfterOutput = true;
                     return;
                 }
@@ -4274,7 +4615,7 @@
                 }
                 try {
                     await replayTransientShrink(rows);
-                    await api.resize(tabId, targetCols, rows);
+                    await api.resize(tabId, targetCols, rows, fullScreenApp);
                     lastPtySize = { cols: targetCols, rows };
                     if (destroyed) return;
                     // El resize del PTY puede provocar un repintado propio de
@@ -4380,11 +4721,22 @@
         // a la par de ConPTY y lo pedido se publica como ancho visible.
         const resizeGrid = term.resize.bind(term);
         term.resize = (cols: number, rows: number) => {
+            const previousDisplayCols = displayCols;
             displayCols = Math.max(1, Math.floor(cols));
             if (host) host.dataset.displayCols = String(displayCols);
-            const gridCols = Math.max(CONPTY_MIN_COLS, displayCols);
+            if (fullScreenApp && displayCols !== previousDisplayCols) syncPtyWidthForFullScreen();
+            // En modo pantalla completa la rejilla y ConPTY encogen JUNTAS al
+            // ancho visible (como en Windows Terminal): las dos parten y
+            // vuelven a juntar las mismas líneas largas. Si solo encogía
+            // ConPTY, al volver a ensanchar su pantalla subía una fila por
+            // cada línea larga y la shell escribía encima o debajo del prompt.
+            const gridCols = fullScreenApp
+                ? Math.max(FULL_SCREEN_MIN_COLS, displayCols)
+                : Math.max(CONPTY_MIN_COLS, displayCols);
             if (term && gridCols === term.cols && rows === term.rows) return;
             resizeGrid(gridCols, rows);
+            // Diagnóstico de los E2E: columnas reales de la rejilla.
+            if (host && term) host.dataset.gridCols = String(term.cols);
         };
         fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
@@ -4407,6 +4759,25 @@
         if (app.appInfo?.platform === 'windows') alignSixelWithConpty(term, imageAddon);
         // URL http/https/file clicables con Ctrl+clic (Ajustes → Terminal).
         syncTerminalLinks(preferences?.terminalLinks !== false);
+        // Un enlace escrito en la fila que ya tenía el ratón debe detectarse
+        // al moverlo, sin tener que salir de la fila (`link-cache.ts`).
+        // La suscripción se libera con la propia terminal.
+        term.onWriteParsed(() => {
+            if (term) invalidateLinkCache(term);
+        });
+        // Programas a pantalla completa: se miran los DECSET/DECRST sin
+        // consumirlos (`return false`), xterm los sigue aplicando.
+        const watchPrivateMode = (set: boolean) => (params: (number | number[])[]) => {
+            const next = fullScreenTransition(fullScreenAppReason, flattenCsiParams(params), set);
+            if (next !== undefined) setFullScreenApp(next);
+            return false;
+        };
+        term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, watchPrivateMode(true));
+        term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, watchPrivateMode(false));
+        if (isAiEnvironmentId(app.tabs.find((tab) => tab.id === tabId)?.envId)) {
+            fullScreenAppReason = 'ai-environment';
+            fullScreenApp = true;
+        }
         searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
             if (resultCount === 0 && searchQuery && visibleRowsSearch(searchQuery)) {
                 searchResultIndex = 0;
@@ -4435,7 +4806,7 @@
         // host acaba mostrando solo una cola o un canvas vacío al desplazarse.
         // El host permanece oculto hasta que exista una reserva horizontal
         // real, por lo que los comandos cortos no muestran una barra.
-        if (term.cols < INPUT_PTY_WARMUP_COLS) {
+        if (!fullScreenApp && term.cols < INPUT_PTY_WARMUP_COLS) {
             localInputGridPinned = true;
             term.resize(INPUT_PTY_WARMUP_COLS, term.rows);
             terminalHost.style.setProperty('--terminal-content-width', `${terminalHost.clientWidth}px`);
@@ -4502,6 +4873,8 @@
         terminalHost.addEventListener('keydown', terminalSearchHandler, true);
         horizontalViewport = terminalHost;
         horizontalViewport?.addEventListener('scroll', onHorizontalViewportScroll, { passive: true });
+        // `scroll` no burbujea: en captura llega el de los elementos interiores.
+        terminalHost.addEventListener('scroll', onInnerHorizontalScroll, { capture: true, passive: true });
         horizontalViewport?.addEventListener('wheel', onTerminalWheel, { capture: true, passive: false });
         term.textarea?.addEventListener('focus', () => {
             // El foco llega antes que la ráfaga de teclas. Enviar la reserva
@@ -4575,7 +4948,7 @@
                 // handshake del PTY. Marcarla como edición evita que el
                 // reintento de prompt inyecte Enter mientras esa línea está
                 // todavía encolada (en especial tras muchos espacios).
-                userEditing = true;
+                if (editingData) userEditing = true;
                 queuedInput += data;
                 // No esperar a `releaseInput()` para reservar la matriz. En
                 // una ráfaga larga (pegado o WebDriver) la shell puede
@@ -4593,7 +4966,7 @@
                     const visibleColumns = viewport && cellWidth > 0
                         ? Math.max(1, Math.floor(viewport.clientWidth / cellWidth))
                         : currentDisplayCols();
-                    if (queuedPrintableLength > visibleColumns && term) {
+                    if (queuedPrintableLength > visibleColumns && term && !fullScreenApp) {
                         // El eco puede llegar antes de que termine la cola IPC.
                         // Fijar aquí la rejilla local evita que ese primer frame
                         // se pinte con 112 columnas y solo se repare después.
@@ -4637,13 +5010,22 @@
             // prompt/curso mientras se escribe la siguiente orden. Liberarlo
             // antes de mover el cursor deja que `keepCursorHorizontallyVisible`
             // recoloque el viewport en la línea de edición.
-            horizontalUserScrolled = false;
-            horizontalScrollLockUntil = 0;
-            // Teclear cierra la ventana del gesto anterior: el desplazamiento
-            // nativo que provoca el eco ya no es el usuario leyendo.
-            lastHorizontalGestureAt = 0;
-            userScrolledBack = false;
-            term?.scrollToBottom();
+            // El informe de foco de ConPTY no es entrada: cambiar de ventana no
+            // debe sacar al usuario de lo que estaba leyendo.
+            if (editingData) {
+                horizontalUserScrolled = false;
+                horizontalScrollLockUntil = 0;
+                // Teclear cierra la ventana del gesto anterior: el desplazamiento
+                // nativo que provoca el eco ya no es el usuario leyendo.
+                lastHorizontalGestureAt = 0;
+                lastVerticalGestureAt = 0;
+                userScrolledBack = false;
+                // Recién reactivada, la pestaña sostiene la posición de lectura
+                // unos segundos y la devolvía arriba en el siguiente repintado:
+                // desde que se teclea, lo que hay que sostener es el final.
+                if (hiddenScrollState) hiddenScrollState = { atBottom: true, viewportY: 0 };
+                term?.scrollToBottom();
+            }
             if (editingData.includes('\r') || editingData.includes('\n') || editingData.includes('\u0003')) {
                 userEditing = false;
                 inputLineSubmitted = true;
@@ -4732,6 +5114,16 @@
                     ? null
                     : candidate;
                 mirroredLine = '';
+                // Solo lo escrito sobre un prompt que marcó la shell: la
+                // contraseña que pide una orden en marcha no tiene prompt.
+                if (submittedCommand && commandTracker?.atPrompt) app.recordCommand(submittedCommand);
+                commandTracker?.submitted(!candidate.trim() && commandInputIsBlank());
+                commandJumpLine = null;
+                // Una IA tecleada en la shell recibe el ancho visible antes de
+                // dibujar su primera pantalla.
+                if (fullScreenAppReason === null && isAiCommandLine(submittedCommand)) {
+                    setFullScreenApp('ai-command');
+                }
             }
             else if (terminators.length > 1) mirroredLine = /[\r\n]$/.test(mirroredLineData) ? '' : null;
             else if (mirroredLineData === '\u007f') {
@@ -4877,7 +5269,18 @@
         document.addEventListener('visibilitychange', onDocumentVisibilityChange);
 
         registerTerminal(tabId, term);
-        registerTerminalControls(tabId, { openSearch, submitLine: submitLineFromApp });
+        registerTerminalControls(tabId, { openSearch, saveOutput, copyLastOutput, jumpToCommand, submitLine: submitLineFromApp, insertLine: insertLineFromApp });
+        commandTracker = new CommandTracker((offset) => term?.registerMarker(offset), () => Date.now());
+        term.parser.registerOscHandler(133, (data) => {
+            if (host) host.dataset.commandMarksSeen = String(Number(host.dataset.commandMarksSeen ?? 0) + 1);
+            if (data.split(';')[0] === 'B') {
+                lastPromptMark?.dispose();
+                lastPromptMark = term?.registerMarker(0);
+            }
+            const finished = commandTracker?.mark(data, term?.buffer.active.cursorX ?? 0);
+            if (finished) onCommandFinished(finished);
+            return true;
+        });
         const fitStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
         fitAndReport();
         const fitNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -4889,6 +5292,7 @@
         });
         window.addEventListener('winslim:terminal-output-busy', onTerminalOutputBusy);
         window.addEventListener('winslim:terminal-output-idle', onTerminalOutputIdle);
+        if (firstShellOutputAt === 0) armStartupHint();
         window.addEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
         window.addEventListener('winslim:environment-switch-requested', onEnvironmentSwitchRequested);
         window.addEventListener('winslim:environment-switch-cancelled', onEnvironmentSwitchCancelled);
@@ -5024,6 +5428,8 @@
         disposeVisibilityGate();
         closeActivationGeometryBarrier();
         releaseActivationScrollPin();
+        clearStartupHint();
+        if (fullScreenRepaintTimer !== undefined) window.clearTimeout(fullScreenRepaintTimer);
         if (cursorBlinkTimer !== undefined) {
             window.clearInterval(cursorBlinkTimer);
             cursorBlinkTimer = undefined;
@@ -5063,6 +5469,7 @@
         if (horizontalStateFrame !== undefined) window.cancelAnimationFrame(horizontalStateFrame);
         if (horizontalRepaintFrame !== undefined) window.cancelAnimationFrame(horizontalRepaintFrame);
         horizontalViewport?.removeEventListener('scroll', onHorizontalViewportScroll);
+        terminalHost?.removeEventListener('scroll', onInnerHorizontalScroll, { capture: true });
         horizontalViewport?.removeEventListener('wheel', onTerminalWheel, { capture: true });
         if (terminalSearchHandler) terminalHost?.removeEventListener('keydown', terminalSearchHandler, true);
         terminalSearchHandler = undefined;
@@ -5215,7 +5622,86 @@
         perf.mark('ui.context-menu.open', { tabId, x: event.clientX, y: event.clientY });
     }
 
-    function runMenu(action: 'copy' | 'cut' | 'delete' | 'paste' | 'search' | 'openDirectory' | 'settings'): void {
+    /** Se guarda el búfer normal: con una IA o un editor a pantalla completa,
+     *  el de pantalla alternativa solo tendría lo que se ve en ese momento. */
+    async function saveOutput(): Promise<void> {
+        if (!term) return;
+        const tab = app.tabs.find((candidate) => candidate.id === tabId);
+        const name = outputFileName(tab ? app.tabTitle(tab) : '', new Date());
+        try {
+            const saved = await api.saveTerminalOutput(name, `${bufferText(term.buffer.normal).trimEnd()}\n`);
+            if (saved) showTerminalNotice(app.t('terminal.outputSaved', 'Salida guardada en {path}').replace('{path}', saved));
+        } catch (error) {
+            console.error('[TerminalPane] no se pudo guardar la salida', error);
+            showTerminalNotice(app.t('terminal.outputSaveFailed', 'No se pudo guardar la salida.'));
+        }
+        term?.focus();
+    }
+
+    /** A partir de aquí una orden avisa al terminar: antes sería puro ruido. */
+    const LONG_COMMAND_MS = 10_000;
+
+    function commandSummary(record: CommandRecord): string {
+        const time = formatDuration(record.durationMs ?? 0, app.catalog.language);
+        if (record.exitCode === null || record.exitCode === 0) {
+            return app.t('terminal.commandFinished', 'Orden terminada en {time}').replace('{time}', time);
+        }
+        return app.t('terminal.commandFailed', 'La orden falló con código {code} tras {time}')
+            .replace('{code}', String(record.exitCode))
+            .replace('{time}', time);
+    }
+
+    function onCommandFinished(record: CommandRecord): void {
+        if (!term) return;
+        if (host) {
+            host.dataset.commandCount = String(Number(host.dataset.commandCount ?? 0) + 1);
+            host.dataset.lastExitCode = String(record.exitCode);
+            host.dataset.lastDurationMs = String(record.durationMs);
+        }
+        if (record.exitCode !== null && record.exitCode !== 0) {
+            const summary = commandSummary(record);
+            term.registerDecoration({ marker: record.prompt as IMarker, width: 1 })?.onRender((element) => {
+                element.classList.add('command-failed');
+                element.title = summary;
+            });
+        }
+        if ((record.durationMs ?? 0) < LONG_COMMAND_MS) return;
+        showTerminalNotice(commandSummary(record));
+        if (!active || !document.hasFocus()) void api.requestWindowAttention();
+    }
+
+    /** El espejo de entrada se pierde al editar con flechas: lo que manda es lo
+     *  que hay de verdad en la fila, a partir del final del prompt. */
+    function commandInputIsBlank(): boolean {
+        const input = commandTracker?.inputLine;
+        const line = input ? term?.buffer.normal.getLine(input.line) : undefined;
+        return !input || !line || !line.translateToString(true, input.column).trim();
+    }
+
+    function copyLastOutput(): void {
+        const buffer = term?.buffer.normal;
+        const record = commandTracker?.lastFinished() ?? null;
+        const range = buffer && record
+            ? outputRange(record, (line) => buffer.getLine(line)?.isWrapped ?? false)
+            : null;
+        if (!buffer || !range) {
+            showTerminalNotice(app.t('terminal.noCommandOutput', 'No hay salida que copiar: esta shell no marca sus órdenes o la última no escribió nada.'));
+            return;
+        }
+        void api.writeClipboard(bufferText(buffer, range[0], range[1]).trimEnd());
+        showTerminalNotice(app.t('terminal.outputCopied', 'Salida de la última orden copiada'));
+    }
+
+    function jumpToCommand(direction: 'previous' | 'next'): void {
+        if (!term || !commandTracker) return;
+        const buffer = term.buffer.normal;
+        const target = commandTracker.jumpTarget(commandJumpLine ?? buffer.baseY + buffer.cursorY, direction);
+        commandJumpLine = target;
+        if (target === null) term.scrollToBottom();
+        else term.scrollToLine(target);
+    }
+
+    function runMenu(action: 'copy' | 'cut' | 'delete' | 'paste' | 'search' | 'saveOutput' | 'copyLastOutput' | 'openDirectory' | 'settings'): void {
         perf.mark('ui.context-menu.action', { tabId, action });
         const searchText = menuState.searchText;
         menu = null;
@@ -5223,6 +5709,11 @@
             searchSelection(searchText);
             return;
         }
+        if (action === 'saveOutput') {
+            void saveOutput();
+            return;
+        }
+        if (action === 'copyLastOutput') copyLastOutput();
         if (action === 'copy' && selectionRange()) void api.writeClipboard(term?.getSelection() ?? '');
         else if (action === 'cut') deleteEditableSelection(true);
         else if (action === 'delete') deleteEditableSelection(false);
@@ -5391,9 +5882,20 @@
         host.addEventListener('focusin', activate, { capture: true });
         host.addEventListener('contextmenu', onContextMenu, { capture: true });
         // Gestos que sí son del usuario para el eje horizontal (ver
-        // `onHorizontalViewportScroll`): puntero pulsado y rueda.
-        const markGesture = () => { lastHorizontalGestureAt = performance.now(); };
+        // `onHorizontalViewportScroll`) y el vertical: puntero pulsado y rueda.
+        const markGesture = () => {
+            lastHorizontalGestureAt = performance.now();
+            lastVerticalGestureAt = lastHorizontalGestureAt;
+        };
         const pointerDown = () => { horizontalPointerDown = true; markGesture(); };
+        // Mayús+RePág y similares desplazan sin pasar por el puntero.
+        const markScrollKey = (event: KeyboardEvent) => {
+            if (event.key === 'PageUp' || event.key === 'PageDown' || event.key === 'Home' || event.key === 'End'
+                || event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                if (event.shiftKey || event.ctrlKey) lastVerticalGestureAt = performance.now();
+            }
+        };
+        host.addEventListener('keydown', markScrollKey, { capture: true });
         const pointerUp = () => {
             if (!horizontalPointerDown) return;
             horizontalPointerDown = false;
@@ -5404,6 +5906,7 @@
         window.addEventListener('pointerup', pointerUp, { capture: true });
         window.addEventListener('pointercancel', pointerUp, { capture: true });
         return () => {
+            host.removeEventListener('keydown', markScrollKey, { capture: true });
             host.removeEventListener('pointerdown', pointerDown, { capture: true });
             host.removeEventListener('wheel', markGesture, { capture: true });
             window.removeEventListener('pointerup', pointerUp, { capture: true });
@@ -5425,6 +5928,11 @@
     bind:this={host}
     role="presentation"
 >
+    {#if startupHintVisible}
+        <div class="startup-hint" role="status" data-testid="terminal-startup-hint">
+            {app.t('terminal.starting', 'Arrancando {name}…').replace('{name}', app.tabs.find((tab) => tab.id === tabId)?.label ?? '')}
+        </div>
+    {/if}
     <div
         class="terminal-host"
         data-testid="terminal-host"
@@ -5463,13 +5971,27 @@
     {/if}
     <div
         class="horizontal-overflow-indicator"
-        class:visible={horizontalCanScrollRight}
+        class:visible={horizontalCanScrollRight && !horizontalIndicatorOverCursor}
+        data-over-cursor={horizontalIndicatorOverCursor}
         aria-hidden="true"
     >
         <span>›</span>
     </div>
     {#if linkNotice}
         <div class="terminal-link-notice" role="status" data-testid="terminal-link-notice">{linkNotice}</div>
+    {/if}
+    {#if aiTabHint}
+        <div class="ai-tab-hint" role="status" data-testid="terminal-ai-tab-hint" data-ai={aiTabHint.name}>
+            <span>{app.t('terminal.aiTabHint', 'Esta IA se ve mejor en su propia pestaña: aquí hay líneas más anchas que la vista y se queda con el ancho de la shell.')}</span>
+            {#if aiTabHint.envId}
+                <button type="button" data-testid="terminal-ai-tab-hint-open" onclick={() => {
+                    const envId = aiTabHint?.envId;
+                    aiTabHint = null;
+                    if (envId) void app.createTab(envId);
+                }}>{app.t('terminal.aiTabHintOpen', 'Abrir en su pestaña')}</button>
+            {/if}
+            <button type="button" class="ai-tab-hint-close" data-testid="terminal-ai-tab-hint-close" title={app.t('common.close', 'Cerrar')} onclick={() => (aiTabHint = null)}>×</button>
+        </div>
     {/if}
 </div>
 
@@ -5512,6 +6034,12 @@
         </button>
         <button type="button" role="menuitem" data-testid="terminal-menu-search" onclick={() => runMenu('search')}>
             <span>{menuSearchLabel(menuState.searchText)}</span>{#if app.preferences?.shortcutSearchTerminal ?? 'Ctrl+Shift+F'}<span class="menu-shortcut">{app.preferences?.shortcutSearchTerminal ?? 'Ctrl+Shift+F'}</span>{/if}
+        </button>
+        <button type="button" role="menuitem" data-testid="terminal-menu-save-output" onclick={() => runMenu('saveOutput')}>
+            <span>{app.t('menu.saveOutput', 'Guardar la salida…')}</span>
+        </button>
+        <button type="button" role="menuitem" data-testid="terminal-menu-copy-output" onclick={() => runMenu('copyLastOutput')}>
+            <span>{app.t('menu.copyLastOutput', 'Copiar la salida de la última orden')}</span>
         </button>
         <button type="button" role="menuitem" onclick={() => runMenu('settings')}>
             <span>{app.t('toolbar.settings', 'Ajustes')}</span>{#if app.preferences?.shortcutOpenSettings}<span class="menu-shortcut">{app.preferences.shortcutOpenSettings}</span>{/if}
@@ -5572,6 +6100,16 @@
         flex-direction: column;
         background: var(--terminal-bg);
         overflow: hidden;
+    }
+
+    .startup-hint {
+        position: absolute;
+        top: 6px;
+        right: 12px;
+        z-index: 3;
+        color: var(--text-muted, #9aa0a8);
+        font-size: 12px;
+        pointer-events: none;
     }
 
     .terminal-host {
@@ -6029,6 +6567,56 @@
     .link-actions button:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: 2px;
+    }
+
+    /* A pantalla completa, nada fuera de las columnas de la rejilla: al
+       encoger, xterm conserva en la pantalla alternativa el texto de las
+       columnas que ya no existen y lo seguía pintando junto al borde. */
+    :global(.tab-pane[data-full-screen-app]:not([data-full-screen-app="false"]) .xterm-screen) {
+        overflow: hidden;
+    }
+
+    .ai-tab-hint {
+        position: absolute;
+        z-index: 8;
+        top: 10px;
+        right: 18px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        max-width: min(460px, calc(100% - 36px));
+        padding: 6px 8px 6px 10px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: var(--surface);
+        box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
+        color: var(--text);
+        font-size: 12px;
+    }
+
+    .ai-tab-hint button {
+        flex: none;
+        padding: 3px 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface-alt, var(--surface));
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+    }
+
+    .ai-tab-hint .ai-tab-hint-close {
+        padding: 0 6px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+    }
+
+    /* Marca de orden fallida junto a su prompt: la dibuja xterm como decoración,
+       fuera del alcance de los estilos del componente. */
+    :global(.xterm .command-failed) {
+        box-sizing: border-box;
+        border-left: 3px solid #e5534b;
     }
 
     .terminal-link-notice {

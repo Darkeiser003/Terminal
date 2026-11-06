@@ -555,12 +555,102 @@ pub fn paste_entry(source_path: &str, directory: &str, move_it: bool) -> FsResul
 /// es el mismo en Linux, macOS y el CRT de Windows.
 const EXDEV: i32 = 18;
 
+/// Lo que ocupa una carpeta y cuántos archivos tiene.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderSize {
+    pub bytes: u64,
+    pub files: u64,
+    /// Se paró en el tope de entradas o de tiempo: es un mínimo, no el total.
+    pub truncated: bool,
+}
+
+/// Suficiente para `node_modules` o `target` sin quedarse minutos contando.
+const MAX_SIZE_ENTRIES: u64 = 300_000;
+
+/// Suma lo que ocupa una carpeta. No sigue enlaces ni uniones: apuntan a otra
+/// parte del disco, se contarían dos veces y una unión puede formar un ciclo.
+/// Lo que no se puede leer se salta en silencio, como hace el Explorador.
+pub fn folder_size(path: &Path, deadline: std::time::Instant) -> FolderSize {
+    let mut size = FolderSize::default();
+    let mut pending = vec![path.to_path_buf()];
+    let mut seen = 0_u64;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > MAX_SIZE_ENTRIES || std::time::Instant::now() >= deadline {
+                size.truncated = true;
+                return size;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if let Ok(metadata) = entry.metadata() {
+                size.bytes = size.bytes.saturating_add(metadata.len());
+                size.files += 1;
+            }
+        }
+    }
+    size
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn dir_str(dir: &tempfile::TempDir) -> String {
         dir.path().to_string_lossy().to_string()
+    }
+
+    // ---- Tamaño de carpetas ----
+
+    #[test]
+    fn el_tamano_suma_los_archivos_de_todas_las_subcarpetas() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a").join("b")).unwrap();
+        std::fs::write(dir.path().join("uno.txt"), vec![0_u8; 10]).unwrap();
+        std::fs::write(dir.path().join("a").join("dos.txt"), vec![0_u8; 20]).unwrap();
+        std::fs::write(
+            dir.path().join("a").join("b").join("tres.txt"),
+            vec![0_u8; 30],
+        )
+        .unwrap();
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        assert_eq!(
+            folder_size(dir.path(), far),
+            FolderSize {
+                bytes: 60,
+                files: 3,
+                truncated: false
+            }
+        );
+    }
+
+    #[test]
+    fn el_tamano_se_corta_al_agotar_el_tiempo() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("uno.txt"), b"x").unwrap();
+        let size = folder_size(dir.path(), std::time::Instant::now());
+        assert!(size.truncated, "sin tiempo debe avisar de que es un mínimo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn el_tamano_no_sigue_enlaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("grande.bin"), vec![0_u8; 1000]).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("enlace")).unwrap();
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        assert_eq!(folder_size(dir.path(), far).bytes, 0);
     }
 
     // ---- Validación de nombres ----

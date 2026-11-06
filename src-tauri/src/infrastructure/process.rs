@@ -97,6 +97,16 @@ pub fn extra_environment() -> Vec<(String, String)> {
     EXTRA_ENVIRONMENT.read().clone()
 }
 
+/// Variables fijas de la app para todo lo que lanza, aparte de las de la
+/// carpeta propia (que se reemplazan enteras al guardar Ajustes): por ahora,
+/// los valores por defecto de las IA (`environments::ai_cli_defaults`).
+static BASE_ENVIRONMENT: once_cell::sync::Lazy<parking_lot::RwLock<Vec<(String, String)>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(Vec::new()));
+
+pub fn set_base_environment(variables: Vec<(String, String)>) {
+    *BASE_ENVIRONMENT.write() = variables;
+}
+
 /// Carpetas que van DELANTE del PATH en todo lo que lanza WTerminal: los
 /// `bin` de las herramientas instaladas en la carpeta propia
 /// (`config::toolchain_store`). No se escriben en el PATH del sistema.
@@ -151,7 +161,10 @@ pub fn child_environment() -> Vec<(String, String)> {
             *value = path_with_extra(value);
         }
     }
-    for (key, value) in extra_environment() {
+    for (key, value) in extra_environment()
+        .into_iter()
+        .chain(BASE_ENVIRONMENT.read().clone())
+    {
         // Nunca se pisa una variable que ya trae el entorno del usuario.
         let present = environment.iter().any(|(existing, _)| {
             if cfg!(windows) {

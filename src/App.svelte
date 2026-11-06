@@ -13,11 +13,12 @@
     import * as perf from "./lib/performance";
     import { matchesPaneShortcut, matchesShortcut } from "./lib/shortcuts";
     import { createTerminalRefreshScheduler } from "./lib/terminal-render";
-    import { themePreferencePatch } from "./lib/theme";
+    import { clampUiScale, themePreferencePatch, UI_SCALE_STEP } from "./lib/theme";
     import { getTerminal, getTerminalControls, type TerminalLineRejection } from "./lib/terminalRegistry";
     import CommandPalette from "./components/CommandPalette.svelte";
     import DependenciesPanel from "./components/DependenciesPanel.svelte";
     import ExplorerSidebar from "./components/ExplorerSidebar.svelte";
+    import HistorySearch from "./components/HistorySearch.svelte";
     import ProjectsPanel from "./components/ProjectsPanel.svelte";
     import ScriptsPanel from "./components/ScriptsPanel.svelte";
     import SettingsPanel from "./components/SettingsPanel.svelte";
@@ -63,6 +64,8 @@
     /** La paleta se monta solo mientras está abierta: cada apertura empieza
      *  con la búsqueda vacía y el estado actual de pestañas y entornos. */
     let paletteOpen = $state(false);
+    /** La búsqueda en las órdenes escritas, igual que la paleta. */
+    let historyOpen = $state(false);
     /** Inicio del cambio de shell por pestaña. Se consume al completar el
      * primer `term.write`, que es el instante en que el usuario ya ve la nueva
      * sesión (el IPC por sí solo no incluye el arranque del inicializador). */
@@ -378,6 +381,9 @@
             [preferences.shortcutExplorerFollow, 'explorerFollow'],
             [preferences.shortcutExplorerCd, 'explorerCd'],
             [preferences.shortcutClearTerminal, 'clearTerminal'],
+            [preferences.shortcutSearchHistory, 'searchHistory'],
+            [preferences.shortcutPreviousCommand, 'previousCommand'],
+            [preferences.shortcutNextCommand, 'nextCommand'],
             [preferences.shortcutOpenSystemExplorer, 'openSystemExplorer'],
             [preferences.shortcutUiScaleUp, 'uiScaleUp'],
             [preferences.shortcutUiScaleDown, 'uiScaleDown'],
@@ -420,6 +426,17 @@
         return rejected ? rejectionMessage(rejected) : null;
     }
 
+    /** Lo mismo sin Intro: la orden del historial queda escrita para revisarla. */
+    function insertIntoActiveTerminal(line: string): string | null {
+        const controls = app.activeTabId ? getTerminalControls(app.activeTabId) : undefined;
+        if (!controls) return app.t('palette.disabled.noTab', 'No hay ninguna pestaña activa.');
+        if (activeTabIsRepl()) {
+            return app.t('palette.disabled.shellOnly', 'Solo en una pestaña de shell; la activa es un intérprete o un asistente.');
+        }
+        const rejected = controls.insertLine(line);
+        return rejected ? rejectionMessage(rejected) : null;
+    }
+
     /** Un único manejador para las acciones de la aplicación: lo usan los
      *  atajos globales y la paleta de comandos. Devuelve el motivo si no se
      *  pudo hacer (la paleta lo muestra; un atajo simplemente no hace nada). */
@@ -430,14 +447,14 @@
             case 'uiScaleDown':
             case 'uiScaleReset': {
                 if (!preferences) return null;
-                // Pasos de 10 % entre 80 % y 200 %, los mismos límites que valida el backend.
+                // Pasos de 10 % entre 80 % y 500 %, los mismos límites que valida el backend.
                 // Dos pulsaciones seguidas llegaban antes de que la primera se
                 // guardara y ambas partían del mismo valor (110 → 100 → 100): se
                 // parte del último valor pedido mientras haya uno pendiente.
                 const current = pendingUiScale ?? preferences.uiScale ?? 100;
                 const next = action === 'uiScaleReset'
                     ? 100
-                    : Math.min(200, Math.max(80, current + (action === 'uiScaleUp' ? 10 : -10)));
+                    : clampUiScale(current + (action === 'uiScaleUp' ? UI_SCALE_STEP : -UI_SCALE_STEP));
                 if (next !== current) {
                     pendingUiScale = next;
                     void app.savePreferences({ uiScale: next }).finally(() => {
@@ -519,6 +536,25 @@
                 return null;
             case 'searchTerminal':
                 if (app.activeTabId) getTerminalControls(app.activeTabId)?.openSearch();
+                return null;
+            case 'saveTerminalOutput':
+                if (app.activeTabId) void getTerminalControls(app.activeTabId)?.saveOutput();
+                return null;
+            case 'searchHistory':
+                paletteOpen = false;
+                historyOpen = true;
+                return null;
+            case 'copyLastOutput':
+                if (app.activeTabId) getTerminalControls(app.activeTabId)?.copyLastOutput();
+                return null;
+            case 'previousCommand':
+            case 'nextCommand':
+                if (app.activeTabId) {
+                    getTerminalControls(app.activeTabId)?.jumpToCommand(action === 'nextCommand' ? 'next' : 'previous');
+                }
+                return null;
+            case 'renameTab':
+                app.renamingTabId = app.activeTabId;
                 return null;
             case 'clearTerminal':
                 // Antes era `terminal.clear()`, que solo vaciaba xterm: el
@@ -602,7 +638,15 @@
 
     onMount(() => {
         const unlisten = api.onCurrentDirectoryChanged((event) => scheduleImportDetection(event.tabId, event.cwd));
-        const onFirstReady = (event: Event) => considerLowPower((event as CustomEvent<{ ms?: number }>).detail?.ms ?? null);
+        // Lo emite cada pestaña al montarse, con el tiempo desde que se abrió la
+        // app: solo el de la primera mide su arranque. Una pestaña abierta diez
+        // minutos después decía que «la primera tardó 600 s». Las siguientes
+        // reevalúan igual, porque las preferencias pueden no haber llegado aún.
+        let firstReadyMs: number | null = null;
+        const onFirstReady = (event: Event) => {
+            firstReadyMs ??= (event as CustomEvent<{ ms?: number }>).detail?.ms ?? null;
+            considerLowPower(firstReadyMs);
+        };
         window.addEventListener('winslim:first-ready', onFirstReady);
         return () => {
             window.removeEventListener('winslim:first-ready', onFirstReady);
@@ -682,6 +726,10 @@
                         return;
                     }
                     try {
+                        // Traza cruda para diagnóstico en los E2E: solo existe
+                        // si la prueba la crea (`window.__wtermPtyTrace = []`).
+                        const trace = (window as unknown as { __wtermPtyTrace?: string[] }).__wtermPtyTrace;
+                        if (trace && trace.length < 4000) trace.push(typeof data === 'string' ? data : new TextDecoder().decode(data));
                         term.write(data, () => {
                         const current = getTerminal(tabId);
                         if (!current?.element?.isConnected) {
@@ -767,6 +815,15 @@
                         return;
                     }
                     try {
+                        // Una sesión que muere a pantalla completa (Amp, vim,
+                        // una IA) deja a xterm en la pantalla alternativa, con
+                        // el cursor oculto o el ratón capturado: la shell nueva
+                        // escribía en esa pantalla y, al salir el siguiente
+                        // programa, xterm volvía a la normal antigua con su
+                        // cursor viejo. Se vuelve a la normal y se restablecen
+                        // esos modos antes de limpiar.
+                        if (term.buffer.active.type === 'alternate') term.write('\x1b[?1049l');
+                        term.write('\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b>\x1b[r\x1b[0m');
                         term.write('\x1b[2J\x1b[3J', resolve);
                         requestAnimationFrame(() => {
                             // CSI limpia el buffer lógico, pero un renderer
@@ -791,15 +848,25 @@
             }),
 
             api.onExit((tabId, code) => {
-                const term = getTerminal(tabId);
-                term?.writeln(
-                    `\r\n\x1b[33m${app
-                        .t(
-                            "tabs.exited",
-                            "[Proceso finalizado con código {code}]",
-                        )
-                        .replace("{code}", String(code))}\x1b[0m`,
-                );
+                // Detrás de la salida que aún está en cola: escrito al llegar
+                // se colaba entre dos trozos del último mensaje del programa
+                // (Elm quedaba «resource bu… Proceso finalizado… sy»).
+                const notice = `\r\n\x1b[33m${app
+                    .t(
+                        "tabs.exited",
+                        "[Proceso finalizado con código {code}]",
+                    )
+                    .replace("{code}", String(code))}\x1b[0m`;
+                const previous = outputQueues.get(tabId) ?? Promise.resolve();
+                const queued = previous.catch(() => undefined).then(() => {
+                    getTerminal(tabId)?.writeln(notice);
+                });
+                outputQueues.set(tabId, queued);
+                void queued.then(() => {
+                    if (outputQueues.get(tabId) !== queued) return;
+                    outputQueues.delete(tabId);
+                    window.dispatchEvent(new CustomEvent('winslim:terminal-output-idle', { detail: { tabId } }));
+                });
             }),
 
             api.onTabClosed((tabId, activeTabId) => {
@@ -1210,6 +1277,9 @@
     {/if}
     {#if paletteOpen && ready}
         <CommandPalette onRun={runPaletteEntry} onClose={() => (paletteOpen = false)} />
+    {/if}
+    {#if historyOpen && ready}
+        <HistorySearch onInsert={insertIntoActiveTerminal} onClose={() => (historyOpen = false)} />
     {/if}
 </main>
 

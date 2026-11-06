@@ -172,6 +172,7 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
             windows_manager: request.windows_manager,
             initial_banner: request.initial_banner && show_banner,
             assist_lines: &assist_lines,
+            command_marks: crate::preferences::current().terminal_command_marks,
         },
     );
 

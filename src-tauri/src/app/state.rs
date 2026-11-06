@@ -34,6 +34,11 @@ pub struct AppState {
     /// arranque y el botón de repetir detección podían entrar a WSL/Docker/
     /// ADB a la vez y dejar la segunda llamada esperando indefinidamente.
     environment_refresh_lock: Mutex<()>,
+    /// Peticiones de refresco completo recibidas (cada una toma un número).
+    environment_refresh_requested: std::sync::atomic::AtomicU64,
+    /// Hasta qué petición cubre el último refresco terminado: el que empieza
+    /// después de una petición ya la atiende.
+    environment_refresh_covered: std::sync::atomic::AtomicU64,
     /// Ya se lanzó la detección completa. Solo hace falta una vez por arranque:
     /// las siguientes las pide el usuario con el botón de refrescar.
     full_detection_started: Mutex<bool>,
@@ -96,6 +101,8 @@ impl AppState {
             inventory: Mutex::new(None),
             inventory_full: Mutex::new(false),
             environment_refresh_lock: Mutex::new(()),
+            environment_refresh_requested: std::sync::atomic::AtomicU64::new(0),
+            environment_refresh_covered: std::sync::atomic::AtomicU64::new(0),
             full_detection_started: Mutex::new(false),
             allowed_items: Mutex::new(HashMap::new()),
             clipboard: Mutex::new(None),
@@ -369,18 +376,58 @@ impl AppState {
 
     /// Vuelve a detectar los entornos desde cero, esta vez con todo: WSL,
     /// Docker, ADB e intérpretes de lenguajes.
+    ///
+    /// Peticiones simultáneas se unen: quien espera al cerrojo y encuentra
+    /// que ya terminó un refresco que empezó después de su petición usa ese
+    /// resultado. Antes cada una repetía la detección entera en serie; con
+    /// siete distros WSL eso eran varios minutos de VM al máximo y el E2E de
+    /// «acciones concurrentes» se agotaba.
     pub fn refresh_environments(&self) -> Inventory {
-        let _refresh_guard = self.environment_refresh_lock.lock();
-        crate::path_env::clear_which_cache();
-        let detected = environments::detect_environments(false);
-        *self.inventory.lock() = Some(detected.clone());
-        *self.inventory_full.lock() = true;
+        let detected = coalesced_refresh(
+            &self.environment_refresh_requested,
+            &self.environment_refresh_covered,
+            &self.environment_refresh_lock,
+            || self.inventory.lock().clone(),
+            || {
+                crate::path_env::clear_which_cache();
+                let detected = environments::detect_environments(false);
+                *self.inventory.lock() = Some(detected.clone());
+                *self.inventory_full.lock() = true;
+                detected
+            },
+        );
         let hidden = preferences::current().hidden_environment_ids;
         let hidden: std::collections::HashSet<&str> =
             hidden.split(',').filter(|id| !id.is_empty()).collect();
         let mut visible = detected;
         visible.envs.retain(|env| !hidden.contains(env.id.as_str()));
         visible
+    }
+
+    /// Primera tanda del inventario de arranque: todo salvo WSL. Conserva las
+    /// distros WSL que ya hubiera en el inventario (ninguna en el arranque en
+    /// frío) y no marca el inventario como completo.
+    fn publish_without_wsl(&self) -> Inventory {
+        let _refresh_guard = self.environment_refresh_lock.lock();
+        crate::path_env::clear_which_cache();
+        let mut detected = environments::detect_environments_without_wsl();
+        if let Some(previous) = self.inventory.lock().as_ref() {
+            detected.envs.extend(
+                previous
+                    .envs
+                    .iter()
+                    .filter(|env| env.transport == environments::Transport::Wsl)
+                    .cloned(),
+            );
+        }
+        *self.inventory.lock() = Some(detected.clone());
+        let hidden = preferences::current().hidden_environment_ids;
+        let hidden: std::collections::HashSet<&str> =
+            hidden.split(',').filter(|id| !id.is_empty()).collect();
+        detected
+            .envs
+            .retain(|env| !hidden.contains(env.id.as_str()));
+        detected
     }
 
     /// Lanza la detección completa en segundo plano y avisa al frontend cuando
@@ -413,6 +460,20 @@ impl AppState {
                 std::thread::sleep(std::time::Duration::from_millis(FULL_DETECTION_DEFER));
                 let started = Instant::now();
                 maybe_start_docker_on_windows();
+                // Primero todo menos WSL (segundos) y después la pasada con
+                // WSL, que con varias distros en frío tarda cerca de un minuto:
+                // el selector no se queda sin lenguajes ni IA mientras tanto.
+                if crate::platform::host().is_windows() {
+                    let partial = state.publish_without_wsl();
+                    log_info!(
+                        "Inventario sin WSL publicado; WSL sigue en segundo plano",
+                        serde_json::json!({
+                            "envs": partial.envs.len(),
+                            "durationMs": started.elapsed().as_millis(),
+                        })
+                    );
+                    let _ = app.emit("envs-updated", partial);
+                }
                 let inventory = state.refresh_environments();
                 log_info!(
                     "Inventario de entornos completo",
@@ -444,6 +505,23 @@ impl AppState {
                             );
                         });
                 }
+                // Sin otro intento, el selector se quedaba sin distros hasta
+                // pulsar «Actualizar» si `wsl.exe` no contestó al arrancar.
+                retry_while_wsl_unanswered(
+                    crate::wsl_env::listing_unanswered,
+                    std::thread::sleep,
+                    || {
+                        let inventory = state.refresh_environments();
+                        log_info!(
+                            "Inventario repetido porque WSL no contestó",
+                            serde_json::json!({
+                                "envs": inventory.envs.len(),
+                                "wslAnswered": !crate::wsl_env::listing_unanswered(),
+                            })
+                        );
+                        let _ = app.emit("envs-updated", inventory);
+                    },
+                );
             });
         let _ = spawn;
     }
@@ -468,6 +546,34 @@ impl AppState {
 }
 
 const FULL_DETECTION_DEFER: u64 = 750;
+
+/// Pausas antes de volver a pedir las distros a un WSL que no contestó en el
+/// inventario de arranque. En una build, `wsl.exe` pasó ~22 s sin contestar
+/// justo al abrir la app; entre pausas e intentos se cubren unos 4 minutos.
+const WSL_LISTING_RETRY_DELAYS: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(20),
+    std::time::Duration::from_secs(40),
+    std::time::Duration::from_secs(80),
+];
+
+/// Repite `refresh` tras cada pausa mientras WSL siga sin contestar.
+fn retry_while_wsl_unanswered(
+    unanswered: impl Fn() -> bool,
+    mut sleep: impl FnMut(std::time::Duration),
+    mut refresh: impl FnMut(),
+) -> usize {
+    let mut attempts = 0;
+    for delay in WSL_LISTING_RETRY_DELAYS {
+        if !unanswered() {
+            break;
+        }
+        sleep(delay);
+        refresh();
+        attempts += 1;
+    }
+    attempts
+}
 
 /// La preferencia de arranque automático solo puede actuar de forma segura en
 /// Windows: allí Docker Desktop es una aplicación de usuario que se puede
@@ -525,10 +631,107 @@ impl Default for AppState {
     }
 }
 
+/// Une peticiones simultáneas de una operación cara. Cada llamada toma un
+/// número; con el cerrojo ya en la mano, si un resultado terminado empezó
+/// después de su petición (`covered >= ticket`) se reutiliza (`cached`); si
+/// no, se calcula (`fresh`) y queda cubierto todo lo pedido hasta empezar.
+fn coalesced_refresh<T>(
+    requested: &std::sync::atomic::AtomicU64,
+    covered: &std::sync::atomic::AtomicU64,
+    lock: &Mutex<()>,
+    cached: impl FnOnce() -> Option<T>,
+    fresh: impl FnOnce() -> T,
+) -> T {
+    use std::sync::atomic::Ordering;
+    let ticket = requested.fetch_add(1, Ordering::SeqCst) + 1;
+    let _guard = lock.lock();
+    if covered.load(Ordering::SeqCst) >= ticket {
+        if let Some(value) = cached() {
+            return value;
+        }
+    }
+    let covers = requested.load(Ordering::SeqCst);
+    let value = fresh();
+    covered.fetch_max(covers, Ordering::SeqCst);
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::AppState;
     use std::time::Duration;
+
+    #[test]
+    fn un_wsl_que_no_contesto_se_vuelve_a_preguntar_hasta_que_contesta() {
+        use std::cell::Cell;
+        let silent_answers = Cell::new(2);
+        let refreshes = Cell::new(0);
+        let mut slept = Vec::new();
+        let attempts = super::retry_while_wsl_unanswered(
+            || silent_answers.get() > 0,
+            |delay| slept.push(delay),
+            || {
+                refreshes.set(refreshes.get() + 1);
+                silent_answers.set(silent_answers.get() - 1);
+            },
+        );
+        assert_eq!(attempts, 2);
+        assert_eq!(refreshes.get(), 2);
+        assert_eq!(slept, super::WSL_LISTING_RETRY_DELAYS[..2]);
+
+        let always = super::retry_while_wsl_unanswered(|| true, |_| {}, || {});
+        assert_eq!(
+            always,
+            super::WSL_LISTING_RETRY_DELAYS.len(),
+            "los intentos tienen tope"
+        );
+        let never = super::retry_while_wsl_unanswered(
+            || false,
+            |_| panic!("no espera"),
+            || panic!("no repite"),
+        );
+        assert_eq!(never, 0, "si WSL contestó no se repite nada");
+    }
+
+    #[test]
+    fn refrescos_simultaneos_se_unen_en_como_mucho_dos_detecciones() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        let requested = AtomicU64::new(0);
+        let covered = AtomicU64::new(0);
+        let lock = parking_lot::Mutex::new(());
+        let result = parking_lot::Mutex::new(None::<usize>);
+        let runs = AtomicUsize::new(0);
+        let refresh = || {
+            super::coalesced_refresh(
+                &requested,
+                &covered,
+                &lock,
+                || *result.lock(),
+                || {
+                    let run = runs.fetch_add(1, Ordering::SeqCst) + 1;
+                    std::thread::sleep(Duration::from_millis(150));
+                    *result.lock() = Some(run);
+                    run
+                },
+            )
+        };
+        let seen: Vec<usize> = std::thread::scope(|scope| {
+            let first = scope.spawn(refresh);
+            std::thread::sleep(Duration::from_millis(30));
+            let rest: Vec<_> = (0..3).map(|_| scope.spawn(refresh)).collect();
+            std::iter::once(first)
+                .chain(rest)
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        // Cuatro clics: la que estaba en marcha y una sola más para las tres
+        // que llegaron durante ella (antes eran cuatro detecciones en serie).
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(seen[0], 1);
+        assert!(seen[1..].iter().all(|run| *run == 2));
+        // Una petición nueva, después, vuelve a detectar.
+        assert_eq!(refresh(), 3);
+    }
 
     #[test]
     fn la_precarga_del_catalogo_se_deduplica_y_se_puede_esperar() {

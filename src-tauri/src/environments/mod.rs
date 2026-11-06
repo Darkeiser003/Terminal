@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod ai;
+pub mod ai_cli_defaults;
 pub mod android;
 pub mod docker;
 pub mod languages;
@@ -671,6 +672,18 @@ fn detect_pkg_manager() -> Option<String> {
 /// hay nada conectado, esa parte de la lista queda vacía y el resto de entornos
 /// funciona con normalidad.
 pub fn detect_environments(quick: bool) -> Inventory {
+    detect_environments_with(quick, true)
+}
+
+/// Inventario completo salvo WSL. Con varias distros en frío, su sonda
+/// detallada tarda cerca de un minuto (medido con siete); publicarla junto al
+/// resto dejaba el selector sin lenguajes ni IA todo ese tiempo. El arranque
+/// publica primero esto y después la pasada con WSL.
+pub fn detect_environments_without_wsl() -> Inventory {
+    detect_environments_with(false, false)
+}
+
+fn detect_environments_with(quick: bool, include_wsl: bool) -> Inventory {
     let detection_started = std::time::Instant::now();
     // Antes de detectar nada se re-sincroniza el PATH del proceso: si el
     // usuario acaba de instalar algo desde la propia terminal, la herramienta
@@ -685,7 +698,12 @@ pub fn detect_environments(quick: bool) -> Inventory {
         // distro, habilitar la plataforma o cambiar sus paquetes, conservar
         // esa instantánea hacía que el panel siguiera mostrando acciones y
         // versiones de una pasada anterior.
-        crate::wsl_env::reset_cache();
+        // Salvo que la última sonda detallada sea de hace unos segundos
+        // (`wsl_env::reset_cache_unless_fresh`): repetirla al abrir
+        // Dependencias justo tras el arranque costaba otro minuto y medio.
+        if include_wsl {
+            crate::wsl_env::reset_cache_unless_fresh();
+        }
     }
 
     let shells_started = std::time::Instant::now();
@@ -717,7 +735,7 @@ pub fn detect_environments(quick: bool) -> Inventory {
     let providers_started = std::time::Instant::now();
     let (wsl, languages, docker, android, pkg_manager) = std::thread::scope(|scope| {
         let wsl = scope.spawn(|| {
-            if crate::platform::host().is_windows() {
+            if include_wsl && crate::platform::host().is_windows() {
                 detect_wsl_environments(wsl_env::ContextOptions {
                     online: false,
                     // Esta fase ya ocurre después del primer pintado. Una
@@ -748,18 +766,36 @@ pub fn detect_environments(quick: bool) -> Inventory {
             {
                 detected.retain(|environment| environment.language.as_deref() != Some("fsharp"));
             }
-            // IPython es un lanzador de pip: puede estar en el PATH sin que su
-            // Python encuentre el módulo (p. ej. instalado con `pip --user` y
-            // sin `PYTHONUSERBASE`). Solo se ofrece si de verdad arranca.
-            if let Some(ipython) = detected
+            // IPython, Jupyter y demás REPL instalados con pip son lanzadores:
+            // pueden estar en el PATH sin que su Python encuentre el módulo
+            // (p. ej. con `pip --user` y sin `PYTHONUSERBASE`). Solo se
+            // ofrecen si de verdad arrancan. Se prueban en paralelo.
+            let launchers: Vec<String> = detected
                 .iter()
-                .find(|environment| environment.language.as_deref() == Some("ipython"))
+                .filter(|environment| is_python_launcher(environment))
                 .map(|environment| environment.exe.clone())
-            {
-                if !python_launcher_keeps(&python_launcher_probe(&ipython)) {
-                    detected
-                        .retain(|environment| environment.language.as_deref() != Some("ipython"));
-                }
+                .collect();
+            let broken: Vec<String> = std::thread::scope(|scope| {
+                let probes: Vec<_> = launchers
+                    .iter()
+                    .map(|exe| {
+                        scope.spawn(move || {
+                            (!python_launcher_keeps(&python_launcher_probe(exe)))
+                                .then(|| exe.clone())
+                        })
+                    })
+                    .collect();
+                probes
+                    .into_iter()
+                    .filter_map(|probe| probe.join().ok().flatten())
+                    .collect()
+            });
+            if !broken.is_empty() {
+                log_info!(
+                    "REPL de Python sin su módulo; no se ofrecen",
+                    serde_json::json!({ "exes": broken })
+                );
+                detected.retain(|environment| !broken.contains(&environment.exe));
             }
             detected
         });
@@ -849,6 +885,25 @@ pub fn detect_environments(quick: bool) -> Inventory {
     }
 }
 
+/// REPL que es un lanzador de pip: los conocidos y, en general, cualquier
+/// ejecutable dentro de una carpeta `Scripts` (donde pip deja los suyos en
+/// Windows).
+fn is_python_launcher(environment: &Environment) -> bool {
+    const KNOWN: [&str; 4] = ["ipython", "jupyter", "ptpython", "bpython"];
+    if !environment.repl {
+        return false;
+    }
+    let known = environment
+        .language
+        .as_deref()
+        .is_some_and(|language| KNOWN.contains(&language));
+    let in_scripts = std::path::Path::new(&environment.exe)
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Scripts"));
+    known || in_scripts
+}
+
 /// `--version` importa el módulo del lanzador: falla con
 /// «ModuleNotFoundError» si su Python no lo encuentra. Usa el mismo entorno
 /// que las pestañas (cachés y `PYTHONUSERBASE` de la carpeta propia).
@@ -928,6 +983,39 @@ mod tests {
         // «ModuleNotFoundError: No module named 'IPython'» sale con error.
         assert!(!python_launcher_keeps(&ProbeOutput::Failed));
         assert!(!python_launcher_keeps(&ProbeOutput::NotFound));
+    }
+
+    #[test]
+    fn los_lanzadores_de_pip_se_reconocen_por_nombre_o_por_su_carpeta_scripts() {
+        let repl = |language: &str, exe: &str| Environment {
+            id: format!("lang:{language}"),
+            exe: exe.to_string(),
+            repl: true,
+            language: Some(language.to_string()),
+            ..Default::default()
+        };
+        assert!(is_python_launcher(&repl("ipython", "ipython")));
+        assert!(is_python_launcher(&repl(
+            "jupyter",
+            r"E:\WTerminal\entornos\herramientas\python\Python312\Scripts\jupyter.EXE"
+        )));
+        assert!(is_python_launcher(&repl(
+            "otro",
+            r"C:\Python312\Scripts\otro.exe"
+        )));
+        assert!(!is_python_launcher(&repl(
+            "python",
+            r"C:\Python312\python.exe"
+        )));
+        assert!(!is_python_launcher(&repl(
+            "node",
+            r"C:\Program Files\nodejs\node.exe"
+        )));
+        let shell = Environment {
+            exe: r"C:\Python312\Scripts\x.exe".into(),
+            ..Default::default()
+        };
+        assert!(!is_python_launcher(&shell), "solo REPL");
     }
 
     #[test]

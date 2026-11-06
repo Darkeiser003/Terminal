@@ -82,20 +82,37 @@ impl Version {
 /// la release la actualiza.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageKind {
-    /// Carpeta unpacked o instalada: se actualiza con el `.zip`.
+    /// Carpeta unpacked: se actualiza con el `.zip`.
     WindowsFolder,
+    /// Copia del instalador NSIS (tiene `uninstall.exe` al lado): se actualiza
+    /// con el `-setup.exe`, que pide UAC para escribir en Archivos de programa
+    /// y mantiene al día el desinstalador, su entrada del registro y los
+    /// accesos directos. Con el `.zip` nada de eso cambiaba y, sin permisos de
+    /// administrador, ni siquiera podía copiarse.
+    WindowsInstalled,
     /// `WTerminal-<versión>-Portable.exe`: el archivo descargado es la
     /// versión nueva entera y sustituye al ejecutable, como un AppImage.
     WindowsSingleFile,
     LinuxAppImage,
+    /// Instalado con el `.deb`: el binario está en `/usr` y es de `dpkg`. Se
+    /// actualiza instalando el `.deb` nuevo con `apt-get` (vía `pkexec`), para
+    /// que el gestor siga sabiendo qué versión hay y qué archivos son suyos.
+    LinuxDeb,
+    /// Lo mismo con el `.rpm` (`dnf`, `zypper` o `rpm -U`).
+    LinuxRpm,
+    /// La carpeta del `.tar.gz`, descomprimida donde sea: se actualiza como la
+    /// carpeta de Windows, copiando encima.
+    LinuxFolder,
 }
 
 impl PackageKind {
     pub fn current() -> Self {
         if !crate::platform::host().is_windows() {
-            PackageKind::LinuxAppImage
+            linux_current()
         } else if crate::single_file::is_single_file() {
             PackageKind::WindowsSingleFile
+        } else if install_dir::current().is_some_and(|dir| is_installer_copy(&dir)) {
+            PackageKind::WindowsInstalled
         } else {
             PackageKind::WindowsFolder
         }
@@ -109,6 +126,172 @@ impl PackageKind {
             PackageKind::WindowsSingleFile | PackageKind::LinuxAppImage
         )
     }
+
+    /// La copia la instaló el sistema (el instalador NSIS, o `dpkg`/`rpm`): se
+    /// actualiza ejecutando el paquete nuevo con permisos de administrador, no
+    /// copiando archivos encima de algo que no es de la app.
+    pub fn uses_system_installer(self) -> bool {
+        matches!(
+            self,
+            PackageKind::WindowsInstalled | PackageKind::LinuxDeb | PackageKind::LinuxRpm
+        )
+    }
+
+    fn is_linux(self) -> bool {
+        matches!(
+            self,
+            PackageKind::LinuxAppImage
+                | PackageKind::LinuxDeb
+                | PackageKind::LinuxRpm
+                | PackageKind::LinuxFolder
+        )
+    }
+}
+
+/// Se decide una vez por arranque: preguntar a `dpkg` o a `rpm` cuesta un
+/// proceso, y la respuesta no cambia mientras la app corre.
+fn linux_current() -> PackageKind {
+    static KIND: std::sync::OnceLock<PackageKind> = std::sync::OnceLock::new();
+    *KIND.get_or_init(|| {
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe));
+        linux_kind(
+            install_dir::appimage_path().is_some(),
+            exe.as_deref(),
+            system_package_owns,
+        )
+    })
+}
+
+/// Cómo se distribuyó una copia Linux. El AppImage lo dice su runtime
+/// (`$APPIMAGE`). Un `.deb` o un `.rpm` dejan el binario bajo `/usr` y su
+/// gestor lo reclama; a los gestores solo se les pregunta por eso, así una
+/// carpeta descomprimida en el home no lanza ningún proceso. Lo demás es la
+/// carpeta del `.tar.gz`.
+pub fn linux_kind(
+    appimage: bool,
+    exe: Option<&Path>,
+    owned_by: impl Fn(&str, &Path) -> bool,
+) -> PackageKind {
+    if appimage {
+        return PackageKind::LinuxAppImage;
+    }
+    let Some(exe) = exe else {
+        return PackageKind::LinuxFolder;
+    };
+    if !exe.starts_with("/usr") || exe.starts_with("/usr/local") {
+        PackageKind::LinuxFolder
+    } else if owned_by("dpkg", exe) {
+        PackageKind::LinuxDeb
+    } else if owned_by("rpm", exe) {
+        PackageKind::LinuxRpm
+    } else {
+        PackageKind::LinuxFolder
+    }
+}
+
+/// `dpkg-query -S` o `rpm -qf`: si algún paquete instalado contiene el archivo.
+fn system_package_owns(manager: &str, exe: &Path) -> bool {
+    let path = exe.to_string_lossy();
+    let path = path.as_ref();
+    let (tool, args) = if manager == "dpkg" {
+        ("dpkg-query", ["-S", path])
+    } else {
+        ("rpm", ["-qf", path])
+    };
+    crate::path_env::which(tool).is_some()
+        && crate::process::run_with_timeout(tool, &args, std::time::Duration::from_secs(10))
+            .is_some_and(|output| output.status.success())
+}
+
+/// La orden que instala el paquete nuevo encima del instalado, con `pkexec`
+/// (el diálogo de contraseña del escritorio). `apt-get` resuelve las
+/// dependencias de un `.deb` local; un `.rpm` va con `dnf`, con `zypper` en
+/// openSUSE o, sin ninguno, con `rpm -U`. El paquete ya pasó el SHA-256 del
+/// manifiesto firmado, por eso `zypper` puede aceptarlo sin firma GPG propia.
+/// `None` si falta `pkexec` o el gestor: entonces se dice qué hacer a mano.
+pub fn linux_package_command(
+    kind: PackageKind,
+    package: &Path,
+    locate: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<Vec<String>> {
+    let pkexec = locate("pkexec")?;
+    let package = package.to_string_lossy().to_string();
+    let candidates: &[(&str, &[&str])] = match kind {
+        PackageKind::LinuxDeb => &[("apt-get", &["install", "-y"]), ("dpkg", &["-i"])],
+        PackageKind::LinuxRpm => &[
+            ("dnf", &["install", "-y"]),
+            (
+                "zypper",
+                &["--non-interactive", "install", "--allow-unsigned-rpm"],
+            ),
+            ("rpm", &["-U"]),
+        ],
+        _ => return None,
+    };
+    candidates.iter().find_map(|(tool, args)| {
+        let tool = locate(tool)?;
+        Some(
+            [
+                pkexec.to_string_lossy().to_string(),
+                tool.to_string_lossy().to_string(),
+            ]
+            .into_iter()
+            .chain(args.iter().map(|arg| arg.to_string()))
+            .chain(Some(package.clone()))
+            .collect(),
+        )
+    })
+}
+
+/// La carpeta la creó el instalador NSIS: deja `uninstall.exe` junto al
+/// ejecutable. La release desempaquetada y el portable no lo traen.
+pub fn is_installer_copy(dir: &Path) -> bool {
+    dir.join("uninstall.exe").is_file()
+}
+
+/// Los argumentos del instalador NSIS de Tauri para actualizar sin preguntar:
+/// `/P` (pasivo: solo la barra de progreso), `/UPDATE` (conserva la
+/// configuración y no reinstala WebView2) y `/R` (vuelve a abrir la app como
+/// usuario normal al terminar).
+pub const INSTALLER_UPDATE_ARGS: [&str; 3] = ["/P", "/UPDATE", "/R"];
+
+/// Dónde descarga la copia instalada su instalador o paquete nuevo. No puede
+/// ser junto al ejecutable (ni Archivos de programa ni `/usr` se escriben sin
+/// ser administrador): es `%LOCALAPPDATA%\WTerminal\update` en Windows y
+/// `$XDG_CACHE_HOME/lterminal/update` (o `~/.cache/…`) en Linux. `None` en una
+/// build de desarrollo, igual que `install_dir::staging`.
+pub fn installer_staging() -> Option<PathBuf> {
+    install_dir::staging()?;
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    if crate::platform::host().is_windows() {
+        return absolute("LOCALAPPDATA").map(|local| local.join("WTerminal").join("update"));
+    }
+    absolute("XDG_CACHE_HOME")
+        .or_else(|| absolute("HOME").map(|home| home.join(".cache")))
+        .map(|cache| cache.join("lterminal").join("update"))
+}
+
+/// La orden que se lanza con UAC para actualizar la copia instalada. Espera a
+/// que esta app se cierre antes de abrir el instalador: el de Tauri se niega
+/// a seguir (o la cierra a la fuerza) si la encuentra en marcha.
+pub fn installer_launch_script(app_pid: u32, installer: &Path) -> String {
+    let quoted = |text: &str| format!("'{}'", text.replace('\'', "''"));
+    let args = INSTALLER_UPDATE_ARGS
+        .iter()
+        .map(|arg| quoted(arg))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "Wait-Process -Id {app_pid} -Timeout 60 -ErrorAction SilentlyContinue; \
+         Start-Process -FilePath {} -ArgumentList {args}",
+        quoted(&installer.to_string_lossy())
+    )
 }
 
 /// El adjunto de una release que corresponde a ESTA copia.
@@ -117,25 +300,54 @@ pub fn asset_for_platform<'a>(names: &[&'a str]) -> Option<&'a str> {
 }
 
 /// En Windows la carpeta se distribuye comprimida, el portable como un único
-/// `-Portable.exe` y en Linux como AppImage, así que se busca por el final del
-/// nombre. El instalador `-setup.exe` o el código fuente que GitHub añade solo
-/// se descartan por no coincidir.
+/// `-Portable.exe` y en Linux como AppImage, `.deb`, `.rpm` o `.tar.gz`, así
+/// que se busca por el final del nombre. El instalador `-setup.exe` o el
+/// código fuente que GitHub añade solo se descartan por no coincidir. En Linux
+/// se descartan además los paquetes de otra arquitectura.
 pub fn asset_for_package<'a>(names: &[&'a str], kind: PackageKind) -> Option<&'a str> {
     let (sufijo, excluir): (&str, &[&str]) = match kind {
         PackageKind::WindowsFolder => (".zip", &["source", "linux", "macos", "darwin"]),
+        PackageKind::WindowsInstalled => (
+            "-setup.exe",
+            &["source", "portable", "linux", "macos", "darwin", "arm64"],
+        ),
         PackageKind::WindowsSingleFile => (
             "-portable.exe",
             &["source", "setup", "linux", "macos", "darwin"],
         ),
         PackageKind::LinuxAppImage => (".appimage", &["source", "windows", "macos"]),
+        PackageKind::LinuxDeb => (".deb", &["source", "windows", "macos"]),
+        // `.src.rpm` es el paquete de código fuente, no la app.
+        PackageKind::LinuxRpm => (".rpm", &["source", ".src.", "windows", "macos"]),
+        PackageKind::LinuxFolder => (".tar.gz", &["source", "windows", "macos", "darwin"]),
+    };
+    let otra_arquitectura: &[&str] = if kind.is_linux() {
+        foreign_arch_markers()
+    } else {
+        &[]
     };
     names
         .iter()
         .find(|name| {
             let bajo = name.to_lowercase();
-            bajo.ends_with(sufijo) && !excluir.iter().any(|malo| bajo.contains(malo))
+            bajo.ends_with(sufijo)
+                && !excluir
+                    .iter()
+                    .chain(otra_arquitectura)
+                    .any(|malo| bajo.contains(malo))
         })
         .copied()
+}
+
+/// Cómo se nombran en los paquetes Linux las arquitecturas que NO son la de
+/// esta copia (`x86_64`/`amd64` o `aarch64`/`arm64`), para no ofrecer un
+/// paquete que no arrancaría.
+fn foreign_arch_markers() -> &'static [&'static str] {
+    if cfg!(target_arch = "aarch64") {
+        &["x86_64", "amd64", "i386", "i686"]
+    } else {
+        &["aarch64", "arm64", "armhf", "armv7", "i386", "i686"]
+    }
 }
 
 /// Lo que se sabe del estado de actualización, tal y como lo ve el frontend.
@@ -196,16 +408,19 @@ fn verify_payload_as(root: &Path, binary_name: &str, kind: PackageKind) -> Resul
             "Lo descargado no parece esta aplicación: no trae {binary_name}."
         ));
     }
+    // El AppImage y el binario de la carpeta del `.tar.gz` son ejecutables
+    // ELF: un archivo de texto o de otro sistema con el mismo nombre no pasa.
     if !crate::platform::host().is_windows()
-        && binary_name.to_ascii_lowercase().ends_with(".appimage")
+        && (binary_name.to_ascii_lowercase().ends_with(".appimage")
+            || kind == PackageKind::LinuxFolder)
     {
         let mut magic = [0u8; 4];
         let mut file = std::fs::File::open(&binario)
-            .map_err(|error| format!("No se pudo leer el AppImage: {error}"))?;
+            .map_err(|error| format!("No se pudo leer el ejecutable nuevo: {error}"))?;
         std::io::Read::read_exact(&mut file, &mut magic)
-            .map_err(|error| format!("El AppImage está incompleto: {error}"))?;
+            .map_err(|error| format!("El ejecutable nuevo está incompleto: {error}"))?;
         if magic != *b"\x7fELF" {
-            return Err("La actualización Linux no es un AppImage ELF válido.".into());
+            return Err("La actualización Linux no es un ejecutable ELF válido.".into());
         }
     }
     if kind == PackageKind::WindowsSingleFile {
@@ -834,6 +1049,226 @@ mod tests {
         );
         assert!(PackageKind::WindowsSingleFile.is_single_file());
         assert!(!PackageKind::WindowsFolder.is_single_file());
+        // La copia instalada se actualiza con el instalador, nunca con el zip
+        // ni con el portable.
+        assert_eq!(
+            asset_for_package(&adjuntos, PackageKind::WindowsInstalled),
+            Some("WTerminal-1.4.3-x64-setup.exe")
+        );
+        assert_eq!(
+            asset_for_package(
+                &[
+                    "WTerminal-1.4.3-Portable.exe",
+                    "WTerminal-Unpacked-1.4.3.zip"
+                ],
+                PackageKind::WindowsInstalled
+            ),
+            None
+        );
+        assert!(!PackageKind::WindowsInstalled.is_single_file());
+    }
+
+    #[test]
+    fn cada_paquete_linux_elige_su_adjunto_y_su_arquitectura() {
+        let adjuntos = [
+            "WTerminal-Unpacked-1.4.3.zip",
+            "WTerminal-1.4.3-x64-setup.exe",
+            "LTerminal-1.4.3-aarch64.AppImage",
+            "LTerminal-1.4.3-x86_64.AppImage",
+            "LTerminal_1.4.3_arm64.deb",
+            "LTerminal_1.4.3_amd64.deb",
+            "LTerminal-1.4.3-1.src.rpm",
+            "LTerminal-1.4.3-1.x86_64.rpm",
+            "LTerminal-Unpacked-1.4.3-x86_64.tar.gz",
+            "SHA256SUMS.txt",
+        ];
+        let elegido = |kind| asset_for_package(&adjuntos, kind);
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(
+                elegido(PackageKind::LinuxAppImage),
+                Some("LTerminal-1.4.3-x86_64.AppImage"),
+                "el de otra arquitectura no se ofrece aunque vaya antes"
+            );
+            assert_eq!(
+                elegido(PackageKind::LinuxDeb),
+                Some("LTerminal_1.4.3_amd64.deb")
+            );
+            assert_eq!(
+                elegido(PackageKind::LinuxRpm),
+                Some("LTerminal-1.4.3-1.x86_64.rpm"),
+                "el .src.rpm es código fuente"
+            );
+            assert_eq!(
+                elegido(PackageKind::LinuxFolder),
+                Some("LTerminal-Unpacked-1.4.3-x86_64.tar.gz")
+            );
+        }
+        // Sin su paquete, una copia Linux no cae en el de otro formato.
+        assert_eq!(
+            asset_for_package(
+                &[
+                    "LTerminal-1.4.3-x86_64.AppImage",
+                    "WTerminal-Unpacked-1.4.3.zip"
+                ],
+                PackageKind::LinuxDeb
+            ),
+            None
+        );
+        // El zip de Windows no filtra arquitecturas Linux ni coge el tar.gz.
+        assert_eq!(
+            elegido(PackageKind::WindowsFolder),
+            Some("WTerminal-Unpacked-1.4.3.zip")
+        );
+        for kind in [
+            PackageKind::WindowsInstalled,
+            PackageKind::LinuxDeb,
+            PackageKind::LinuxRpm,
+        ] {
+            assert!(kind.uses_system_installer(), "{kind:?}");
+            assert!(!kind.is_single_file(), "{kind:?}");
+        }
+        for kind in [
+            PackageKind::WindowsFolder,
+            PackageKind::WindowsSingleFile,
+            PackageKind::LinuxAppImage,
+            PackageKind::LinuxFolder,
+        ] {
+            assert!(!kind.uses_system_installer(), "{kind:?}");
+        }
+        assert!(!PackageKind::LinuxFolder.is_single_file());
+    }
+
+    #[test]
+    fn una_copia_linux_se_reconoce_por_su_appimage_su_gestor_o_su_carpeta() {
+        let preguntas = std::cell::RefCell::new(Vec::new());
+        let gestor = |dueño: &'static str| {
+            let preguntas = &preguntas;
+            move |manager: &str, _: &Path| {
+                preguntas.borrow_mut().push(manager.to_string());
+                manager == dueño
+            }
+        };
+        let usr = Path::new("/usr/bin/lterminal");
+        assert_eq!(
+            linux_kind(true, Some(usr), gestor("dpkg")),
+            PackageKind::LinuxAppImage
+        );
+        assert_eq!(
+            linux_kind(false, Some(usr), gestor("dpkg")),
+            PackageKind::LinuxDeb
+        );
+        assert_eq!(
+            linux_kind(false, Some(usr), gestor("rpm")),
+            PackageKind::LinuxRpm
+        );
+        assert_eq!(
+            linux_kind(false, Some(usr), gestor("ninguno")),
+            PackageKind::LinuxFolder,
+            "en /usr pero de nadie: se copió a mano"
+        );
+        preguntas.borrow_mut().clear();
+        for carpeta in [
+            "/home/romen/LTerminal-1.4.3/lterminal",
+            "/opt/LTerminal/lterminal",
+            "/usr/local/bin/lterminal",
+        ] {
+            assert_eq!(
+                linux_kind(false, Some(Path::new(carpeta)), gestor("dpkg")),
+                PackageKind::LinuxFolder,
+                "{carpeta}"
+            );
+        }
+        assert!(
+            preguntas.borrow().is_empty(),
+            "fuera de /usr no se lanza ni dpkg ni rpm"
+        );
+        assert_eq!(
+            linux_kind(false, None, gestor("dpkg")),
+            PackageKind::LinuxFolder
+        );
+    }
+
+    #[test]
+    fn el_paquete_linux_se_instala_con_pkexec_y_el_gestor_que_haya() {
+        let paquete = Path::new("/home/romen/.cache/lterminal/update/LTerminal_1.4.3_amd64.deb");
+        let con = |herramientas: &'static [&'static str]| {
+            move |tool: &str| {
+                herramientas
+                    .contains(&tool)
+                    .then(|| PathBuf::from(format!("/usr/bin/{tool}")))
+            }
+        };
+        let texto = |orden: Option<Vec<String>>| orden.map(|orden| orden.join(" "));
+        assert_eq!(
+            texto(linux_package_command(
+                PackageKind::LinuxDeb,
+                paquete,
+                con(&["pkexec", "apt-get", "dpkg"])
+            ))
+            .as_deref(),
+            Some("/usr/bin/pkexec /usr/bin/apt-get install -y /home/romen/.cache/lterminal/update/LTerminal_1.4.3_amd64.deb")
+        );
+        assert!(texto(linux_package_command(
+            PackageKind::LinuxDeb,
+            paquete,
+            con(&["pkexec", "dpkg"])
+        ))
+        .is_some_and(|orden| orden.starts_with("/usr/bin/pkexec /usr/bin/dpkg -i ")));
+        let rpm = Path::new("/tmp/LTerminal-1.4.3-1.x86_64.rpm");
+        assert!(texto(linux_package_command(
+            PackageKind::LinuxRpm,
+            rpm,
+            con(&["pkexec", "dnf", "rpm"])
+        ))
+        .is_some_and(|orden| orden.contains("/usr/bin/dnf install -y ")));
+        assert!(texto(linux_package_command(
+            PackageKind::LinuxRpm,
+            rpm,
+            con(&["pkexec", "zypper", "rpm"])
+        ))
+        .is_some_and(|orden| orden.contains("--allow-unsigned-rpm")));
+        // Sin pkexec, sin gestor o con un tipo que no es un paquete: a mano.
+        assert_eq!(
+            linux_package_command(PackageKind::LinuxDeb, paquete, con(&["apt-get"])),
+            None
+        );
+        assert_eq!(
+            linux_package_command(PackageKind::LinuxRpm, rpm, con(&["pkexec", "apt-get"])),
+            None
+        );
+        assert_eq!(
+            linux_package_command(
+                PackageKind::LinuxFolder,
+                paquete,
+                con(&["pkexec", "apt-get"])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn la_copia_del_instalador_se_reconoce_por_su_desinstalador() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_installer_copy(dir.path()));
+        std::fs::write(dir.path().join("uninstall.exe"), b"MZ").unwrap();
+        assert!(is_installer_copy(dir.path()));
+        // Una carpeta llamada así no cuenta: tiene que ser un archivo.
+        let otra = tempfile::tempdir().unwrap();
+        std::fs::create_dir(otra.path().join("uninstall.exe")).unwrap();
+        assert!(!is_installer_copy(otra.path()));
+    }
+
+    #[test]
+    fn el_instalador_se_abre_cuando_la_app_ha_cerrado_y_en_modo_pasivo() {
+        let script = installer_launch_script(
+            4321,
+            Path::new(
+                r"C:\Users\O'Brien\AppData\Local\WTerminal\update\WTerminal-1.4.3-x64-setup.exe",
+            ),
+        );
+        assert!(script.starts_with("Wait-Process -Id 4321 "));
+        assert!(script.contains(r"-FilePath 'C:\Users\O''Brien\AppData"));
+        assert!(script.ends_with("-ArgumentList '/P','/UPDATE','/R'"));
     }
 
     #[test]

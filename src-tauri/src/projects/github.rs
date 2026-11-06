@@ -1319,6 +1319,22 @@ pub struct GithubClient {
 
 /// Un solo pool HTTP por proceso. `reqwest::Client` reutiliza conexiones y su
 /// resolvedor; recrearlo en Proyectos y Actualizador duplicaba sockets y DNS.
+/// `reqwest::blocking` no puede usarse desde un hilo del runtime asíncrono, y
+/// las órdenes de Tauri corren ahí: en debug entra en pánico («Cannot start a
+/// runtime from within a runtime»), la tarea muere sin responder y la
+/// interfaz se quedaba esperando (Release en Proyectos); en release no falla,
+/// pero tiene ese hilo ocupado mientras espera a la red. Dentro del runtime,
+/// el trabajo HTTP va a un hilo propio; fuera, se hace en el actual.
+pub(crate) fn off_async_runtime<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return work();
+    }
+    std::thread::scope(|scope| match scope.spawn(work).join() {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    })
+}
+
 pub fn shared_client() -> &'static GithubClient {
     static CLIENT: once_cell::sync::Lazy<GithubClient> =
         once_cell::sync::Lazy::new(|| GithubClient::new(crate::identity::current().user_agent));
@@ -1397,6 +1413,10 @@ impl GithubClient {
     }
 
     fn request_public(&self, api_path: &str) -> Result<(Value, RateLimit), ApiError> {
+        off_async_runtime(|| self.request_public_blocking(api_path))
+    }
+
+    fn request_public_blocking(&self, api_path: &str) -> Result<(Value, RateLimit), ApiError> {
         let response = self
             .client
             .get(format!("{}{api_path}", api_origin()))
@@ -1527,6 +1547,34 @@ impl GithubClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Dentro del runtime de Tauri, un cliente `reqwest::blocking` creado y
+    /// soltado en el hilo del runtime entra en pánico en debug; fuera de él,
+    /// no. `off_async_runtime` lo lleva a un hilo propio.
+    #[test]
+    fn el_http_bloqueante_no_corre_en_un_hilo_del_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let caller = runtime.block_on(async {
+            tokio::task::spawn(async {
+                let caller = std::thread::current().id();
+                let worker = off_async_runtime(|| {
+                    let client = reqwest::blocking::Client::new();
+                    drop(client);
+                    std::thread::current().id()
+                });
+                (caller, worker)
+            })
+            .await
+            .unwrap()
+        });
+        assert_ne!(caller.0, caller.1, "dentro del runtime se usa otro hilo");
+        // Fuera de un runtime se hace en el mismo hilo, sin coste extra.
+        let here = std::thread::current().id();
+        assert_eq!(off_async_runtime(|| std::thread::current().id()), here);
+    }
 
     #[test]
     fn el_remoto_de_github_da_owner_repo_en_todos_sus_formatos() {

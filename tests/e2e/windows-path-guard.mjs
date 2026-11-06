@@ -1,7 +1,8 @@
-// Copia exacta del PATH del usuario y del estado de «Invocar WTerminal desde
-// el PATH» (HKCU). El perfil aislado del E2E no cubre el registro: cualquier
-// prueba que toque la integración debe guardar esta copia antes y reponerla
-// después, y las suites comprueban al final que no cambió nada.
+// Copia exacta del PATH del usuario, del estado de «Invocar WTerminal desde el
+// PATH» y de las variables que publicó (HKCU). El perfil aislado del E2E no
+// cubre el registro: cualquier prueba que toque la integración debe guardar
+// esta copia antes y reponerla después, y las suites comprueban al final que
+// no cambió nada.
 import { execFile as execFileCallback } from 'node:child_process';
 import process from 'node:process';
 import { promisify } from 'node:util';
@@ -21,7 +22,16 @@ if ($environment -and ($environment.GetValueNames() -contains 'Path')) {
 $state = $root.OpenSubKey('${WINDOWS_PATH_STATE_KEY}')
 $values = @()
 if ($state) { foreach ($name in $state.GetValueNames()) { $values += @{ name = $name; kind = $state.GetValueKind($name).ToString(); value = "$($state.GetValue($name))" } } }
-@{ path = $path; kind = $kind; stateExists = [bool]$state; state = $values } | ConvertTo-Json -Compress -Depth 4`;
+$variables = @()
+if ($state -and $environment -and ($state.GetValueNames() -contains 'ToolVariables')) {
+    foreach ($line in ([string]$state.GetValue('ToolVariables')) -split [char]10) {
+        $name = ($line -split '=', 2)[0]
+        if ($name -and ($environment.GetValueNames() -contains $name)) {
+            $variables += @{ name = $name; kind = $environment.GetValueKind($name).ToString(); value = "$($environment.GetValue($name, $null, 'DoNotExpandEnvironmentNames'))" }
+        }
+    }
+}
+@{ path = $path; kind = $kind; stateExists = [bool]$state; state = $values; variables = $variables } | ConvertTo-Json -Compress -Depth 4`;
 
 const RESTORE_SCRIPT = `$ErrorActionPreference = 'Stop'
 $snapshot = $env:WTERMINAL_E2E_PATH_SNAPSHOT | ConvertFrom-Json
@@ -38,6 +48,9 @@ if ($snapshot.stateExists) {
         $value = if ($kind -eq [Microsoft.Win32.RegistryValueKind]::DWord) { [int]$item.value } else { [string]$item.value }
         $state.SetValue($item.name, $value, $kind)
     }
+}
+foreach ($item in @($snapshot.variables)) {
+    if ($item) { $environment.SetValue($item.name, [string]$item.value, [Microsoft.Win32.RegistryValueKind]$item.kind) }
 }`;
 
 /** Devuelve la copia, o `null` fuera de Windows. */
@@ -46,6 +59,7 @@ export async function snapshotWindowsPathIntegration() {
     const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', SNAPSHOT_SCRIPT], { windowsHide: true });
     const snapshot = JSON.parse(stdout.trim());
     snapshot.state = Array.isArray(snapshot.state) ? snapshot.state : (snapshot.state ? [snapshot.state] : []);
+    snapshot.variables = Array.isArray(snapshot.variables) ? snapshot.variables : (snapshot.variables ? [snapshot.variables] : []);
     return snapshot;
 }
 
@@ -74,6 +88,9 @@ export function describeWindowsPathChange(before, after) {
     if (before.kind !== after.kind) parts.push(`tipo ${before.kind} → ${after.kind}`);
     if (JSON.stringify([before.stateExists, before.state]) !== JSON.stringify([after.stateExists, after.state])) {
         parts.push(`integración: ${JSON.stringify(before.state)} → ${JSON.stringify(after.state)}`);
+    }
+    if (JSON.stringify(before.variables) !== JSON.stringify(after.variables)) {
+        parts.push(`variables: ${JSON.stringify(before.variables)} → ${JSON.stringify(after.variables)}`);
     }
     return parts.join('; ') || 'sin diferencias visibles';
 }

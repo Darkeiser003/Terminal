@@ -63,6 +63,31 @@ fn crossover_is_installed() -> bool {
     candidates.into_iter().any(|path| path.is_file())
 }
 
+/// En qué fase está la detección completa del catálogo. La primera vez, con
+/// varias distros de WSL, puede tardar minutos, y el panel solo enseñaba un
+/// contador: ahora dice qué está comprobando (`install_detection_stage`).
+/// Es la clave de traducción de la fase; `None` fuera de una detección.
+static DETECTION_STAGE: parking_lot::Mutex<Option<&'static str>> = parking_lot::Mutex::new(None);
+
+fn set_detection_stage(stage: Option<&'static str>) {
+    *DETECTION_STAGE.lock() = stage;
+}
+
+/// Cambia de fase solo dentro de una detección completa: las mismas sondas
+/// sirven también para comprobar una sola herramienta al abrirla.
+fn advance_detection_stage(stage: &'static str) {
+    let mut current = DETECTION_STAGE.lock();
+    if current.is_some() {
+        *current = Some(stage);
+    }
+}
+
+/// La fase de la detección en curso, como clave de traducción.
+#[tauri::command]
+pub fn install_detection_stage() -> Option<String> {
+    DETECTION_STAGE.lock().map(str::to_string)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DetectionDepth {
     /// Solo información ya disponible y comprobaciones del PATH. No entra en
@@ -512,6 +537,9 @@ fn prefetch_ecosystem_inventory(
     inventory: &mut HashMap<String, crate::process::ProbeOutput>,
     targeted: bool,
 ) {
+    if !targeted {
+        advance_detection_stage("deps.stage.ecosystems");
+    }
     let generation = DETECTION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
     if targeted {
         inventory.extend(reusable_ecosystem_entries(
@@ -810,6 +838,7 @@ const POWERSHELL_BATCH_MARKER: &str = "__wterminal_probe_";
 /// arrancar. Ahora van todas en un solo proceso. Lo que no se pueda agrupar,
 /// o si el proceso falla o agota el plazo, sigue por la sonda individual.
 fn batch_powershell_probes(actions: &[InstallAction]) -> HashMap<String, DetectionState> {
+    advance_detection_stage("deps.stage.powershell");
     let mut scripts: Vec<&str> = actions
         .iter()
         .flat_map(|action| [action.check_cmd.as_deref(), action.requires_cmd.as_deref()])
@@ -1044,6 +1073,7 @@ struct WingetInventory {
 }
 
 fn prefetch_winget_inventory(actions: &[InstallAction], inventory: &mut WingetInventory) {
+    advance_detection_stage("deps.stage.winget");
     let mut expected = HashMap::<String, ()>::new();
     for command in actions.iter().filter_map(|action| {
         action
@@ -2248,11 +2278,17 @@ fn build_list(
         DetectionDepth::Catalog => "catalog",
     };
     let t = Translator::new(&crate::i18n::active_language());
+    if depth == DetectionDepth::Full {
+        set_detection_stage(Some("deps.stage.wsl"));
+    }
     let context = install_context(inventory.pkg_manager.clone(), depth);
     let actions = filter_available_actions_with_depth(
         install_actions::get_install_actions(&context, &t),
         depth,
     );
+    if depth == DetectionDepth::Full {
+        set_detection_stage(None);
+    }
 
     // El catálogo se genera en español y se traduce aquí, en la frontera con el
     // frontend: las acciones conservan su id, su comando y su orden, que es lo

@@ -162,8 +162,8 @@ if (report.focusedScenario === 'dependency-full-audit') {
         const availableCaptures = new Set((report.captures ?? []).map((capture) => capture?.label));
         if (!visual || visual.passed !== true
             || requiredCaptures.some((label) => !availableCaptures.has(label))
-            || !Array.isArray(report.video?.nativeSegments)
-            || report.video.nativeSegments.length === 0
+            || (report.options?.nativeVideoSegments !== false
+                && (!Array.isArray(report.video?.nativeSegments) || report.video.nativeSegments.length === 0))
             || Number(report.video.frames ?? 0) < 2
             // La cadencia efectiva puede ser fraccionaria si el driver
             // descarta muestras durante un resize; lo que debe quedar

@@ -1,7 +1,7 @@
 // Ejecuta las suites E2E estandarizadas de tests/e2e/suites.mjs contra un
 // binario y deja un resumen comparable. Uso:
 //   node scripts/run-e2e-suite.mjs --binary src-tauri/target/dist/WTerminal-X/wterminal.exe
-//        [--suite focused,video | --level full|release]
+//        [--suite focused,video | --level full|release|quick] [--quick]
 //        [--installer release/WTerminal-X-x64-setup.exe] [--out carpeta]
 //        [--only escenario1,escenario2] [--fail-fast] [--list]
 //
@@ -31,7 +31,7 @@ const execFile = promisify(execFileCallback);
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export function parseSuiteArgs(argv) {
-    const options = { suites: [], failFast: false, list: false, help: false };
+    const options = { suites: [], quick: false, failFast: false, list: false, help: false };
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
         const value = () => {
@@ -46,7 +46,9 @@ export function parseSuiteArgs(argv) {
             const level = value();
             if (!VALIDATION_LEVELS[level]) throw new Error(`Nivel desconocido: ${level}. Disponibles: ${Object.keys(VALIDATION_LEVELS).join(', ')}`);
             options.suites.push(...VALIDATION_LEVELS[level]);
-        } else if (arg === '--installer') options.installer = value();
+            if (level === 'quick') options.quick = true;
+        } else if (arg === '--quick') options.quick = true;
+        else if (arg === '--installer') options.installer = value();
         else if (arg === '--release-dir') options.releaseDir = value();
         else if (arg === '--out') options.out = value();
         else if (arg === '--only') (options.only ??= []).push(...value().split(',').map((id) => id.trim()).filter(Boolean));
@@ -137,7 +139,7 @@ export async function runSuites(options) {
 
     const pathBefore = await snapshotWindowsPathIntegration();
     const results = [];
-    const plan = planSuites(options.suites.filter((name) => name !== 'installer'))
+    const plan = planSuites(options.suites.filter((name) => name !== 'installer'), { quick: options.quick })
         .filter((item) => !options.only || options.only.includes(item.scenario));
     const total = plan.length + (options.suites.includes('installer') ? 1 : 0);
     let position = 0;
@@ -171,6 +173,7 @@ export async function runSuites(options) {
                 releaseDir: options.releaseDir ?? dirname(binary),
                 out: join(out, 'installer'),
                 video: options.suites.includes('video'),
+                quick: options.quick,
             });
             results.push({ suite: 'installer', id: 'installer', title: SUITES.installer.title, ...installer });
             process.stdout.write(`    ${STATUS_LABEL[installer.status]} (${formatDuration(installer.durationMs)}) ${installer.summary}\n`);
@@ -212,9 +215,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const options = parseSuiteArgs(process.argv.slice(2));
     if (options.help) {
         process.stdout.write([
-            'Uso: node scripts/run-e2e-suite.mjs [--binary <wterminal.exe>] [--suite a,b] [--level full|release] [--out <carpeta>] [--fail-fast]',
+            'Uso: node scripts/run-e2e-suite.mjs [--binary <wterminal.exe>] [--suite a,b] [--level full|release|quick] [--quick] [--out <carpeta>] [--fail-fast]',
             '                                  [--installer <setup.exe>] [--release-dir <carpeta>] [--list]',
-            'Sin --suite ni --level ejecuta la suite focused. --list enseña suites, escenarios y niveles.',
+            'Sin --suite ni --level ejecuta la suite focused. --quick aplica el bloque reducido de cada escenario. --list enseña suites, escenarios y niveles.',
             '',
         ].join('\n'));
     } else if (options.list) {

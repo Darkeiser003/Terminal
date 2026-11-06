@@ -27,6 +27,103 @@ const keyedQueue = await importTypeScript('src/lib/keyed-serial-queue.ts');
 const terminalRender = await importTypeScript('src/lib/terminal-render.ts');
 const ltoolsSelection = await importTypeScript('src/lib/ltools-selection.ts');
 
+// Guardar la salida: el texto que va al archivo y el nombre que se propone.
+{
+    const registry = await importTypeScript('src/lib/terminalRegistry.ts');
+    const rows = [['uno', false], ['dos ', false], ['partida', true], ['', false]];
+    const buffer = {
+        length: rows.length + 1,
+        getLine: (row) => (rows[row] ? { isWrapped: rows[row][1], translateToString: () => rows[row][0] } : undefined),
+    };
+    assert.equal(registry.bufferText(buffer), 'uno\ndos partida\n', 'las filas de una línea partida se unen y las demás van en la suya');
+    const date = new Date(2026, 10, 2, 9, 5, 7);
+    assert.equal(registry.outputFileName('Git Bash', date), 'Git Bash-20261102-090507.txt');
+    assert.equal(registry.outputFileName('a<b>:c/d\\e|f?g*h.', date), 'a b c d e f g h-20261102-090507.txt', 'sin caracteres prohibidos en Windows');
+    assert.equal(registry.outputFileName('', date), 'terminal-20261102-090507.txt');
+}
+
+// Historial de órdenes escritas: sin vacías, sin duplicados, con límite y con
+// la búsqueda por palabras en cualquier orden, la más reciente primero.
+{
+    const history = await importTypeScript('src/lib/command-history.ts');
+    let list = [];
+    for (const command of ['git status', '  ', 'npm run build', 'git status', 'Get-ChildItem C:\\Temp']) {
+        list = history.rememberCommand(list, command);
+    }
+    assert.deepEqual(list, ['npm run build', 'git status', 'Get-ChildItem C:\\Temp'], 'la repetida sube al final y la vacía no entra');
+    assert.deepEqual(history.rememberCommand(list, 'uno\ndos'), list, 'un pegado de varias líneas no es una orden');
+    assert.deepEqual(history.rememberCommand(list, 'x'.repeat(5000)), list, 'un pegado enorme tampoco');
+    assert.deepEqual(history.rememberCommand(['a', 'b', 'c'], 'd', 3), ['b', 'c', 'd'], 'con el límite se va la más antigua');
+    assert.deepEqual(history.searchCommands(list, ''), ['Get-ChildItem C:\\Temp', 'git status', 'npm run build'], 'sin búsqueda, todas y la última primero');
+    assert.deepEqual(history.searchCommands(list, 'STATUS git'), ['git status'], 'palabras en cualquier orden y sin mayúsculas');
+    assert.deepEqual(history.searchCommands(list, 'temp'), ['Get-ChildItem C:\\Temp']);
+    assert.deepEqual(history.searchCommands(list, 'nada'), []);
+    assert.equal(history.searchCommands(Array.from({ length: 80 }, (_, i) => `orden ${i}`), 'orden').length, 50, 'como mucho 50 resultados');
+    const terminalPaneSource = await readFile('src/components/TerminalPane.svelte', 'utf8');
+    assert(terminalPaneSource.includes('if (submittedCommand && commandTracker?.atPrompt) app.recordCommand(submittedCommand);'),
+        'solo se guarda lo escrito sobre un prompt marcado: nunca la contraseña que pide una orden en marcha');
+}
+
+// Marcas OSC 133: qué es una orden, cómo terminó y dónde está su salida.
+{
+    const marks = await importTypeScript('src/lib/command-marks.ts');
+    let row = 0;
+    let clock = 1000;
+    const created = [];
+    const tracker = new marks.CommandTracker((offset) => {
+        const mark = { line: row + offset };
+        created.push(mark);
+        return mark;
+    }, () => clock);
+    const runCommand = ({ code, output = 2, blank = false, withC = false, column = 0 }) => {
+        tracker.mark('A', 0);
+        tracker.mark('B', 2);
+        assert.equal(tracker.atPrompt, true, 'tras B hay un prompt esperando');
+        tracker.submitted(blank);
+        row += 1;
+        if (withC) tracker.mark('C', 0);
+        row += output;
+        clock += 2500;
+        const finished = tracker.mark(code === undefined ? 'D' : `D;${code}`, column);
+        return finished;
+    };
+    assert.equal(tracker.mark('D;0', 0), null, 'el primer prompt no cierra ninguna orden');
+    const ok = runCommand({ code: 0 });
+    assert.equal(ok.exitCode, 0);
+    assert.equal(ok.durationMs, 2500);
+    assert.deepEqual(marks.outputRange(ok, () => false), [1, 2], 'la salida va entre la línea escrita y el fin');
+    const failed = runCommand({ code: 3, withC: true });
+    assert.equal(failed.exitCode, 3);
+    assert.deepEqual(marks.outputRange(failed, () => false), [4, 5], 'con C la salida empieza en su marca');
+    assert.equal(runCommand({ code: 3, blank: true, output: 0 }), null, 'Intro en blanco no repite el fallo anterior');
+    const silent = runCommand({ output: 0 });
+    assert.equal(silent.exitCode, null, 'cmd no da código de salida');
+    assert.equal(marks.outputRange(silent, () => false), null, 'una orden muda no tiene salida');
+    const noNewline = runCommand({ code: 0, output: 1, column: 4 });
+    assert.equal(noNewline.end.line, row + 1, 'sin salto final la última fila sigue siendo salida');
+    const wrapped = runCommand({ code: 0, output: 3 });
+    assert.deepEqual(marks.outputRange(wrapped, (line) => line === wrapped.input.line + 1), [wrapped.input.line + 2, wrapped.end.line - 1], 'una orden partida en dos filas no entra en la salida');
+    assert.equal(tracker.lastFinished(), wrapped);
+    const prompts = [ok, failed, silent, noNewline, wrapped].map((record) => record.prompt.line);
+    assert.equal(tracker.jumpTarget(prompts[2], 'previous'), prompts[1]);
+    assert.equal(tracker.jumpTarget(prompts[2], 'next'), prompts[3]);
+    assert.equal(tracker.jumpTarget(prompts[4], 'next'), null, 'tras la última no hay siguiente');
+    failed.prompt.line = -1;
+    assert.equal(tracker.jumpTarget(prompts[2], 'previous'), prompts[0], 'una orden que salió del historial se salta');
+    tracker.mark('A', 0);
+    tracker.mark('B', 2);
+    tracker.submitted(false);
+    clock += 60000;
+    tracker.clear();
+    assert.equal(tracker.mark('D;0', 0), null, 'la sesión nueva no cierra una orden de la anterior');
+    assert.equal(tracker.lastFinished(), null, 'ni conserva las órdenes de la anterior');
+    assert.equal(marks.parseExitCode('130;aid=1'), 130);
+    assert.equal(marks.parseExitCode(undefined), null);
+    assert.equal(marks.formatDuration(820, 'es'), '820 ms');
+    assert.equal(marks.formatDuration(4200, 'es'), '4,2 s');
+    assert.equal(marks.formatDuration(192000, 'es'), '3 min 12 s');
+}
+
 const ltoolsActions = Array.from({ length: 73 }, (_, index) => ({
     id: `scope.action-${index}`,
     actionKey: `scope.action-${index}`,
@@ -142,6 +239,49 @@ const columnRows = [
     { columns: 35, isWrapped: true },
     { columns: 22, isWrapped: false },
 ];
+// Bloques de salida: una línea partida sigue sumando, los espacios finales no.
+{
+    const { EMPTY_OUTPUT_LINE: empty, measureOutputChunk: measure } = terminalColumns;
+    const promptSp = `%${' '.repeat(1023)}`;
+    assert.equal(measure(`${promptSp}\r \rroot$ `, empty, 16384).longest, 5,
+        'el relleno de PROMPT_SP en un solo bloque no ocupa');
+    const firstHalf = measure(`%${' '.repeat(600)}`, empty, 16384);
+    assert.equal(firstHalf.longest, 1, 'medio relleno de PROMPT_SP no ocupa');
+    assert.equal(measure(`${' '.repeat(423)}\r \rroot$ `, firstHalf.carry, 16384).longest, 5,
+        'el resto del relleno en otro bloque tampoco suma los espacios del anterior');
+    const head = measure('abc   ', empty, 16384);
+    assert.equal(measure('def', head.carry, 16384).longest, 9,
+        'una línea partida en dos bloques cuenta los espacios que quedan en medio');
+    assert.equal(measure('x'.repeat(50), empty, 40).longest, 40, 'el tope se respeta');
+    assert.deepEqual(measure('x'.repeat(50), empty, 40).carry, empty, 'al llegar al tope no se arrastra nada');
+    // zsh-syntax-highlighting repinta lo tecleado: atrás, color y al final.
+    let typed = measure('└─# echo LTERMINAL_ENV_WSL_KALI_LINUX_ZSH', empty, 16384);
+    for (let redraw = 0; redraw < 20; redraw += 1) {
+        typed = measure('\x1b[37D\x1b[36me\x1b[36mc\x1b[36mh\x1b[36mo\x1b[39m\x1b[33C', typed.carry, 16384);
+    }
+    assert.equal(typed.longest, 41, 'los repintados de zsh no suman la línea otra vez');
+    assert.equal(measure('\r\r\n', typed.carry, 16384).longest, 41, 'el Intro tras los repintados mide la línea real');
+    assert.equal(measure('\x1b[1;61Hx', empty, 16384).longest, 61, 'CUP lleva a la columna pedida');
+    assert.equal(measure('abcdef\x1b[3Gx', empty, 16384).longest, 6, 'CHA vuelve atrás sin ensanchar');
+    assert.equal(measure('abc\b\bx', empty, 16384).longest, 3, 'el retroceso no ensancha');
+    assert.equal(measure('a\x1b[?1l\x1b>\x1b]0;título\x07b', empty, 16384).longest, 2,
+        'los escapes sin movimiento siguen sin ocupar');
+
+    const { withoutTerminalControls: plain } = terminalColumns;
+    assert.equal(plain('\x1b[?1l\x1b>'), '', 'el ESC > de zsh no deja un `>` suelto');
+    assert.equal(plain('a\x1b7b\x1b8c\x1b(Bd\x1b=e'), 'abcde', 'los escapes de dos caracteres desaparecen enteros');
+    assert.equal(plain('\x1bPq#0;2;0;0;0#0~~@@vv@@~~$-\x1b\\x'), 'x', 'los datos de Sixel no cuentan como texto');
+    assert.equal(plain('\x1b]0;título\x07x\x1b]8;;https://a\x1b\\y'), 'xy', 'los OSC desaparecen con BEL o con ST');
+    assert.equal(plain('\x1b[1;31mrojo\x1b[0m\r\n'), 'rojo\r\n', 'CSI fuera, CR y LF dentro');
+    // Lo que manda zsh tras una orden, detrás de una línea de espacios.
+    let carry = measure(' '.repeat(736), empty, 16384).carry;
+    for (const chunk of ['\x1b[?1l\x1b>', '\x1b[?2004l', '\r\r\n']) {
+        const measured = measure(plain(chunk), carry, 16384);
+        assert.equal(measured.longest, 0, `${JSON.stringify(chunk)} no pide columnas`);
+        carry = measured.carry;
+    }
+}
+
 assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 1, 1, (index) => columnRows[index]), 115,
     'una continuación visible conserva el ancho completo de su línea lógica');
 assert.equal(terminalColumns.longestVisibleLogicalLineWidth(4, 3, 1, (index) => columnRows[index]), 22,
@@ -426,6 +566,43 @@ assert(terminalPane.includes('if (awaitingTerminalVisibility) return;')
     && terminalPane.includes('if (hiddenScrollState) openVisibilityGate();')
     && terminalPane.includes('window.setTimeout(closeVisibilityGate, 0)'),
     'el reajuste de una casilla reactivada debe esperar a que xterm la vea');
+// Si el aviso de xterm llega tarde (plazo de reserva de 200 ms), su renderer
+// sigue en pausa al medir: se reanuda antes, o el Viewport recorta el scroll
+// con el alto viejo y la vista deja de seguir la salida.
+assert(/if \(awaitingTerminalVisibility\) return;\s*resumeRendererIfVisible\(\);/u.test(terminalPane)
+    && terminalPane.includes("renderService._handleIntersectionChange({ isIntersecting: true, intersectionRatio: 1 });")
+    && terminalPane.includes("if (!rect || rect.width <= 0 || rect.height <= 0) return;"),
+    'el ajuste de una casilla visible debe reanudar antes el renderer de xterm');
+// Ese arreglo y `__wtTerminalState` usan internos de xterm 6. Si una
+// actualización los cambia, el arreglo dejaría de actuar sin avisar: que falle
+// aquí y no en un E2E intermitente.
+const xtermBundle = await readFile('node_modules/@xterm/xterm/lib/xterm.mjs', 'utf8');
+assert(/_handleIntersectionChange\(\w+\)\{this\._isPaused=/u.test(xtermBundle)
+    && xtermBundle.includes('this._pausedResizeTask.flush()')
+    && xtermBundle.includes('getScrollDimensions()')
+    && xtermBundle.includes('this._latestYDisp'),
+    'los internos de xterm que usa TerminalPane (pausa del renderer y scroll del Viewport) deben seguir existiendo');
+// El eje X es solo del host: el navegador desplaza `.xterm-scrollable-element`
+// para enseñar el textarea al cruzar las 1024 columnas y el prompt siguiente
+// quedaba fuera de la vista (build 25). `scroll` no burbujea: va en captura.
+assert(terminalPane.includes("terminalHost.addEventListener('scroll', onInnerHorizontalScroll, { capture: true, passive: true });")
+    && terminalPane.includes("terminalHost?.removeEventListener('scroll', onInnerHorizontalScroll, { capture: true });")
+    && /function onInnerHorizontalScroll\(event: Event\): void \{[\s\S]{0,400}?target instanceof HTMLTextAreaElement\) return;[\s\S]{0,120}?target\.scrollLeft = 0;/u.test(terminalPane),
+    'un desplazamiento horizontal interior debe volver a 0 (salvo el del textarea)');
+// Si el cursor cabe en la primera pantalla, la línea se ve desde el principio:
+// al borrar una línea que rozaba el borde, el resto de scroll cortaba el prompt.
+assert(/if \(cursorRight \+ margin <= viewport\.clientWidth\) \{\s*if \(viewport\.scrollLeft > 0\) setHorizontalScrollLeft\(viewport, 0\);/u.test(terminalPane),
+    'con el cursor en la primera pantalla, la vista debe volver al principio de la línea');
+// Cada pestaña emite `winslim:first-ready` con el tiempo desde que se abrió la
+// app: solo vale el de la primera, o una pestaña abierta tarde decía que «la
+// primera tardó 1504,8 s» (vídeo de la auditoría de la build 25).
+assert(app.includes('firstReadyMs ??= (event as CustomEvent<{ ms?: number }>).detail?.ms ?? null;')
+    && app.includes('considerLowPower(firstReadyMs);'),
+    'la sugerencia de bajo consumo solo debe usar la medida de la primera pestaña');
+// Restaurar el scroll tras un reajuste no debe dejar fuera el eco de una tecla
+// escrita durante el reajuste.
+assert(/const restoreHorizontalPosition = \(\) => \{[\s\S]{0,1000}?if \(userEditing\) keepCursorHorizontallyVisible\(\);/u.test(terminalPane),
+    'tras restaurar el scroll horizontal de un reajuste, el cursor de la línea en edición debe seguir a la vista');
 // La reserva del primer eco se libera al enviar la entrada encolada; si no,
 // cada resize posterior sale antes de ajustar las filas.
 assert(/\.then\(\(\) => api\.sendInput\(tabId, pending\)\)\s*\.finally\(\(\) => \{[\s\S]{0,700}?if \(!queuedInput\) localInputGridPinned = false;/u.test(terminalPane),
@@ -446,13 +623,14 @@ assert(terminalPane.includes('let internalBatchStart: { row: number; col: number
     const frontendMin = Number(terminalPane.match(/const CONPTY_MIN_COLS = (\d+);/u)?.[1]);
     assert(backendMin > 0 && backendMin === frontendMin,
         `CONPTY_MIN_COLS (${frontendMin}) debe coincidir con MIN_INTERACTIVE_COLS (${backendMin})`);
-    assert(terminalPane.includes('const gridCols = Math.max(CONPTY_MIN_COLS, displayCols);')
+    assert(terminalPane.includes(': Math.max(CONPTY_MIN_COLS, displayCols);')
         && terminalPane.includes('host.dataset.displayCols = String(displayCols)')
         && terminalPane.includes('function currentDisplayCols(): number'),
         'xterm debe compartir la rejilla de ConPTY y publicar aparte el ancho visible');
     assert(tabsSource.includes('tab.viewport_confirmed.then_some(tab.viewport)')
         && tabsSource.includes('pub fn resize_from_frontend(')
-        && commandsSource.includes('.resize_from_frontend(&app, &tab_id, viewport.cols, viewport.rows)')
+        && commandsSource.includes('state.tabs.resize_from_frontend(')
+        && commandsSource.includes('exact.unwrap_or(false),')
         && terminalPane.includes('if (lastSize.rows <= 0 && lastPtySize.rows === 0) return commandPtyWarmupQueue;'),
         'una pestaña nueva no arranca la shell hasta recibir la geometría medida del xterm');
 }
@@ -494,8 +672,8 @@ assert(terminalPane.includes('const accumulatedInputLength = Math.max(')
     && terminalPane.includes('enqueueTerminalInput(data, inputResizeBarrier ?? resizeQueue)')
     && terminalPane.includes('function queueOutputPtyResize(requiredColumns: number): void')
     && terminalPane.includes('pendingOutputPtyColumns')
-    && terminalPane.includes('let outputLogicalLineColumns = 0')
-    && terminalPane.includes('outputLogicalLineColumns = logicalLine')
+    && terminalPane.includes('let outputLineCarry: OutputLineCarry = EMPTY_OUTPUT_LINE')
+    && terminalPane.includes('outputLineCarry = measured.carry')
     && terminalPane.includes('queueOutputPtyResize(requiredColumns)')
     && terminalPane.includes('inputResizeBarrier = reserveCurrentInputColumns(accumulatedInputLength)')
     && terminalPane.includes('const submittedInputColumns = inputWideReservationColumns')
@@ -726,7 +904,7 @@ assert(app.includes('"terminal.terminalOnlyGuideNoShortcut"'),
         && terminalPane.includes("term.input('\\r', true);")
         && terminalPane.includes("if (term.buffer.active.type === 'alternate') return 'busy';")
         && /if \(draft\.trim\(\)\) return 'draft';\s*if \(!terminalPromptVisible\(\)\) return 'busy';/u.test(terminalPane)
-        && terminalPane.includes('registerTerminalControls(tabId, { openSearch, submitLine: submitLineFromApp });')
+        && terminalPane.includes('registerTerminalControls(tabId, { openSearch, saveOutput, copyLastOutput, jumpToCommand, submitLine: submitLineFromApp, insertLine: insertLineFromApp });')
         && terminalPane.includes('unregisterTerminalControls(tabId);'),
         'TerminalPane teclea por la ruta del teclado y solo sobre un prompt vacío');
     assert(paletteComponent.includes('role="combobox"') && paletteComponent.includes('aria-activedescendant')
@@ -869,6 +1047,19 @@ const preferencesRs = await readFile('src-tauri/src/config/preferences.rs', 'utf
 assert(preferencesRs.includes('pub const NEUTRAL_THEME_ID: &str = "winslim";')
     && preferencesRs.includes('const FULL_PALETTE_THEMES: [&str; 1] = ["contrast"];'),
     'theme.ts y preferences.rs deben compartir la base neutra y las excepciones');
+// Tamaño de la interfaz: se escribe a mano entre 80 y 500 %, y por encima
+// del 200 % nunca deja la interfaz más estrecha que la ventana mínima (480 px).
+assert.equal(themeModule.clampUiScale(137.4), 137);
+assert.equal(themeModule.clampUiScale(20), 80);
+assert.equal(themeModule.clampUiScale(900), 500);
+assert.equal(themeModule.clampUiScale(Number.NaN), 100);
+assert.equal(themeModule.effectiveUiScale(150, 600), 150, 'hasta el 200 % se aplica lo pedido');
+assert.equal(themeModule.effectiveUiScale(500, 1918), 399, '1918 / 480 cabe al 399 %');
+assert.equal(themeModule.effectiveUiScale(500, 3840), 500, 'una pantalla 4K admite el 500 %');
+assert.equal(themeModule.effectiveUiScale(300, 1100), 229);
+assert.equal(themeModule.effectiveUiScale(300, 700), 200, 'nunca baja de lo que se aplicaba antes');
+assert(preferencesRs.includes('integer_in_range(get("uiScale"), 80, 500, defaults.ui_scale)'),
+    'theme.ts y preferences.rs deben compartir los límites del tamaño de la interfaz');
 // `:theme <id>` debe aplicar los colores del tema, no solo su identificador.
 assert(terminalPane.includes('themePreferencePatch(theme.id, app.preferences, app.themes)'),
     ':theme tiene que aplicar la paleta del tema');
@@ -997,11 +1188,71 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
 // reconoce por su título tras el margen exacto que deja el backend, y la
 // separación es la misma constante en Rust y en TypeScript.
 {
+    // Caché de enlaces bajo el ratón (src/lib/link-cache.ts): se invalida
+    // tocando dos campos internos del Linkifier de xterm. Si una versión nueva
+    // los renombra, este test falla en vez de volver el fallo en silencio
+    // (un enlace escrito bajo el ratón no se detectaba).
+    {
+        const linkCache = await importTypeScript('src/lib/link-cache.ts');
+        const fake = { _core: { linkifier: { _activeLine: 4, _lastBufferCell: { x: 3, y: 4 } } } };
+        assert.equal(linkCache.invalidateLinkCache(fake), true);
+        assert.equal(fake._core.linkifier._activeLine, -1);
+        assert.equal(fake._core.linkifier._lastBufferCell, undefined);
+        assert.equal(linkCache.invalidateLinkCache({}), false, 'sin linkifier no hace nada');
+        const xtermLib = await readFile('node_modules/@xterm/xterm/lib/xterm.js', 'utf8');
+        assert.match(xtermLib, /get linkifier\(\)\{return this\._linkifier\.value\}/u, 'xterm sigue exponiendo _core.linkifier');
+        assert.match(xtermLib, /this\._activeLine=-1/u, 'el Linkifier de xterm sigue usando _activeLine');
+        assert.match(xtermLib, /this\._lastBufferCell=t\)/u, 'el Linkifier de xterm sigue usando _lastBufferCell');
+    }
+    // Programas a pantalla completa (src/lib/full-screen-app.ts): Claude Code,
+    // Amp o vim reciben el ancho visible y no la reserva de 1024 columnas.
+    {
+        const fullScreen = await importTypeScript('src/lib/full-screen-app.ts');
+        const step = (current, params, set) => fullScreen.fullScreenTransition(current, params, set);
+        assert.equal(fullScreen.isAiEnvironmentId('ai:claude'), true);
+        assert.equal(fullScreen.isAiEnvironmentId('pwsh'), false);
+        assert.deepEqual(fullScreen.flattenCsiParams([1049, [2026, 25]]), [1049, 2026, 25]);
+        assert.equal(step(null, [1049], true), 'alternate-screen', 'Amp/vim entran en la pantalla alternativa');
+        assert.equal(step('alternate-screen', [1049], false), null, 'y al salir vuelve la shell');
+        assert.equal(step(null, [2026], true), undefined, 'ConPTY envuelve sus repintados en ?2026: no es señal');
+        assert.equal(step(null, [25], true), undefined, 'una shell que enseña el cursor sigue siendo shell');
+        assert.equal(step(null, [2004], true), undefined, 'el pegado entre corchetes no es pantalla completa');
+        assert.equal(step('ai-environment', [1049], false), undefined, 'una pestaña de IA no sale nunca');
+        assert.equal(step('ai-command', [1049], false), undefined, 'una IA tecleada sale al volver el prompt, no por su pantalla');
+        for (const line of ['claude', '  amp --help', 'codex.exe', '& \'C:\\npm\\gemini.cmd\'', '"C:\\Program Files\\x\\opencode.exe" run', '.\\qwen.ps1']) {
+            assert.equal(fullScreen.isAiCommandLine(line), true, line);
+        }
+        assert.equal(fullScreen.aiCommandName('  AMP.cmd --help'), 'amp', 'el nombre coincide con el id de su entorno ai:amp');
+        assert.equal(fullScreen.aiCommandName('vim'), null);
+        for (const line of ['echo claude', 'dir', 'claudette', ':theme', '', null]) {
+            assert.equal(fullScreen.isAiCommandLine(line), false, String(line));
+        }
+        const pane = await readFile('src/components/TerminalPane.svelte', 'utf8');
+        assert(pane.includes('if (fullScreenApp) {\n            fitFullScreen();\n            return;\n        }')
+            && pane.includes('const cols = Math.max(FULL_SCREEN_MIN_COLS, measuredVisibleColumns());')
+            && pane.includes('if (fullScreenApp) return Math.max(FULL_SCREEN_MIN_COLS, currentDisplayCols());')
+            && pane.includes('if (fullScreenApp && displayCols !== previousDisplayCols) syncPtyWidthForFullScreen();')
+            && (pane.match(/api\.resize\(tabId, [^;]*, fullScreenApp\);/gu) ?? []).length === 6,
+            'TerminalPane da a la PTY el ancho visible exacto en modo pantalla completa');
+        assert(pane.includes('? Math.max(FULL_SCREEN_MIN_COLS, displayCols)')
+            && pane.includes('&& shellPromptAtCursor()'),
+            'xterm y ConPTY encogen juntas en pantalla completa y la IA tecleada termina con el prompt vacío en la fila del cursor');
+        const appSource = await readFile('src/App.svelte', 'utf8');
+        assert(appSource.includes("if (term.buffer.active.type === 'alternate') term.write('\\x1b[?1049l');")
+            && appSource.includes('\\x1b[?25h\\x1b[?1000l'),
+            'una sesión nueva sale de la pantalla alternativa y de los modos que dejó una TUI');
+    }
     const bannerImage = await importTypeScript('src/lib/banner-image.ts');
     const systemInfo = await readFile('src-tauri/src/platform/system_info.rs', 'utf8');
     const gap = Number(/pub const BANNER_IMAGE_GAP: usize = (\d+);/u.exec(systemInfo)?.[1]);
     assert.equal(bannerImage.BANNER_IMAGE_GAP, gap, 'la separación de la imagen del banner coincide con el backend');
     assert.equal(bannerImage.bannerImagePadding(20), 22);
+    // Bajo la imagen, el mismo hueco que a los lados (BANNER_IMAGE_GAP
+    // columnas): el prompt de PowerShell 7, bash de WSL o NSudo, que va en la
+    // fila siguiente sin línea en blanco, ya no queda pegado.
+    assert.equal(bannerImage.bannerImageHeight(8.4), `calc(100% - ${(bannerImage.BANNER_IMAGE_GAP * 8.4).toFixed(2)}px)`);
+    assert.equal(bannerImage.bannerImageHeight(0), 'calc(100% - 0.00px)', 'sin medida no recorta');
+    assert.equal(bannerImage.bannerImageHeight(Number.NaN), 'calc(100% - 0.00px)');
     // La imagen va centrada en el margen: el mismo hueco contra el borde de la
     // ventana que contra el texto, en todos los anchos (en el banner grande la
     // limita el ancho y antes quedaba pegada al borde izquierdo).

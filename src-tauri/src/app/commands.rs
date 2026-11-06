@@ -236,13 +236,18 @@ pub fn pty_resize(
     tab_id: String,
     cols: i64,
     rows: i64,
+    exact: Option<bool>,
 ) {
     let Some(viewport) = crate::tabs::valid_viewport(cols, rows) else {
         return;
     };
-    state
-        .tabs
-        .resize_from_frontend(&app, &tab_id, viewport.cols, viewport.rows);
+    state.tabs.resize_from_frontend(
+        &app,
+        &tab_id,
+        viewport.cols,
+        viewport.rows,
+        exact.unwrap_or(false),
+    );
 }
 
 #[tauri::command]

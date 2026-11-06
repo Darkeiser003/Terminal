@@ -194,10 +194,14 @@ check(
         && releaseBuildJobs.includes('LTERMINAL_SSH_UPDATE_PUBLIC_KEY: ${{ secrets.LTERMINAL_SSH_UPDATE_PUBLIC_KEY }}'),
 );
 check(
-    'La publicación de releases usa el gh CLI integrado de forma idempotente, sin acción externa adicional',
+    'La publicación de releases usa el gh CLI integrado, solo a mano, en borrador y sin reemplazar adjuntos ya subidos',
     !/softprops\/action-gh-release|actions\/upload-release-asset/.test(releaseWorkflow)
         && (releaseWorkflow.match(/gh release upload/g) ?? []).length === 1
-        && releaseWorkflow.includes('--clobber'),
+        && !releaseWorkflow.includes('--clobber')
+        && !/^\s{2}push:/m.test(releaseWorkflow)
+        && releaseWorkflow.includes('--draft')
+        && releaseWorkflow.includes("--jq '.assets | length'")
+        && releaseWorkflow.includes('release/*-Portable.exe'),
 );
 check(
     'CodeQL solo entrega security-events: write al job que analiza código',

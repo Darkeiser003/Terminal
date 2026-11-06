@@ -95,6 +95,82 @@ export function occupiedTerminalColumns(
     return occupied;
 }
 
+/** El texto de un bloque de salida, sin secuencias de escape ni controles. */
+export function withoutTerminalControls(data: string): string {
+    return data
+        // OSC y las cadenas DCS, SOS, PM y APC (los datos de Sixel también).
+        .replace(/\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\)/gu, '')
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '')
+        // Los demás escapes son ESC, intermedios y un carácter final. Quitando
+        // solo el ESC, el `ESC >` con el que zsh restaura el teclado tras cada
+        // orden contaba como un `>` detrás de cientos de espacios de la misma
+        // línea, y salía una barra horizontal vacía.
+        .replace(/\x1b[ -/]*[0-~]/gu, '')
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/gu, '');
+}
+
+/** La línea lógica que un bloque de salida deja a medias para el siguiente. */
+export interface OutputLineCarry {
+    /** Columnas escritas, espacios incluidos. */
+    columns: number;
+    /** Hasta dónde llega el último carácter que no es un espacio. */
+    ink: number;
+}
+
+export const EMPTY_OUTPUT_LINE: OutputLineCarry = { columns: 0, ink: 0 };
+
+/**
+ * La línea más ancha de un bloque de salida tal como llega de la PTY,
+ * contando la que dejó a medias el bloque anterior. Los espacios finales no
+ * ocupan: zsh (`PROMPT_SP`) rellena la fila entera antes de cada prompt, y si
+ * ConPTY partía esos espacios en dos bloques, el segundo los contaba y salía
+ * una barra horizontal vacía. Los movimientos del cursor sí cuentan:
+ * zsh-syntax-highlighting repinta lo tecleado volviendo atrás (`CSI n D`) y
+ * saltando al final (`CSI n C`), y si se quitaban sin mover la columna, cada
+ * repintado sumaba la línea otra vez y también salía la barra.
+ */
+export function measureOutputChunk(
+    data: string,
+    carry: OutputLineCarry,
+    limit: number,
+): { longest: number; carry: OutputLineCarry } {
+    let { columns, ink } = carry;
+    let longest = ink;
+    // OSC y las cadenas DCS, SOS, PM y APC no se ven ni mueven el cursor.
+    const text = data.replace(/\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\)/gu, '');
+    const tokens = /\x1b\[([0-?]*)[ -/]*([@-~])|\x1b[ -/]*[0-~]|([\r\n])|(\x08)|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|([^\x00-\x08\x0a-\x1f\x7f\x1b]+)/gu;
+    for (const [, params, final, newline, backspace, printable] of text.matchAll(tokens)) {
+        if (printable !== undefined) {
+            const printed = Array.from(printable.trimEnd()).length;
+            if (printed > 0) ink = Math.max(ink, columns + printed);
+            columns += Array.from(printable).length;
+        } else if (newline !== undefined) {
+            columns = 0;
+            ink = 0;
+        } else if (backspace !== undefined) {
+            columns = Math.max(0, columns - 1);
+        } else if (final !== undefined) {
+            const [first, second] = (params ?? '').split(';').map((value) => Number.parseInt(value, 10));
+            const count = Number.isFinite(first) && first > 0 ? first : 1;
+            if (final === 'D') columns = Math.max(0, columns - count);
+            else if (final === 'C') columns += count;
+            else if (final === 'G' || final === '`') columns = count - 1;
+            else if (final === 'H' || final === 'f') {
+                // Otra fila: lo que ya tenga se midió cuando se escribió.
+                columns = (Number.isFinite(second) && second > 0 ? second : 1) - 1;
+                ink = 0;
+            } else if (final === 'A' || final === 'B' || final === 'd') ink = 0;
+            else if (final === 'E' || final === 'F') {
+                columns = 0;
+                ink = 0;
+            }
+        }
+        longest = Math.max(longest, ink);
+        if (longest >= limit) return { longest: limit, carry: EMPTY_OUTPUT_LINE };
+    }
+    return { longest: Math.min(limit, longest), carry: { columns, ink } };
+}
+
 /**
  * Mide el ancho lógico máximo que realmente se ve en la ventana de xterm.
  * Las filas blandamente envueltas se reconstruyen como una sola línea, pero

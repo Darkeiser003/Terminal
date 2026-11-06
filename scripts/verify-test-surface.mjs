@@ -536,7 +536,7 @@ check('El banner se imprime como salida PTY normal',
         && terminalTabs.includes('Outbound::Data')
         && terminalTabs.includes('print_banner'));
 check('El resize solo ajusta xterm y no repinta automáticamente',
-    terminalPane.includes('api.resize(tabId, targetCols, rows)')
+    terminalPane.includes('api.resize(tabId, targetCols, rows, fullScreenApp)')
         && !terminalPane.includes('api.refreshBanner'));
 check('El resize conserva el anclaje al prompt al envolver líneas largas',
     terminalPane.includes('const wasAtBottom = bufferBeforeResize.viewportY')
@@ -660,9 +660,11 @@ check('La actualización de AppImage vuelve a habilitar ejecución en Linux',
     read('src-tauri/src/updater/commands.rs').includes('make_appimage_executable')
         && read('src-tauri/src/updater/commands.rs').includes('permissions.set_mode(0o755)')
         && read('src-tauri/src/updater/commands.rs').includes('permisos_de_ejecucion_antes_de_instalarse'));
-check('Un fallo de la matriz de shells conserva captura antes de restaurar la original',
-    smoke.includes('failure-before-restore')
-        && smoke.indexOf('failure-before-restore') < smoke.indexOf('let restored = currentId === originalId'));
+check('Cada fallo de la matriz de shells conserva captura, sigue con el resto y se declara al final',
+    smoke.includes('captureScreenshot(`shell-${id}-failure`)')
+        && smoke.indexOf('captureScreenshot(`shell-${id}-failure`)') < smoke.indexOf('let restored = currentId === originalId')
+        && smoke.includes('deferredFailures.push(')
+        && smoke.includes('E2E completo con ${deferredFailures.length} fallo(s)'));
 check('Las líneas largas conservan el scroll horizontal único y no pierden texto',
     read('src/lib/terminal-columns.ts').includes('longestVisibleLogicalLineWidth')
         && read('src/lib/terminal-columns.ts').includes('requiredTerminalColumns')
@@ -934,6 +936,19 @@ check('El E2E fuerza AppImage sin FUSE y acota las peticiones WebDriver',
     check('El E2E de sugerencias fuerza el aviso de caché de ble.sh',
         read('scripts/prepare-e2e-shell-tools.mjs').includes('touch ${E2E_BLESH_PREFIX}/blesh/lib/init-term.sh')
         && smoke.includes("line.includes('Desalineación entre ConPTY y xterm tras el arranque')"));
+    // Sin awk, `ble.sh --install` no termina (FedoraLinux-44, build 22): el
+    // E2E y el catálogo comprueban la misma lista de órdenes antes de instalar.
+    const shellTools = read('scripts/prepare-e2e-shell-tools.mjs');
+    const bleshCommands = /export const BLESH_REQUIRED_COMMANDS = '([^']+)'/u.exec(shellTools)?.[1];
+    check('El E2E de ble.sh descarta las distros sin las órdenes que exige y reintenta Ubuntu',
+        Boolean(bleshCommands) && bleshCommands.split(' ').includes('awk')
+        && read('src-tauri/src/packages/actions.rs').includes(`"${bleshCommands}"`)
+        && shellTools.includes('const PREFERRED_ATTEMPTS = 3;')
+        && smoke.includes('await prepareWslBashWithBlesh('));
+    // La detección del catálogo tarda lo que tarde la máquina: 180 s fijos
+    // daban falsos fallos con el anfitrión ocupado (build 26).
+    check('Las esperas del E2E a una detección completa usan E2E_DEPENDENCY_TIMEOUT_MS',
+        smoke.includes('detectionRetryMs') && !/\b180000\b/u.test(smoke));
 }
 // NSudo exige un padre elevado (sin él termina con -1). Se abre directo, a
 // través de gsudo o del sudo de Windows «En línea», o sale deshabilitado con
@@ -1124,13 +1139,17 @@ check('Los controles de Ajustes quedan por encima del pie fijo al desplazarse a 
     && smoke.includes("recordEvent('driver-click-scrolled',"));
 
 // Una pestaña nueva que arranca con un programa que pregunta (gh auth login y
-// su Y/n) acepta teclas en cuanto se ve; y las pruebas lanzadas desde
-// PowerShell 7 no rompen los powershell.exe 5.1 que usan.
+// su Y/n) acepta teclas en cuanto se ve, también cuando cmd borra la línea del
+// prompt al pintar el recuadro (cuenta la marca OSC 133 `B`); y las pruebas
+// lanzadas desde PowerShell 7 no rompen los powershell.exe 5.1 que usan.
 check('Las pestañas que arrancan con un programa interactivo aceptan teclas y su E2E responde a gh',
     read('src/components/TerminalPane.svelte').includes('function shellPromptAfterBanner(')
-    && read('src/components/TerminalPane.svelte').includes('terminalPromptVisible() || shellPromptAfterBanner(latestBanner)')
+    && read('src/components/TerminalPane.svelte').includes('|| shellPromptAfterBanner(latestBanner)')
+    && read('src/components/TerminalPane.svelte').includes('|| (titleRow >= 0 && promptMarkedBelow(titleRow)))')
+    && read('src/components/TerminalPane.svelte').includes('lastPromptMark = term?.registerMarker(0);')
     && smoke.includes("'pregunta Y/n de gh auth login'")
-    && smoke.includes("'la respuesta a la pregunta de gh llega a la terminal'"));
+    && smoke.includes("'la respuesta a la pregunta de gh llega a la terminal'")
+    && smoke.includes('if (results.loginAnswerMs > 10000)'));
 check('Las pruebas quitan el PSModulePath heredado de PowerShell 7 antes de usar Windows PowerShell 5.1',
     read('tests/e2e/powershell-env.mjs').includes('export function dropPowerShell7ModulePath(')
     && smoke.includes("import { dropPowerShell7ModulePath } from './powershell-env.mjs';")

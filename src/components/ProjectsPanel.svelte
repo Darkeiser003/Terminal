@@ -60,6 +60,47 @@
     let needsDeleteScope = $state(false);
     const exclusiveGroups = $derived(app.preferences?.exclusiveAccordionGroups ?? false);
     let loadSerial = 0;
+    /** Estado de Git de cada descargado, cuando se pide con «Estado de Git». */
+    type GitState = { branch: string; changes: number; truncated: boolean; ahead: number; behind: number } | { error: string };
+    let gitStates = $state<Record<string, GitState>>({});
+    let gitChecking = $state(false);
+
+    /** De tres en tres: con docenas de repositorios no se lanzan docenas de
+     *  `git` a la vez. Solo lee; no consulta la red. */
+    async function checkGitStates(): Promise<void> {
+        if (gitChecking) return;
+        gitChecking = true;
+        gitStates = {};
+        const pending = downloaded.map((repo) => repo.fullName);
+        const worker = async () => {
+            for (let fullName = pending.shift(); fullName; fullName = pending.shift()) {
+                let next: GitState;
+                try {
+                    const result = await api.gitDownloadedStatus(fullName);
+                    next = { branch: result.branch, changes: result.files.length, truncated: result.truncated, ahead: result.ahead, behind: result.behind };
+                } catch (cause) {
+                    next = { error: String(cause) };
+                }
+                gitStates = { ...gitStates, [fullName]: next };
+            }
+        };
+        try {
+            await Promise.all([worker(), worker(), worker()]);
+        } finally {
+            gitChecking = false;
+        }
+    }
+
+    function gitStateText(state: GitState): string {
+        if ('error' in state) return state.error;
+        const parts = [state.branch || app.t('projects.gitNoBranch', 'sin rama')];
+        parts.push(state.changes
+            ? app.t('projects.gitChanges', '{count} cambios sin confirmar').replace('{count}', `${state.changes}${state.truncated ? '+' : ''}`)
+            : app.t('projects.gitClean', 'sin cambios'));
+        if (state.ahead) parts.push(`↑${state.ahead}`);
+        if (state.behind) parts.push(`↓${state.behind}`);
+        return parts.join(' · ');
+    }
 
     function toggleExpanded(fullName: string): void {
         if (expanded.includes(fullName)) {
@@ -98,6 +139,7 @@
                 if (serial !== loadSerial) return;
                 downloaded = nextDownloaded;
                 projects = nextProjects;
+                gitStates = {};
             } else {
                 const nextProjects = await api.getProjectsState();
                 if (serial !== loadSerial) return;
@@ -442,7 +484,7 @@
     </div>
 
     {#if loading}
-        <div class="empty">{app.t('projects.loading', 'Consultando…')}</div>
+        <div class="empty" data-testid="projects-loading">{app.t('projects.loading', 'Consultando…')}</div>
     {:else if mode === 'pinned'}
         <!-- Perfiles primero y repositorios después: un perfil lleva a varios
              repositorios, así que es el nivel de arriba. -->
@@ -512,9 +554,20 @@
     {:else if mode === 'downloaded'}
         <div class="import-bar">
             <span class="hint">{app.t('projects.importHint', '¿Tienes repositorios clonados en otra carpeta? Enlázalos sin moverlos.')}</span>
-            <button type="button" data-testid="projects-import" onclick={importRepository}>
-                {app.t('projects.import', 'Importar…')}
-            </button>
+            <span class="import-actions">
+                <button
+                    type="button"
+                    data-testid="projects-git-states"
+                    title={app.t('projects.gitStateHint', 'Rama, cambios sin confirmar y commits por delante (↑) o por detrás (↓) según el último fetch. Solo lee: no consulta la red.')}
+                    disabled={gitChecking || downloaded.length === 0}
+                    onclick={checkGitStates}
+                >
+                    {gitChecking ? app.t('projects.gitChecking', 'Mirando…') : app.t('projects.gitStates', 'Estado de Git')}
+                </button>
+                <button type="button" data-testid="projects-import" onclick={importRepository}>
+                    {app.t('projects.import', 'Importar…')}
+                </button>
+            </span>
         </div>
         {#each downloadedVisible as repo (repo.fullName)}
             {@render row(
@@ -525,6 +578,19 @@
                 repo.path,
                 null
             )}
+            {#if gitStates[repo.fullName]}
+                {@const gitState = gitStates[repo.fullName]}
+                <div
+                    class="git-state"
+                    class:dirty={!('error' in gitState) && gitState.changes > 0}
+                    class:failed={'error' in gitState}
+                    data-testid="projects-git-state"
+                    data-repo={repo.fullName}
+                    data-changes={'error' in gitState ? '' : String(gitState.changes)}
+                >
+                    <small>{gitStateText(gitState)}</small>
+                </div>
+            {/if}
             {#if repo.imported}
                 <div class="imported-note">
                     <small>{app.t('projects.importedBadge', 'Importado: está fuera de la carpeta de proyectos.')}</small>
@@ -883,6 +949,22 @@
     .imported-note {
         padding-top: 0;
         color: var(--muted);
+    }
+    .import-actions {
+        display: flex;
+        flex: 0 0 auto;
+        gap: var(--density-control-gap, 8px);
+    }
+    .git-state {
+        padding: 0 var(--space-min, 6px) var(--space-min, 6px);
+        color: var(--muted);
+        font-family: var(--terminal-font);
+    }
+    .git-state.dirty {
+        color: var(--warning);
+    }
+    .git-state.failed {
+        color: var(--error, var(--warning));
     }
     .modes {
         display: grid;

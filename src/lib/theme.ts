@@ -156,9 +156,49 @@ export function applyTheme(
     root.setProperty('--terminal-selection', preferences.terminalSelectionColor);
     root.setProperty('--terminal-padding', `${preferences.terminalPadding}px`);
     root.setProperty('--terminal-font', terminalFont(preferences, fonts));
-    root.setProperty('--ui-scale', String((preferences.uiScale ?? 100) / 100));
+    applyUiScale(preferences.uiScale ?? 100);
 
     document.body.dataset.density = preferences.uiDensity;
+}
+
+/** Límites del tamaño de la interfaz, los mismos que valida el backend. */
+export const UI_SCALE_MIN = 80;
+export const UI_SCALE_MAX = 500;
+export const UI_SCALE_STEP = 10;
+/** Hasta el 200 % se aplica siempre lo pedido, como antes de subir el límite. */
+const UI_SCALE_ALWAYS_APPLIED = 200;
+/** El ancho mínimo de la ventana (`minWidth` de Tauri): por debajo, la barra
+ *  de herramientas ya no cabe aunque se repliegue. */
+const UI_SCALE_MIN_LAYOUT_WIDTH = 480;
+
+/** Un valor escrito a mano, redondeado y dentro de los límites. */
+export function clampUiScale(value: number): number {
+    if (!Number.isFinite(value)) return 100;
+    return Math.min(UI_SCALE_MAX, Math.max(UI_SCALE_MIN, Math.round(value)));
+}
+
+/** La escala que de verdad se aplica. Por encima del 200 %, la interfaz
+ *  escalada no puede quedar más estrecha que la ventana mínima: al 500 % en
+ *  una pantalla de 1920 px la barra quedaría en 384 px y se saldría. Entonces
+ *  se aplica la mayor que cabe, y vuelve sola a la pedida al ensanchar. */
+export function effectiveUiScale(requested: number, viewportWidth: number): number {
+    const wanted = clampUiScale(requested);
+    const fitting = Math.floor((viewportWidth / UI_SCALE_MIN_LAYOUT_WIDTH) * 100);
+    return Math.min(wanted, Math.max(UI_SCALE_ALWAYS_APPLIED, fitting));
+}
+
+let requestedUiScale = 100;
+let uiScaleResizeListener = false;
+
+function applyUiScale(requested: number): void {
+    requestedUiScale = requested;
+    const scale = effectiveUiScale(requested, window.innerWidth);
+    document.documentElement.style.setProperty('--ui-scale', String(scale / 100));
+    document.documentElement.dataset.uiScale = String(scale);
+    if (!uiScaleResizeListener) {
+        uiScaleResizeListener = true;
+        window.addEventListener('resize', () => applyUiScale(requestedUiScale), { passive: true });
+    }
 }
 
 /** La parte de las preferencias que entiende xterm. */

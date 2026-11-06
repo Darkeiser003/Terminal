@@ -1406,6 +1406,10 @@ fn clean_os_name(raw: &str) -> String {
 const MIN_BOXED_WIDTH: usize = 40;
 const ASSUMED_COLUMNS: usize = 80;
 
+/// Filas desde las que una casilla baja (menos de 12) lleva el banner de una
+/// línea: la línea más las cinco filas de trabajo y el prompt.
+pub const LOW_PANE_BANNER_MIN_ROWS: usize = 7;
+
 /// Columnas de separación entre la imagen del banner y su texto.
 pub const BANNER_IMAGE_GAP: usize = 2;
 /// Lo que debe quedarle al texto para que la imagen tenga sitio.
@@ -1662,8 +1666,22 @@ pub fn build_banner_with(
     // una rejilla podía conservar el formato completo mientras las nuevas
     // nacían compactas. Un formato único evita esa mezcla y hace que el banner
     // sea estable al dividir la ventana o mover una pestaña.
+    // Una casilla baja no tiene sitio para el bloque, pero sí para una línea:
+    // al dividir una ventana pequeña, la casilla original conservaba su banner
+    // y las nuevas solo enseñaban el prompt. Con la línea, todas empiezan igual.
+    // Las cinco filas de trabajo de abajo siguen siendo intocables, así que con
+    // menos de siete filas no va nada. Sin imagen: no hay alto para ella.
     if rows > 0 && usize::from(rows) < 12 {
-        return String::new();
+        if usize::from(rows) < LOW_PANE_BANNER_MIN_ROWS {
+            return String::new();
+        }
+        let system = system_rows
+            .iter()
+            .find(|(label, _)| label == &t.t("banner.system", "Sistema"))
+            .map(|(_, value)| format!(" · {value}"))
+            .unwrap_or_default();
+        let line = ellipsize(&format!("{display_name} {version}{system}"), max_line_cols);
+        return format!("{BOLD}{accent}{line}{RESET}\r\n");
     }
     let compact_layout = true;
     let compact_rows = if compact_layout {
@@ -2174,6 +2192,37 @@ mod tests {
     }
 
     #[test]
+    fn una_casilla_baja_lleva_el_banner_de_una_linea_y_una_minima_ninguno() {
+        let t = Translator::default();
+        let lines = |rows: u16| -> Vec<String> {
+            build_banner("cmd.exe", "WTerminal", 80, rows, 2, &t)
+                .lines()
+                .map(crate::current_dir::strip_ansi)
+                .collect()
+        };
+        let version = env!("CARGO_PKG_VERSION");
+        for rows in [7u16, 9, 11] {
+            let low = lines(rows);
+            assert_eq!(low.len(), 1, "{rows} filas: {low:?}");
+            assert!(
+                low[0].starts_with(&format!("WTerminal {version}")),
+                "{low:?}"
+            );
+        }
+        assert!(lines(6).is_empty(), "con menos de siete filas no va nada");
+        assert!(lines(12).len() > 1, "desde doce filas, el bloque");
+        // Nunca más ancha que la casilla.
+        let narrow = build_banner("cmd.exe", "WTerminal", 12, 8, 2, &t);
+        assert!(
+            crate::current_dir::strip_ansi(narrow.trim_end())
+                .chars()
+                .count()
+                <= 12,
+            "{narrow:?}"
+        );
+    }
+
+    #[test]
     fn el_banner_mantiene_el_mismo_formato_al_cambiar_la_rejilla() {
         let t = Translator::default();
         for (columns, rows) in [(120, 40), (120, 20), (60, 14)] {
@@ -2245,9 +2294,11 @@ mod tests {
 
     #[test]
     fn una_casilla_demasiado_baja_no_deja_la_cola_del_banner() {
+        // Por debajo de doce filas no va el bloque ni un trozo de él: como
+        // mucho, la línea única de las casillas bajas.
         for rows in [6, 9, 11] {
             let banner = build_banner("cmd.exe", "LTerminal", 120, rows, 2, &Translator::default());
-            assert!(banner.is_empty(), "rows={rows}: {banner}");
+            assert!(banner.lines().count() <= 1, "rows={rows}: {banner}");
         }
     }
 

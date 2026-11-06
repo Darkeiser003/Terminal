@@ -201,6 +201,29 @@ for (const relative of ['src-tauri/src/app/panel_commands.rs', 'src-tauri/src/pr
     }
 }
 
+// Un texto igual al español en otro idioma suele ser un olvido, pero también hay
+// nombres propios y palabras que coinciden de verdad. Lo revisado está en
+// `i18n-identical-allowlist.json`: `all` vale para todos y el resto por idioma.
+// `englishDebt` fija cuántos textos siguen copiados del inglés: puede bajar, no subir.
+const identicalAllowlist = JSON.parse(fs.readFileSync(path.join(root, 'scripts', 'i18n-identical-allowlist.json'), 'utf8'));
+const english = catalogs['en.json'] ?? {};
+for (const [file, catalog] of Object.entries(catalogs)) {
+    if (file === 'es.json') continue;
+    const id = file.slice(0, -'.json'.length);
+    const allowed = new Set([...identicalAllowlist.all, ...(identicalAllowlist[id] ?? [])]);
+    const identical = expectedKeys.filter((key) => catalog[key] === spanish[key]);
+    for (const key of identical) {
+        if (!allowed.has(key)) errors.push(`${file}: «${key}» sigue en español; tradúcelo o revísalo en scripts/i18n-identical-allowlist.json`);
+    }
+    for (const key of identicalAllowlist[id] ?? []) {
+        if (catalog[key] !== spanish[key]) errors.push(`${file}: «${key}» ya no es igual al español; quítalo de scripts/i18n-identical-allowlist.json`);
+    }
+    if (id === 'en') continue;
+    const copied = expectedKeys.filter((key) => catalog[key] === english[key] && english[key] !== spanish[key]).length;
+    const debt = identicalAllowlist.englishDebt[id] ?? 0;
+    if (copied > debt) errors.push(`${file}: ${copied} textos copiados del inglés, por encima de los ${debt} conocidos`);
+}
+
 if (errors.length) {
     console.error(['Comprobación de traducciones fallida:', ...errors.map((error) => `- ${error}`)].join('\n'));
     process.exit(1);

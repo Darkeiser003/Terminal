@@ -248,12 +248,20 @@ export function safeEnvironmentMarker(id) {
 }
 
 /**
- * Convierte la salida UTF-16LE que `wsl.exe --list --quiet` devuelve en
- * Windows a nombres de distribuciones. WSL no abre shells en sus distros
- * internas de Docker Desktop, así que se excluyen igual que en el backend.
+ * Convierte la salida que `wsl.exe --list --quiet` devuelve en Windows a
+ * nombres de distribuciones. Es UTF-16LE, salvo con `WSL_UTF8=1` en el
+ * entorno: entonces es UTF-8 y leída como UTF-16 salían caracteres CJK que no
+ * coincidían con ninguna distro. Igual que `decode_wsl_output` del backend,
+ * si en UTF-16 no hay ninguna letra ASCII se lee como UTF-8. WSL no abre
+ * shells en sus distros internas de Docker Desktop, así que se excluyen igual
+ * que en el backend.
  */
 export function parseWslDistroList(output) {
-    const text = Buffer.isBuffer(output) ? output.toString('utf16le') : String(output ?? '');
+    const decode = (buffer) => {
+        const utf16 = buffer.length % 2 === 0 ? buffer.toString('utf16le') : '';
+        return /[A-Za-z]/u.test(utf16) ? utf16 : buffer.toString('utf8');
+    };
+    const text = Buffer.isBuffer(output) ? decode(output) : String(output ?? '');
     return text
         .replace(/^\uFEFF/u, '')
         .replaceAll('\0', '')

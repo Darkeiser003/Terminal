@@ -40,8 +40,11 @@ export const BLESH = {
     directory: 'ble-nightly-20260908+d81fd54',
 };
 
-/** Carpeta de la distro donde el E2E instala ble.sh (`--install` crea `blesh/`). */
-export const E2E_BLESH_PREFIX = '/tmp/wterminal-e2e-blesh';
+/** Carpeta de la distro donde el E2E instala ble.sh (`--install` crea `blesh/`).
+ *  `/var/tmp` y no `/tmp`: con systemd (Ubuntu 26.04) `/tmp` es tmpfs y se
+ *  vacía cada vez que la instancia de la distro se detiene por inactividad,
+ *  así que ble.sh desaparecía entre la preparación y la pestaña de bash. */
+export const E2E_BLESH_PREFIX = '/var/tmp/wterminal-e2e-blesh';
 
 export const DEFAULT_TOOLS_DIR = join(projectRoot, 'artifacts', 'e2e-tools');
 
@@ -118,18 +121,78 @@ async function wsl(args, options = {}) {
     return stdout.replace(/\0/gu, '').trim();
 }
 
-/** La distro WSL para el E2E de bash: la pedida, Ubuntu si existe o la
- *  primera con bash. `null` si no hay WSL o ninguna distro tiene bash. */
-export async function pickWslDistro(preferred = '') {
-    if (process.platform !== 'win32') return null;
-    const names = (await wsl(['--list', '--quiet']).catch(() => ''))
-        .split(/\r?\n/u)
-        .map((name) => name.trim())
-        .filter((name) => name && !/^docker-desktop/iu.test(name));
+/** Órdenes que ble.sh exige al cargarse: igual que `BLESH_REQUIRED_COMMANDS`
+ *  de `packages/actions.rs`. Sin alguna, `ble.sh --install` no termina: en la
+ *  build 22, FedoraLinux-44 (sin awk) agotó el plazo y tumbó la suite. */
+export const BLESH_REQUIRED_COMMANDS = 'sed date rm mkdir mkfifo sleep stty tty sort awk chmod grep cat wc mv sh od cp ps';
+
+/** Lo que el E2E necesita en la distro: bash, las órdenes de ble.sh y algo
+ *  con que extraer el .tar.xz. Imprime `ok` o `falta: …`. */
+export const WSL_PROBE_SCRIPT = [
+    'm=',
+    'command -v bash >/dev/null 2>&1 || m="$m bash"',
+    `for c in ${BLESH_REQUIRED_COMMANDS}; do command -v $c >/dev/null 2>&1 || m="$m $c"; done`,
+    '{ command -v tar >/dev/null 2>&1 && command -v xz >/dev/null 2>&1; } || command -v python3 >/dev/null 2>&1 || m="$m tar+xz/python3"',
+    'if [ -n "$m" ]; then echo "falta:$m"; else echo ok; fi',
+].join('; ');
+
+/** Intentos con la distro pedida y con Ubuntu: un fallo pasajero de WSL
+ *  (build 22: Ubuntu no contestó a la sonda) no debe llevar a otra distro. */
+const PREFERRED_ATTEMPTS = 3;
+const RETRY_PAUSE_MS = 5000;
+const PROBE_TIMEOUT_MS = 60000;
+
+const outputLines = (text) => String(text ?? '').split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+
+async function wslDistroNames() {
+    return outputLines(await wsl(['--list', '--quiet']).catch(() => ''))
+        .filter((name) => !/^docker-desktop/iu.test(name));
+}
+
+/** `ok`, `falta: …` o `null` si WSL no contestó (fallo pasajero). */
+async function probeWslDistro(name) {
+    const output = await wsl(['-d', name, '--exec', 'sh', '-c', WSL_PROBE_SCRIPT], { timeout: PROBE_TIMEOUT_MS }).catch(() => '');
+    return outputLines(output).find((line) => line === 'ok' || line.startsWith('falta:')) ?? null;
+}
+
+/** Distro WSL para el E2E de bash, con ble.sh ya instalado en ella: la
+ *  pedida, Ubuntu si existe y luego las demás. La pedida y Ubuntu se
+ *  reintentan ante un fallo pasajero de WSL; una distro a la que le falta
+ *  algo, o donde ble.sh no se instala, cede el turno a la siguiente.
+ *  `null` si no hay WSL o ninguna sirve. `deps` sustituye a WSL en los tests. */
+export async function prepareWslBashWithBlesh(preferred = '', toolsDir = DEFAULT_TOOLS_DIR, log = (line) => console.log(line), deps = {}) {
+    const {
+        platform = process.platform,
+        listDistros = wslDistroNames,
+        probe: probeDistro = probeWslDistro,
+        install = prepareBleshInWsl,
+        pause = () => new Promise((done) => setTimeout(done, RETRY_PAUSE_MS)),
+    } = deps;
+    if (platform !== 'win32') return null;
+    const names = await listDistros();
     const ordered = [preferred, 'Ubuntu', ...names].filter((name, index, list) => name && names.includes(name) && list.indexOf(name) === index);
     for (const name of ordered) {
-        const bash = await wsl(['-d', name, '--exec', 'sh', '-c', 'command -v bash']).catch(() => '');
-        if (bash) return name;
+        const attempts = name === preferred || name === 'Ubuntu' ? PREFERRED_ATTEMPTS : 1;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            if (attempt > 1) await pause();
+            const probe = await probeDistro(name);
+            if (probe?.startsWith('falta:')) {
+                log(`E2E de bash con ble.sh: se descarta ${name} (${probe}).`);
+                break;
+            }
+            if (!probe) {
+                log(`E2E de bash con ble.sh: ${name} no contestó a la sonda (intento ${attempt} de ${attempts}).`);
+                continue;
+            }
+            try {
+                const bleshPath = await install(name, toolsDir);
+                log(`E2E de bash con ble.sh: distro ${name}.`);
+                return { distro: name, bleshPath };
+            } catch (error) {
+                const reason = outputLines(error?.stderr || error?.message || error)[0] ?? 'sin detalles';
+                log(`E2E de bash con ble.sh: no se instaló en ${name} (intento ${attempt} de ${attempts}): ${reason}`);
+            }
+        }
     }
     return null;
 }

@@ -78,12 +78,13 @@ if (shellAssistOnly && process.platform === 'win32') {
 // personal) y la app lo carga desde ahí. E2E_SHELL_ASSIST_WSL=0 lo omite.
 let shellAssistWslDistro = null;
 if (shellAssistOnly && process.platform === 'win32' && process.env.E2E_SHELL_ASSIST_WSL !== '0') {
-    const { pickWslDistro, prepareBleshInWsl } = await import('../../scripts/prepare-e2e-shell-tools.mjs');
-    shellAssistWslDistro = await pickWslDistro(process.env.E2E_SHELL_ASSIST_WSL_DISTRO || '');
-    if (shellAssistWslDistro) {
-        process.env.LTERMINAL_E2E_BLESH_PATH = await prepareBleshInWsl(shellAssistWslDistro, process.env.E2E_SHELL_TOOLS_DIR || undefined);
+    const { prepareWslBashWithBlesh } = await import('../../scripts/prepare-e2e-shell-tools.mjs');
+    const wslBash = await prepareWslBashWithBlesh(process.env.E2E_SHELL_ASSIST_WSL_DISTRO || '', process.env.E2E_SHELL_TOOLS_DIR || undefined);
+    if (wslBash) {
+        shellAssistWslDistro = wslBash.distro;
+        process.env.LTERMINAL_E2E_BLESH_PATH = wslBash.bleshPath;
     } else if (process.env.E2E_SHELL_ASSIST_WSL === '1') {
-        throw new Error('E2E_SHELL_ASSIST_WSL=1 pero no hay ninguna distro WSL con bash');
+        throw new Error('E2E_SHELL_ASSIST_WSL=1 pero no hay ninguna distro WSL con bash donde se instale ble.sh');
     }
 }
 // Fuerza la carrera de una pestaña nueva: nace con la geometría heredada de la
@@ -277,6 +278,8 @@ const parseDuration = (name, fallback, minimum, maximum) => {
 const POLL_INTERVAL_MS = parseDuration('E2E_POLL_INTERVAL_MS', 100, 25, 1000);
 const WM_TRANSITION_TIMEOUT_MS = parseDuration('E2E_WM_TIMEOUT_MS', 1800, 500, 5000);
 const FOCUS_SETTLE_MS = parseDuration('E2E_FOCUS_SETTLE_MS', 100, 25, 1000);
+// Cubre el reposo de la salida y los reajustes que programa a 1,2 s y 2,4 s.
+const WIDE_FRAME_SETTLE_MS = 3000;
 const COMMAND_SETTLE_MS = parseDuration('E2E_COMMAND_SETTLE_MS', 220, 50, 2000);
 // El resize ya solicita el repintado del banner. Esta opción conserva la
 // ruta más pesada para investigar específicamente el teclado de la shell.
@@ -380,6 +383,19 @@ const appearanceOnly = process.env.E2E_APPEARANCE_ONLY === '1';
 // de la orden siguiente debe seguir pegado al prompt: nada se escribe solo en
 // xterm sin que ConPTY lo sepa.
 const commandPaletteOnly = process.env.E2E_COMMAND_PALETTE_ONLY === '1';
+// Renombrar una pestaña (doble clic, paleta, Escape, nombre vacío, cambio de
+// shell) y guardar su salida. El diálogo nativo no se puede pulsar desde aquí:
+// el backend usa la ruta de `LTERMINAL_E2E_SAVE_OUTPUT_PATH`.
+const tabToolsOnly = process.env.E2E_TAB_TOOLS_ONLY === '1';
+// Marcas OSC 133 en cmd, PowerShell y Git Bash: fin de orden, código de salida,
+// Intro vacío, eco pegado al prompt, copiar la salida, saltos y orden larga.
+const commandMarksOnly = process.env.E2E_COMMAND_MARKS_ONLY === '1';
+let saveOutputFile = null;
+if (tabToolsOnly) {
+    saveOutputFile = join(await mkdtemp(join(tmpdir(), 'wterminal-e2e-salida-')), 'salida.txt');
+    process.env.LTERMINAL_E2E_SAVE_OUTPUT_PATH = saveOutputFile;
+    process.env.LTERMINAL_E2E_TESTING = '1';
+}
 const cursorOnly = process.env.E2E_CURSOR_ONLY === '1';
 // Permite validar la matriz PTY/layout sin esperar la pasada completa de
 // sondas externas. La auditoría de detección mantiene su modo enfocado y no
@@ -483,6 +499,47 @@ if (aiEnvironmentsOnly) {
     process.env.LTERMINAL_E2E_HIDDEN_PATH_DIRS = realAiDirs.join(delimiter);
     process.env.OLLAMA_MODELS = join(fakeAiDirectory, 'models');
     if (realAiDirs.length) process.stdout.write(`E2E IA: fuera del PATH de la prueba ${realAiDirs.length} carpetas con Claude Code u Ollama reales.\n`);
+}
+// IA de terminal a pantalla completa con un simulador (`fake-ai-tui.mjs`),
+// sin cuenta ni red: Claude Code, Amp o Gemini dibujan para el ancho que
+// anuncia la PTY, y con la reserva de 1024 columnas de las shells quedaban
+// fuera de la vista y parpadeaban. Un `amp.cmd` delante del PATH abre el
+// simulador en pantalla alternativa; el Amp real (si está instalado) se
+// esconde de esta prueba igual que Claude Code en `E2E_AI_ENVIRONMENTS_ONLY`.
+const aiTuiOnly = process.env.E2E_AI_TUI_ONLY === '1';
+// Las IA reales instaladas, sin cuenta (ver el escenario `aiRealOnly`).
+const aiRealOnly = process.env.E2E_AI_REAL_ONLY === '1';
+const fakeTuiSimulator = fileURLToPath(new URL('./fake-ai-tui.mjs', import.meta.url));
+let fakeTuiDirectory = null;
+let fakeTuiReport = null;
+if (aiTuiOnly) {
+    if (process.platform !== 'win32') throw new Error('E2E_AI_TUI_ONLY simula la CLI con un archivo .cmd de Windows');
+    fakeTuiDirectory = await mkdtemp(join(tmpdir(), 'wterminal-e2e-tui-'));
+    const fakeTuiBin = join(fakeTuiDirectory, 'bin');
+    await mkdir(fakeTuiBin, { recursive: true });
+    fakeTuiReport = join(fakeTuiDirectory, 'report.jsonl');
+    // `amp` abre el simulador en pantalla alternativa (como Amp) y `claude`
+    // en línea (como Claude Code, que usa Ink): los dos con el nombre real
+    // para que la app los reconozca como IA al teclearlos en una shell.
+    await writeFile(join(fakeTuiBin, 'amp.cmd'), `@echo off\r\n"${process.execPath}" "${fakeTuiSimulator}" --alt %*\r\n`);
+    await writeFile(join(fakeTuiBin, 'claude.cmd'), `@echo off\r\n"${process.execPath}" "${fakeTuiSimulator}" %*\r\n`);
+    // Un programa que no es una IA (como vim o htop) en pantalla alternativa.
+    await writeFile(join(fakeTuiBin, 'fakevim.cmd'), `@echo off\r\n"${process.execPath}" "${fakeTuiSimulator}" --alt %*\r\n`);
+    const realAmpDirs = [];
+    const keptPath = [];
+    for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+        let real = false;
+        for (const name of ['amp.exe', 'amp.cmd', 'amp.ps1', 'amp', 'claude.exe', 'claude.cmd', 'claude.ps1', 'claude']) {
+            if (await access(join(dir, name)).then(() => true, () => false)) real = true;
+        }
+        if (real) realAmpDirs.push(dir);
+        else keptPath.push(dir);
+    }
+    process.env.PATH = [fakeTuiBin, ...keptPath].join(delimiter);
+    process.env.LTERMINAL_E2E_HIDDEN_PATH_DIRS = realAmpDirs.join(delimiter);
+    process.env.FAKE_AI_REPORT = fakeTuiReport;
+    process.env.FAKE_AI_NAME = 'FAKE-AMP';
+    if (realAmpDirs.length) process.stdout.write(`E2E IA TUI: fuera del PATH de la prueba ${realAmpDirs.length} carpetas con Amp real.\n`);
 }
 // «Mi GitHub» de Proyectos con un `gh` simulado: un gh.cmd delante del PATH
 // que guarda la sesión en archivos (`state/logged-in`, `state/delete-scope`),
@@ -786,6 +843,9 @@ const captureVideo = process.env.E2E_CAPTURE_VIDEO === '1' || dependencyAuditOnl
 // el muestreador de la ventana la grabe. Se puede desactivar para smoke cortos.
 const dependencyVisualActions = (dependencyAuditOnly || comprehensiveVisualAudit)
     && process.env.E2E_DEPENDENCY_VISUAL_ACTIONS !== '0';
+// Modo reducido: la primera pasada cuenta y compara, y el recorrido visual de
+// cada acción (11 min, con su captura y sus fotogramas) lo hace solo la segunda.
+const dependencyFirstPassCountOnly = process.env.E2E_DEPENDENCY_FIRST_PASS_COUNT_ONLY === '1';
 const dependencyVisualActionHoldMs = Math.max(
     80,
     Number(process.env.E2E_DEPENDENCY_ACTION_HOLD_MS ?? 160) || 160,
@@ -889,6 +949,10 @@ let nativeWindowPreludeRecorder = null;
 let nativeWindowPreludeDirectory = null;
 let diagnosticWindowHiderTimer = null;
 let runnerConsoleHidden = false;
+// Fallos que no deben cortar la pasada: la matriz de shells y REPL sigue con
+// el resto de entornos y el E2E con sus fases siguientes. Se declaran todos
+// juntos al final, para corregirlos de una vez en vez de uno por build.
+const deferredFailures = [];
 const smokeReport = {
     schemaVersion: 1,
     token: smokeToken,
@@ -1550,6 +1614,12 @@ async function stopDesktopVideo() {
                         // padding ni reescalado artificial.
                         const segmentPixelFormat = (segment.dimensions.width % 2 === 0
                             && segment.dimensions.height % 2 === 0) ? 'yuv420p' : 'yuv444p';
+                        // El plazo crece con los fotogramas: la auditoría
+                        // completa deja un segmento de ~18 600 PNG y con la
+                        // máquina cargada superaba los 180 s fijos de antes
+                        // (ffmpeg se mataba y la suite fallaba con la
+                        // auditoría ya superada). Mínimo 3 min, 40 ms por PNG.
+                        const segmentEncodeTimeoutMs = Math.max(180_000, segmentNames.length * 40);
                         await execFile(ffmpeg, [
                             '-y', '-loglevel', 'error', '-framerate', encodedFrameRate.toFixed(6),
                             '-i', join(segmentDir, 'frame-%06d.png'),
@@ -1557,7 +1627,7 @@ async function stopDesktopVideo() {
                             '-fps_mode', 'passthrough',
                             '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', segmentPixelFormat,
                             segmentPath,
-                        ], { windowsHide: true, timeout: 180_000 });
+                        ], { windowsHide: true, timeout: segmentEncodeTimeoutMs });
                         windowVideoNativeSegments.push({
                             path: segmentPath,
                             width: segment.dimensions.width,
@@ -1999,14 +2069,20 @@ async function verifyCompactSettingsFooterLayout() {
     return layout;
 }
 
+// Con la máquina cargada (suites seguidas, siete distros WSL), tauri-driver
+// tardó más de 15 s en responder justo después de cerrarse el de la suite
+// anterior. Un driver que de verdad no arranca sale antes por
+// `driverStartupError`.
+const DRIVER_READY_TIMEOUT_MS = 45000;
+
 async function waitForDriver() {
-    const deadline = Date.now() + 15000;
+    const deadline = Date.now() + DRIVER_READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
         if (driverStartupError) throw driverStartupError;
         try { await request('/status'); return; } catch { await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS)); }
     }
     if (driverStartupError) throw driverStartupError;
-    throw new Error('tauri-driver no respondió en 15 segundos');
+    throw new Error(`tauri-driver no respondió en ${DRIVER_READY_TIMEOUT_MS / 1000} segundos`);
 }
 
 function processGroupExists(groupId) {
@@ -2736,6 +2812,25 @@ async function clickWhenReady(css, timeoutMs = 20000) {
     let lastError;
     for (let attempt = 0; attempt < 4; attempt += 1) {
         const element = await findWhenReady(css, timeoutMs);
+        // Tras una acción, los paneles se refrescan con sus botones
+        // desactivados («ocupado»). Un clic ahí no hace nada y la orden nunca
+        // llegaba (Mi GitHub: renombrar o abrir los adjuntos justo después de
+        // publicar o desarchivar). Se espera a que vuelva a estar activo; si
+        // sigue desactivado al agotar el plazo se pulsa igual, como antes.
+        const enabledBy = Date.now() + Math.min(timeoutMs, 15000);
+        while (Date.now() < enabledBy) {
+            let disabled = false;
+            try {
+                disabled = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                    script: 'return Boolean(arguments[0].disabled) || arguments[0].getAttribute("aria-disabled") === "true";',
+                    args: [{ [elementKey]: element }],
+                });
+            } catch {
+                break;
+            }
+            if (!disabled) break;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
         try {
             await click(element);
             return element;
@@ -2900,6 +2995,21 @@ async function exerciseExplorerDoubleClick() {
         await clickWhenReady('.explorer .toolbar button:first-child');
         await waitUntil(async () => (await explorerState()).path === originalPath, 10000, 'restauración de la ruta original tras el doble clic');
         const restoredCapture = await captureScreenshot('explorer-double-click-restored');
+        // «Calcular tamaño» desde el menú de la carpeta: suma lo de sus
+        // subcarpetas (3000 bytes en nested) y lo enseña en la fila.
+        await writeFile(join(nestedDirectory, 'datos.bin'), Buffer.alloc(3000));
+        const sizeTarget = await findExplorerEntryByName(temporaryName);
+        await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `arguments[0].dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 120, button: 2 }));`,
+            args: [{ [elementKey]: sizeTarget }],
+        });
+        await clickWhenReady('[data-testid="explorer-menu-size"]');
+        const measuredSize = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const entry = [...document.querySelectorAll('.explorer .entry')].find((item) => item.querySelector('.name')?.textContent?.trim() === arguments[0]);
+                return entry?.querySelector('.size')?.textContent?.trim() ?? '';`,
+            args: [temporaryName],
+        });
+        await waitUntil(async () => await measuredSize() === '3 KB', 15000, `tamaño de la carpeta temporal (${temporaryRoot})`);
         recordEvent('explorer-double-click', {
             skipped: false,
             temporaryRoot,
@@ -3107,6 +3217,17 @@ async function exerciseWindowManagerStates() {
         }
         recordEvent('window-manager', { action: 'undock', floating: true, fullscreen: floating?.fullscreen ?? null });
     }
+}
+
+/** Espera a que el panel termine su arranque visual (`startupReady`). Para
+ *  shells lentas en frío, antes de que `sendTerminalKeys` aplique su margen
+ *  general. */
+async function waitForPaneStartup(pane, timeoutMs) {
+    await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const pane = arguments[0].querySelector('.tab-pane:not(.hidden)') ?? arguments[0];
+        return pane?.dataset.startupReady === 'true';`,
+        args: [{ [elementKey]: pane }],
+    }), timeoutMs, 'arranque visual completo de una shell lenta en frío');
 }
 
 async function sendTerminalKeys(line, pane = null, { enter = true, settle = true } = {}) {
@@ -3823,12 +3944,22 @@ async function exerciseProgressOutputLayout() {
     await new Promise((resolve) => setTimeout(resolve, 120));
     await captureScreenshot('progress-during-cleanup');
     await waitForProgressMarker(cleanupMarker, 'limpieza de la barra de progreso');
-    const cleaned = await terminalHorizontalSnapshot(cell);
-    const cleanupHost = cleaned.host;
-    const reclaimed = Boolean(cleanupHost)
-        && cleanupHost.overflow !== 'true'
-        && cleanupHost.scrollWidth <= cleanupHost.clientWidth + 12
-        && Number(cleanupHost.cols) <= Number(baseline.host.cols) + 4;
+    // La anchura visible se libera cuando la salida queda en reposo, un poco
+    // después de aparecer el marcador: una sola foto en ese instante podía
+    // ver aún las 1024 columnas de la reserva con la vista ya recuperada
+    // (sin desbordamiento ni scroll), sobre todo con la máquina cargada.
+    let cleaned = null;
+    let cleanupHost = null;
+    const isReclaimed = (hostState) => Boolean(hostState)
+        && hostState.overflow !== 'true'
+        && hostState.scrollWidth <= hostState.clientWidth + 12
+        && Number(hostState.cols) <= Number(baseline.host.cols) + 4;
+    await waitUntil(async () => {
+        cleaned = await terminalHorizontalSnapshot(cell);
+        cleanupHost = cleaned.host;
+        return isReclaimed(cleanupHost);
+    }, 10000, 'ancho recuperado tras limpiar la barra').catch(() => {});
+    const reclaimed = isReclaimed(cleanupHost);
     const cleanupCapture = await captureScreenshot('progress-clean-layout');
     if (!reclaimed) {
         throw new Error(`La terminal no recuperó su ancho tras limpiar la barra: ${JSON.stringify({ baseline, cleaned })}`);
@@ -4999,52 +5130,16 @@ async function fullTerminalTextWithin(cell) {
 }
 
 async function scrollbackTerminalTextWithin(cell) {
-    const geometry = await request(`/session/${sessionId}/execute/sync`, 'POST', {
-        script: `const root = arguments[0];
-            const nodes = [root.querySelector('.xterm-viewport'), root.querySelector('.xterm-scrollable-element')].filter(Boolean);
-            return nodes.map((node) => ({
-                maximum: Math.max(0, node.scrollHeight - node.clientHeight),
-                scrollTop: node.scrollTop,
-            }));`,
+    // Se lee del búfer: xterm 6 no desplaza el DOM y recorrer el historial por
+    // la pantalla costaba 113 pasos, ~30 s por lectura y 70 s con vídeo (14 min
+    // de la auditoría y 5 del escenario horizontal, sin ver nada en pantalla).
+    const text = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const tabId = arguments[0].closest('[data-tab-id]')?.dataset.tabId;
+            return tabId ? window.__wtTerminalText?.(tabId) ?? null : null;`,
         args: [{ [elementKey]: cell }],
     });
-    const maximum = Math.max(0, ...(geometry ?? []).map((item) => Number(item?.maximum) || 0));
-    const chunks = [];
-    // xterm puede mantener el scrollback con una altura DOM fija en WebView2;
-    // en ese caso la rueda es la única ruta que mueve su viewport lógico.
-    if (maximum === 0) {
-        for (let index = 0; index < 32; index += 1) {
-            await dispatchTerminalWheel(cell, -240, 1);
-            chunks.push(String(await fullTerminalTextWithin(cell) ?? ''));
-        }
-        for (let index = 0; index < 32; index += 1) {
-            await dispatchTerminalWheel(cell, 240, 1);
-            chunks.push(String(await fullTerminalTextWithin(cell) ?? ''));
-        }
-    }
-    for (let index = 0; index <= 48; index += 1) {
-        await request(`/session/${sessionId}/execute/sync`, 'POST', {
-            script: `const root = arguments[0];
-                for (const selector of ['.xterm-viewport', '.xterm-scrollable-element']) {
-                    const node = root.querySelector(selector);
-                    if (node) node.scrollTop = arguments[1];
-                }
-                return true;`,
-            args: [{ [elementKey]: cell }, maximum * (index / 48)],
-        });
-        await new Promise((resolve) => setTimeout(resolve, 40));
-        chunks.push(String(await fullTerminalTextWithin(cell) ?? ''));
-    }
-    await request(`/session/${sessionId}/execute/sync`, 'POST', {
-        script: `const root = arguments[0];
-            for (const selector of ['.xterm-viewport', '.xterm-scrollable-element']) {
-                const node = root.querySelector(selector);
-                if (node) node.scrollTop = node.scrollHeight;
-            }
-            return true;`,
-        args: [{ [elementKey]: cell }],
-    });
-    return chunks.join('\n');
+    if (text === null) throw new Error('La casilla no publicó el texto de su búfer (__wtTerminalText)');
+    return text;
 }
 
 async function dispatchTerminalWheel(cell, deltaY, repeat = 1) {
@@ -5419,7 +5514,16 @@ async function waitForBannerPanes(expected = 1, timeoutMs = 20000) {
                         compact: !hasCompleteHeader,
                         partial: (minimalBanner || partialBanner) && !compactBanner && !hasCompleteHeader,
                         promptsVisible,
-                        preview: visibleTexts.map((text) => text.slice(-1200)),
+                        // Los tramos largos de espacios se acortan: la zsh de
+                        // Kali (`PROMPT_SP`) rellena una fila entera de la
+                        // rejilla (1024 columnas) antes del prompt, y el
+                        // recorte de 1200 caracteres dejaba la muestra
+                        // empezando a mitad del banner, que el verificador
+                        // tomaba por mezclado.
+                        preview: visibleTexts.map((text) => text.split('\n')
+                            .map((line) => line.trimEnd().replace(/ {41,}/gu, ' '.repeat(40)))
+                            .join('\n')
+                            .slice(-1200)),
                         geometry,
                     });
                     return { elapsedMs: Date.now() - startedAt, texts, geometry, compact: !hasCompleteHeader };
@@ -6496,7 +6600,14 @@ async function switchToEnvironment(id) {
 
 async function exerciseShellMatrix() {
     const wslDistroNames = await installedWslDistroNames();
-    const wslDistroIds = wslDistroNames?.map((name) => `wsl:${name}`) ?? [];
+    // Si `wsl --list` no contestó (WSL ocupado justo al arrancar), se esperan
+    // igualmente las distros pedidas en E2E_SHELL_MATRIX_IDS: la app vuelve a
+    // preguntar por ellas y la matriz fallaba antes de que llegaran.
+    const requestedWslIds = (process.env.E2E_SHELL_MATRIX_IDS ?? '').split(',')
+        .map((id) => id.trim())
+        .filter((id) => id.startsWith('wsl:'))
+        .map((id) => `wsl:${id.slice(4).split(':')[0]}`);
+    const wslDistroIds = [...new Set([...(wslDistroNames?.map((name) => `wsl:${name}`) ?? []), ...requestedWslIds])];
     const button = await findWhenReady('.env-select');
     await waitUntil(async () => (await attribute(
         await findWhenReady('.env-select'),
@@ -6504,6 +6615,9 @@ async function exerciseShellMatrix() {
     )) === null, 60000, 'inventario completo de shells, WSL y REPL');
     await click(button);
     if (wslDistroIds.length) {
+        // WSL llega en una segunda tanda del inventario (el resto se publica
+        // antes): con varias distros en frío tarda cerca de un minuto, y si
+        // WSL no contestó al arrancar, la app reintenta durante ~4 min.
         await waitUntil(async () => {
             const ids = await request(`/session/${sessionId}/execute/sync`, 'POST', {
                 script: `return [...document.querySelectorAll('.env-menu [data-testid="environment-option"]')]
@@ -6512,7 +6626,7 @@ async function exerciseShellMatrix() {
             });
             return wslDistroIds.every((id) => ids.some((candidate) =>
                 String(candidate ?? '').toLowerCase() === id.toLowerCase()));
-        }, 20000, 'carga del inventario WSL completo en el selector');
+        }, 300000, 'carga del inventario WSL completo en el selector');
     }
     const selectorState = await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `const currentLabel = document.querySelector('.env-select .env-current')?.textContent?.trim() ?? '';
@@ -6533,10 +6647,16 @@ async function exerciseShellMatrix() {
     const unverifiedWsl = options.filter((option) => String(option.id ?? '').startsWith('wsl:')
         && /sin comprobar|unverified/iu.test(option.text ?? ''));
     if (unverifiedWsl.length) {
+        // Fallo aplazado: la matriz sigue con el resto (también con estas
+        // distros, que pueden responder igualmente) y se declara al final.
         await captureScreenshot('wsl-sin-comprobar');
-        throw new Error(`Distribuciones WSL marcadas sin comprobar tras el inventario completo: ${JSON.stringify(unverifiedWsl)}`);
+        deferredFailures.push(new Error(`Distribuciones WSL marcadas sin comprobar tras el inventario completo: ${JSON.stringify(unverifiedWsl)}`));
     }
-    recordEvent('wsl-verified', { passed: true, distros: options.filter((option) => String(option.id ?? '').startsWith('wsl:')).map((option) => option.id) });
+    recordEvent('wsl-verified', {
+        passed: unverifiedWsl.length === 0,
+        unverified: unverifiedWsl.map((option) => option.id),
+        distros: options.filter((option) => String(option.id ?? '').startsWith('wsl:')).map((option) => option.id),
+    });
     const availableOptions = options.filter((option) => !option.disabled && option.id);
     const availableIds = availableOptions.map((option) => option.id);
     if (wslDistroNames !== null) {
@@ -6580,9 +6700,22 @@ async function exerciseShellMatrix() {
         skipped.push(skip);
         recordEvent('environment-probe-skipped', skip);
     }
-    const targets = availableOptions
-        .filter((option) => option.id !== originalId && probes.get(option.id)?.kind !== 'skip')
-        .map((option) => option.id);
+    // Diagnóstico: E2E_SHELL_MATRIX_IDS=a,b,a,b prueba solo esos entornos, en
+    // ese orden y con repeticiones (para repetir un REPL intermitente).
+    const onlyIds = (process.env.E2E_SHELL_MATRIX_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean);
+    // Un id mal escrito no debe dar verde sin haber probado nada, salvo en la
+    // lista fija de la suite `distribution`: un equipo sin WSL prueba el resto.
+    const unknownIds = process.env.E2E_SHELL_MATRIX_KNOWN_ONLY === '1'
+        ? []
+        : onlyIds.filter((id) => !probes.has(id));
+    if (unknownIds.length > 0) {
+        throw new Error(`E2E_SHELL_MATRIX_IDS con entornos que no existen: ${unknownIds.join(', ')}. Disponibles: ${[...probes.keys()].join(', ')}`);
+    }
+    const targets = onlyIds.length > 0
+        ? onlyIds.filter((id) => id !== originalId && probes.has(id) && probes.get(id)?.kind !== 'skip')
+        : availableOptions
+            .filter((option) => option.id !== originalId && probes.get(option.id)?.kind !== 'skip')
+            .map((option) => option.id);
     const testedIds = [];
     const probeResults = [];
     let currentId = originalId;
@@ -6649,7 +6782,12 @@ async function exerciseShellMatrix() {
         // primera línea). No confundir ese arranque frío con una pérdida de
         // prompt: conservar el límite habitual para los demás y darle margen
         // acotado solo a Java.
-        const environmentHandshakeTimeout = id.startsWith('lang:') ? 90_000 : 35_000;
+        // WSL: si la sesión anterior de la misma distro aún se está apagando,
+        // `wsl.exe` se rinde a los ~20 s (0x80370107) y la app la reabre una
+        // vez; el margen cubre ese reintento.
+        const environmentHandshakeTimeout = id.startsWith('lang:')
+            ? 90_000
+            : (id.startsWith('wsl:') ? 75_000 : 35_000);
         try {
             await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
                 script: String.raw`const pane = document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)');
@@ -6698,6 +6836,13 @@ async function exerciseShellMatrix() {
         // una diferencia visual del prompt se convierta en un falso fallo.
         const inputReadyOnly = id === 'lang:forth' || id === 'lang:groovy';
         const readinessSignal = inputReadyOnly ? 'input-ready-no-prompt' : 'prompt';
+        // Los REPL sobre JVM, .NET, GHC o Julia no pintan nada hasta su
+        // banner. Con el anfitrión de la VM ocupado (build 24) tardaron 1,4–2,1
+        // veces más que en la 23 y Scala, que suele dar el prompt en 10–20 s
+        // (5,5 s fuera de WTerminal), pasó de 30 s en blanco. Dentro de WSL pasa
+        // lo mismo (build 31: Perl de Ubuntu dio su prompt pasados 30 s). El
+        // plazo es para que el REPL responda, no una medida de velocidad.
+        const replPromptTimeout = id.includes('lang:') ? 60000 : 30000;
         if ((probe?.kind === 'repl' || id === 'wine-cmd') && !inputReadyOnly) {
             try {
                 await waitUntil(async () => {
@@ -6709,7 +6854,7 @@ async function exerciseShellMatrix() {
                     // IPython) evita marcar como fallida una sesión utilizable.
                     const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
                     return promptLooksVisible(await textOf(rows));
-                }, 30000, `prompt del REPL ${id}`);
+                }, replPromptTimeout, `prompt del REPL ${id}`);
             } catch (error) {
                 const diagnostic = await promptDiagnostics().catch((diagnosticError) => ({
                     diagnosticError: diagnosticError?.message ?? String(diagnosticError),
@@ -6770,13 +6915,15 @@ async function exerciseShellMatrix() {
         // evita convertir esa carrera visual en un fallo de la matriz. La
         // segunda pasada conserva exactamente la misma validación de salida.
         for (let attempt = 0; attempt < 2; attempt += 1) {
-            if (attempt > 0) {
-                recordEvent('environment-probe-retry', { id, attempt, reason: 'prompt-restored-without-marker' });
-                await waitUntil(async () => (await promptStates(1))[0] === 'true', 5000,
-                    `prompt recuperado antes de repetir ${id}`);
-                await sendTerminalLine(probe.command);
-            }
             try {
+                // Dentro del try: si el prompt no vuelve (el REPL terminó),
+                // el fallo conserva el texto de la sesión como los demás.
+                if (attempt > 0) {
+                    recordEvent('environment-probe-retry', { id, attempt, reason: 'prompt-restored-without-marker' });
+                    await waitUntil(async () => (await promptStates(1))[0] === 'true', 5000,
+                        `prompt recuperado antes de repetir ${id}`);
+                    await sendTerminalLine(probe.command);
+                }
                 await waitUntil(async () => {
                     const cell = await findWhenReady('.cell:not(.hidden)');
                     let output = await rawTerminalTextWithin(cell);
@@ -6859,6 +7006,37 @@ async function exerciseShellMatrix() {
             startupClean: true,
             passed: true,
         };
+        // zsh rellena la fila con espacios antes de cada prompt (`PROMPT_SP`):
+        // no ocupan, así que no deben sacar la barra horizontal.
+        if (id.endsWith(':zsh')) {
+            const overflow = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: 'return document.querySelector(".tab-pane:not(.hidden)")?.dataset.horizontalOverflow ?? null;',
+                args: [],
+            });
+            if (overflow === 'true') {
+                // Qué ancho sacó la barra: el lógico pedido o el del lienzo.
+                const pane = await findWhenReady('.tab-pane:not(.hidden)');
+                const snapshot = await terminalHorizontalSnapshot(pane);
+                const widths = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                    script: `const host = arguments[0].querySelector('[data-testid="terminal-host"]');
+                        const root = host?.querySelector('.xterm');
+                        const id = document.querySelector('.tab.active[data-tab-id]')?.dataset.tabId;
+                        return {
+                            spacer: host?.querySelector('.terminal-width-spacer')?.style.width ?? null,
+                            rootInline: root?.style.width ?? null,
+                            rootRect: root?.getBoundingClientRect().width ?? null,
+                            contentWidth: host?.style.getPropertyValue('--terminal-content-width') ?? null,
+                            dataset: { ...host?.dataset },
+                            rawRows: [...(host?.querySelectorAll('.xterm-rows > div') ?? [])].map((row) => (row.textContent ?? '').length),
+                            state: id ? window.__wtTerminalState?.(id) ?? null : null,
+                        };`,
+                    args: [{ [elementKey]: pane }],
+                });
+                const details = JSON.stringify({ screen: snapshot?.screen, host: snapshot?.host, scrollers: snapshot?.horizontalScrollers, ...widths });
+                recordEvent('prompt-sp-overflow', { id, details });
+                throw new Error(`${id}: barra horizontal con todas las filas cortas (PROMPT_SP). ${details.slice(0, 6000)}`);
+            }
+        }
         testedIds.push(id);
         probeResults.push(result);
         recordEvent('environment-probe', result);
@@ -6866,19 +7044,78 @@ async function exerciseShellMatrix() {
         return result;
     };
 
-    try {
-        if (probes.get(originalId)?.kind !== 'skip') {
-            await selectAndProbe(originalId);
+    // Cada entorno se prueba aunque falle otro: un REPL roto no oculta los
+    // fallos de los demás. Cada fallo conserva su captura antes de pasar al
+    // siguiente; la lista completa se declara al final del E2E.
+    const matrixFailures = [];
+    // Elm se cae a veces en Windows por su cuenta al escribir su caché al
+    // evaluar: `d.dat: withBinaryFile: resource busy (file is locked)`. Pasa
+    // igual fuera de WTerminal y en 0.19.3 y 0.19.1-6 (fijar una versión no lo
+    // arregla). La pestaña lo muestra y termina bien, así que
+    // se relanza el entorno como haría el usuario (otra shell y vuelta) hasta
+    // dos veces; si sigue cayéndose, se omite con el motivo.
+    // El aviso de fin de la pestaña puede caer en medio del mensaje.
+    const externalReplCrash = (error) => /resource busy \(file is locked\)/u.test(
+        String(error?.message ?? error).replace(/\[?Proceso finalizado[^)]*\)\]?/gu, ''),
+    );
+    const EXTERNAL_CRASH_RELAUNCHES = 2;
+    for (const id of [
+        ...(probes.get(originalId)?.kind !== 'skip' ? [originalId] : []),
+        ...targets,
+    ]) {
+        try {
+            for (let relaunch = 0; ; relaunch += 1) {
+                try {
+                    // ¿Hay un elm.exe vivo antes de abrir el REPL? Si lo hay,
+                    // el bloqueo de su caché viene de un proceso huérfano y no
+                    // del propio Elm. Solo se anota, para saber cuál de las dos
+                    // causas es.
+                    if (id === 'lang:elm' && process.platform === 'win32') {
+                        const { stdout } = await execFile('tasklist', ['/FI', 'IMAGENAME eq elm.exe', '/FO', 'CSV', '/NH'], { windowsHide: true })
+                            .catch(() => ({ stdout: '' }));
+                        const running = String(stdout).split(/\r?\n/u).filter((line) => /^"elm\.exe"/iu.test(line));
+                        recordEvent('repl-orphan-check', { id, relaunch, elmProcesses: running.length });
+                        if (running.length) process.stdout.write(`E2E shell/REPL ${id}: ${running.length} elm.exe vivos antes de abrirlo\n`);
+                    }
+                    await selectAndProbe(id);
+                    break;
+                } catch (error) {
+                    if (!externalReplCrash(error) || id === originalId) throw error;
+                    await captureScreenshot(`shell-${id}-external-crash-${relaunch + 1}`).catch(() => {});
+                    if (relaunch >= EXTERNAL_CRASH_RELAUNCHES) {
+                        const skip = {
+                            id,
+                            kind: 'skip',
+                            reason: `${id} se cerró por su cuenta ${relaunch + 1} veces con su caché bloqueada `
+                                + '(resource busy, file is locked): fallo del propio programa, reproducible fuera de WTerminal',
+                        };
+                        skipped.push(skip);
+                        recordEvent('environment-probe-skipped', skip);
+                        process.stdout.write(`E2E omitido: ${id} — ${skip.reason}` + '\n');
+                        break;
+                    }
+                    recordEvent('environment-probe-relaunch', { id, relaunch: relaunch + 1, reason: 'external-repl-crash' });
+                    process.stdout.write(`E2E shell/REPL ${id}: el programa se cerró solo (caché bloqueada); `
+                        + `relanzando (${relaunch + 1}/${EXTERNAL_CRASH_RELAUNCHES})` + '\n');
+                    await selectEnvironment(originalId);
+                }
+            }
+        } catch (error) {
+            matrixFailures.push({ id, error });
+            recordEvent('environment-probe-failed', {
+                id,
+                error: String(error?.message ?? error).slice(0, 4000),
+                passed: false,
+            });
+            process.stdout.write(`E2E shell/REPL ${id}: FALLO — ${String(error?.message ?? error).split('\n')[0].slice(0, 300)}\n`);
+            // Preserve the failing shell's actual terminal before moving on;
+            // the next environment otherwise hides the prompt/output that
+            // caused the failure.
+            await captureScreenshot(`shell-${id}-failure`).catch(() => {});
         }
-        for (const id of targets) {
-            await selectAndProbe(id);
-        }
-    } catch (error) {
-        primaryError = error;
-        // Preserve the failing shell's actual terminal before restoring the
-        // user's original environment; the post-restore screenshot otherwise
-        // hides the prompt/output that caused the matrix to fail.
-        await captureScreenshot(`shell-${currentId}-failure-before-restore`);
+    }
+    for (const { id, error } of matrixFailures) {
+        deferredFailures.push(new Error(`Matriz de shells/REPL — ${id}: ${error?.message ?? error}`, { cause: error }));
     }
 
     let restored = currentId === originalId;
@@ -8263,6 +8500,17 @@ try {
             if (!(await stat(join(first, '.git')).then(() => true, () => false))) throw new Error('Importar movió o borró la carpeta.');
             await captureScreenshot('importar-descargados');
             results.imported = true;
+            // «Estado de Git» lee el repositorio importado sin tocarlo: un
+            // archivo nuevo cuenta como un cambio sin confirmar.
+            await writeFile(join(first, 'src', 'nuevo.txt'), 'cambio\n');
+            await clickWhenReady('[data-testid="projects-git-states"]');
+            const gitStateChanges = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `return document.querySelector('[data-testid="projects-git-state"][data-repo="wterminal-e2e/importado"]')?.dataset.changes ?? null;`,
+                args: [],
+            });
+            await waitUntil(async () => await gitStateChanges() === '1', 20000, 'estado de Git del importado con 1 cambio');
+            await captureScreenshot('importar-estado-git');
+            results.gitState = true;
             // 3. Quitar de la lista: desaparece de Descargados y la carpeta sigue.
             await clickWhenReady('[data-testid="projects-forget-imported"]');
             await waitUntil(async () => (await findAll('[data-testid="projects-forget-imported"]')).length === 0, 15000, 'quitar de la lista');
@@ -8347,30 +8595,191 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write(`E2E modo de bajo consumo OK: sugerencia con motivo, activar, Ajustes y apagar (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_SCROLLBACK_OUTPUT_ONLY === '1') {
+        // Una instalación escribe a tirones: la vista volvía abajo en cada
+        // pausa de la salida y no dejaba leer lo que había pasado.
+        markPhase('leer el historial mientras llega salida');
+        await waitForBannerPanes(1, 60000);
+        const cell = await activeTerminalCell();
+        const pause = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+        const xtermState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const id = document.querySelector('.tab.active[data-tab-id]')?.dataset.tabId;
+                return id ? window.__wtTerminalState?.(id) ?? null : null;`,
+            args: [],
+        });
+        await sendTerminalLine('for /L %i in (1,1,150) do @echo E2E_SCROLL_FILL_%i');
+        await waitUntil(async () => (await xtermState())?.baseY >= 100, 30000, 'historial suficiente para subir');
+        await waitUntil(async () => snapshotPromptVisible(await terminalRowSnapshot(cell)), 20000, 'prompt tras el historial');
+        await sendTerminalLine('for /L %i in (1,1,16) do @(echo E2E_SCROLL_TICK_%i & ping -n 2 127.0.0.1 >nul)');
+        const outputBase = (await xtermState()).baseY;
+        await waitUntil(async () => (await xtermState()).baseY > outputBase, 10000, 'la salida a tirones empezó');
+        await dispatchTerminalWheel(cell, -600, 4);
+        const reading = await xtermState();
+        if (reading.viewportY >= reading.baseY - 5) {
+            throw new Error(`La rueda no subió por el historial: ${JSON.stringify(reading)}`);
+        }
+        const assertStillReading = async (label) => {
+            const now = await xtermState();
+            if (now.viewportY !== reading.viewportY) {
+                throw new Error(`La vista se movió sola ${label}: ${reading.viewportY} -> ${now.viewportY} (final ${now.baseY}).`);
+            }
+            return now;
+        };
+        let latest = reading;
+        const readUntil = Date.now() + 7000;
+        while (Date.now() < readUntil) {
+            latest = await assertStillReading('mientras llegaba salida');
+            await pause(250);
+        }
+        if (latest.baseY <= reading.baseY) throw new Error('No llegó salida mientras se leía: la prueba no demuestra nada.');
+        // Abrir Ajustes quita el foco a la terminal: el informe de foco de
+        // ConPTY no debe contar como una tecla.
+        await clickWhenReady('[data-testid="toolbar-settings"]');
+        await findWhenReady('[role="dialog"] .panel-close');
+        await assertStillReading('al perder el foco');
+        await clickWhenReady('[role="dialog"] .panel-close');
+        await pause(600);
+        await assertStillReading('al recuperar el foco');
+        // Esperar a que termine sin mirar el prompt: la vista sigue arriba.
+        let quietSince = Date.now();
+        let lastBase = (await assertStillReading('al acabar la salida')).baseY;
+        await waitUntil(async () => {
+            const now = await assertStillReading('al acabar la salida');
+            if (now.baseY !== lastBase) {
+                lastBase = now.baseY;
+                quietSince = Date.now();
+            }
+            return Date.now() - quietSince > 3000;
+        }, 30000, 'fin de la salida a tirones');
+        const readingTab = await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id');
+        await clickWhenReady('.tab-new');
+        await waitUntil(async () => await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id') !== readingTab, 15000, 'pestaña nueva activa');
+        await waitForBannerPanes(1, 60000);
+        await clickWhenReady(`.tab[data-tab-id="${readingTab}"]`);
+        await waitUntil(async () => await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id') === readingTab, 15000, 'vuelta a la pestaña');
+        await pause(1500);
+        await assertStillReading('al volver a la pestaña');
+        await sendTerminalLine('echo E2E_SCROLL_BACK_OK');
+        await waitUntil(async () => {
+            const now = await xtermState();
+            return now.viewportY >= now.baseY;
+        }, 10000, 'teclear vuelve al final');
+        // Al reactivar la pestaña, la app sostiene 4 s la posición de lectura
+        // frente al scroll a cero de xterm. Lo tecleado en ese plazo bajaba al
+        // final y el siguiente repintado lo devolvía arriba: pasado el plazo
+        // la vista tiene que seguir abajo.
+        await pause(4500);
+        const afterPin = await xtermState();
+        if (afterPin.viewportY < afterPin.baseY) {
+            throw new Error(`La vista volvió a subir después de teclear: ${afterPin.viewportY} de ${afterPin.baseY}.`);
+        }
+        await waitUntil(async () => snapshotPromptVisible(await terminalRowSnapshot(cell)), 15000, 'prompt al volver al final');
+        await captureScreenshot('historial-tras-leer');
+        recordEvent('scrollback-output', { reading: reading.viewportY, finalBase: lastBase, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'scrollback-output';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E historial OK: la vista no baja con salida, foco ni cambio de pestaña, y teclear vuelve al final (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_UNSPLIT_ONLY === '1') {
+        markPhase('separar pestañas divididas');
+        await waitForBannerPanes(1, 60000);
+        const paneCount = async () => (await findAll('.cell:not(.hidden)')).length;
+        const tabCount = async () => (await findAll('.tab[data-tab-id]')).length;
+        await clickWhenReady('.side-toggle.panes');
+        await waitForBannerPanes(2, 60000);
+        const tabs = await tabCount();
+        if (tabs !== 2) throw new Error(`Dividir debía dejar 2 pestañas: ${tabs}`);
+        await clickWhenReady('[data-testid="tabs-unsplit"]');
+        await waitUntil(async () => await paneCount() === 1, 10000, 'una sola vista tras «Separar»');
+        if (await tabCount() !== tabs) throw new Error('«Separar» cerró o abrió pestañas.');
+        if ((await findAll('[data-testid="tabs-unsplit"]')).length !== 0) throw new Error('«Separar» sigue a la vista sin división.');
+        await sendTerminalLine(':panes 2');
+        await waitUntil(async () => await paneCount() === 2, 10000, ':panes 2');
+        if (await tabCount() !== tabs) throw new Error(':panes 2 abrió pestañas teniendo ya 2.');
+        await sendTerminalLine(':panes 1');
+        await waitUntil(async () => await paneCount() === 1, 10000, ':panes 1');
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 1000));
+        if (await tabCount() !== tabs) throw new Error(`:panes 1 cambió las pestañas: ${tabs} -> ${await tabCount()}.`);
+        // Sacar una sola pestaña de la vista desde su menú, sin cerrar nada, y
+        // volver a ponerla junto a la activa.
+        const openTabMenu = (selector) => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `document.querySelector(arguments[0]).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 60, clientY: 20, button: 2 }));`,
+            args: [selector],
+        });
+        await sendTerminalLine(':panes 2');
+        await waitUntil(async () => await paneCount() === 2, 10000, ':panes 2 antes de sacar una pestaña');
+        await openTabMenu('.tab.active');
+        await clickWhenReady('[data-testid="tab-menu-unsplit"]');
+        await waitUntil(async () => await paneCount() === 1, 10000, 'una sola vista tras sacar la pestaña');
+        if (await tabCount() !== tabs) throw new Error('Sacar una pestaña de la vista cerró o abrió pestañas.');
+        await openTabMenu('.tab:not(.active)');
+        await clickWhenReady('[data-testid="tab-menu-split"]');
+        await waitUntil(async () => await paneCount() === 2, 10000, 'la pestaña vuelve junto a la activa');
+        if (await tabCount() !== tabs) throw new Error('«Ver junto a la pestaña activa» cerró o abrió pestañas.');
+        await sendTerminalLine(':panes 1');
+        await waitUntil(async () => await paneCount() === 1, 10000, ':panes 1 tras el menú de la pestaña');
+        // Una pestaña que tarda en escribir avisa de que está arrancando: un
+        // REPL de WSL en frío tarda bastante más que los 2 s del aviso.
+        // El selector se habilita antes de que lleguen las distros de WSL.
+        // Si `wsl.exe` no contestó al arrancar, la app vuelve a preguntar
+        // durante unos 4 minutos: esperar más solo escondía el fallo tras el
+        // límite de 10 min de la suite.
+        await waitUntil(async () => {
+            if ((await findAll('.env-menu')).length === 0) await clickWhenReady('.env-select');
+            return (await findAll('.env-menu [data-environment-id="wsl:Ubuntu"]')).length > 0;
+        }, Math.min(dependencyDetectionTimeoutMs, 300000), 'Ubuntu en el selector de entornos');
+        await execFile('wsl.exe', ['--shutdown'], { windowsHide: true }).catch(() => undefined);
+        await switchToEnvironment('wsl:Ubuntu');
+        await waitUntil(async () => (await findAll('[data-testid="terminal-startup-hint"]')).length > 0,
+            20000, 'aviso de arranque en una pestaña en blanco');
+        await captureScreenshot('aviso-arranque');
+        await waitUntil(async () => (await findAll('[data-testid="terminal-startup-hint"]')).length === 0,
+            90000, 'el aviso de arranque se retira al llegar texto');
+        recordEvent('unsplit', { tabs, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'unsplit';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E separar OK: botón y :panes 1 sin cerrar ni abrir pestañas, y aviso de arranque en WSL (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (process.env.E2E_UI_SCALE_ONLY === '1') {
         markPhase('tamaño de la interfaz');
         await waitForBannerPanes(1, 60000);
         const pause = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
         // Mismo camino que una persona: el control de Ajustes. `settings_save`
         // directo guarda, pero no reaplica el tema en el WebView.
+        // Por encima del 200 % la app aplica como mucho lo que cabe en la
+        // ventana (ancho mínimo de 480 px de interfaz escalada).
+        const appliedScale = async (uiScale) => {
+            const width = await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'return innerWidth;', args: [] });
+            return Math.min(uiScale, Math.max(200, Math.floor((width / 480) * 100)));
+        };
         const setScale = async (uiScale) => {
             await clickWhenReady('[data-testid="toolbar-settings"]');
             await clickWhenReady('[data-testid="settings-tab-appearance"]');
-            const slider = await findWhenReady('[data-testid="settings-ui-scale"]');
-            await request(`/session/${sessionId}/execute/sync`, 'POST', {
-                script: `
-                    const input = arguments[0];
-                    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, arguments[1]);
-                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                    input.dispatchEvent(new Event('change', { bubbles: true }));`,
-                args: [{ [elementKey]: slider }, String(uiScale)],
-            });
-            await waitForSettingsAutosave();
+            // Se escribe con teclas reales, como una persona: seleccionar todo
+            // (Ctrl+A), el número e Intro. El «clear» de WebDriver no sirve:
+            // dispara `change` con el cuadro vacío y Ajustes lo devuelve al
+            // valor guardado, así que lo tecleado se sumaba a ese valor.
+            const field = await findWhenReady('[data-testid="settings-ui-scale"]');
+            const keys = `\uE009a\uE000${uiScale}\uE007`;
+            await request(`/session/${sessionId}/element/${field}/value`, 'POST', { text: keys, value: [...keys] });
+            await waitUntil(async () => (await invokeJson('settings_get')).preferences.uiScale === uiScale
+                && await property(await findWhenReady('[data-testid="settings-ui-scale"]'), 'value') === String(uiScale),
+                10000, `uiScale guardado y escrito al ${uiScale} %`);
+            const applied = await appliedScale(uiScale);
+            const limitedNotice = (await findAll('[data-testid="settings-ui-scale-limited"]')).length > 0;
+            if (limitedNotice !== (applied < uiScale)) {
+                throw new Error(`Aviso de tamaño limitado ${limitedNotice ? 'visible' : 'oculto'} al ${uiScale} % (aplicado ${applied} %)`);
+            }
             await clickWhenReady('[role="dialog"] .panel-close');
             await waitUntil(async () => Number(await request(`/session/${sessionId}/execute/sync`, 'POST', {
                 script: "return getComputedStyle(document.documentElement).getPropertyValue('--ui-scale').trim();", args: [],
-            })) === uiScale / 100, 10000, `--ui-scale al ${uiScale} %`);
+            })) === applied / 100, 10000, `--ui-scale al ${applied} % (pedido ${uiScale} %)`);
             await pause(400);
+            return applied;
         };
         const measure = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: `
@@ -8390,21 +8799,23 @@ try {
         const results = [];
         const violations = [];
         let baseline = null;
-        for (const scale of [100, 80, 150, 200]) {
-            await setScale(scale);
+        // 300 y 500 % comprueban el límite nuevo: en una ventana normal se
+        // aplica lo que cabe y Ajustes lo avisa; 137 % comprueba un valor libre.
+        for (const scale of [100, 80, 137, 150, 200, 300, 500]) {
+            const applied = await setScale(scale);
             await clickWhenReady('[data-testid="toolbar-settings"]');
             await findWhenReady('[role="dialog"]');
             await pause(300);
             const metrics = await measure();
             if (scale === 100) baseline = metrics;
             const ratio = metrics.toolbarHeight / baseline.toolbarHeight;
-            if (Math.abs(ratio - scale / 100) > 0.12) violations.push(`barra al ${scale} %: ${ratio.toFixed(2)}x`);
+            if (Math.abs(ratio - applied / 100) > 0.12) violations.push(`barra al ${scale} % (aplicado ${applied} %): ${ratio.toFixed(2)}x`);
             if (metrics.terminalFont !== baseline.terminalFont) violations.push(`la letra de la terminal cambió al ${scale} %: ${metrics.terminalFont}`);
             if (metrics.outside.length) violations.push(`fuera de la ventana al ${scale} %: ${metrics.outside.join(', ')}`);
-            for (const edge of await panelEdgeViolations(8 * Math.min(1, scale / 100))) violations.push(`margen al ${scale} %: ${JSON.stringify(edge)}`);
+            for (const edge of await panelEdgeViolations(8 * Math.min(1, applied / 100))) violations.push(`margen al ${scale} %: ${JSON.stringify(edge)}`);
             await captureScreenshot(`escala-${scale}-ajustes`);
             await clickWhenReady('[role="dialog"] .panel-close');
-            results.push({ scale, ...metrics });
+            results.push({ scale, applied, ...metrics });
         }
         // Atajos: Ctrl+Alt+= sube un paso, Ctrl+Alt+- baja y Ctrl+Alt+0 vuelve al 100 %.
         await setScale(100);
@@ -8427,7 +8838,7 @@ try {
         smokeReport.focusedScenario = 'ui-scale';
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
-        process.stdout.write(`E2E tamaño de la interfaz OK: 80/100/150/200 %, terminal sin escalar, márgenes y atajos (${Date.now() - smokeStartedAt} ms).\n`);
+        process.stdout.write(`E2E tamaño de la interfaz OK: 80/100/137/150/200/300/500 % escritos a mano, tope por ancho, terminal sin escalar, márgenes y atajos (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (process.env.E2E_FASTFETCH_MATRIX_ONLY === '1') {
         markPhase('banner y fastfetch en varias shells y tamaños');
         await waitForBannerPanes(1, 60000);
@@ -8447,14 +8858,50 @@ try {
             `,
             args: [],
         });
-        const available = ((await invokeJson('env_list', { tabId: null })).envs ?? []).filter((env) => env.available).map((env) => env.id);
-        for (const shell of ['cmd', 'powershell', 'gitbash'].filter((id) => available.includes(id))) {
-            for (const image of [true, false]) {
+        // Entre el banner y el prompt, una sola línea en blanco en todas las
+        // shells: cmd y Git Bash la dejan por su prompt y PowerShell la pone
+        // la app. Se cuentan las filas vacías tras el bloque del banner.
+        const bannerGap = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `
+                const cell = document.querySelector('.cell:not(.hidden)');
+                const rows = [...(cell?.querySelectorAll('.xterm-rows > div') ?? [])].map((row) => (row.textContent ?? '').trim());
+                let at = 0;
+                while (at < rows.length && !rows[at]) at += 1;
+                while (at < rows.length && rows[at]) at += 1;
+                let gap = 0;
+                while (at < rows.length && !rows[at]) { gap += 1; at += 1; }
+                return at < rows.length ? gap : null;
+            `,
+            args: [],
+        });
+        const gaps = [];
+        const availableEnvironments = async () => ((await invokeJson('env_list', { tabId: null })).envs ?? [])
+            .filter((env) => env.available)
+            .map((env) => env.id);
+        let available = await availableEnvironments();
+        // En WSL el hueco lo decide la propia shell (`__wt_banner_gap`) y Kali
+        // ya deja su línea antes de cada prompt: un tamaño basta para verlo.
+        const wslGapShells = ['wsl:kali-linux:zsh', 'wsl:kali-linux', 'wsl:Ubuntu'];
+        // WSL llega en una segunda tanda del inventario: sin esperarla, la
+        // prueba no veía ninguna distro y solo medía las shells de Windows. Se
+        // espera a las distros instaladas de verdad; las que no hay, no cuentan.
+        const installedWsl = ((await installedWslDistroNames()) ?? []).map((name) => `wsl:${name}`.toLowerCase());
+        const wantedWslDistros = [...new Set(wslGapShells.map((id) => id.split(':').slice(0, 2).join(':')))]
+            .filter((id) => installedWsl.includes(id.toLowerCase()));
+        if (wantedWslDistros.length) {
+            await waitUntil(async () => {
+                available = await availableEnvironments();
+                return wantedWslDistros.every((id) => available.includes(id));
+            }, 300000, 'distros de WSL para medir el hueco del banner');
+        }
+        for (const shell of ['cmd', 'powershell', 'gitbash', ...wslGapShells].filter((id) => available.includes(id))) {
+            const wslShell = wslGapShells.includes(shell);
+            for (const image of wslShell ? [true] : [true, false]) {
                 const current = (await invokeJson('settings_get')).preferences;
                 await invokeJson('settings_save', { incoming: { ...current, bannerImage: image } });
                 await invokeJson('env_switch', { tabId: await attribute(await findWhenReady('.tab.active[data-tab-id]'), 'data-tab-id'), envId: shell }).catch(() => null);
                 await waitForBannerPanes(1, 60000);
-                for (const [width, height] of sizes) {
+                for (const [width, height] of wslShell ? [[800, 600]] : sizes) {
                     await resizeWindow(width, height);
                     await pause(800);
                     for (const moment of ['tras-redimensionar', 'tras-cls']) {
@@ -8466,6 +8913,8 @@ try {
                         const lines = await bannerCut();
                         const label = `${shell}-${image ? 'imagen' : 'sin-imagen'}-${width}x${height}-${moment}`;
                         cases.push(label);
+                        const gap = await bannerGap();
+                        if (gap !== 1) gaps.push({ label, gap });
                         if (lines.length) {
                             cut.push({ label, lines });
                             await captureScreenshot(`fastfetch-cortado-${label}`);
@@ -8475,8 +8924,9 @@ try {
                 await captureScreenshot(`fastfetch-${shell}-${image ? 'imagen' : 'sin-imagen'}`);
             }
         }
-        recordEvent('fastfetch-matrix', { cases: cases.length, cut, passed: cut.length === 0 });
+        recordEvent('fastfetch-matrix', { cases: cases.length, cut, gaps, passed: cut.length === 0 && gaps.length === 0 });
         if (cut.length) throw new Error(`Banner cortado en ${cut.length} de ${cases.length} casos: ${JSON.stringify(cut.slice(0, 4))}`);
+        if (gaps.length) throw new Error(`Hueco distinto de una línea entre el banner y el prompt en ${gaps.length} de ${cases.length} casos: ${JSON.stringify(gaps.slice(0, 6))}`);
         await assertCurrentLog();
         phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
         smokeReport.focusedScenario = 'fastfetch-matrix';
@@ -8515,6 +8965,10 @@ try {
             for (const mode of ['pinned', 'downloaded', 'explore', 'github']) {
                 await clickWhenReady(`[data-testid="projects-mode-${mode}"]`);
                 await pause(400);
+                // «Mi GitHub» consulta la red: a los 400 ms la captura salía en
+                // «Consultando…» y no enseñaba el estado final.
+                await waitUntil(async () => (await findAll('[data-testid="projects-loading"]')).length === 0,
+                    30000, `proyectos-${mode} sin «Consultando…»`).catch(() => undefined);
                 await visit(`proyectos-${mode}`, density);
             }
             await clickWhenReady('[role="dialog"] .panel-close');
@@ -8555,7 +9009,7 @@ try {
         markPhase('reintento de comprobación de actualización firmado');
         await clickWhenReady('[data-testid="toolbar-dependencies"]');
         await findWhenReady('[data-testid="dependency-detection-placeholder"]');
-        await waitUntil(async () => (await findAll('[role="dialog"] .filters')).length > 0, 180000, 'fin de la detección para actualización');
+        await waitUntil(async () => (await findAll('[role="dialog"] .filters')).length > 0, dependencyDetectionTimeoutMs, 'fin de la detección para actualización');
         await waitUntil(async () => (await findAll('[data-testid="dependency-section"]')).length > 0, 20000, 'secciones de dependencias para reintento');
         const updatesSection = await findWhenReady('[data-testid="dependency-section"][data-section-id="updates"]');
         if ((await attribute(updatesSection, 'open')) === null) {
@@ -9087,10 +9541,12 @@ try {
                     .map((decoration) => {
                         const rect = decoration.getBoundingClientRect();
                         const image = decoration.querySelector('img[data-banner-image]');
+                        const imageRect = image?.getBoundingClientRect();
                         return {
                             src: image?.getAttribute('src') ?? '',
                             loaded: Boolean(image?.complete && image.naturalWidth > 0),
                             top: rect.top, bottom: rect.bottom, left: rect.left, width: rect.width, height: rect.height,
+                            imageBottom: imageRect?.bottom ?? rect.bottom,
                         };
                     });
                 return { rows, images, screenLeft: screen?.left ?? 0 };`,
@@ -9126,9 +9582,14 @@ try {
             const cellWidth = image.width / (padding - 2 * bannerGap);
             const leftGap = image.left - state.screenLeft;
             const rightGap = padding * cellWidth - leftGap - image.width;
+            const rowHeight = lastRow.bottom - lastRow.top;
             const checks = {
                 top: Math.abs(image.top - titleRow.top) <= 2,
                 bottom: Math.abs(image.bottom - lastRow.bottom) <= 2,
+                // Bajo la imagen el mismo hueco que a los lados (bannerGap
+                // celdas): un prompt en la fila siguiente no queda pegado.
+                bottomGap: Math.abs((lastRow.bottom - image.imageBottom) - bannerGap * cellWidth) <= 2
+                    && rowHeight > 0,
                 centered: Math.abs(leftGap - bannerGap * cellWidth) <= 2 && Math.abs(rightGap - leftGap) <= 2,
                 single: state.images.filter((candidate) => Math.abs(candidate.top - titleRow.top) <= 2).length === 1,
             };
@@ -9368,6 +9829,11 @@ try {
         await waitUntil(async () => (await readFile(answerFile, 'utf8').catch(() => '')).includes('[y]'), 10000,
             'la respuesta a la pregunta de gh llega a la terminal');
         results.loginAnswerMs = Date.now() - answeredAt;
+        // Pasar por el seguro de 35 s también es el fallo, aunque llegue a
+        // tiempo: cmd había borrado el prompt y la pestaña no se daba por lista.
+        if (results.loginAnswerMs > 10000) {
+            throw new Error(`La respuesta a gh tardó ${results.loginAnswerMs} ms: el teclado esperó al seguro`);
+        }
         // 3. Con sesión: la cuenta y sus repositorios.
         await openGithubMode();
         await clickWhenReady('[data-testid="projects-gh-check"]').catch(() => {});
@@ -9732,6 +10198,12 @@ try {
         const results = [];
         for (const shell of shells) {
             await clickWhenReady('.env-select');
+            // WSL llega en la segunda tanda del inventario (con varias distros
+            // en frío, cerca de un minuto): se espera a que aparezca.
+            if (shell.id.startsWith('wsl:')) {
+                await waitUntil(async () => (await findAll(`.env-menu [data-environment-id="${shell.id}"]`)).length > 0,
+                    150000, `${shell.id} en el selector`).catch(() => {});
+            }
             const available = (await findAll(`.env-menu [data-environment-id="${shell.id}"]`)).length > 0;
             if (!available) {
                 await closeEnvironmentMenu();
@@ -9743,14 +10215,23 @@ try {
             }
             await switchToEnvironment(shell.id);
             const cell = await activeTerminalCell();
-            const marker = `WTASSIST${shell.id.toUpperCase()}${Date.now().toString(36).toUpperCase()}`;
+            // bash de WSL con ble.sh en frío: arrancar la VM y la distro
+            // (~13 s medidos en Ubuntu) y la primera carga de ble.sh, que
+            // regenera su caché, superan el margen general de 35 s.
+            if (shell.id.startsWith('wsl:')) await waitForPaneStartup(cell, 120000);
+            // Solo letras: con cifras, lo escrito dependía de la hora. Desde el
+            // 03-11 a las 01:22 (`Date.now()` en base 36 pasó de «MVZ…» a
+            // «MW0…») el prefijo acababa en «0» y ble.sh dejó de sugerir con
+            // cualquier binario, también el de la release 37.
+            const stamp = Date.now().toString(36).toUpperCase().replace(/[0-9]/gu, (digit) => 'ABCDEFGHIJ'[Number(digit)]);
+            const marker = `WTASSIST${shell.id.toUpperCase()}${stamp}`;
             // El historial de la prueba no se guarda en el del usuario (Clink
             // usa además un perfil temporal). Dos órdenes: la sugerencia se
             // busca por el principio de cada línea del historial.
             if (shell.kind === 'powershell') await sendTerminalLine('Set-PSReadLineOption -HistorySaveStyle SaveNothing', cell);
             if (shell.kind === 'bash') {
                 // ble.sh tiene que haberse cargado desde la inicialización
-                // (ruta de E2E en /tmp) y el historial no se guarda en disco.
+                // (ruta de E2E en /var/tmp) y el historial no se guarda en disco.
                 await sendTerminalLine('unset HISTFILE; echo WTBLE=${BLE_VERSION:+cargado}', cell);
                 await waitUntil(async () => (await terminalRowSnapshot(cell)).rows
                     .some((row) => row.text.trim() === 'WTBLE=cargado'), 30000, `ble.sh cargado en ${shell.id}`);
@@ -9773,9 +10254,13 @@ try {
                             const row = [...host.querySelectorAll('.xterm-rows > div')]
                                 .filter((node) => (node.textContent ?? '').includes('echo ' + arguments[2])).at(-1);
                             if (!row) return null;
+                            // Nunca la celda del cursor: lleva el color del
+                            // cursor, no el de la sugerencia (con la máquina
+                            // cargada a veces solo estaba pintada esa letra).
                             const span = [...row.querySelectorAll('span')].filter((node) => {
                                 const part = (node.textContent ?? '').trim();
-                                return part.length > 0 && arguments[1].includes(part);
+                                return part.length > 0 && arguments[1].includes(part)
+                                    && !node.classList.contains('xterm-cursor');
                             }).at(-1);
                             if (!span) return { row: row.textContent ?? '' };
                             const style = getComputedStyle(span);
@@ -9810,6 +10295,438 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write(`E2E sugerencias OK: ${results.filter((result) => !result.skipped).map((result) => result.shell).join(', ')} sugieren el historial atenuado tras lo escrito.\n`);
+    } else if (aiRealOnly) {
+        // Las IA de terminal REALES instaladas en el equipo, sin cuenta: su
+        // primera pantalla (elegir tema o método de acceso) ya es una interfaz
+        // a pantalla completa. No se teclea nada para no iniciar sesión. Una
+        // IA que no esté instalada se omite; las que fallan se anotan todas y
+        // el escenario falla al final con el resumen.
+        markPhase('IA de terminal reales (sin iniciar sesión)');
+        await waitForBannerPanes(1, 60000);
+        await waitUntil(async () => (await attribute(await findWhenReady('.env-select'), 'disabled')) === null,
+            90000, 'inventario completo de entornos');
+        const cell = await activeTerminalCell();
+        const pause = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+        const paneState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const pane = arguments[0].querySelector('.tab-pane:not(.hidden)') ?? arguments[0];
+                const host = pane.querySelector('[data-testid="terminal-host"]');
+                const screen = pane.querySelector('.xterm-screen');
+                const displayCols = Number(pane.dataset.displayCols || 0);
+                const cell = screen && displayCols > 0 ? screen.getBoundingClientRect().width / Math.max(displayCols, 1) : 0;
+                return {
+                    fullScreenApp: pane.dataset.fullScreenApp ?? 'false',
+                    displayCols,
+                    gridCols: Number(pane.dataset.gridCols || 0),
+                    screenClipped: Boolean(screen) && getComputedStyle(screen).overflow === 'hidden',
+                    visibleCols: host && cell > 0 ? Math.floor(host.clientWidth / cell) : 0,
+                    horizontalOverflow: Boolean(host) && getComputedStyle(host).overflowX !== 'hidden'
+                        && host.scrollWidth > host.clientWidth + 2,
+                };`,
+            args: [{ [elementKey]: cell }],
+        });
+        const rowsText = async () => (await terminalRowSnapshot(cell)).rows.map((row) => row.text.trimEnd());
+        const visibleWidth = (rows, state) => Math.max(0, ...rows.map((row) => {
+            const cells = [...row];
+            return (state.screenClipped && state.gridCols > 0 ? cells.slice(0, state.gridCols) : cells).join('').trimEnd().length;
+        }));
+        const available = async (id) => {
+            if ((await findAll('.env-menu')).length === 0) await clickWhenReady('.env-select');
+            const found = (await findAll(`.env-menu [data-environment-id="${id}"]`)).length > 0;
+            return found;
+        };
+        // La detección de las IA puede llegar algo después del inventario.
+        await waitUntil(async () => available('ai:claude').then((found) => found || available('ai:gemini')), 120000,
+            'alguna IA de terminal real en el selector').catch(() => undefined);
+        const results = [];
+        const failures = [];
+        for (const name of ['claude', 'gemini', 'codex', 'opencode', 'qwen', 'amp']) {
+            const id = `ai:${name}`;
+            if (!(await available(id))) {
+                results.push({ name, skipped: 'no instalada' });
+                continue;
+            }
+            try {
+                // El selector cambia de nombre antes de que xterm vacíe su
+                // DOM: las filas de la IA anterior no son la primera pantalla
+                // de esta, y teclear antes de tiempo se pierde en su arranque.
+                const previousScreen = (await rowsText()).filter(Boolean).join('|');
+                await switchToEnvironment(id);
+                let rows = [];
+                await waitUntil(async () => {
+                    rows = (await rowsText()).filter(Boolean);
+                    return rows.length >= 2 && rows.join('|') !== previousScreen;
+                }, 45000, `${name}: primera pantalla dibujada`);
+                await pause(3000);
+                const state = await paneState();
+                rows = (await rowsText()).filter(Boolean);
+                const widest = visibleWidth(rows, state);
+                let blank = 0;
+                for (let sample = 0; sample < 20; sample += 1) {
+                    if ((await rowsText()).filter(Boolean).length < 2) blank += 1;
+                    await pause(100);
+                }
+                const capture = await captureScreenshot(`ia-real-${name}`);
+                const result = { name, ...state, widest, blankSamples: blank, capture, firstRows: rows.slice(0, 4).map((row) => row.slice(0, 120)) };
+                results.push(result);
+                process.stdout.write(`E2E IA real ${name}: ${JSON.stringify({ ...state, widest, blank })}` + String.fromCharCode(10));
+                const problems = [];
+                if (state.fullScreenApp !== 'ai-environment') problems.push(`modo ${state.fullScreenApp}`);
+                if (state.horizontalOverflow) problems.push('barra horizontal');
+                if (widest > state.visibleCols + 1) problems.push(`dibuja ${widest} columnas en una vista de ${state.visibleCols}`);
+                if (blank > 0) problems.push(`${blank}/20 muestras en blanco (parpadeo)`);
+                // Lo escrito entra entero y en su sitio, sin enviarlo: solo
+                // en las que ya enseñan su caja (Amp, OpenCode); en las demás
+                // la primera pantalla es elegir una opción.
+                if (['amp', 'opencode'].includes(name)) {
+                    const typed = 'hola wterminal 123';
+                    const xterm = (await findAllWithin(cell, '.xterm'))[0]?.[elementKey];
+                    const input = (await findAllWithin(cell, '.xterm-helper-textarea'))[0]?.[elementKey];
+                    await focusTerminal(xterm, input);
+                    const typingStarted = Date.now();
+                    await request(`/session/${sessionId}/actions`, 'POST', { actions: [{ type: 'key', id: 'keyboard', actions:
+                        [...typed].flatMap((value) => [{ type: 'keyDown', value }, { type: 'keyUp', value }]) }] });
+                    try {
+                        await waitUntil(async () => (await rowsText()).some((row) => row.includes(typed)), 15000,
+                            `${name}: lo escrito aparece entero en su caja`);
+                        const echoMs = Date.now() - typingStarted;
+                        const typingState = await paneState();
+                        await captureScreenshot(`ia-real-${name}-escribiendo`);
+                        process.stdout.write(`E2E IA real ${name} escribiendo: ${JSON.stringify({ echoMs, horizontalOverflow: typingState.horizontalOverflow })}` + String.fromCharCode(10));
+                        if (typingState.horizontalOverflow) problems.push('barra horizontal al escribir');
+                    } catch (error) {
+                        problems.push(`lo escrito no apareció entero: ${JSON.stringify((await rowsText()).filter(Boolean).slice(-4))}`);
+                    }
+                    // Se borra sin enviar nada.
+                    await request(`/session/${sessionId}/actions`, 'POST', { actions: [{ type: 'key', id: 'keyboard', actions:
+                        [...typed].flatMap(() => [{ type: 'keyDown', value: '\uE003' }, { type: 'keyUp', value: '\uE003' }]) }] });
+                    await waitUntil(async () => !(await rowsText()).some((row) => row.includes('wterminal 1')), 10000,
+                        `${name}: lo escrito se borra con Retroceso`).catch(() => problems.push('Retroceso no borró lo escrito'));
+                }
+                if (['amp', 'claude'].includes(name)) {
+                    await resizeWindow(620, 560, { waitForBanner: false });
+                    await pause(3000);
+                    const narrow = await paneState();
+                    const narrowRows = (await rowsText()).filter(Boolean);
+                    const narrowWidest = visibleWidth(narrowRows, narrow);
+                    await captureScreenshot(`ia-real-${name}-estrecha`);
+                    // Una letra suelta en la última columna, tras un espacio, es
+                    // un resto de la pantalla anterior. Los bordes de caja no.
+                    const leftovers = narrowRows.filter((row) => {
+                        const cells = [...row];
+                        const last = cells[narrow.gridCols - 1] ?? ' ';
+                        return cells.length >= narrow.gridCols && last.trim() !== '' && !/[─-╿]/u.test(last)
+                            && (cells[narrow.gridCols - 2] ?? ' ').trim() === '';
+                    }).length;
+                    if (leftovers > 0) problems.push(`${leftovers} filas con restos en la última columna al estrechar`);
+                    process.stdout.write(`E2E IA real ${name} estrecha: ${JSON.stringify({ ...narrow, widest: narrowWidest, leftovers })}` + String.fromCharCode(10));
+                    if (narrow.horizontalOverflow || !narrow.screenClipped || narrowWidest > narrow.visibleCols + 1 || narrow.visibleCols >= state.visibleCols) {
+                        problems.push(`al encoger la ventana dibuja ${narrowWidest} columnas en una vista de ${narrow.visibleCols}`);
+                    }
+                    await resizeWindow(800, 600, { waitForBanner: false });
+                    await pause(1500);
+                }
+                if (problems.length) failures.push(`${name}: ${problems.join(', ')}`);
+            } catch (error) {
+                failures.push(`${name}: ${String(error?.message ?? error).slice(0, 300)}`);
+                await captureScreenshot(`ia-real-${name}-fallo`).catch(() => undefined);
+            }
+        }
+        // Una IA real tecleada en cmd: el modo se activa al enviarla y, al
+        // salir con Ctrl+C, la shell sigue intacta.
+        for (const typed of ['claude', 'amp']) {
+            if (!results.some((result) => result.name === typed && !result.skipped)) continue;
+            try {
+                await switchToEnvironment('cmd');
+                await waitUntil(async () => (await rowsText()).some((row) => />$/u.test(row)), 30000, 'prompt de cmd');
+                await sendTerminalLine(typed);
+                await waitUntil(async () => (await paneState()).fullScreenApp === 'ai-command', 15000, `${typed} tecleado activa el modo`);
+                await pause(8000);
+                const state = await paneState();
+                const rows = (await rowsText()).filter(Boolean);
+                const widest = visibleWidth(rows, state);
+                await captureScreenshot(`ia-real-${typed}-desde-cmd`);
+                process.stdout.write(`E2E IA real ${typed} desde cmd: ${JSON.stringify({ ...state, widest })}` + String.fromCharCode(10));
+                if (state.horizontalOverflow || widest > state.visibleCols + 1) {
+                    failures.push(`${typed} desde cmd: dibuja ${widest} columnas en una vista de ${state.visibleCols}`);
+                }
+                const xterm = (await findAllWithin(cell, '.xterm'))[0]?.[elementKey];
+                const input = (await findAllWithin(cell, '.xterm-helper-textarea'))[0]?.[elementKey];
+                await focusTerminal(xterm, input);
+                // Su primera pantalla (confiar en la carpeta) se cancela con
+                // Esc; las demás, con Ctrl+C dos veces.
+                const ctrlC = [{ type: 'keyDown', value: '\uE009' }, { type: 'keyDown', value: 'c' }, { type: 'keyUp', value: 'c' }, { type: 'keyUp', value: '\uE009' }];
+                const keys = [
+                    [{ type: 'keyDown', value: '\uE00C' }, { type: 'keyUp', value: '\uE00C' }],
+                    // Amp y Claude piden Ctrl+C dos veces seguidas para salir.
+                    [...ctrlC, { type: 'pause', duration: 150 }, ...ctrlC],
+                    [...ctrlC, { type: 'pause', duration: 150 }, ...ctrlC],
+                ];
+                for (const actions of keys) {
+                    if ((await paneState()).fullScreenApp === 'false') break;
+                    await request(`/session/${sessionId}/actions`, 'POST', { actions: [{ type: 'key', id: 'keyboard', actions }] });
+                    await pause(1500);
+                }
+                await waitUntil(async () => (await paneState()).fullScreenApp === 'false', 20000, `${typed} se cierra con Esc o Ctrl+C`);
+                const marker = `E2E_IA_REAL_${typed.toUpperCase()}_OK`;
+                await sendTerminalLine(`echo ${marker}`);
+                await waitUntil(async () => {
+                    const shellRows = (await rowsText()).filter(Boolean);
+                    const echoRow = shellRows.findIndex((row) => /^[A-Za-z]:[\\/][^>]*>echo /u.test(row) && row.endsWith(marker));
+                    return echoRow >= 0 && shellRows[echoRow + 1] === marker;
+                }, 20000, `la shell sigue intacta tras salir de ${typed}`);
+            } catch (error) {
+                failures.push(`${typed} desde cmd: ${String(error?.message ?? error).slice(0, 300)}`);
+                await captureScreenshot(`ia-real-${typed}-desde-cmd-fallo`).catch(() => undefined);
+            }
+        }
+        recordEvent('ai-real', { results, failures, passed: failures.length === 0 });
+        if (failures.length) throw new Error(`IA reales: ${failures.join(' | ')}`);
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'ai-real';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        const tested = results.filter((result) => !result.skipped).map((result) => result.name);
+        process.stdout.write(`E2E IA reales OK: ${tested.join(', ') || 'ninguna instalada'} al ancho visible, sin barra ni parpadeo (${Date.now() - smokeStartedAt} ms).` + String.fromCharCode(10));
+    } else if (aiTuiOnly) {
+        markPhase('IA de terminal a pantalla completa (simulada)');
+        await waitForBannerPanes(1, 60000);
+        await waitUntil(async () => (await attribute(await findWhenReady('.env-select'), 'disabled')) === null,
+            90000, 'inventario completo de entornos');
+        const cell = await activeTerminalCell();
+        const pause = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+        const readTuiReport = async () => (await readFile(fakeTuiReport, 'utf8').catch(() => ''))
+            .split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        const paneState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const pane = arguments[0].querySelector('.tab-pane:not(.hidden)') ?? arguments[0];
+                const host = pane.querySelector('[data-testid="terminal-host"]');
+                const screen = pane.querySelector('.xterm-screen');
+                const displayCols = Number(pane.dataset.displayCols || 0);
+                // Columnas que caben de verdad: ancho de la vista entre el
+                // ancho de una celda (el del screen entre sus columnas).
+                const cell = screen && displayCols > 0 ? screen.getBoundingClientRect().width / Math.max(displayCols, 1) : 0;
+                return {
+                    fullScreenApp: pane.dataset.fullScreenApp ?? 'false',
+                    displayCols,
+                    visibleCols: host && cell > 0 ? Math.floor(host.clientWidth / cell) : 0,
+                    // Desbordamiento que se ve: barra horizontal con algo que
+                    // desplazar (la rejilla interna de xterm es más ancha).
+                    horizontalOverflow: Boolean(host) && getComputedStyle(host).overflowX !== 'hidden'
+                        && host.scrollWidth > host.clientWidth + 2,
+                };`,
+            args: [{ [elementKey]: cell }],
+        });
+        const rowsText = async () => (await terminalRowSnapshot(cell)).rows.map((row) => row.text);
+        // Dentro de la IA no hay prompt de shell: se teclea directamente, con
+        // el mismo camino de teclado que una persona.
+        const typeIntoTui = async (text) => {
+            const xterm = (await findAllWithin(cell, '.xterm'))[0]?.[elementKey];
+            const input = (await findAllWithin(cell, '.xterm-helper-textarea'))[0]?.[elementKey];
+            if (!xterm || !input) throw new Error('La pestaña de la IA no ofreció receptor de teclado');
+            await focusTerminal(xterm, input);
+            await pause(FOCUS_SETTLE_MS);
+            const actions = [...text].flatMap((character) => {
+                const value = character === '\n' ? '\uE007' : character;
+                return [{ type: 'keyDown', value }, { type: 'keyUp', value }];
+            });
+            await request(`/session/${sessionId}/actions`, 'POST', { actions: [{ type: 'key', id: 'keyboard', actions }] });
+        };
+        // La IA debe dibujar para el ancho VISIBLE: la última medida que vio
+        // (arranque o cambio de tamaño) coincide con las columnas que muestra
+        // la casilla, su cabecera lo dice y la caja se cierra a la vista.
+        const assertDrawsInView = async (label, expectedMode) => {
+            let state = null;
+            let last = null;
+            let rows = [];
+            try {
+                await waitUntil(async () => {
+                    state = await paneState();
+                    last = [...await readTuiReport()].reverse()
+                        .find((event) => event.event === 'start' || event.event === 'resize') ?? null;
+                    rows = await rowsText();
+                    const header = rows.find((row) => row.includes('FAKE-AMP') && row.includes('cols=')) ?? '';
+                    const shownCols = Number(/cols=(\d+)/u.exec(header)?.[1] ?? 0);
+                    return state.fullScreenApp === expectedMode && last !== null
+                        && Math.abs(last.cols - state.displayCols) <= 1
+                        && Math.abs(last.cols - state.visibleCols) <= 2
+                        && shownCols === last.cols;
+                }, 30000, `${label}: la IA recibe el ancho visible`);
+            } catch (error) {
+                throw new Error(`${label}: ${JSON.stringify({ state, last, rows: rows.filter((row) => row.trim()).slice(-6).map((row) => row.trimEnd().slice(0, 160)) })}`, { cause: error });
+            }
+            if (last.cols >= 1024) throw new Error(`${label}: la IA recibió ${last.cols} columnas, la reserva de las shells`);
+            if (state.horizontalOverflow) throw new Error(`${label}: la casilla quedó con desplazamiento horizontal`);
+            if (!rows.some((row) => row.trimEnd().endsWith('╮')) || !rows.some((row) => row.trimEnd().endsWith('╯'))) {
+                throw new Error(`${label}: la caja de la IA no se ve entera`);
+            }
+            return { cols: last.cols, displayCols: state.displayCols };
+        };
+        // Parpadeo: la IA redibuja unas 20 veces por segundo; ninguna muestra
+        // de la casilla puede salir sin su caja.
+        const assertNoBlankFrames = async (label) => {
+            let blank = 0;
+            for (let sample = 0; sample < 20; sample += 1) {
+                if (!(await rowsText()).some((row) => row.includes('FAKE-AMP'))) blank += 1;
+                await pause(50);
+            }
+            if (blank > 0) throw new Error(`${label}: ${blank}/20 muestras sin la caja de la IA (parpadeo)`);
+        };
+        // Bloqueo: lo escrito llega y la respuesta aparece en pocos segundos.
+        // Bloqueo: se mide por separado lo que tarda en verse lo tecleado y
+        // la respuesta tras Intro. El tecleo por WebDriver es lento con el
+        // equipo cargado; un bloqueo real congela cualquiera de las dos.
+        const assertReply = async (label, text) => {
+            const typingStarted = Date.now();
+            await typeIntoTui(text);
+            await waitUntil(async () => (await rowsText()).some((row) => row.includes(`> ${text}`)), 20000,
+                `${label}: lo escrito aparece en la IA`);
+            const echoMs = Date.now() - typingStarted;
+            const replyStarted = Date.now();
+            await typeIntoTui('\n');
+            const reversed = [...text].reverse().join('');
+            await waitUntil(async () => (await rowsText()).some((row) => row.includes(reversed)), 15000,
+                `${label}: respuesta de la IA a lo escrito`);
+            const replyMs = Date.now() - replyStarted;
+            process.stdout.write(`E2E IA TUI: ${label}: tecleo visible en ${echoMs} ms, respuesta en ${replyMs} ms` + String.fromCharCode(10));
+            // Con el equipo anfitrión cargado se puede subir para comprobar lo
+            // funcional; la validación de release usa el límite normal.
+            const replyLimitMs = Number(process.env.E2E_AI_TUI_REPLY_LIMIT_MS || 5000);
+            if (replyMs > replyLimitMs) throw new Error(`${label}: la respuesta tardó ${replyMs} ms tras Intro (la casilla se bloqueó)`);
+            return replyMs;
+        };
+        const waitShellMode = async (label) => {
+            await waitUntil(async () => (await paneState()).fullScreenApp === 'false', 15000, `${label}: la shell recupera su modo`);
+        };
+        const results = {};
+        // A. La pestaña entera es la IA (`ai:amp`). La detección de las IA
+        // puede llegar después del resto del inventario (equipo cargado).
+        await waitUntil(async () => {
+            if ((await findAll('.env-menu [data-environment-id="ai:amp"]')).length > 0) return true;
+            if ((await findAll('.env-menu')).length === 0) await clickWhenReady('.env-select');
+            return (await findAll('.env-menu [data-environment-id="ai:amp"]')).length > 0;
+        }, 120000, 'Amp (simulado) en el selector de entornos');
+        await switchToEnvironment('ai:amp');
+        results.aiTab = await assertDrawsInView('IA en su pestaña', 'ai-environment');
+        await assertNoBlankFrames('IA en su pestaña');
+        results.aiTab.replyMs = await assertReply('IA en su pestaña', 'hola wterminal');
+        await captureScreenshot('ia-tui-pestana');
+        // La ventana de las pruebas mide 800×600: se estrecha y luego se
+        // devuelve a su tamaño.
+        await resizeWindow(620, 560, { waitForBanner: false });
+        results.aiTabNarrow = await assertDrawsInView('IA tras encoger la ventana', 'ai-environment');
+        if (results.aiTabNarrow.cols >= results.aiTab.cols) {
+            throw new Error(`Al encoger la ventana la IA no recibió menos columnas: ${JSON.stringify(results)}`);
+        }
+        await assertNoBlankFrames('IA tras encoger la ventana');
+        await captureScreenshot('ia-tui-ventana-estrecha');
+        await resizeWindow(800, 600, { waitForBanner: false });
+        await assertDrawsInView('IA tras ensanchar la ventana', 'ai-environment');
+
+        // B y C. Lanzada desde una shell: en pantalla alternativa (Amp, vim)
+        // y en línea con salida sincronizada (Ink: Claude Code, Gemini). Al
+        // salir, la shell vuelve a su reserva y sigue funcionando.
+        await switchToEnvironment('cmd');
+        await waitShellMode('cmd');
+        await waitUntil(async () => (await rowsText()).some((row) => />\s*$/u.test(row.trimEnd())), 30000, 'prompt de cmd');
+        for (const [key, command, mode, label] of [
+            ['shellAlternate', 'fakevim', 'alternate-screen', 'desde cmd, un programa en pantalla alternativa'],
+            ['shellAiAlternate', 'amp', 'ai-command', 'desde cmd, una IA en pantalla alternativa (amp)'],
+            ['shellInline', 'claude', 'ai-command', 'desde cmd, una IA en línea (claude)'],
+        ]) {
+            // Traza cruda de la PTY de este caso (App.svelte la llena si
+            // existe): si la shell queda descolocada, se guarda junto a las
+            // capturas para ver qué mandó ConPTY.
+            await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'window.__wtermPtyTrace = []; return true;', args: [] });
+            await sendTerminalLine(command);
+            results[key] = await assertDrawsInView(label, mode);
+            await assertNoBlankFrames(label);
+            results[key].replyMs = await assertReply(label, `prueba ${key}`);
+            await captureScreenshot(`ia-tui-${key}`);
+            await typeIntoTui('/exit\n');
+            await waitShellMode(label);
+            const marker = `E2E_TUI_${key.toUpperCase()}_OK`;
+            await sendTerminalLine(`echo ${marker}`);
+            // Como una persona lo vería: el prompt y la orden en la misma
+            // fila, la salida en la suya y el prompt siguiente solo, vacío.
+            let shellRows = [];
+            try {
+                await waitUntil(async () => {
+                    shellRows = (await rowsText()).map((row) => row.trimEnd()).filter(Boolean);
+                    const echoRow = shellRows.findIndex((row) => /^[A-Za-z]:[\\/][^>]*>echo /u.test(row) && row.endsWith(marker));
+                    return echoRow >= 0
+                        && shellRows[echoRow + 1] === marker
+                        && /^[A-Za-z]:[\\/][^>]*>$/u.test(shellRows[echoRow + 2] ?? '');
+                }, 20000, `${label}: la shell sigue intacta tras salir de la IA`);
+            } catch (error) {
+                const trace = await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'return window.__wtermPtyTrace ?? [];', args: [] }).catch(() => []);
+                const tracePath = join(process.env.E2E_CAPTURE_DIR || fakeTuiDirectory, `pty-trace-${key}.json`);
+                await writeFile(tracePath, JSON.stringify(trace, null, 1)).catch(() => undefined);
+                throw new Error(`${label}: shell descolocada tras salir de la IA: ${JSON.stringify(shellRows.slice(-8))} (traza PTY: ${tracePath})`, { cause: error });
+            }
+        }
+        // D. Con una línea más ancha que la vista en pantalla, encoger
+        // partiría esa línea en conhost y en xterm de forma distinta y la
+        // shell quedaría descolocada al salir: la pestaña conserva la reserva
+        // y lo anota; la IA se ve bien en su propia pestaña (caso A).
+        const wide = `E2E_TUI_LINEA_ANCHA_${'x'.repeat(220)}`;
+        await sendTerminalLine(`echo ${wide}`);
+        await waitUntil(async () => (await rowsText()).some((row) => row.trim() === wide), 20000, 'línea ancha en pantalla');
+        await sendTerminalLine('amp');
+        await waitUntil(async () => (await rowsText()).some((row) => row.includes('FAKE-AMP')), 30000, 'IA abierta con una línea ancha en pantalla');
+        const skipped = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const pane = arguments[0].querySelector('.tab-pane:not(.hidden)') ?? arguments[0];
+                return { mode: pane.dataset.fullScreenApp ?? 'false', skipped: pane.dataset.fullScreenSkipped ?? '' };`,
+            args: [{ [elementKey]: cell }],
+        });
+        // Se descarta al teclear `amp` y otra vez cuando activa su pantalla
+        // alternativa: queda anotado el último motivo.
+        if (skipped.mode !== 'false' || !['ai-command', 'alternate-screen'].includes(skipped.skipped)) {
+            throw new Error(`Con una línea ancha en pantalla la pestaña no debía encoger: ${JSON.stringify(skipped)}`);
+        }
+        // Y se sugiere abrirla en su pestaña, donde sí tiene el ancho visible.
+        await waitUntil(async () => (await findAll('[data-testid="terminal-ai-tab-hint"][data-ai="amp"]')).length > 0,
+            10000, 'aviso de abrir la IA en su pestaña');
+        if ((await findAll('[data-testid="terminal-ai-tab-hint-open"]')).length === 0) {
+            throw new Error('El aviso no ofrece abrir Amp en su pestaña aunque el entorno ai:amp existe');
+        }
+        await captureScreenshot('ia-tui-aviso-pestana');
+        // La caja llena sus filas hasta el borde. Sin salida, la terminal llega
+        // a su reposo con ella en pantalla: esas filas no son una línea partida
+        // y la PTY no debe crecer (sumarlas daba 6 × 1024 = 6144 columnas, la IA
+        // redibujaba cajas enormes y `/exit` no llegaba a tiempo).
+        await typeIntoTui('/pause\n');
+        await waitUntil(async () => (await readTuiReport()).some((event) => event.event === 'pause'),
+            10000, 'la IA deja de redibujar');
+        await pause(WIDE_FRAME_SETTLE_MS);
+        const wideRun = await readTuiReport();
+        const wideResizes = wideRun.slice(wideRun.findLastIndex((event) => event.event === 'start'))
+            .filter((event) => event.event === 'resize');
+        if (wideResizes.length > 0) {
+            throw new Error(`La PTY cambió con la IA a pantalla alternativa en una pestaña con líneas anchas: ${JSON.stringify(wideResizes.map(({ cols, rows }) => ({ cols, rows })))}`);
+        }
+        await typeIntoTui('/exit\n');
+        await waitUntil(async () => (await findAll('[data-testid="terminal-ai-tab-hint"]')).length === 0,
+            15000, 'el aviso se retira al volver el prompt');
+        const markerWide = 'E2E_TUI_WIDE_OK';
+        await sendTerminalLine(`echo ${markerWide}`);
+        let wideRows = [];
+        try {
+            await waitUntil(async () => {
+                wideRows = (await rowsText()).map((row) => row.trimEnd()).filter(Boolean);
+                const echoRow = wideRows.findIndex((row) => /^[A-Za-z]:[\\/][^>]*>echo /u.test(row) && row.endsWith(markerWide));
+                return echoRow >= 0 && wideRows[echoRow + 1] === markerWide;
+            }, 20000, 'la shell sigue intacta tras la IA con una línea ancha en pantalla');
+        } catch (error) {
+            throw new Error(`Shell descolocada tras la IA con una línea ancha: ${JSON.stringify(wideRows.slice(-8))}`, { cause: error });
+        }
+        results.wideLineKeepsReserve = true;
+        recordEvent('ai-tui', { results, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'ai-tui';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E IA de terminal OK: ancho visible en su pestaña (${results.aiTab.cols} → ${results.aiTabNarrow.cols} columnas), desde cmd en pantalla alternativa y en línea, sin parpadeo y respuesta en ${results.aiTab.replyMs} ms (${Date.now() - smokeStartedAt} ms).\n`);
     } else if (aiEnvironmentsOnly) {
         markPhase('asistentes de IA y modelos locales simulados');
         await waitForBannerPanes(1, 60000);
@@ -9859,8 +10776,11 @@ try {
         await captureScreenshot('ia-claude-code');
 
         // Dependencias: apartado propio y el modelo simulado figura como descargado.
+        // El panel no enseña secciones hasta comprobarlas todas, y la de WSL
+        // necesita el inventario detallado de cada distro: con siete en frío,
+        // más de un minuto.
         await clickWhenReady('[data-testid="toolbar-dependencies"]');
-        await findWhenReady('[data-testid="dependency-section"][data-section-id="ai"]', 60000);
+        await findWhenReady('[data-testid="dependency-section"][data-section-id="ai"]', dependencyDetectionTimeoutMs);
         await request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: `const section = document.querySelector('[data-testid="dependency-section"][data-section-id="ai"]');
                 section.open = true;
@@ -9952,26 +10872,24 @@ try {
             actionRows = (await terminalRowSnapshot(cell)).rows.map((row) => row.text.trimEnd()).filter(Boolean);
             return actionRows.some((row) => row.includes('WTERMINAL_FAKE_OLLAMA list'));
         }, 30000, 'salida de la acción «Ver los modelos descargados» en cmd');
-        // Solo cuentan las órdenes escritas tras el prompt de cmd: la cabecera
-        // visual de la acción («│ ollama list») también nombra la orden.
-        const typed = actionRows.filter((row) => /^[A-Za-z]:\\[^>]*>/u.test(row) && row.includes('ollama list'));
-        const oneLine = typed.length === 1
-            && typed[0].includes('call "%WSTERM_UI%\\ui-') && typed[0].includes('ini.cmd" & ollama list & call')
-            && !actionRows.some((row) => /echo %WSTERM_ESC%|if errorlevel|if not errorlevel/u.test(row))
-            && actionRows.some((row) => row.includes('┌─ VER'));
+        // La línea tecleada se borra sola: solo queda la cabecera de la acción
+        // («│ ollama list»), sin la decoración interna.
+        const oneLine = !actionRows.some((row) => /%WSTERM_UI%|echo %WSTERM_ESC%|if errorlevel|if not errorlevel/u.test(row))
+            && actionRows.some((row) => row.includes('┌─ VER'))
+            && actionRows.some((row) => row.includes('│ ollama list'));
         await sendTerminalKeys('', cell, { enter: true, settle: true });
         await waitUntil(async () => (await terminalRowSnapshot(cell)).rows.some((row) => row.text.includes('✔')),
             30000, 'cierre de la acción con su resultado');
         await captureScreenshot('ia-accion-cmd-una-linea');
         await sendTerminalKeys('', cell, { enter: true, settle: true });
         if (!oneLine) {
-            throw new Error(`La acción no se escribió como una sola línea en cmd: ${JSON.stringify(actionRows.slice(-12))}`);
+            throw new Error(`La acción de cmd dejó a la vista su orden interna: ${JSON.stringify(actionRows.slice(-12))}`);
         }
         recordEvent('ai-environments', {
             options: aiOptions,
             opened: [ollamaLabel, claudeLabel],
             model: { remove: modelState.remove, download: modelState.download },
-            cmdActionLine: typed[0],
+            cmdActionRows: actionRows.slice(-12),
             passed: true,
         });
         await assertCurrentLog();
@@ -10174,6 +11092,9 @@ try {
         // misma validación, si ConPTY deja pasar la secuencia.
         const osc8Url = `https://example.com/wterminal-e2e/osc8?caso=${marker}`;
         const osc8Text = `WTERMINAL_OSC8_${marker.toUpperCase()}`;
+        // El ratón sigue donde lo dejó el paso anterior y el enlace puede salir
+        // justo en esa fila: es el caso que dejaba a xterm con su caché de
+        // enlaces vacía (`src/lib/link-cache.ts`).
         await sendTerminalLine(`powershell -NoProfile -Command "[Console]::Out.Write([char]27+']8;;${osc8Url}'+[char]27+'\\'+'${osc8Text}'+[char]27+']8;;'+[char]27+'\\'); Write-Host ''"`, cell);
         await waitUntil(async () => (await terminalRowSnapshot(cell)).rows.some((row) => row.text.trim() === osc8Text), 30000, 'texto del hipervínculo OSC 8');
         results.osc8 = { passthrough: (await runScript('return window.__e2eRawOut ?? "";')).includes(`\u001b]8;;${osc8Url}`) };
@@ -10182,7 +11103,20 @@ try {
             results.osc8.hover = await hoverLink(osc8Target);
             if (results.osc8.hover?.url !== osc8Url) problems.push(`el hipervínculo OSC 8 no se detectó: ${JSON.stringify(results.osc8.hover)}`);
             await clickLink(osc8Target);
-            await waitUntil(dialogOpen, 5000, 'confirmación del hipervínculo OSC 8');
+            try {
+                await waitUntil(dialogOpen, 5000, 'confirmación del hipervínculo OSC 8');
+            } catch (error) {
+                const mouse = await runScript('return window.__e2eLinkMouse ?? [];');
+                // Lo que de verdad le llegó a xterm alrededor del texto: si
+                // ConPTY repinta la fila sin el OSC 8, el enlace se pierde.
+                const raw = String(await runScript('return window.__e2eRawOut ?? "";'));
+                const rawAround = [...raw.matchAll(new RegExp(osc8Text, 'gu'))]
+                    .map((match) => raw.slice(Math.max(0, match.index - 140), match.index + osc8Text.length + 60));
+                await captureScreenshot('enlaces-osc8-sin-confirmacion');
+                throw new Error(`Ctrl+clic en el OSC 8 no pidió confirmación: ${JSON.stringify({
+                    hover: results.osc8.hover, target: osc8Target, mouse: mouse.slice(-6), calls: await linkCalls(), rawAround,
+                })}`, { cause: error });
+            }
             results.osc8.dialogUrl = await runScript(`return document.querySelector('[data-testid="terminal-link-dialog"]')?.dataset.url ?? null;`);
             await captureScreenshot('enlaces-osc8');
             await clickWhenReady('[data-testid="terminal-link-open"]');
@@ -10604,6 +11538,262 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write('E2E paleta de comandos OK: atajo, teclado, filtrado, Ajustes, comandos `:`, aviso de línea con texto, limpiar y nueva pestaña.\n');
+    } else if (commandMarksOnly) {
+        markPhase('marcas de orden OSC 133');
+        await waitForBannerPanes(1, 60000);
+        await waitUntil(async () => (await attribute(await findWhenReady('.env-select'), 'disabled')) === null,
+            90000, 'inventario completo de entornos');
+        const available = ((await invokeJson('env_list', { tabId: null })).envs ?? [])
+            .filter((environment) => environment.available)
+            .map((environment) => environment.id);
+        const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+        const marks = (cell) => runScript(`const host = arguments[0].querySelector('.tab-pane:not(.hidden)') ?? arguments[0].closest('.tab-pane');
+            return { seen: Number(host?.dataset.commandMarksSeen ?? 0), count: Number(host?.dataset.commandCount ?? 0), exit: host?.dataset.lastExitCode ?? '',
+                duration: Number(host?.dataset.lastDurationMs ?? -1), failed: arguments[0].querySelectorAll('.command-failed').length };`, [{ [elementKey]: cell }]);
+        const nextMark = async (cell, before, description) => {
+            const deadline = Date.now() + 15000;
+            let now = await marks(cell);
+            while (now.count !== before.count + 1 && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 200));
+                now = await marks(cell);
+            }
+            // `seen` distingue una marca que no llega de una orden mal contada.
+            if (now.count !== before.count + 1) throw new Error(`${description}: sin fin de orden ${JSON.stringify({ before, now })}`);
+            return now;
+        };
+        // Cada shell con su orden correcta, su fallo y el código que debe verse.
+        // cmd no puede dar el código de salida en su prompt.
+        const shells = [
+            { id: 'cmd', ok: 'echo WT_MARCA_OK', fail: null },
+            { id: 'powershell', ok: 'Write-Output WT_MARCA_OK', fail: 'cmd /c exit 3', code: '3' },
+            { id: 'gitbash', ok: 'echo WT_MARCA_OK', fail: '(exit 4)', code: '4' },
+        ].filter((shell) => available.includes(shell.id));
+        const results = [];
+        for (const shell of shells) {
+            await switchToEnvironment(shell.id);
+            await waitForBannerPanes(1, 60000);
+            const cell = await activeTerminalCell();
+            // `sendLineAndAssertPrompt` comprueba además que el eco siga pegado
+            // al prompt: las marcas no pueden mover el cursor.
+            let before = await marks(cell);
+            await sendLineAndAssertPrompt(shell.ok, cell, 'WT_MARCA_OK', `${shell.id}: orden correcta`);
+            const passed = await nextMark(cell, before, shell.id);
+            if (passed.failed !== before.failed) throw new Error(`${shell.id}: una orden correcta no debe marcarse como fallida`);
+            if (shell.fail) {
+                before = passed;
+                await sendTerminalKeys(shell.fail, cell, { enter: true, settle: true });
+                const failed = await nextMark(cell, before, `${shell.id}: orden fallida`);
+                if (failed.exit !== shell.code) throw new Error(`${shell.id}: código ${failed.exit}, se esperaba ${shell.code}`);
+                await waitUntil(async () => (await marks(cell)).failed === before.failed + 1, 5000, `${shell.id}: marca roja en la orden fallida`);
+                // Un Intro vacío repite el código anterior, pero no es una orden.
+                await sendTerminalKeys('', cell, { enter: true, settle: true });
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                const blank = await marks(cell);
+                if (blank.count !== failed.count || blank.failed !== failed.failed) {
+                    throw new Error(`${shell.id}: un Intro vacío cuenta como orden: ${JSON.stringify({ failed, blank })}`);
+                }
+            }
+            await captureScreenshot(`marcas-${shell.id}`);
+            results.push({ shell: shell.id, ...(await marks(cell)) });
+        }
+
+        // Copiar la salida de la última orden, sin su eco ni el prompt.
+        await switchToEnvironment('powershell');
+        await waitForBannerPanes(1, 60000);
+        const cell = await activeTerminalCell();
+        const tabId = await runScript("return document.querySelector('.tab.active')?.dataset.tabId;");
+        const openTerminalMenu = () => runScript(`arguments[0].querySelector('[data-testid="terminal-host"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200, button: 2 }));`, [{ [elementKey]: cell }]);
+        const copyBefore = await marks(cell);
+        await sendLineAndAssertPrompt("'WT_COPIA_1','WT_COPIA_2'", cell, 'WT_COPIA_2', 'salida de dos líneas');
+        await nextMark(cell, copyBefore, 'salida de dos líneas');
+        await openTerminalMenu();
+        await clickWhenReady('[data-testid="terminal-menu-copy-output"]');
+        await findWhenReady('[data-testid="terminal-link-notice"]', 5000);
+        await waitUntil(async () => (await systemClipboardText()).replaceAll('\r\n', '\n') === 'WT_COPIA_1\nWT_COPIA_2', 5000, 'portapapeles con la salida exacta de la orden');
+
+        // Saltar entre órdenes con el teclado: sube al prompt anterior y baja
+        // hasta el final.
+        const fillBefore = await marks(cell);
+        await sendTerminalKeys('1..80', cell, { enter: true, settle: true });
+        await nextMark(cell, fillBefore, 'orden larga para saltar');
+        const viewport = () => runScript('const state = window.__wtTerminalState?.(arguments[0]); return { y: state?.viewportY ?? 0, base: state?.baseY ?? 0 };', [tabId]);
+        const bottom = await viewport();
+        await sendWindowShortcut(['', '', '']);
+        await waitUntil(async () => (await viewport()).y < bottom.base, 5000, 'Ctrl+Shift+↑ sube a la orden anterior');
+        await sendWindowShortcut(['', '', '']);
+        await sendWindowShortcut(['', '', '']);
+        await waitUntil(async () => { const now = await viewport(); return now.y === now.base; }, 5000, 'Ctrl+Shift+↓ vuelve al final');
+
+        // Duración y aviso al terminar una orden larga.
+        const longBefore = await marks(cell);
+        await sendTerminalKeys('Start-Sleep -Seconds 11', cell, { enter: true, settle: true });
+        await waitUntil(async () => (await marks(cell)).count === longBefore.count + 1, 25000, 'orden larga terminada');
+        const longDone = await marks(cell);
+        if (longDone.duration < 10000 || longDone.duration > 20000) throw new Error(`Duración medida fuera de rango: ${longDone.duration} ms`);
+        await findWhenReady('[data-testid="terminal-link-notice"]', 5000);
+
+        // Cambiar de shell con una orden en marcha: el primer prompt de la
+        // nueva no la cierra, ni cuenta como orden ni avisa de una duración falsa.
+        const abandonedBefore = await marks(cell);
+        await sendTerminalKeys('Start-Sleep -Seconds 60', cell, { enter: true, settle: true });
+        await switchToEnvironment('cmd');
+        await waitForBannerPanes(1, 60000);
+        const nextShellCell = await activeTerminalCell();
+        await waitUntil(async () => (await marks(nextShellCell)).seen > abandonedBefore.seen, 15000, 'marcas del primer prompt de la shell nueva');
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const abandoned = await marks(nextShellCell);
+        if (abandoned.count !== abandonedBefore.count) {
+            throw new Error(`La shell nueva cerró una orden de la anterior: ${JSON.stringify({ abandonedBefore, abandoned })}`);
+        }
+
+        recordEvent('command-marks', { results, duration: longDone.duration, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'command-marks';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E marcas de orden OK: ${results.map((result) => result.shell).join(', ')}, código de salida, Intro vacío, copiar salida, saltos y aviso de orden larga (${longDone.duration} ms).\n`);
+    } else if (tabToolsOnly) {
+        markPhase('renombrar pestañas y guardar la salida');
+        await waitForBannerPanes(1, 60000);
+        const cell = await activeTerminalCell();
+        const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+        const pressKeys = (...values) => request(`/session/${sessionId}/actions`, 'POST', {
+            actions: [{ type: 'key', id: 'keyboard', actions: values.flatMap((value) => [{ type: 'keyDown', value }, { type: 'keyUp', value }]) }],
+        });
+        const activeTitle = () => runScript("return document.querySelector('.tab.active')?.getAttribute('title') ?? '';");
+        const renameState = () => runScript(`const input = document.querySelector('[data-testid="tab-rename"]');
+            return { open: Boolean(input), focused: Boolean(input) && document.activeElement === input, value: input?.value ?? '',
+                draggable: document.querySelector('.tab.active')?.getAttribute('draggable') ?? '' };`);
+        const terminalHasFocus = () => runScript("return document.activeElement?.classList.contains('xterm-helper-textarea') ?? false;");
+        const openRenameFromPalette = async () => {
+            await sendWindowShortcut(['', '', 'p']);
+            const input = await findWhenReady('[data-testid="command-palette-input"]');
+            await request(`/session/${sessionId}/element/${input}/value`, 'POST', { text: 'rename' });
+            await waitUntil(() => runScript(`return document.querySelector('[data-testid="command-palette-option"]')?.dataset.paletteId === 'app:renameTab';`), 5000, 'la paleta ofrece renombrar');
+            await pressKeys('');
+            await waitUntil(async () => (await renameState()).focused, 5000, 'campo de renombrar abierto desde la paleta');
+        };
+        const expectTabTool = (condition, message) => {
+            if (!condition) throw new Error(`Pestañas y salida: ${message}`);
+        };
+        const original = await activeTitle();
+        expectTabTool(original, 'la pestaña activa no tiene título');
+        const tabId = await runScript("return document.querySelector('.tab.active')?.dataset.tabId;");
+
+        // 1. Un doble clic real abre el campo, con el foco y sin arrastre.
+        const tabElement = await findWhenReady('.tab.active');
+        await request(`/session/${sessionId}/actions`, 'POST', {
+            actions: [{
+                type: 'pointer',
+                id: 'mouse',
+                parameters: { pointerType: 'mouse' },
+                actions: [
+                    { type: 'pointerMove', origin: { [elementKey]: tabElement }, x: 0, y: 0 },
+                    { type: 'pointerDown', button: 0 }, { type: 'pointerUp', button: 0 },
+                    { type: 'pointerDown', button: 0 }, { type: 'pointerUp', button: 0 },
+                ],
+            }],
+        });
+        await request(`/session/${sessionId}/actions`, 'DELETE');
+        await waitUntil(async () => (await renameState()).focused, 5000, 'campo de renombrar con el foco tras el doble clic');
+        const opened = await renameState();
+        expectTabTool(opened.value === original, `el campo debe abrirse con el nombre actual, no con «${opened.value}»`);
+        expectTabTool(opened.draggable === 'false', 'la pestaña no se arrastra mientras se escribe');
+
+        // 2. Intro guarda el nombre y devuelve el foco a la terminal.
+        // Con teclas reales: lo escrito reemplaza el nombre seleccionado, y el
+        // Intro que confirma no debe llegar a la shell.
+        const terminalLines = async () => (await runScript('return window.__wtTerminalText?.(arguments[0]) ?? "";', [tabId])).trimEnd().split('\n').length;
+        const linesBefore = await terminalLines();
+        await pressKeys(...'Servidor E2E', '');
+        await waitUntil(async () => await activeTitle() === 'Servidor E2E', 5000, 'nombre nuevo en la pestaña');
+        await waitUntil(terminalHasFocus, 5000, 'el foco vuelve a la terminal al renombrar');
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        expectTabTool(await terminalLines() === linesBefore, 'el Intro de confirmar el nombre no debe llegar a la shell');
+
+        // 3. Cambiar de shell no borra un nombre puesto a mano.
+        await sendTerminalKeys(':shell powershell', cell, { enter: true, settle: true });
+        await waitForBannerPanes(1, 60000);
+        await sendLineAndAssertPrompt('Write-Output WTERMINAL_TRAS_CAMBIO', cell, 'WTERMINAL_TRAS_CAMBIO', 'shell cambiada');
+        expectTabTool(await activeTitle() === 'Servidor E2E', 'el nombre debe sobrevivir al cambio de shell');
+
+        // 4. Escape cancela y un nombre vacío devuelve el del entorno.
+        await openRenameFromPalette();
+        await pressKeys(...'Descartado', '');
+        await waitUntil(async () => !(await renameState()).open, 5000, 'Escape cierra el campo');
+        expectTabTool(await activeTitle() === 'Servidor E2E', 'Escape no debe cambiar el nombre');
+        await openRenameFromPalette();
+        await pressKeys('', '');
+        await waitUntil(async () => { const title = await activeTitle(); return Boolean(title) && title !== 'Servidor E2E'; }, 5000, 'nombre vacío vuelve al del entorno');
+
+        // 5. Guardar la salida: el historial entero, con las líneas partidas unidas.
+        const longMarker = `WTERMINAL_LINEA_LARGA_${'x'.repeat(320)}_FIN`;
+        await sendLineAndAssertPrompt('Write-Output WTERMINAL_GUARDAR_SALIDA', cell, 'WTERMINAL_GUARDAR_SALIDA', 'marca antes de guardar');
+        await sendTerminalKeys(`Write-Output ${longMarker}`, cell, { enter: true, settle: true });
+        await waitUntil(() => runScript(`return (window.__wtTerminalText?.(arguments[0]) ?? '').includes(arguments[1]);`, [tabId, longMarker]), 15000, 'línea larga en la terminal');
+        await runScript(`arguments[0].querySelector('[data-testid="terminal-host"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200, button: 2 }));`, [{ [elementKey]: cell }]);
+        await clickWhenReady('[data-testid="terminal-menu-save-output"]');
+        await waitUntil(async () => (await findAll('[data-testid="terminal-link-notice"]')).length > 0, 10000, 'aviso de salida guardada');
+        const saved = await readFile(saveOutputFile, 'utf8');
+        expectTabTool(saved.includes('WTERMINAL_GUARDAR_SALIDA'), 'el archivo debe tener lo escrito en la terminal');
+        expectTabTool(saved.includes(longMarker), 'el archivo debe tener la línea larga sin partir');
+
+        // 6. Color desde el menú de la pestaña; Escape no cambia nada y «Sin
+        // color» la devuelve a su aspecto normal.
+        const openTabMenu = () => runScript(`document.querySelector('.tab.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 60, clientY: 20, button: 2 }));`);
+        const activeColor = () => runScript("return document.querySelector('.tab.active')?.dataset.tabColor ?? '';");
+        const tabMenuOpen = async () => (await findAll('[data-testid="tab-menu"]')).length > 0;
+        await openTabMenu();
+        await clickWhenReady('[data-testid="tab-menu-color-green"]');
+        await waitUntil(async () => await activeColor() === 'green', 5000, 'pestaña en verde');
+        expectTabTool(!(await tabMenuOpen()), 'el menú debe cerrarse al elegir un color');
+        await waitUntil(terminalHasFocus, 5000, 'el foco vuelve a la terminal tras el menú');
+        await openTabMenu();
+        await waitUntil(tabMenuOpen, 5000, 'menú de la pestaña abierto');
+        await pressKeys('');
+        await waitUntil(async () => !(await tabMenuOpen()), 5000, 'Escape cierra el menú de la pestaña');
+        expectTabTool(await activeColor() === 'green', 'Escape no debe cambiar el color');
+        await openTabMenu();
+        await clickWhenReady('[data-testid="tab-menu-color-none"]');
+        await waitUntil(async () => await activeColor() === '', 5000, 'pestaña sin color');
+
+        // 7. Búsqueda en las órdenes escritas (Ctrl+Shift+R): encuentra una de
+        // antes, la deja escrita sin ejecutarla, Intro la lanza y Escape cierra.
+        const markerRuns = async () => ((await runScript('return window.__wtTerminalText?.(arguments[0]) ?? "";', [tabId]))
+            .match(/^WTERMINAL_TRAS_CAMBIO\s*$/gmu) ?? []).length;
+        const historyOpen = async () => (await findAll('[data-testid="history-search"]')).length > 0;
+        const runsBefore = await markerRuns();
+        await sendWindowShortcut(['', '', 'r']);
+        const historyInput = await findWhenReady('[data-testid="history-search-input"]');
+        await request(`/session/${sessionId}/element/${historyInput}/value`, 'POST', { text: 'tras_cambio write' });
+        await waitUntil(() => runScript(`return document.querySelector('[data-testid="history-search-option"]')?.textContent?.trim() === 'Write-Output WTERMINAL_TRAS_CAMBIO';`),
+            5000, 'el historial encuentra la orden escrita antes');
+        await pressKeys('');
+        await waitUntil(async () => !(await historyOpen()), 5000, 'la búsqueda se cierra al elegir');
+        await waitUntil(() => runScript(`return (window.__wtTerminalText?.(arguments[0]) ?? '').trimEnd().split('\\n').at(-1).trimEnd().endsWith('Write-Output WTERMINAL_TRAS_CAMBIO');`, [tabId]),
+            10000, 'la orden queda escrita en el prompt');
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        expectTabTool(await markerRuns() === runsBefore, 'escribirla desde el historial no debe ejecutarla');
+        await sendTerminalKeys('', cell, { enter: true, settle: true });
+        await waitUntil(async () => await markerRuns() === runsBefore + 1, 15000, 'Intro ejecuta la orden escrita desde el historial');
+        await sendWindowShortcut(['', '', 'r']);
+        await findWhenReady('[data-testid="history-search-input"]');
+        await pressKeys('');
+        await waitUntil(async () => !(await historyOpen()), 5000, 'Escape cierra la búsqueda');
+
+        // El aviso de «Actualizar todo» depende de que el disco se pueda medir.
+        // La acción no se pulsa aquí: con espacio de sobra lanzaría winget de verdad.
+        const freeBytes = await invokeJson('system_drive_free_bytes');
+        expectTabTool(Number.isFinite(freeBytes) && freeBytes > 0, `espacio libre sin medir: ${JSON.stringify(freeBytes)}`);
+
+        recordEvent('tab-tools', { original, bytes: saved.length, freeBytes, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'tab-tools';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E pestañas y salida OK: doble clic, Intro, Escape, paleta, cambio de shell y ${saved.length} caracteres guardados.\n`);
     } else if (inputFollowOnly) {
         markPhase('seguimiento del cursor en una entrada larga');
         await waitForBannerPanes(1, 60000);
@@ -10634,6 +11824,14 @@ try {
                     cellWidth: cursorRect ? cursorRect.width : 0,
                     cols: Number(host.dataset.terminalCols || 0),
                     lineLength: (cursorRow?.textContent ?? '').trimEnd().length,
+                    // El eje X vive solo en el host: un elemento interior
+                    // desplazado (el navegador lo hace para enseñar el
+                    // textarea de xterm) mueve el texto sin que cambie
+                    // host.scrollLeft. El textarea desplaza su propio texto
+                    // dentro de su caja, y eso no mueve nada.
+                    innerScroll: [...host.querySelectorAll('*')]
+                        .filter((element) => element.scrollLeft !== 0 && element.tagName !== 'TEXTAREA')
+                        .map((element) => ({ element: element.tagName.toLowerCase() + '.' + [...element.classList].join('.'), scrollLeft: element.scrollLeft })),
                     fonts: (() => {
                         const measure = host.querySelector('.xterm-char-measure-element');
                         const rowsEl = host.querySelector('.xterm-rows');
@@ -10647,7 +11845,8 @@ try {
         });
         const cursorVisible = (state) => state.cursorLeft !== null
             && state.cursorLeft >= -1
-            && state.cursorRight <= state.clientWidth + 1;
+            && state.cursorRight <= state.clientWidth + 1
+            && state.innerScroll.length === 0;
         const keys = (values, delayMs = 30) => request(`/session/${sessionId}/actions`, 'POST', {
             actions: [{ type: 'key', id: 'keyboard', actions: [...values].flatMap((value) => [
                 { type: 'keyDown', value }, { type: 'keyUp', value }, { type: 'pause', duration: delayMs },
@@ -10805,6 +12004,81 @@ try {
         const afterEnter = record('prompt-tras-intro', await settle());
         if (afterEnter.scrollLeft > 1) failures.push({ ...afterEnter, reason: 'el prompt nuevo no se ve desde el principio' });
         await captureScreenshot('seguimiento-prompt-tras-intro');
+        // I. Un resto de scroll no corta la primera columna: la línea roza el
+        // borde derecho (la vista avanza unas celdas) y, al borrar hasta caber
+        // en la primera pantalla, vuelve al principio.
+        {
+            const start = await probe();
+            const fill = Math.max(0, Math.floor(start.clientWidth / start.cellWidth) - start.lineLength);
+            await keys(Array.from({ length: fill }, (_, index) => alphabet[index % alphabet.length]), 0);
+            const filled = await settle(start.lineLength + fill);
+            if (filled.scrollLeft <= 1) failures.push({ phase: 'resto-de-scroll', ...filled, reason: 'la línea no llegó a desplazar la vista' });
+            const backspace = String.fromCharCode(0xE003);
+            await keys(Array.from({ length: 12 }, () => backspace), 8);
+            await waitUntil(async () => (await probe()).lineLength <= filled.lineLength - 12, 10000, 'borrado del final de la línea').catch(() => undefined);
+            const trimmed = record('resto-de-scroll', await settle());
+            if (trimmed.scrollLeft > 1) failures.push({ ...trimmed, reason: 'un resto de scroll corta la primera columna' });
+        }
+        // J. Teclear con texto más ancho que la vista en pantalla no la mueve:
+        // ni nuestro código ni el navegador, ni siquiera una columna un frame.
+        // Se registra cada escritura de scrollLeft y cada evento de scroll: un
+        // evento sin escritura previa lo ha movido el navegador. Aquí se teclea
+        // sin clic: el clic de WebDriver sí corre la vista (escribe `scrollLeft`
+        // desde su script inyectado) y por eso los vídeos E2E enseñan a veces
+        // el prompt sin su primera columna; una persona no provoca ese scroll.
+        {
+            await keys([String.fromCharCode(0xE007)], 60);
+            await waitUntil(async () => {
+                const state = await probe();
+                return state.lineLength > 0 && state.lineLength <= promptLength + 2;
+            }, 20000, 'prompt tras la salida ancha').catch(() => undefined);
+            await settle();
+            await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `const host = arguments[0].querySelector('[data-testid="terminal-host"]');
+                    const accessor = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft');
+                    const trace = [];
+                    const started = performance.now();
+                    const now = () => Math.round(performance.now() - started);
+                    Object.defineProperty(host, 'scrollLeft', {
+                        configurable: true,
+                        get() { return accessor.get.call(this); },
+                        set(value) {
+                            trace.push({ t: now(), kind: 'set', value, stack: new Error().stack.split('\\n').slice(2, 5).map((line) => line.trim().slice(0, 90)) });
+                            accessor.set.call(this, value);
+                        },
+                    });
+                    const onScroll = (event) => trace.push({
+                        t: now(),
+                        kind: 'scroll',
+                        target: event.target === host ? 'host' : event.target.className,
+                        value: event.target.scrollLeft,
+                        hostWidth: [host.scrollWidth, host.clientWidth],
+                    });
+                    host.addEventListener('scroll', onScroll, true);
+                    let peak = 0;
+                    let running = true;
+                    const tick = () => {
+                        peak = Math.max(peak, accessor.get.call(host));
+                        if (running) requestAnimationFrame(tick);
+                    };
+                    requestAnimationFrame(tick);
+                    window.__e2eTypingScroll = () => {
+                        running = false;
+                        host.removeEventListener('scroll', onScroll, true);
+                        delete host.scrollLeft;
+                        return { peak, trace: trace.slice(0, 60) };
+                    };
+                    return true;`,
+                args: [{ [elementKey]: cell }],
+            });
+            await keys('abcdefgh', 150);
+            await settle();
+            const typing = await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'return window.__e2eTypingScroll();', args: [] });
+            recordEvent('input-follow-typing-scroll', typing);
+            if (typing.peak > 1) {
+                failures.push({ phase: 'teclear-con-texto-ancho', reason: 'la vista se corrió al teclear', peak: typing.peak, trace: typing.trace.slice(0, 12) });
+            }
+        }
         recordEvent('input-follow', { samples: samples.length, failures, passed: failures.length === 0 });
         if (failures.length) {
             throw new Error(`El cursor se perdió de vista o el scroll saltó (${failures.length}/${samples.length}): ${JSON.stringify(failures.slice(0, 6))}`);
@@ -11110,7 +12384,13 @@ try {
             await new Promise((resolve) => setTimeout(resolve, 2000));
             await clickWhenReady('[role="dialog"] .panel-close');
         }
-        if (headers.length !== 6) categoryProblems.push(`categorías visibles: ${JSON.stringify(headers)}`);
+        // Las mismas categorías que `toolchain_store::Category`, en su orden.
+        // Comparar la lista (y no solo cuántas) detecta una que falte o sobre;
+        // el «6» de antes se quedó corto al añadir Programas y Proyectos.
+        const expectedCategories = ['caches', 'downloads', 'aiModels', 'tools', 'replHistory', 'toolchains', 'programs', 'projects'];
+        if (JSON.stringify(headers) !== JSON.stringify(expectedCategories)) {
+            categoryProblems.push(`categorías visibles: ${JSON.stringify(headers)}; esperadas: ${JSON.stringify(expectedCategories)}`);
+        }
         recordEvent('toolchain-store-categories', { headers, problems: categoryProblems, passed: categoryProblems.length === 0 });
         if (categoryProblems.length) throw new Error(`Categorías de Entornos y descargas: ${categoryProblems.join('; ')}`);
         // Descarga real (opcional, necesita red): cada gestor instalado baja un
@@ -11365,12 +12645,23 @@ try {
                         const terminalHost = cell.querySelector('[data-testid="terminal-host"]');
                         const viewport = cell.querySelector('.xterm-viewport');
                         const rows = [...cell.querySelectorAll('.xterm-rows > div')].map((row) => (row.textContent || '').trimEnd());
-                        return { dataset: { ...host?.dataset }, terminalRows: terminalHost?.dataset.terminalRows,
+                        const screen = cell.querySelector('.xterm-screen')?.getBoundingClientRect();
+                        // Filas del DOM de xterm: si no coinciden con las de la
+                        // rejilla, su renderer no aplicó el último resize (pausado).
+                        const tabId = cell.dataset.tabId;
+                        return { domRows: rows.length, visibility: document.visibilityState, hasFocus: document.hasFocus(),
+                            xterm: tabId ? window.__wtTerminalState?.(tabId) ?? null : null,
+                            screen: screen ? { width: Math.round(screen.width), height: Math.round(screen.height), top: Math.round(screen.top) } : null,
+                            window: { innerWidth, innerHeight, screenX, screenY },
+                            dataset: { ...host?.dataset }, terminalRows: terminalHost?.dataset.terminalRows,
                             viewport: viewport ? { scrollTop: viewport.scrollTop, scrollHeight: viewport.scrollHeight, clientHeight: viewport.clientHeight } : null,
                             rows: rows.filter(Boolean).slice(-8) };`,
                     args: [{ [elementKey]: cell }],
                 }).catch((diagnosticError) => ({ diagnosticError: String(diagnosticError) }));
                 await captureScreenshot(`sin-salida-${label}`);
+                const trace = await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'return window.__e2eResizeTrace ?? [];', args: [] }).catch(() => []);
+                await mkdir(captureDirectory, { recursive: true }).catch(() => {});
+                await writeFile(join(captureDirectory, `traza-${label}.json`), JSON.stringify(trace, null, 1)).catch(() => {});
                 throw new Error(`${error.message}: ${JSON.stringify(state).slice(0, 4000)}`, { cause: error });
             }
             // Dejar que termine cualquier resize/repintado de ConPTY: un eco
@@ -11392,6 +12683,35 @@ try {
             await expectAttached(marker, `redimensionar-y-escribir-${index}`);
             results.push({ kind: 'visible', height, attached: true });
         }
+        // Traza de la salida por pestaña y del desplazamiento de cada xterm
+        // (`__wtTerminalState`): si falla, dice si ConPTY devolvió el eco y
+        // si la vista se quedó lejos del final.
+        await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `if (!window.__e2eResizeTrace) {
+                window.__e2eResizeTrace = [];
+                const started = performance.now();
+                const push = (entry) => {
+                    if (window.__e2eResizeTrace.length < 3000) window.__e2eResizeTrace.push({ t: Math.round(performance.now() - started), ...entry });
+                };
+                window.addEventListener('winslim:terminal-output-busy', (event) => push({ kind: 'out', tabId: event.detail?.tabId, data: event.detail?.data ?? '' }));
+                // Desplazamiento y tamaño de cada xterm, solo cuando cambian.
+                const lastState = new Map();
+                window.setInterval(() => {
+                    for (const cell of document.querySelectorAll('.cell[data-tab-id]')) {
+                        const tabId = cell.dataset.tabId;
+                        const state = window.__wtTerminalState?.(tabId);
+                        if (!state) continue;
+                        const { connected, cols, cursorY, needsFullRefresh, ...tracked } = state;
+                        const key = JSON.stringify([tracked, cell.classList.contains('hidden')]);
+                        if (lastState.get(tabId) === key) continue;
+                        lastState.set(tabId, key);
+                        push({ kind: 'state', tabId, hidden: cell.classList.contains('hidden'), ...tracked });
+                    }
+                }, 50);
+            }
+            return true;`,
+            args: [],
+        });
         // B) Pestaña oculta durante el cambio de tamaño: volver y escribir.
         const attempts = Math.max(1, Number(process.env.E2E_RESIZE_TYPE_ATTEMPTS) || 3);
         for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -11767,6 +13087,14 @@ try {
     } else if (process.env.E2E_SHELL_MATRIX_ONLY === '1') {
         markPhase('cambio de shell');
         const matrix = await exerciseShellMatrix();
+        // La matriz aplaza el fallo de cada entorno para probar los demás; el
+        // recorrido completo los declara al final, pero aquí no había nadie
+        // que lo hiciera y la matriz salía «OK» con entornos fallados.
+        if (deferredFailures.length > 0) {
+            throw new Error(`Matriz de shells/REPL con ${deferredFailures.length} fallo(s):\n${deferredFailures
+                .map((failure, index) => `${index + 1}. ${String(failure.message).slice(0, 1500)}`)
+                .join('\n')}`);
+        }
         await assertCurrentLog();
         phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
         smokeReport.focusedScenario = 'environment-shell-matrix';
@@ -11778,7 +13106,7 @@ try {
         await resizeWindow(1100, 900, { waitForBanner: false });
         await clickWhenReady('[data-testid="toolbar-dependencies"]');
         await findWhenReady('[data-testid="dependency-detection-placeholder"]');
-        await waitUntil(async () => (await findAll('[role="dialog"] .filters')).length > 0, 180000, 'fin de la detección para frameworks');
+        await waitUntil(async () => (await findAll('[role="dialog"] .filters')).length > 0, dependencyDetectionTimeoutMs, 'fin de la detección para frameworks');
         await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0, 30000, 'grupos de dependencias');
         const developmentSection = await findWhenReady('[data-testid="dependency-section"][data-section-id="development"]');
         if ((await attribute(developmentSection, 'open')) === null) {
@@ -12410,7 +13738,9 @@ try {
                 passed: true,
             });
         }
-        const firstAudit = await collectDependencyAudit('primera');
+        const firstAudit = await collectDependencyAudit('primera', {
+            walkActions: dependencyVisualActions && !dependencyFirstPassCountOnly,
+        });
         const firstAuditCapture = await captureScreenshot('dependencias-auditoria-primera-completa');
         const readVisibleComponentCount = async () => {
             const raw = await request(`/session/${sessionId}/execute/sync`, 'POST', {
@@ -12540,7 +13870,7 @@ try {
                 : 'not-present',
         };
         smokeReport.coverage.realInstallationsExecuted = false;
-        if (dependencyVisualActions
+        if (dependencyVisualActions && !dependencyFirstPassCountOnly
             && visualActionCount + visualRemovedAfterDetection.length !== firstAudit.actionCount) {
             throw new Error(`Auditoría: el recorrido visual perdió acciones (${visualActionCount} visibles + ${visualRemovedAfterDetection.length} retiradas -> ${firstAudit.actionCount})`);
         }
@@ -12595,8 +13925,9 @@ try {
             unknownIds: [],
             passed: true,
         });
-        const firstVisualWalkComplete = visualActionCount + visualRemovedAfterDetection.length === firstAudit.actionCount
-            && visualRemovedAfterDetection.length === 0;
+        const firstVisualWalkComplete = dependencyFirstPassCountOnly
+            || (visualActionCount + visualRemovedAfterDetection.length === firstAudit.actionCount
+                && visualRemovedAfterDetection.length === 0);
         const secondVisualWalkComplete = secondVisualActionCount + secondVisualRemovedAfterDetection.length === secondAudit.actionCount
             && secondVisualRemovedAfterDetection.length === 0;
         const catalogActionsIndividuallyVerified = catalogStatesValid
@@ -12702,7 +14033,10 @@ try {
         smokeReport.focusedScenario = 'dependency-full-audit';
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
-        process.stdout.write(`E2E auditoría OK: ${secondAudit.sections.length} secciones, ${secondAudit.groupCount} grupos, ${secondAudit.actionCount} acciones verificadas; catálogo inicial=${firstAudit.actionCount}, estable tras detección completa (${firstAudit.durationMs}/${secondAudit.durationMs} ms, desconocidas=${unknownActions.length}).\n`);
+        // Si la primera detección trae menos acciones es que una distro no llegó
+        // a tiempo: no rompe nada, pero el usuario vería el panel incompleto.
+        const firstPassMissing = secondAudit.actionCount - firstAudit.actionCount;
+        process.stdout.write(`E2E auditoría OK: ${secondAudit.sections.length} secciones, ${secondAudit.groupCount} grupos, ${secondAudit.actionCount} acciones verificadas; catálogo primera=${firstAudit.actionCount} segunda=${secondAudit.actionCount}${firstPassMissing > 0 ? ` (AVISO: la primera detección trajo ${firstPassMissing} acciones menos)` : ''} (${firstAudit.durationMs}/${secondAudit.durationMs} ms, desconocidas=${unknownActions.length}).\n`);
     } else if (dependencyDetectionOnly) {
         markPhase('reintento de detección de dependencias');
         await clickWhenReady('[data-testid="toolbar-dependencies"]');
@@ -12716,13 +14050,13 @@ try {
         } else {
             await findWhenReady('[data-testid="dependency-detection-placeholder"]');
         }
-        await waitUntil(async () => (await findAll('[role="dialog"] .filters')).length > 0, 180000, 'fin de la detección inicial');
+        await waitUntil(async () => (await findAll('[role="dialog"] .filters')).length > 0, dependencyDetectionTimeoutMs, 'fin de la detección inicial');
         await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0,
             90000, 'catálogo de dependencias');
         await waitUntil(async () => !(await property(
             await findWhenReady('[data-testid="dependency-refresh"]'),
             'disabled',
-        )), 180000, 'fin de la detección inicial de dependencias');
+        )), dependencyDetectionTimeoutMs, 'fin de la detección inicial de dependencias');
         const groupsBeforeRefresh = (await findAll('[data-testid="dependency-group"]')).length;
         await clickInView(await findWhenReady('[data-testid="dependency-refresh"]'));
         await waitUntil(async () => Boolean(await property(
@@ -12737,7 +14071,7 @@ try {
         await waitUntil(async () => !(await property(
             await findWhenReady('[data-testid="dependency-refresh"]'),
             'disabled',
-        )), 180000, 'fin de la detección repetida');
+        )), dependencyDetectionTimeoutMs, 'fin de la detección repetida');
         const groupsAfterRefresh = (await findAll('[data-testid="dependency-group"]')).length;
         const readyCapture = await captureScreenshot('dependencias-despues-de-reintento');
         if (groupsBeforeRefresh === 0 || groupsAfterRefresh !== groupsBeforeRefresh
@@ -13306,7 +14640,10 @@ try {
             const lastRow = nonEmptyRows.at(-1);
             const previousRow = nonEmptyRows.at(-2);
             const text = nonEmptyRows.map((row) => row.text).join('\n');
+            // La orden interna sigue a la vista (repetida al empezar su
+            // salida) aunque se borre de la línea de la shell.
             return text.includes('Banner:')
+                && nonEmptyRows.some((row) => row.text.trim() === ':banner')
                 && Boolean(lastRow && promptLooksVisible(
                     previousRow ? `${previousRow.text}\n${lastRow.text}` : lastRow.text,
                 ))
@@ -13557,10 +14894,13 @@ try {
     // La detección consulta WSL, WinGet y varias rutas de toolchains. En una
     // máquina fría puede superar 20 s aunque la petición siga avanzando; el
     // contrato que probamos es que termine y desbloquee el selector.
+    // Los cuatro clics se unen en como mucho dos detecciones
+    // (`AppState::refresh_environments`), pero la primera vuelve a sondear
+    // cada distro WSL: con siete en frío tarda alrededor de un minuto.
     await waitUntil(async () => {
         const environmentButton = await findWhenReady('.env-select');
         return (await attribute(environmentButton, 'disabled')) === null;
-    }, 90000, 'fin de refrescos concurrentes de entornos');
+    }, dependencyDetectionTimeoutMs, 'fin de refrescos concurrentes de entornos');
 
     // Cambiar de shell crea un PTY nuevo. Probar comandos reales en hasta dos
     // shells distintas —Fish incluido cuando está disponible— detecta fallos
@@ -13987,7 +15327,7 @@ try {
     // aserción dependa del idioma que quedó activo tras el ciclo de traducción.
     const installControlVisible = (await findAll('[data-testid="scripts-ltools-install"]')).length === 1;
     const ltoolsAvailable = (await findAll('[data-testid="scripts-ltools-meta"]')).length === 1;
-    if (!ltoolsAvailable && !/LTools|WinSlim Tools/i.test(ltoolsText)) {
+    if (!ltoolsAvailable && !/LTools|WTools/i.test(ltoolsText)) {
         throw new Error(`La Biblioteca no muestra el estado de LTools ni el control de instalación: ${JSON.stringify(ltoolsText)}`);
     }
     recordEvent('ltools-ui-source', {
@@ -14178,19 +15518,28 @@ try {
         // confirmada. En ese caso el catálogo debe reutilizarse inmediatamente
         // y no volver a enseñar un placeholder ni lanzar otra pasada. Si aún
         // no hay inventario, sí exigimos la pantalla atómica de carga.
-        let groupsOnOpen = (await findAll('[data-testid="dependency-group"]')).length;
+        // Grupos y pantalla de carga se leen a la vez: en dos llamadas al driver
+        // el panel podía cambiar entre ambas y parecer que mostraba los dos
+        // (falso fallo de la build 35, con los grupos ya solos en la captura).
+        const dependencyLoadingState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `return {
+                groups: document.querySelectorAll('[data-testid="dependency-group"]').length,
+                placeholders: document.querySelectorAll('[data-testid="dependency-detection-placeholder"]').length,
+            };`,
+            args: [],
+        });
         let placeholderSeenOnOpen = false;
         await waitUntil(async () => {
-            if ((await findAll('[data-testid="dependency-group"]')).length > 0) return true;
-            if ((await findAll('[data-testid="dependency-detection-placeholder"]')).length === 0) return false;
+            const { groups, placeholders } = await dependencyLoadingState();
+            if (groups > 0) return true;
+            if (placeholders === 0) return false;
             placeholderSeenOnOpen = true;
             return true;
         }, 5000, 'estado inicial de Entorno y dependencias');
         // La apertura puede resolver el catálogo entre la lectura inicial y
         // este punto. Medir aquí evita confundir ese primer render confirmado
         // con un placeholder que ya desapareció.
-        groupsOnOpen = (await findAll('[data-testid="dependency-group"]')).length;
-        const placeholderOnOpen = (await findAll('[data-testid="dependency-detection-placeholder"]')).length;
+        const { groups: groupsOnOpen, placeholders: placeholderOnOpen } = await dependencyLoadingState();
         if (groupsOnOpen === 0) {
             // La pantalla de carga ya vista cuenta: en cuanto la detección
             // confirma su primera sección la quita (y aún puede no haber grupos
@@ -14199,20 +15548,20 @@ try {
             if (!placeholderSeenOnOpen && placeholderOnOpen === 0) {
                 await findWhenReady('[data-testid="dependency-detection-placeholder"]');
             }
-            if ((await findAll('[data-testid="dependency-detection-placeholder"]')).length > 0
-                && (await findAll('[data-testid="dependency-group"]')).length !== 0) {
+            const loading = await dependencyLoadingState();
+            if (loading.placeholders > 0 && loading.groups !== 0) {
                 throw new Error('Dependencias mostró grupos antes de terminar la detección completa');
             }
         } else if (placeholderOnOpen !== 0) {
             throw new Error('Dependencias mezcló el catálogo confirmado con el placeholder de detección');
         }
     await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0,
-        180000, 'fin de la detección secuencial de dependencias');
+        dependencyDetectionTimeoutMs, 'fin de la detección secuencial de dependencias');
     const dependencyRefresh = await findWhenReady('[data-testid="dependency-refresh"]');
     await waitUntil(async () => !(await property(
         await findWhenReady('[data-testid="dependency-refresh"]'),
         'disabled',
-    )), 180000, 'botón habilitado al terminar la detección inicial');
+    )), dependencyDetectionTimeoutMs, 'botón habilitado al terminar la detección inicial');
         const groupsBeforeRefresh = (await findAll('[data-testid="dependency-group"]')).length;
         if (groupsOnOpen > 0) {
             recordEvent('dependency-cache-reused-on-open', {
@@ -14238,10 +15587,12 @@ try {
             throw new Error('Repetir detección dejó visible un menú parcial mientras estaba ocupado');
         }
         await captureScreenshot('dependencias-reintentando-deteccion');
+        const detectionRetryStartedAt = Date.now();
         await waitUntil(async () => !(await property(
             await findWhenReady('[data-testid="dependency-refresh"]'),
             'disabled',
-        )), 180000, 'fin del reintento de detección');
+        )), dependencyDetectionTimeoutMs, 'fin del reintento de detección');
+        const detectionRetryMs = Date.now() - detectionRetryStartedAt;
         const groupsAfterRefresh = (await findAll('[data-testid="dependency-group"]')).length;
         if (groupsAfterRefresh === 0 || groupsAfterRefresh !== groupsBeforeRefresh) {
             throw new Error(`Repetir detección dejó un catálogo inconsistente: ${groupsBeforeRefresh} -> ${groupsAfterRefresh}`);
@@ -14254,6 +15605,7 @@ try {
         recordEvent('dependency-detection-retry', {
             buttonVisible: true,
             busyStateCaptured: true,
+            detectionRetryMs,
             groupsBeforeRefresh,
             groupsAfterRefresh,
             unresolvedAfterRefresh: unresolvedAfterRefresh.length,
@@ -15523,6 +16875,11 @@ try {
 
     phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
     await assertCurrentLog();
+    if (deferredFailures.length > 0) {
+        throw new Error(`E2E completo con ${deferredFailures.length} fallo(s):\n${deferredFailures
+            .map((failure, index) => `${index + 1}. ${String(failure.message).slice(0, 1500)}`)
+            .join('\n')}`);
+    }
     smokeReport.status = 'passed';
     smokeReport.logValidated = true;
     process.stdout.write(`E2E OK: ventana, terminal, paneles, menús y redimensionado (${Date.now() - smokeStartedAt} ms).\n`);
@@ -15530,6 +16887,9 @@ try {
 } catch (error) {
     smokeReport.status = 'failed';
     smokeReport.error = error instanceof Error ? error.stack ?? error.message : String(error);
+    // Los fallos aplazados (p. ej. de la matriz de REPL) también van al
+    // informe aunque después otro fallo haya cortado la pasada.
+    smokeReport.deferredFailures = deferredFailures.map((failure) => String(failure.message).slice(0, 4000));
     if (driverDiagnostics.length > 0) {
         smokeReport.driverDiagnostics = driverDiagnostics.join('').slice(-12000);
     }

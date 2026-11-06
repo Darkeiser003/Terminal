@@ -853,7 +853,7 @@
         <details class="operations ltools-operations" data-testid="scripts-ltools" aria-label={app.t('scripts.ltools.title', 'Acciones fijadas de LTools')} ontoggle={onDetailsToggle}>
             <summary class="operations-title">
                 <span>{app.t('scripts.ltools.title', 'Acciones fijadas de LTools')}</span>
-                <small>{app.t('scripts.ltools.note', 'Las acciones se descubren desde el catálogo de LTools / WinSlim Tools y se ejecutan en una shell visible.')}</small>
+                <small>{app.t('scripts.ltools.note', 'Las acciones se descubren desde el catálogo de LTools / WTools y se ejecutan en una shell visible.')}</small>
                 <span class="operations-chevron" aria-hidden="true"></span>
             </summary>
             {#if ltoolsLoading}

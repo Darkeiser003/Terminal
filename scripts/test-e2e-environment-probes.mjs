@@ -37,6 +37,11 @@ assert.deepEqual(
     'la salida UTF-16LE de WSL se analiza sin distros internas de Docker',
 );
 assert.deepEqual(parseWslDistroList('Ubuntu\nArch Linux\n'), ['Ubuntu', 'Arch Linux']);
+assert.deepEqual(
+    parseWslDistroList(Buffer.from('Ubuntu\r\nFedoraLinux-44\r\ndocker-desktop\r\nDebian\r\n', 'utf8')),
+    ['Ubuntu', 'FedoraLinux-44', 'Debian'],
+    'con WSL_UTF8=1 la salida es UTF-8 y también se entiende',
+);
 assert.equal(quotePosixShellArgument("line with spaces and 'quotes'"), "'line with spaces and '\\''quotes'\\'''",
     'la sonda POSIX escapa argumentos sin perder espacios ni comillas');
 assert.equal(posixPrintfLinesScript(['first line', "second 'line'"]), "printf '%s\\n' 'first line' 'second '\\''line'\\'''\n",

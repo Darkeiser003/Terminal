@@ -8,7 +8,8 @@
 //! hilos y se esperan juntas, y un único mutex garantiza que dos peticiones
 //! simultáneas no reconstruyan el inventario a la vez.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -25,7 +26,10 @@ pub const KNOWN_SHELLS: [&str; 4] = ["bash", "zsh", "fish", "sh"];
 
 const TOOLS_OF_INTEREST: [&str; 4] = ["node", "npm", "python3", "git"];
 
-const INSTALLED_CACHE: Duration = Duration::from_millis(10_000);
+/// Cuánto vale una detección correcta. Una instalación o un cambio real en
+/// una distro tarda más que esto, y así dos refrescos seguidos (el inventario
+/// de arranque y abrir Dependencias) no sondean dos veces cada distro.
+const INSTALLED_CACHE: Duration = Duration::from_secs(30);
 /// Cuánto se recuerda un inventario con sondas fallidas.
 ///
 /// Antes no se recordaba en absoluto: una sonda fallida se consideraba un
@@ -51,6 +55,17 @@ const PROBE_CONCURRENCY: usize = 3;
 /// cargada, las distros con systemd tardaban más de los 12 s de antes.
 const DETAILED_LISTING_TIMEOUT: Duration = Duration::from_secs(30);
 const ONLINE_CACHE: Duration = Duration::from_secs(5 * 60);
+/// Plazo de `wsl --list --quiet`, que no arranca la VM de WSL.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// La última lista de distros se quedó sin respuesta: `wsl.exe` no contestó
+/// en todo el plazo (su VM arrancando o apagándose), no es que falte WSL, que
+/// falla en el acto. Quien hizo el inventario vuelve a preguntar más tarde.
+static LISTING_UNANSWERED: AtomicBool = AtomicBool::new(false);
+
+pub fn listing_unanswered() -> bool {
+    LISTING_UNANSWERED.load(Ordering::Relaxed)
+}
 
 /// Si `wsl --list --online` no responde, se ofrecen al menos las distros
 /// oficiales de siempre en vez de un panel vacío.
@@ -202,6 +217,12 @@ pub struct InstalledDistro {
     /// comprobar»), pero sus herramientas son desconocidas: el panel no
     /// inventa instalaciones pendientes para ella.
     pub listing_error: bool,
+    /// La sonda actual falló (`probe_error` o `listing_error`) y `shell`,
+    /// `shells`, `package_manager` y `tools` son los de la última detección
+    /// detallada buena de esta sesión. Sin ello, un fallo pasajero de una
+    /// sola distro (Alpine en la auditoría) borraba sus acciones del catálogo
+    /// hasta el siguiente refresco.
+    pub previous_inventory: bool,
     /// Intérpretes presentes que el kernel no puede ejecutar (código 126,
     /// «Exec format error»): por ejemplo, el `node` de Ubuntu 24 en WSL 1.
     /// Siguen en `tools`, pero no se ofrecen como REPL.
@@ -219,6 +240,7 @@ impl InstalledDistro {
             detailed: false,
             probe_error: false,
             listing_error: false,
+            previous_inventory: false,
             unrunnable: Vec::new(),
         }
     }
@@ -236,6 +258,7 @@ impl InstalledDistro {
             detailed: false,
             probe_error: true,
             listing_error: false,
+            previous_inventory: false,
             unrunnable: Vec::new(),
         }
     }
@@ -404,6 +427,7 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
             detailed: false,
             probe_error: false,
             listing_error: false,
+            previous_inventory: false,
             unrunnable: Vec::new(),
         };
     }
@@ -430,6 +454,7 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
             detailed: false,
             probe_error: false,
             listing_error: true,
+            previous_inventory: false,
             unrunnable: Vec::new(),
         };
     };
@@ -482,6 +507,7 @@ pub fn probe_distro(name: &str, detailed: bool) -> InstalledDistro {
         detailed: true,
         probe_error: false,
         listing_error: false,
+        previous_inventory: false,
         unrunnable,
     }
 }
@@ -533,6 +559,17 @@ fn runnable_probe_script(executables: &[String]) -> String {
         "done".to_string(),
         "wait".to_string(),
         "fi".to_string(),
+        // El REPL de Perl es su depurador (`perl -de0`). `perl-base` (Debian
+        // recién instalado) trae `perl` pero no `perl5db.pl`: el REPL moría
+        // al abrirse y su pestaña se cerraba. Sin depurador, Perl sigue en
+        // `tools` pero no se ofrece como REPL.
+        if names.contains(&"perl") {
+            format!(
+                r#"if command -v perl >/dev/null 2>&1 && ! perl -e 'for (@INC) {{ exit 0 if -e "$_/perl5db.pl" }} exit 1' </dev/null >/dev/null 2>&1; then printf '{UNRUNNABLE_MARKER}%s\n' perl; fi"#
+            )
+        } else {
+            String::new()
+        },
     ]
     .join("\n")
 }
@@ -609,6 +646,10 @@ struct InstalledCache {
     at: Instant,
     installed: Vec<InstalledDistro>,
     detailed: bool,
+    /// Una detección reciente con alguna distro fallida que se ha pedido
+    /// repetir: no se reutiliza tal cual, pero sus distros válidas sí, y solo
+    /// se vuelven a sondear las que fallaron.
+    retry_failed: bool,
 }
 
 struct OnlineCache {
@@ -631,6 +672,60 @@ pub fn reset_cache() {
     *CACHE.lock() = CacheState::default();
 }
 
+/// La última detección detallada buena de cada distro, por nombre en
+/// minúsculas. No la vacía `reset_cache`: refrescar no debe dejar sin
+/// catálogo a una distro solo porque esta vez no respondió.
+static LAST_GOOD: Lazy<Mutex<HashMap<String, InstalledDistro>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Guarda las distros que respondieron con su inventario completo y rellena
+/// las que fallaron con su última detección buena (`previous_inventory`).
+/// Las marcas de error se conservan: se siguen reintentando pronto y el
+/// selector sigue diciendo que no respondieron.
+fn apply_last_good(
+    distros: &mut [InstalledDistro],
+    last_good: &mut HashMap<String, InstalledDistro>,
+) {
+    for distro in distros.iter_mut() {
+        let key = distro.name.to_lowercase();
+        if distro.probe_error || distro.listing_error {
+            let Some(previous) = last_good.get(&key) else {
+                continue;
+            };
+            distro.shell = previous.shell.clone();
+            distro.shells = previous.shells.clone();
+            distro.package_manager = previous.package_manager.clone();
+            distro.tools = previous.tools.clone();
+            distro.unrunnable = previous.unrunnable.clone();
+            distro.previous_inventory = true;
+        } else if distro.detailed {
+            last_good.insert(key, distro.clone());
+        }
+    }
+}
+
+/// Como `reset_cache`, salvo que la última detección sea detallada y de hace
+/// menos de `INSTALLED_CACHE`: entonces se reutiliza. Con siete distros la
+/// sonda detallada tarda más de un minuto y arranca todas; abrir Dependencias
+/// justo después del inventario de arranque la repetía entera y el panel
+/// tardaba más de tres minutos en enseñar nada. Si alguna distro falló (en
+/// frío es habitual), solo se vuelven a sondear las que fallaron.
+pub fn reset_cache_unless_fresh() {
+    let mut cache = CACHE.lock();
+    let Some(entry) = cache
+        .installed
+        .as_mut()
+        .filter(|entry| entry.detailed && entry.at.elapsed() < INSTALLED_CACHE)
+    else {
+        *cache = CacheState::default();
+        return;
+    };
+    entry.retry_failed = entry
+        .installed
+        .iter()
+        .any(|distro| distro.probe_error || distro.listing_error);
+}
+
 /// Las distros de la última detección, sin volver a detectar ni arrancar
 /// nada, por antigua que sea. Vacío si aún no se ha detectado.
 pub fn cached_installed() -> Vec<InstalledDistro> {
@@ -651,9 +746,16 @@ pub fn get_wsl_context(options: ContextOptions) -> WslContext {
     let installed = match reusable_installed(&cache, options) {
         Some(cached) => cached,
         None => {
-            let Some(fresh) = rebuild_installed(&cache, options) else {
+            let started = Instant::now();
+            let rebuilt = rebuild_installed(&cache, options);
+            LISTING_UNANSWERED.store(
+                rebuilt.is_none() && started.elapsed() >= LISTING_TIMEOUT,
+                Ordering::Relaxed,
+            );
+            let Some(mut fresh) = rebuilt else {
                 return WslContext::default();
             };
+            apply_last_good(&mut fresh, &mut LAST_GOOD.lock());
             cache.installed = Some(InstalledCache {
                 at: Instant::now(),
                 detailed: options.details
@@ -661,6 +763,7 @@ pub fn get_wsl_context(options: ContextOptions) -> WslContext {
                         .iter()
                         .all(|distro| distro.detailed || distro.probe_error),
                 installed: fresh.clone(),
+                retry_failed: false,
             });
             fresh
         }
@@ -693,7 +796,10 @@ pub fn get_wsl_context(options: ContextOptions) -> WslContext {
 /// guarda ninguna sonda fallida: un fallo es un estado transitorio (WSL suele
 /// tardar más en la primera activación en frío), no información útil.
 fn reusable_installed(cache: &CacheState, options: ContextOptions) -> Option<Vec<InstalledDistro>> {
-    let entry = cache.installed.as_ref()?;
+    let entry = cache
+        .installed
+        .as_ref()
+        .filter(|entry| !entry.retry_failed)?;
     let has_probe_errors = entry
         .installed
         .iter()
@@ -709,45 +815,79 @@ fn reusable_installed(cache: &CacheState, options: ContextOptions) -> Option<Vec
 }
 
 fn rebuild_installed(cache: &CacheState, options: ContextOptions) -> Option<Vec<InstalledDistro>> {
-    let mut listing = run_wsl(&["--list", "--quiet"], Duration::from_secs(5));
+    let mut listing = run_wsl(&["--list", "--quiet"], LISTING_TIMEOUT);
     if listing.is_none() && warm_wsl(Duration::from_secs(8)) {
-        listing = run_wsl(&["--list", "--quiet"], Duration::from_secs(5));
+        listing = run_wsl(&["--list", "--quiet"], LISTING_TIMEOUT);
     }
     let names = parse_installed_distros(&listing?);
+    Some(rebuild_with_previous(
+        &names,
+        reusable_distros(cache),
+        options,
+        probe_all,
+    ))
+}
 
-    let mut installed: Vec<InstalledDistro> = if options.probe {
-        probe_all(&names, options.details)
-    } else {
-        names
+/// Las distros de una detección detallada reciente que respondieron bien.
+fn reusable_distros(cache: &CacheState) -> Vec<InstalledDistro> {
+    cache
+        .installed
+        .as_ref()
+        .filter(|entry| entry.at.elapsed() < INSTALLED_CACHE)
+        .map(|entry| {
+            entry
+                .installed
+                .iter()
+                .filter(|distro| distro.detailed && !distro.probe_error && !distro.listing_error)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Si una sola distro falló, se repite el inventario, pero no se pierde la
+/// información detallada y válida de las demás ni se vuelven a arrancar: solo
+/// se sondean las que faltan. Así pueden seguir apareciendo Fedora · sh/fish,
+/// por ejemplo, aunque Ubuntu esté arrancando en frío.
+fn rebuild_with_previous<P>(
+    names: &[String],
+    previous: Vec<InstalledDistro>,
+    options: ContextOptions,
+    probe: P,
+) -> Vec<InstalledDistro>
+where
+    P: FnOnce(&[String], bool) -> Vec<InstalledDistro>,
+{
+    let reused = |name: &str| {
+        previous
             .iter()
-            .map(|name| InstalledDistro::unprobed(name))
-            .collect()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+            .cloned()
     };
-
-    // Si una sola distro falló, se reintenta el inventario, pero no se pierde
-    // la información detallada y válida de las demás durante ese reintento
-    // rápido. Así pueden seguir apareciendo Fedora · sh/fish, por ejemplo,
-    // aunque Ubuntu esté arrancando en frío.
-    if !options.details {
-        if let Some(previous) = cache
-            .installed
-            .as_ref()
-            .filter(|entry| entry.detailed && entry.at.elapsed() < INSTALLED_CACHE)
-        {
-            for distro in &mut installed {
-                let better = previous.installed.iter().find(|candidate| {
-                    candidate.detailed
-                        && !candidate.probe_error
-                        && candidate.name.eq_ignore_ascii_case(&distro.name)
-                });
-                if let Some(better) = better {
-                    *distro = better.clone();
+    let pending: Vec<String> = names
+        .iter()
+        .filter(|name| reused(name).is_none())
+        .cloned()
+        .collect();
+    let mut probed = if options.probe && !pending.is_empty() {
+        probe(&pending, options.details).into_iter()
+    } else {
+        Vec::new().into_iter()
+    };
+    names
+        .iter()
+        .map(|name| {
+            reused(name).unwrap_or_else(|| {
+                if options.probe {
+                    probed
+                        .next()
+                        .unwrap_or_else(|| InstalledDistro::failed(name))
+                } else {
+                    InstalledDistro::unprobed(name)
                 }
-            }
-        }
-    }
-
-    Some(installed)
+            })
+        })
+        .collect()
 }
 
 /// Cada sonda entra en su distro y puede tardar segundos; en serie, cuatro
@@ -792,6 +932,17 @@ where
         slot.into_inner()
             .unwrap_or_else(|| InstalledDistro::failed(name))
     }));
+    // Segunda pasada, de una en una, para las que no respondieron: la VM ya
+    // está caliente y nadie compite con ellas. En el E2E del portable, Debian
+    // (la última de la cola) agotó sus dos plazos con la VM cargada y quedó
+    // «sin comprobar» aunque respondía. El inventario que no llegó también
+    // cuenta: en la auditoría de la build 34, Debian respondió a la shell pero
+    // no a tiempo a la lista de órdenes, y sus 80 acciones faltaron del panel.
+    for (distro, name) in results.iter_mut().zip(names) {
+        if distro.probe_error || distro.listing_error {
+            *distro = probe_or_failed(name);
+        }
+    }
     results
 }
 
@@ -819,6 +970,49 @@ fn fetch_online() -> Vec<OnlineDistro> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn una_distro_que_falla_conserva_su_ultima_deteccion_buena() {
+        let good = |name: &str| InstalledDistro {
+            shell: "ash".into(),
+            shells: vec!["ash".into(), "sh".into()],
+            package_manager: Some("apk".into()),
+            tools: vec!["python3".into(), "git".into()],
+            detailed: true,
+            ..InstalledDistro::unprobed(name)
+        };
+        let mut last_good = HashMap::new();
+        let mut first = vec![good("Alpine"), good("Debian")];
+        apply_last_good(&mut first, &mut last_good);
+        assert!(first.iter().all(|distro| !distro.previous_inventory));
+        assert_eq!(last_good.len(), 2);
+
+        // La sonda siguiente falla en Alpine (sin respuesta) y en Debian
+        // (inventario sin terminar); Ubuntu falla sin detección previa.
+        let mut debian = InstalledDistro::unprobed("Debian");
+        debian.listing_error = true;
+        let mut second = vec![
+            InstalledDistro::failed("alpine"),
+            debian,
+            InstalledDistro::failed("Ubuntu"),
+        ];
+        apply_last_good(&mut second, &mut last_good);
+        let alpine = &second[0];
+        assert!(alpine.probe_error && alpine.previous_inventory);
+        assert_eq!(alpine.shell, "ash");
+        assert_eq!(alpine.package_manager.as_deref(), Some("apk"));
+        assert_eq!(alpine.tools, vec!["python3".to_string(), "git".to_string()]);
+        assert!(second[1].listing_error && second[1].previous_inventory);
+        assert_eq!(second[1].tools.len(), 2);
+        assert!(!second[2].previous_inventory && second[2].tools.is_empty());
+
+        // Una detección rápida (sin inventario) no pisa la buena guardada, y
+        // una distro rellenada no se guarda como si hubiera respondido.
+        let mut quick = vec![InstalledDistro::unprobed("Alpine")];
+        apply_last_good(&mut quick, &mut last_good);
+        assert_eq!(last_good["alpine"].tools.len(), 2);
+        assert!(!last_good["alpine"].previous_inventory);
+    }
 
     #[test]
     fn probe_all_sondea_la_primera_sola_y_limita_la_concurrencia() {
@@ -854,6 +1048,107 @@ mod tests {
         assert!(peak.load(Ordering::SeqCst) <= 3);
         assert!(probed.iter().all(|distro| !distro.probe_error));
         assert!(probe_all_with(&[], 3, InstalledDistro::failed).is_empty());
+    }
+
+    #[test]
+    fn repetir_la_deteccion_solo_sondea_las_distros_que_fallaron() {
+        let names: Vec<String> = ["Ubuntu", "Debian", "Alpine"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let mut ubuntu = InstalledDistro::unprobed("Ubuntu");
+        ubuntu.detailed = true;
+        ubuntu.shell = "bash".into();
+        let mut alpine = InstalledDistro::unprobed("Alpine");
+        alpine.detailed = true;
+        let options = ContextOptions {
+            online: false,
+            details: true,
+            probe: true,
+        };
+        let mut sondeadas = Vec::new();
+        let result = rebuild_with_previous(&names, vec![ubuntu, alpine], options, |pending, _| {
+            sondeadas = pending.to_vec();
+            pending
+                .iter()
+                .map(|name| {
+                    let mut distro = InstalledDistro::unprobed(name);
+                    distro.detailed = true;
+                    distro
+                })
+                .collect()
+        });
+        assert_eq!(sondeadas, vec!["Debian".to_string()]);
+        assert_eq!(
+            result.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["Ubuntu", "Debian", "Alpine"]
+        );
+        assert_eq!(result[0].shell, "bash", "conserva lo detectado de Ubuntu");
+        assert!(result.iter().all(|d| d.detailed && !d.probe_error));
+    }
+
+    #[test]
+    fn una_cache_con_fallos_que_se_pide_repetir_no_se_reutiliza_entera() {
+        let mut debian = InstalledDistro::failed("Debian");
+        debian.detailed = false;
+        let mut ubuntu = InstalledDistro::unprobed("Ubuntu");
+        ubuntu.detailed = true;
+        let mut cache = CacheState {
+            installed: Some(InstalledCache {
+                at: Instant::now(),
+                installed: vec![ubuntu, debian],
+                detailed: true,
+                retry_failed: true,
+            }),
+            online: None,
+        };
+        let options = ContextOptions {
+            online: false,
+            details: true,
+            probe: true,
+        };
+        assert!(reusable_installed(&cache, options).is_none());
+        assert_eq!(
+            reusable_distros(&cache)
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Ubuntu"]
+        );
+        cache.installed.as_mut().unwrap().retry_failed = false;
+        assert!(reusable_installed(&cache, options).is_some());
+    }
+
+    #[test]
+    fn probe_all_resondea_de_una_en_una_las_que_fallaron() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let names: Vec<String> = ["Ubuntu", "Debian"].iter().map(|n| n.to_string()).collect();
+        let debian_calls = AtomicUsize::new(0);
+        let probed = probe_all_with(&names, 3, |name| {
+            if name == "Debian" && debian_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return InstalledDistro::failed(name);
+            }
+            InstalledDistro::unprobed(name)
+        });
+        assert!(probed.iter().all(|distro| !distro.probe_error));
+        assert_eq!(debian_calls.load(Ordering::SeqCst), 2);
+        // El inventario que no llegó también se repite.
+        let listing_calls = AtomicUsize::new(0);
+        let probed = probe_all_with(&["Debian".to_string()], 3, |name| {
+            let mut distro = InstalledDistro::unprobed(name);
+            distro.listing_error = listing_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            distro
+        });
+        assert!(!probed[0].listing_error);
+        assert_eq!(listing_calls.load(Ordering::SeqCst), 2);
+        // Una distro que de verdad no responde se sondea solo dos veces.
+        let calls = AtomicUsize::new(0);
+        let probed = probe_all_with(&["Rota".to_string()], 3, |name| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            InstalledDistro::failed(name)
+        });
+        assert!(probed[0].probe_error);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -990,6 +1285,15 @@ mod tests {
         assert!(script.contains("printf 'wterminal-unrunnable:%s\\n'"));
         assert!(script.trim_end().ends_with("fi"));
         assert!(runnable_probe_script(&[]).is_empty());
+        // Perl sin su depurador (`perl-base` de Debian): no se ofrece su REPL.
+        assert!(
+            !script.contains("perl5db.pl"),
+            "sin perl en la lista no se comprueba"
+        );
+        let with_perl = runnable_probe_script(&["perl".to_string()]);
+        assert!(with_perl.contains(r#"exit 0 if -e "$_/perl5db.pl""#));
+        assert!(with_perl.contains("printf 'wterminal-unrunnable:%s\\n' perl; fi"));
+        assert!(with_perl.trim_end().ends_with("fi"));
 
         let listing = "bash\nnode\npython3\nwterminal-unrunnable:node\nwterminal-unrunnable:../x\n";
         assert_eq!(parse_unrunnable(listing), vec!["node".to_string()]);

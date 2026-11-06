@@ -34,6 +34,8 @@ pub struct WindowsIntegrationStatus {
 #[cfg(windows)]
 const LAYERS_KEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 const RUN_AS_ADMIN: &str = "RUNASADMIN";
+#[cfg(windows)]
+const APP_PATH_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths\wterminal.exe";
 
 /// Valor de `Layers` con la marca RUNASADMIN puesta o quitada, conservando las
 /// demás marcas (`~ WIN8RTM RUNASADMIN`). `None` si no queda ninguna: entonces
@@ -125,7 +127,7 @@ pub fn status() -> WindowsIntegrationStatus {
         supported: true,
         context_menu_registered: context_menu_keys_registered(),
         protocol_registered: key_exists(r"Software\Classes\wterminal\shell\open\command"),
-        app_path_registered: key_exists(r"Software\Microsoft\Windows\CurrentVersion\App Paths\wterminal.exe"),
+        app_path_registered: key_exists(APP_PATH_KEY),
         nsudo_available: nsudo_path.is_some(),
         nsudo_path,
         modern_default_terminal_supported: false,
@@ -207,7 +209,7 @@ pub fn set_enabled(enabled: bool) -> Result<WindowsIntegrationStatus, String> {
             .set_value("", &format!("\"{}\" \"%1\"", exe.display()))
             .map_err(|error| error.to_string())?;
         let (app_path, _) = hkcu
-            .create_subkey(r"Software\Microsoft\Windows\CurrentVersion\App Paths\wterminal.exe")
+            .create_subkey(APP_PATH_KEY)
             .map_err(|error| error.to_string())?;
         app_path
             .set_value("", &exe.to_string_lossy().as_ref())
@@ -222,9 +224,7 @@ pub fn set_enabled(enabled: bool) -> Result<WindowsIntegrationStatus, String> {
             let _ = hkcu.delete_subkey_all(path);
         }
         let _ = hkcu.delete_subkey_all(r"Software\Classes\wterminal");
-        let _ = hkcu.delete_subkey_all(
-            r"Software\Microsoft\Windows\CurrentVersion\App Paths\wterminal.exe",
-        );
+        let _ = hkcu.delete_subkey_all(APP_PATH_KEY);
     }
     Ok(status())
 }
@@ -232,6 +232,27 @@ pub fn set_enabled(enabled: bool) -> Result<WindowsIntegrationStatus, String> {
 #[cfg(not(windows))]
 pub fn set_enabled(_enabled: bool) -> Result<WindowsIntegrationStatus, String> {
     Err("La integración con el Registro solo existe en Windows".into())
+}
+
+/// Desinstalación: quita los menús, el protocolo y App Paths, salvo que los
+/// registrara otra copia de WTerminal. Se escriben juntos, así que App Paths
+/// dice de cuál son.
+#[cfg(windows)]
+pub fn uninstall_cleanup() -> Result<(), String> {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let registered = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(APP_PATH_KEY)
+        .and_then(|key| key.get_value::<String, _>(""))
+        .ok();
+    if super::path_integration::owned_by_other_copy(
+        registered.as_deref(),
+        &exe.to_string_lossy(),
+        &|path| std::path::Path::new(path).exists(),
+    ) {
+        return Ok(());
+    }
+    set_enabled(false).map(|_| ())
 }
 
 #[tauri::command]

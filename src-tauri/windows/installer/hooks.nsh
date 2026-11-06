@@ -6,6 +6,7 @@
 ; el perfil del usuario: su carpeta y las `bin` de herramientas en el PATH de
 ; HKCU (solo las que añadió él), los menús «Abrir con WTerminal», App Paths, el
 ; protocolo wterminal:// y la marca RUNASADMIN (`platform::uninstall_cleanup`).
+; Lo que registró otra copia que sigue existiendo (un portable) no se toca.
 ; En una actualización (/UPDATE) no se deshace nada: la versión nueva lo usa.
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} $UpdateMode <> 1

@@ -27,6 +27,79 @@ use crate::{paths, spawn_cwd};
 /// la shell). Ahí la pestaña se queda abierta con el código a la vista, porque
 /// cerrarla haría desaparecer la única pista de qué ha pasado.
 const FAILED_SESSION: Duration = Duration::from_millis(3000);
+/// Un REPL que termina con error antes de esto no se cierra: su pestaña se
+/// queda con la salida y el código, para ver por qué no arrancó.
+const FAILED_REPL_SESSION: Duration = Duration::from_secs(15);
+/// Espera antes de reabrir una sesión WSL que WSL cerró al arrancar: da
+/// tiempo a que termine de apagarse la instancia anterior de la distro.
+const WSL_STARTUP_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// Como mucho un reintento por pestaña y entorno en este intervalo: si WSL
+/// sigue fallando, la pestaña muestra el error en vez de reintentar sin fin.
+const WSL_STARTUP_RETRY_WINDOW: Duration = Duration::from_secs(120);
+/// Solo una sesión que muere poco después de abrirse es un arranque fallido;
+/// medido: `wsl.exe` se rinde a los ~20 s.
+const WSL_STARTUP_RETRY_MAX_SESSION: Duration = Duration::from_secs(60);
+
+/// Salida de `wsl.exe` que indica que la VM o el contenedor de la distro se
+/// cerró por la fuerza mientras la sesión arrancaba (`0x80370107`), o que el
+/// servicio de WSL falló sin más detalle («Error catastrófico»,
+/// `Wsl/Service/E_UNEXPECTED`). Las dos salen en la misma carrera: una shell
+/// nueva de la distro mientras se apaga la anterior.
+fn is_transient_wsl_exit(code: Option<i32>, startup_output: &str) -> bool {
+    let output = startup_output.to_ascii_lowercase();
+    code.unwrap_or(-1) != 0
+        && (output.contains("0x80370107") || output.contains("wsl/service/e_unexpected"))
+}
+
+#[cfg(test)]
+mod wsl_startup_retry_tests {
+    #[test]
+    fn solo_el_cierre_forzado_de_la_vm_de_wsl_se_reintenta_y_una_vez() {
+        let error = "Se forzó el cierre de la máquina virtual o del contenedor.\r\nCódigo de error: Wsl/Service/0x80370107";
+        assert!(super::is_transient_wsl_exit(Some(-1), error));
+        assert!(!super::is_transient_wsl_exit(Some(0), error));
+        assert!(!super::is_transient_wsl_exit(Some(1), "bash: exit"));
+        let unexpected = "Error catastrófico \r\nCódigo de error: Wsl/Service/E_UNEXPECTED";
+        assert!(super::is_transient_wsl_exit(Some(-1), unexpected));
+        assert!(!super::is_transient_wsl_exit(Some(0), unexpected));
+        assert!(!super::is_transient_wsl_exit(
+            Some(1),
+            "E_UNEXPECTED en la salida de un programa"
+        ));
+        assert!(super::allow_wsl_startup_retry(
+            "tab-retry-test",
+            "wsl:Alpine"
+        ));
+        assert!(
+            !super::allow_wsl_startup_retry("tab-retry-test", "wsl:Alpine"),
+            "una sola vez"
+        );
+        // Otro entorno en la misma pestaña tiene su propio reintento: en el
+        // E2E, Alpine lo gastaba y Perl de Ubuntu, medio minuto después, ya no
+        // podía reintentar y su pestaña se cerraba.
+        assert!(super::allow_wsl_startup_retry(
+            "tab-retry-test",
+            "wsl:Ubuntu:lang:perl"
+        ));
+        assert!(super::allow_wsl_startup_retry(
+            "tab-retry-test-2",
+            "wsl:Alpine"
+        ));
+    }
+}
+
+fn allow_wsl_startup_retry(tab_id: &str, env_id: &str) -> bool {
+    static LAST_RETRY: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, Instant>>> =
+        once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+    let key = format!("{tab_id}/{env_id}");
+    let mut retries = LAST_RETRY.lock();
+    retries.retain(|_, at| at.elapsed() < WSL_STARTUP_RETRY_WINDOW);
+    if retries.contains_key(&key) {
+        return false;
+    }
+    retries.insert(key, Instant::now());
+    true
+}
 
 /// La ConPTY redistribuida nace con `PSEUDOCONSOLE_INHERIT_CURSOR` y pregunta
 /// la posición mediante DSR antes de procesar la primera orden. Si nadie
@@ -608,6 +681,10 @@ struct Tab {
     /// absolutas y un banner impreso con otras filas desplazaba la primera
     /// orden una o dos filas por debajo del prompt.
     viewport_confirmed: bool,
+    /// Un programa a pantalla completa ocupa la pestaña (`full-screen-app.ts`
+    /// en el frontend): la PTY usa justo las columnas visibles, sin la
+    /// reserva mínima de las shells, para que dibuje en lo que se ve.
+    exact_width: bool,
     /// Para transportes sin script de inicialización (Docker/ADB/Wine), el
     /// banner se entrega como salida PTY en el primer resize real, o al
     /// reutilizar el viewport vigente cuando el xterm ya estaba montado. Los
@@ -661,6 +738,7 @@ impl Tab {
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,
+            exact_width: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,
@@ -1022,12 +1100,24 @@ impl TabManager {
         }
 
         let spawn_dir = spawn_cwd::resolve_spawn_cwd(initial_cwd, env, &paths::home_cwd());
-        let viewport = self
-            .registry
-            .lock()
-            .find(tab_id)
-            .map(|tab| tab.viewport)
-            .unwrap_or_else(|| self.viewport());
+        let viewport = {
+            let mut registry = self.registry.lock();
+            match registry.find_mut(tab_id) {
+                Some(tab) => {
+                    // Solo una IA hereda el ancho exacto de la anterior: una
+                    // shell que sustituye a una IA a pantalla completa vuelve
+                    // a la reserva. Si naciera con el ancho estrecho, al
+                    // ensancharla después su prompt quedaba descolocado.
+                    tab.exact_width = tab.exact_width && env.id.starts_with("ai:");
+                    tab.viewport = Viewport {
+                        cols: interactive_cols(tab.viewport.cols, tab.exact_width),
+                        rows: tab.viewport.rows,
+                    };
+                    tab.viewport
+                }
+                None => self.viewport(),
+            }
+        };
 
         let manager = Arc::clone(self);
         let app_for_data = app.clone();
@@ -1196,6 +1286,10 @@ impl TabManager {
             crate::terminal::powershell::prepare_spawn_args(env.kind, &env.args).1;
         match session {
             Ok(session) => {
+                // Un REPL no deja procesos suyos al cerrarse (`kill_tree`).
+                if env.repl || env.kind == crate::environments::ShellKind::Repl {
+                    session.kill_whole_tree_on_close();
+                }
                 let mut registry = self.registry.lock();
                 let Some(tab) = registry.find_mut(tab_id) else {
                     // La pestaña se cerró mientras arrancaba la shell.
@@ -1217,8 +1311,18 @@ impl TabManager {
                 tab.semantic_zones.reset();
                 tab.last_missing_command = None;
                 let viewport = tab.viewport;
+                let exact_width = tab.exact_width;
                 let pane_count = tab.pane_count.max(1);
+                let new_session = tab.session.clone();
                 drop(registry);
+                // Una IA pudo recibir su ancho exacto mientras arrancaba (el
+                // aviso del frontend llegó a la sesión anterior): se aplica
+                // ahora a la nueva. Con el mismo tamaño ConPTY no hace nada.
+                if exact_width {
+                    if let Some(session) = new_session {
+                        let _ = session.resize(viewport);
+                    }
+                }
                 self.respond_startup_cursor_query(tab_id, generation);
 
                 log_info!(
@@ -1856,7 +1960,7 @@ impl TabManager {
             );
             return;
         }
-        let (startup_output, startup_exe, startup_is_nsudo) = {
+        let (startup_output, startup_exe, startup_is_nsudo, startup_env, recent_output) = {
             let mut registry = self.registry.lock();
             if let Some(tab) = registry.find_mut(tab_id) {
                 let output = std::mem::take(&mut tab.startup_output);
@@ -1866,9 +1970,21 @@ impl TabManager {
                     .as_deref()
                     .is_some_and(|id| id.starts_with("nsudo:"));
                 tab.session = None;
-                (output, executable, is_nsudo)
+                (
+                    output,
+                    executable,
+                    is_nsudo,
+                    tab.env.clone(),
+                    // WSL no retiene su salida de arranque: el error de
+                    // `wsl.exe` llega a la vista y queda en este búfer.
+                    {
+                        let mut tail = tab.output_buffer.clone();
+                        trim_to_last_chars(&mut tail, 2000);
+                        tail
+                    },
+                )
             } else {
-                (String::new(), None, false)
+                (String::new(), None, false, None, String::new())
             }
         };
         log_info!(
@@ -1881,13 +1997,64 @@ impl TabManager {
             })
         );
 
+        // Al cambiar de shell dentro de la misma distro, WSL puede estar
+        // apagando aún la instancia de la sesión anterior (con systemd tarda
+        // unos segundos) y la nueva se engancha a ese contenedor: a los ~20 s
+        // sale con -1 y «Se forzó el cierre de la máquina virtual o del
+        // contenedor (Wsl/Service/0x80370107)», o con «Error catastrófico»
+        // (Wsl/Service/E_UNEXPECTED). Es transitorio: se reabre la
+        // misma sesión una vez, sin cerrar la pestaña.
+        if let Some(env) = startup_env.clone().filter(|env| {
+            env.transport == crate::environments::Transport::Wsl
+                && elapsed < WSL_STARTUP_RETRY_MAX_SESSION
+                && (is_transient_wsl_exit(code, &startup_output)
+                    || is_transient_wsl_exit(code, &recent_output))
+        }) {
+            if allow_wsl_startup_retry(tab_id, &env.id) {
+                log_warn!(
+                    "WSL cerró la sesión mientras arrancaba; se reabre una vez",
+                    serde_json::json!({ "tabId": tab_id, "envId": env.id, "code": code })
+                );
+                let manager = Arc::clone(self);
+                let app = app.clone();
+                let tab_id = tab_id.to_string();
+                let _ = std::thread::Builder::new()
+                    .name("wsl-startup-retry".into())
+                    .spawn(move || {
+                        std::thread::sleep(WSL_STARTUP_RETRY_DELAY);
+                        // El usuario puede haber cambiado de entorno o cerrado
+                        // la pestaña mientras tanto.
+                        if manager.is_current(&tab_id, generation) {
+                            let cwd = manager.cwd_of(&tab_id);
+                            manager.spawn_pty(&app, &tab_id, &env, cwd.as_deref());
+                        }
+                    });
+                return;
+            }
+        }
+
         // Si el lanzador alcanzó a escribir un diagnóstico, conserva la
         // pestaña aunque haya tardado más que el umbral de arranque. Es
         // especialmente importante para NSudo: al iniciar TrustedInstaller
         // puede esperar al servicio y después fallar, pero cerrar la pestaña
         // haría desaparecer precisamente la explicación que necesitamos.
+        // Un REPL no retiene su salida de arranque (va directa a la vista), así
+        // que «escribió un diagnóstico» no se puede saber por `startup_output`.
+        // Si termina con error poco después de abrirse es un arranque fallido:
+        // en el E2E, Elm salió con código 1 a los 3,004 s (el límite general
+        // era 3 s) y la pestaña se cerró llevándose el mensaje. Dentro de WSL
+        // el plazo es el del arranque de WSL: `wsl.exe` se rinde a los ~20 s y
+        // la pestaña del REPL desaparecía sin decir por qué.
+        let failed_repl_start = startup_env.as_ref().is_some_and(|env| {
+            let limit = if env.transport == crate::environments::Transport::Wsl {
+                WSL_STARTUP_RETRY_MAX_SESSION
+            } else {
+                FAILED_REPL_SESSION
+            };
+            (env.repl || env.kind == crate::environments::ShellKind::Repl) && elapsed < limit
+        });
         if code.unwrap_or(-1) != 0
-            && (elapsed < FAILED_SESSION || !startup_output.trim().is_empty())
+            && (elapsed < FAILED_SESSION || !startup_output.trim().is_empty() || failed_repl_start)
         {
             let diagnostic = if !startup_output.trim().is_empty() {
                 startup_output.trim_end().to_string()
@@ -2153,9 +2320,17 @@ impl TabManager {
     /// tamaño de la ventana.
     /// `pty_resize`: además de redimensionar, confirma que la geometría ya es
     /// la del xterm que pintará la salida y permite arrancar la shell.
-    pub fn resize_from_frontend(&self, app: &AppHandle, tab_id: &str, cols: u16, rows: u16) {
+    pub fn resize_from_frontend(
+        &self,
+        app: &AppHandle,
+        tab_id: &str,
+        cols: u16,
+        rows: u16,
+        exact: bool,
+    ) {
         if let Some(tab) = self.registry.lock().find_mut(tab_id) {
             tab.viewport_confirmed = true;
+            tab.exact_width = exact;
         }
         self.resize(app, tab_id, cols, rows);
     }
@@ -2165,12 +2340,21 @@ impl TabManager {
         // xterm puede ocultar esa anchura detrás de su host, pero ConPTY debe
         // conservarla para que una línea que ya está en edición no se vuelva
         // a envolver con una rejilla distinta.
+        let exact = self
+            .registry
+            .lock()
+            .find_mut(tab_id)
+            .is_some_and(|tab| tab.exact_width);
         let viewport = Viewport {
-            cols: cols.max(MIN_INTERACTIVE_COLS),
+            cols: interactive_cols(cols, exact),
             rows: rows.max(1),
         };
-        *self.viewport.lock() = viewport;
-        self.viewport_saver.remember(viewport);
+        // Un programa a pantalla completa no cambia la reserva con la que
+        // nacen las pestañas nuevas: ese tamaño es solo de esta.
+        if !exact {
+            *self.viewport.lock() = viewport;
+            self.viewport_saver.remember(viewport);
+        }
 
         // Guardar el tamaño por pestaña evita que una casilla redimensionada
         // en último lugar contamine el repintado progresivo de las otras.
@@ -2355,6 +2539,7 @@ impl TabManager {
                 windows_manager,
                 initial_banner: false,
                 assist_lines: &[],
+                command_marks: false,
             };
             if let Some(script) = crate::alias_profiles::build_init_script(env.kind, &t, &options) {
                 crate::session_files::write_help_files(&tab_id, &help_path, env.kind, &script);
@@ -2503,6 +2688,16 @@ impl ViewportSaver {
 /// Límites del tamaño que acepta el backend, iguales a los de la versión
 /// Electron. Un valor fuera de rango se ignora en vez de recortarse: viene de
 /// una medición del frontend que ha salido mal.
+/// Columnas de la PTY de una pestaña: la reserva mínima de las shells o, con
+/// un programa a pantalla completa, justo las pedidas.
+fn interactive_cols(cols: u16, exact: bool) -> u16 {
+    if exact {
+        cols.max(1)
+    } else {
+        cols.max(MIN_INTERACTIVE_COLS)
+    }
+}
+
 pub fn valid_viewport(cols: i64, rows: i64) -> Option<Viewport> {
     if (1..=MAX_TERMINAL_COLS).contains(&cols) && (1..=500).contains(&rows) {
         Some(Viewport {
@@ -2653,6 +2848,16 @@ mod tests {
     }
 
     #[test]
+    fn un_programa_a_pantalla_completa_recibe_el_ancho_visible() {
+        // Una shell conserva la reserva de 1024 columnas…
+        assert_eq!(interactive_cols(132, false), MIN_INTERACTIVE_COLS);
+        assert_eq!(interactive_cols(2000, false), 2000);
+        // …pero Claude Code, Amp o vim dibujan en lo que se ve.
+        assert_eq!(interactive_cols(132, true), 132);
+        assert_eq!(interactive_cols(0, true), 1);
+    }
+
+    #[test]
     fn la_sonda_de_cursor_inicial_se_consume_sin_borrar_el_resto() {
         let mut data = format!("{STARTUP_CURSOR_QUERY}C:\\Users\\Admin>");
         assert!(remove_startup_query(&mut data, STARTUP_CURSOR_QUERY));
@@ -2752,6 +2957,7 @@ mod tests {
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,
+            exact_width: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,
@@ -2794,6 +3000,7 @@ mod tests {
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,
+            exact_width: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,
@@ -2858,6 +3065,7 @@ mod tests {
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,
+            exact_width: false,
             initial_banner_pending: false,
             here_scripts_dir: None,
             here_manual: false,

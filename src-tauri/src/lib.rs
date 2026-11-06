@@ -211,6 +211,11 @@ pub fn run() {
     if std::env::args().any(|argument| argument == platform::UNINSTALL_CLEANUP_ARG) {
         std::process::exit(platform::uninstall_cleanup());
     }
+    // `--install-webview2 [ruta]`: instala WebView2 sin ventana y sale.
+    #[cfg(windows)]
+    if let Some(installer) = platform::webview2::install_argument() {
+        std::process::exit(platform::webview2::install_command(installer.as_deref()));
+    }
     install_async_runtime();
     apply_runtime_argument_overrides();
     let startup_started = Instant::now();
@@ -264,12 +269,17 @@ pub fn run() {
         })),
     );
     #[cfg(target_os = "windows")]
-    if std::env::var("LTERMINAL_WINE_HEADLESS_SMOKE").as_deref() != Ok("1")
-        && !platform::webview2::ensure_runtime()
-    {
-        log_error!(
-            "WebView2 Runtime no está disponible; el portable necesita el runtime de Microsoft o su bootstrapper (junto al ejecutable o embebido)"
-        );
+    if std::env::var("LTERMINAL_WINE_HEADLESS_SMOKE").as_deref() != Ok("1") {
+        match platform::webview2::ensure_runtime() {
+            platform::webview2::Readiness::Ready => {}
+            platform::webview2::Readiness::Missing => log_error!(
+                "WebView2 Runtime no está disponible: instálalo de Microsoft, deja su instalador junto al ejecutable o usa `wterminal --install-webview2`"
+            ),
+            platform::webview2::Readiness::UserExit => {
+                log_info!("WebView2 Runtime ausente; el usuario eligió salir");
+                std::process::exit(1);
+            }
+        }
     }
     if platform::host().is_windows() && conpty.is_none() {
         // Sin ella la app arranca igual, pero en un Windows recortado las
@@ -285,6 +295,8 @@ pub fn run() {
     // Las cachés centralizadas deben estar publicadas antes de la primera
     // pestaña y de las sondas de detección que arrancan con la app.
     toolchain_store::refresh_environment();
+    // Gemini y Qwen no deben abrir una consola aparte para actualizarse.
+    environments::ai_cli_defaults::install();
 
     // Temporales de ejecuciones anteriores que no se cerraron limpiamente.
     let _ = std::thread::Builder::new()
@@ -438,12 +450,16 @@ pub fn run() {
             commands_panels::scripts_list,
             commands_panels::scripts_list_here,
             commands_panels::scripts_pick_target,
+            commands_panels::terminal_save_output,
+            commands_panels::system_drive_free_bytes,
+            commands_panels::window_request_attention,
             commands_panels::scripts_open,
             commands_panels::scripts_cd,
             commands_panels::scripts_cd_directory,
             commands_panels::scripts_run,
             commands_panels::scripts_pin,
             commands_panels::explorer_list,
+            commands_panels::explorer_size,
             commands_panels::explorer_follow,
             commands_panels::explorer_create,
             commands_panels::explorer_open,
@@ -457,6 +473,7 @@ pub fn run() {
             commands_install::install_list,
             commands_install::install_catalog,
             commands_install::install_check,
+            commands_install::install_detection_stage,
             commands_install::install_refresh,
             commands_install::install_run,
             ltools::ltools_actions_list,
@@ -511,6 +528,7 @@ pub fn run() {
             projects::gh_manage::github_runs,
             projects::gh_manage::github_run_rerun,
             projects::git_local::git_local_status,
+            projects::git_local::git_downloaded_status,
             projects::git_local::git_local_commit,
             projects::git_local::git_local_branch,
             commands_projects::github_git_terminal,

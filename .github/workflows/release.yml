@@ -1,8 +1,9 @@
 name: Release
 
+# Solo a mano. Al subir una etiqueta se lanzaba solo, compilaba otros binarios
+# (sin la validación larga ni el vídeo) y reemplazaba los validados que ya se
+# hubieran subido a la release.
 on:
-  push:
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
@@ -88,6 +89,7 @@ jobs:
           path: |
             release/*.zip
             release/*-x64-setup.exe
+            release/*-Portable.exe
           if-no-files-found: error
 
   publish:
@@ -146,8 +148,15 @@ jobs:
             echo 'Faltan artefactos Linux/Windows, el manifiesto o la firma.' >&2
             exit 1
           fi
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
-              || gh release view "$RELEASE_TAG" >/dev/null
+          # Nunca se reemplaza lo que ya está subido: una release con adjuntos
+          # puede ser una validada a mano. Lo de este flujo va a un borrador.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            existing="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')"
+            if [ "$existing" != "0" ]; then
+              echo "La release $RELEASE_TAG ya tiene $existing adjuntos; no se reemplazan." >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes
           fi
-          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}"
