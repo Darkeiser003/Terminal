@@ -22,6 +22,7 @@
     import ProjectsPanel from "./components/ProjectsPanel.svelte";
     import ScriptsPanel from "./components/ScriptsPanel.svelte";
     import SettingsPanel from "./components/SettingsPanel.svelte";
+    import StorePanel from "./components/StorePanel.svelte";
     import TabBar from "./components/TabBar.svelte";
     import TerminalPane from "./components/TerminalPane.svelte";
     import Toolbar from "./components/Toolbar.svelte";
@@ -30,6 +31,7 @@
     let startupError = $state("");
     let deps = $state<DependenciesPanel | null>(null);
     let settings = $state<SettingsPanel | null>(null);
+    let store = $state<StorePanel | null>(null);
     let scripts = $state<ScriptsPanel | null>(null);
     let projects = $state<ProjectsPanel | null>(null);
     // Los paneles conservan su estado una vez abiertos, pero no construyen sus
@@ -37,6 +39,7 @@
     // existe antes de pedirle su carga, también en la primera apertura.
     let depsMounted = $state(false);
     let settingsMounted = $state(false);
+    let storeMounted = $state(false);
     let scriptsMounted = $state(false);
     // KeyboardEvent.ctrlKey no distingue Ctrl izquierdo de Ctrl derecho en la
     // pulsación de W/A/S/D. Se conserva el estado del modificador físico para
@@ -248,6 +251,19 @@
         try {
             await tick();
             await settings?.load();
+            finish('ok');
+        } catch (cause) {
+            finish('error', { error: String(cause).slice(0, 300) });
+            throw cause;
+        }
+    }
+
+    async function loadStore(): Promise<void> {
+        const finish = perf.start('panel.load', { panel: 'store' });
+        storeMounted = true;
+        try {
+            await tick();
+            await store?.load();
             finish('ok');
         } catch (cause) {
             finish('error', { error: String(cause).slice(0, 300) });
@@ -695,6 +711,9 @@
             } else if (panel === 'settings') {
                 panels.show('settings');
                 void loadSettings();
+            } else if (panel === 'store') {
+                panels.show('store');
+                void loadStore();
             }
         };
         window.addEventListener('winslim:open-panel', openPanelFromTerminal);
@@ -1274,6 +1293,9 @@
     {/if}
     {#if settingsMounted}
         <SettingsPanel bind:this={settings} />
+    {/if}
+    {#if storeMounted}
+        <StorePanel bind:this={store} />
     {/if}
     {#if paletteOpen && ready}
         <CommandPalette onRun={runPaletteEntry} onClose={() => (paletteOpen = false)} />

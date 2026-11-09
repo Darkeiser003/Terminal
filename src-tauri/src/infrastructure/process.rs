@@ -365,7 +365,7 @@ pub fn run_with_timeout_env(
     timeout: Duration,
     environment: &[(&str, &str)],
 ) -> Option<Output> {
-    run_with_timeout_inner(program, args, timeout, environment, false)
+    run_with_timeout_inner(program, args, timeout, environment, false, None)
 }
 
 /// Como `run_with_timeout_env`, pero también recoge la salida de errores:
@@ -376,7 +376,21 @@ pub fn run_with_timeout_capture(
     timeout: Duration,
     environment: &[(&str, &str)],
 ) -> Option<Output> {
-    run_with_timeout_inner(program, args, timeout, environment, true)
+    run_with_timeout_inner(program, args, timeout, environment, true, None)
+}
+
+/// Igual que [`run_with_timeout_capture`], escribiendo `input` en la entrada
+/// estándar del proceso y cerrándola. Para lo que no debe ir nunca en los
+/// argumentos (el valor de un secreto de GitHub, que se vería en la lista de
+/// procesos y en el registro).
+pub fn run_with_timeout_capture_stdin(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    environment: &[(&str, &str)],
+    input: &[u8],
+) -> Option<Output> {
+    run_with_timeout_inner(program, args, timeout, environment, true, Some(input))
 }
 
 fn run_with_timeout_inner(
@@ -385,6 +399,7 @@ fn run_with_timeout_inner(
     timeout: Duration,
     environment: &[(&str, &str)],
     capture_stderr: bool,
+    input: Option<&[u8]>,
 ) -> Option<Output> {
     let mut command = hidden_command(program);
     configure_process_tree(&mut command);
@@ -392,7 +407,17 @@ fn run_with_timeout_inner(
     if capture_stderr {
         command.stderr(Stdio::piped());
     }
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command.args(args).spawn().ok()?;
+    if let Some(input) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write as _;
+            let _ = stdin.write_all(input);
+            // Al soltarla se cierra: el proceso ve el fin de la entrada.
+        }
+    }
     // La salida se lee mientras el proceso corre: si solo se leyera al
     // terminar, un hijo que escribe más de lo que cabe en la tubería (el
     // catálogo de WTools, un `winget list` largo) se quedaría bloqueado

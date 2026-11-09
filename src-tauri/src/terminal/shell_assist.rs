@@ -333,6 +333,13 @@ pub fn clink_profile_dir() -> PathBuf {
             }
         }
     }
+    let default_dir = clink_default_profile_dir();
+    crate::toolchain_store::clink_profile_in_store(&default_dir).unwrap_or(default_dir)
+}
+
+/// El perfil de siempre, fuera de la carpeta propia. «Traer lo ya instalado»
+/// lo copia desde aquí (`store_adopt`).
+pub fn clink_default_profile_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| crate::paths::home_dir().join(".local").join("share"))
         .join(crate::identity::current().name)

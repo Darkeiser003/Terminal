@@ -16,6 +16,7 @@
         "headerImage": "windows/installer/header.bmp",
         "uninstallerHeaderImage": "windows/installer/header-uninstall.bmp",
         "installerHooks": "windows/installer/hooks.nsh",
+        "template": "windows/installer/installer.nsi",
         "displayLanguageSelector": true,
         "languages": [
           "Spanish",
@@ -26,11 +27,19 @@
           "Portuguese",
           "Russian",
           "Ukrainian",
+          "Polish",
+          "Romanian",
           "Arabic",
           "Japanese",
           "Korean",
-          "SimpChinese"
-        ]
+          "SimpChinese",
+          "Hindi"
+        ],
+        "customLanguageFiles": {
+          "Polish": "windows/installer/Polish.nsh",
+          "Romanian": "windows/installer/Romanian.nsh",
+          "Hindi": "windows/installer/Hindi.nsh"
+        }
       }
     }
   }

@@ -494,10 +494,12 @@
         top: calc(100% + 6px);
         left: 0;
         z-index: 61;
-        width: min(480px, calc(100vw - 20px));
+        /* Entre `--ui-scale`: el zoom de la barra también agranda vw y vh
+           (ver `.lang-menu`). */
+        width: min(480px, calc(100vw / var(--ui-scale, 1) - 20px));
         min-width: 0;
-        max-width: calc(100vw - 20px);
-        max-height: min(70vh, 480px);
+        max-width: calc(100vw / var(--ui-scale, 1) - 20px);
+        max-height: min(calc(70vh / var(--ui-scale, 1)), 480px);
         overflow-x: hidden;
         overflow-y: auto;
         padding: 5px;
@@ -705,6 +707,13 @@
         z-index: 60;
     }
 
+    /* Dieciséis idiomas miden unos 480 px: con la ventana por defecto en una
+       pantalla pequeña, o con la interfaz agrandada, la lista se salía por
+       abajo sin forma de llegar al final. Se queda dentro de la ventana (la
+       barra está arriba: 40 px + 6 de separación) y hace scroll. La barra
+       lleva `zoom: var(--ui-scale)` y el zoom también multiplica `vh` y `vw`
+       (comprobado en Chromium 152): sin dividir, al 200 % «100vh» mide el
+       doble de la ventana. */
     .lang-menu {
         position: absolute;
         top: calc(100% + 6px);
@@ -712,7 +721,12 @@
         z-index: 61;
         display: flex;
         flex-direction: column;
-        min-width: 175px;
+        min-width: min(175px, calc(100vw / var(--ui-scale, 1) - 20px));
+        max-width: calc(100vw / var(--ui-scale, 1) - 20px);
+        max-height: calc(100vh / var(--ui-scale, 1) - 40px - 6px - 10px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
         padding: 4px;
         border: 1px solid var(--border);
         border-radius: 5px;
@@ -722,6 +736,7 @@
 
     .lang-item {
         display: flex;
+        flex: none;
         align-items: center;
         gap: 8px;
         padding: 6px 10px;
@@ -753,6 +768,10 @@
 
     .lang-label {
         flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .check-mark {

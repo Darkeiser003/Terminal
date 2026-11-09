@@ -82,10 +82,15 @@ pub enum Category {
     Toolchains,
     Programs,
     Projects,
+    /// Configuración de los REPL (IPython, Jupyter): solo si aún no existía.
+    Config,
+    /// Plugins de las shells: caché de starship y el perfil de Clink propio
+    /// de WTerminal.
+    Plugins,
 }
 
 impl Category {
-    pub const ALL: [Category; 8] = [
+    pub const ALL: [Category; 10] = [
         Category::Caches,
         Category::Downloads,
         Category::AiModels,
@@ -94,7 +99,31 @@ impl Category {
         Category::Toolchains,
         Category::Programs,
         Category::Projects,
+        Category::Config,
+        Category::Plugins,
     ];
+
+    /// El identificador que ve el frontend (el mismo que da serde).
+    pub fn id(self) -> &'static str {
+        match self {
+            Category::Caches => "caches",
+            Category::Downloads => "downloads",
+            Category::AiModels => "aiModels",
+            Category::Tools => "tools",
+            Category::ReplHistory => "replHistory",
+            Category::Toolchains => "toolchains",
+            Category::Programs => "programs",
+            Category::Projects => "projects",
+            Category::Config => "config",
+            Category::Plugins => "plugins",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Category> {
+        Category::ALL
+            .into_iter()
+            .find(|category| category.id() == id)
+    }
 
     /// Subcarpeta dentro de la raíz. `cache` conserva el nombre de siempre:
     /// las cachés ya descargadas siguen en su sitio.
@@ -108,6 +137,8 @@ impl Category {
             Category::Toolchains => "toolchains",
             Category::Programs => "programas",
             Category::Projects => "proyectos",
+            Category::Config => "configuracion",
+            Category::Plugins => "plugins",
         }
     }
 }
@@ -123,6 +154,8 @@ pub struct Categories {
     pub toolchains: bool,
     pub programs: bool,
     pub projects: bool,
+    pub config: bool,
+    pub plugins: bool,
 }
 
 impl Categories {
@@ -136,6 +169,8 @@ impl Categories {
             toolchains: preferences.toolchain_store_toolchains,
             programs: preferences.toolchain_store_programs,
             projects: preferences.toolchain_store_projects,
+            config: preferences.toolchain_store_config,
+            plugins: preferences.toolchain_store_plugins,
         }
     }
 
@@ -149,6 +184,8 @@ impl Categories {
             Category::Toolchains => self.toolchains,
             Category::Programs => self.programs,
             Category::Projects => self.projects,
+            Category::Config => self.config,
+            Category::Plugins => self.plugins,
         }
     }
 }
@@ -241,6 +278,101 @@ const fn history(
 /// de verlos).
 const OLLAMA_ENTRY: &str = "ollama";
 
+/// Lo que cambia dónde va cada entrada además de la raíz: una carpeta propia
+/// por categoría (Ajustes), entradas apagadas una a una y entradas traídas con
+/// «Traer lo ya instalado» (`store_adopt`), que se reubican aunque ya
+/// existieran en su sitio de siempre, porque su contenido ya está copiado.
+#[derive(Debug, Default, Clone)]
+struct Layout {
+    category_dirs: HashMap<&'static str, PathBuf>,
+    disabled: std::collections::HashSet<String>,
+    adopted: std::collections::HashSet<String>,
+}
+
+static LAYOUT: Lazy<Mutex<Layout>> = Lazy::new(|| Mutex::new(Layout::default()));
+
+/// Lee la carpeta de cada categoría y las entradas apagadas de las
+/// preferencias, y las traídas del diario de `store_adopt`. Se llama antes de
+/// calcular variables, carpetas `bin` o el estado.
+pub fn sync_layout(preferences: &crate::preferences::Preferences) {
+    let mut layout = Layout::default();
+    for (category, dir) in parse_category_dirs(&preferences.toolchain_store_category_dirs) {
+        layout.category_dirs.insert(category.id(), dir);
+    }
+    layout.disabled = preferences
+        .toolchain_store_disabled
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
+    layout.adopted = crate::store_adopt::adopted_variable_ids()
+        .into_iter()
+        .collect();
+    *LAYOUT.lock() = layout;
+}
+
+/// `categoría=carpeta`, una por línea (`caches=E:\cachés`). Las líneas con
+/// una categoría desconocida o una carpeta relativa se ignoran.
+pub fn parse_category_dirs(text: &str) -> Vec<(Category, PathBuf)> {
+    text.lines()
+        .filter_map(|line| {
+            let (id, dir) = line.split_once('=')?;
+            let category = Category::from_id(id.trim())?;
+            let dir = PathBuf::from(dir.trim());
+            dir.is_absolute().then_some((category, dir))
+        })
+        .collect()
+}
+
+/// Id del perfil de Clink propio de WTerminal en «Traer lo ya instalado».
+pub const CLINK_PROFILE_ENTRY: &str = "clink-profile";
+
+/// Dónde va el perfil de Clink de WTerminal con la categoría de plugins
+/// activa: `<plugins>\clink` si aún no existía el de siempre (`default_dir`)
+/// o si se trajo con «Traer lo ya instalado». `None` = el de siempre.
+pub fn clink_profile_in_store(default_dir: &Path) -> Option<PathBuf> {
+    let preferences = crate::preferences::current();
+    sync_layout(&preferences);
+    if !preferences.toolchain_store_plugins || entry_disabled(CLINK_PROFILE_ENTRY) {
+        return None;
+    }
+    let root = effective_root(
+        preferences.toolchain_store_enabled,
+        &preferences.toolchain_store_dir,
+    )?;
+    let in_store = category_base(&root, Category::Plugins).join("clink");
+    (adopted(CLINK_PROFILE_ENTRY) || in_store.exists() || !default_dir.exists()).then_some(in_store)
+}
+
+/// Archivo que deja WTerminal en la raíz de la carpeta propia: explica qué es
+/// y marca la carpeta como suya. El desinstalador solo ofrece borrar una
+/// carpeta propia elegida a mano si lo lleva (`platform::first_run`).
+pub const STORE_MARKER: &str = "LEEME-carpeta-propia-WTerminal.txt";
+
+const STORE_MARKER_TEXT: &str = "Carpeta propia de WTerminal: cachés, descargas, modelos de IA, herramientas, historial, toolchains, configuración, plugins y programas instalados desde WTerminal, cada cosa en su subcarpeta.\r\nSe gestiona en Ajustes > Comportamiento > «Gestionar la carpeta propia…». Al desinstalar WTerminal se puede borrar entera.\r\n";
+
+/// La entrada se trajo a la carpeta propia con «Traer lo ya instalado».
+pub fn adopted(id: &str) -> bool {
+    LAYOUT.lock().adopted.contains(id)
+}
+
+/// La entrada está apagada a mano en Ajustes, aunque su categoría siga activa.
+pub fn entry_disabled(id: &str) -> bool {
+    LAYOUT.lock().disabled.contains(id)
+}
+
+/// La carpeta de una categoría: la que eligió el usuario para ella o
+/// `<raíz>\<subcarpeta>`.
+pub fn category_base(root: &Path, category: Category) -> PathBuf {
+    LAYOUT
+        .lock()
+        .category_dirs
+        .get(category.id())
+        .cloned()
+        .unwrap_or_else(|| root.join(category.dir()))
+}
+
 #[rustfmt::skip]
 const CACHES: &[CacheDef] = &[
     entry("npm", "npm", "npm_config_cache", "npm", Category::Caches),
@@ -271,6 +403,20 @@ const CACHES: &[CacheDef] = &[
     toolchain("gradle", "Gradle", "GRADLE_USER_HOME", "gradle", Bin::None),
     toolchain("dotnet-home", ".NET (dotnet)", "DOTNET_CLI_HOME", "dotnet", Bin::None),
     toolchain("android-user", "Android (AVD y ajustes)", "ANDROID_USER_HOME", "android", Bin::None),
+    // Haskell y Elixir: paquetes, índices y compiladores descargados. Sin
+    // `bin` en el PATH: cada una lo gestiona con su propia configuración.
+    toolchain("cabal", "Haskell (cabal)", "CABAL_DIR", "cabal", Bin::None),
+    toolchain("stack", "Haskell (Stack)", "STACK_ROOT", "stack", Bin::None),
+    toolchain("mix", "Elixir (Mix)", "MIX_HOME", "mix", Bin::None),
+    entry("pub", "Dart y Flutter (pub)", "PUB_CACHE", "pub", Category::Caches),
+    // Configuración de los REPL: solo si aún no existía (como las
+    // toolchains), para no dejar de ver la que ya tienes.
+    entry("ipython", "IPython (configuración y perfiles)", "IPYTHONDIR", "ipython", Category::Config),
+    entry("jupyter", "Jupyter (configuración)", "JUPYTER_CONFIG_DIR", "jupyter", Category::Config),
+    // Plugins de las shells. El perfil de Clink no va por variable: WTerminal
+    // ya le pasa el suyo con `--profile` (`shell_assist::clink_profile_dir`), y
+    // `CLINK_PROFILE` lo anularía.
+    entry("starship-cache", "starship (caché)", "STARSHIP_CACHE", "starship", Category::Plugins),
     // Las acciones «Instalar» de WinGet y Chocolatey instalan en
     // `<esta carpeta>\<id>` si la variable existe
     // (`packages::actions::centralized_install`).
@@ -821,6 +967,7 @@ pub fn default_root() -> PathBuf {
 /// (`projects::github::projects_folder`).
 pub fn centralized_projects_dir() -> Option<PathBuf> {
     let preferences = crate::preferences::current();
+    sync_layout(&preferences);
     if !preferences.toolchain_store_projects {
         return None;
     }
@@ -828,7 +975,7 @@ pub fn centralized_projects_dir() -> Option<PathBuf> {
         preferences.toolchain_store_enabled,
         &preferences.toolchain_store_dir,
     )
-    .map(|root| root.join(Category::Projects.dir()))
+    .map(|root| category_base(&root, Category::Projects))
 }
 
 pub fn effective_root(enabled: bool, configured: &str) -> Option<PathBuf> {
@@ -846,7 +993,7 @@ pub fn effective_root(enabled: bool, configured: &str) -> Option<PathBuf> {
 }
 
 fn cache_path(root: &Path, cache: &CacheDef) -> PathBuf {
-    let dir = root.join(cache.category.dir());
+    let dir = category_base(root, cache.category);
     // Programas no tiene subcarpeta: `<raíz>\programas\<id>`.
     if cache.subdir.is_empty() {
         dir
@@ -863,7 +1010,8 @@ fn active_entries(
 ) -> impl Iterator<Item = &'static CacheDef> {
     CACHES.iter().filter(move |cache| {
         categories.includes(cache.category)
-            && !(cache.id == OLLAMA_ENTRY && existing_ollama_models)
+            && !entry_disabled(cache.id)
+            && !(cache.id == OLLAMA_ENTRY && existing_ollama_models && !adopted(cache.id))
             && !toolchain_preinstalled(cache)
     })
 }
@@ -1072,6 +1220,17 @@ fn system_location(
         ("gradle", _) => home(&[".gradle"]),
         ("dotnet-home", _) => home(&[".dotnet"]),
         ("android-user", _) => home(&[".android"]),
+        ("cabal", true) => roaming(&["cabal"]),
+        ("cabal", false) => home(&[".cabal"]),
+        ("stack", true) => roaming(&["stack"]),
+        ("stack", false) => home(&[".stack"]),
+        ("mix", _) => home(&[".mix"]),
+        ("pub", true) => local(&["Pub", "Cache"]),
+        ("pub", false) => home(&[".pub-cache"]),
+        ("ipython", _) => home(&[".ipython"]),
+        ("jupyter", _) => home(&[".jupyter"]),
+        ("starship-cache", true) => local(&["starship"]),
+        ("starship-cache", false) => home(&[".cache", "starship"]),
         // Sin centralizar, WinGet decide: Program Files para los instaladores y
         // sus paquetes portables en LOCALAPPDATA, que es lo que se mide aquí.
         ("winget-programs", true) => local(&["Microsoft", "WinGet", "Packages"]),
@@ -1087,7 +1246,14 @@ fn system_location(
 /// ver lo que ya tienes instalado. La categoría solo sirve para instalaciones
 /// nuevas, igual que la regla de Ollama.
 fn toolchain_preinstalled(cache: &CacheDef) -> bool {
-    if cache.category != Category::Toolchains {
+    // La configuración de los REPL sigue la misma regla: con IPYTHONDIR en
+    // una carpeta vacía, IPython dejaría de ver tus perfiles. Lo ya instalado
+    // se trae a la carpeta propia a propósito, con «Traer lo ya instalado»
+    // (`store_adopt`), y entonces sí se reubica.
+    if !matches!(cache.category, Category::Toolchains | Category::Config) {
+        return false;
+    }
+    if adopted(cache.id) {
         return false;
     }
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
@@ -1117,6 +1283,7 @@ fn ollama_has_existing_models() -> bool {
 /// PATH las pone también en el del usuario (`path_integration::sync_tool_bins`).
 pub fn published_bin_dirs() -> Vec<PathBuf> {
     let preferences = crate::preferences::current();
+    sync_layout(&preferences);
     let root = effective_root(
         preferences.toolchain_store_enabled,
         &preferences.toolchain_store_dir,
@@ -1135,6 +1302,7 @@ pub fn published_bin_dirs() -> Vec<PathBuf> {
 /// (`BIN_REQUIRES`). Nunca incluye una variable que ya definió el usuario.
 pub fn published_variables() -> Vec<(String, String)> {
     let preferences = crate::preferences::current();
+    sync_layout(&preferences);
     let root = effective_root(
         preferences.toolchain_store_enabled,
         &preferences.toolchain_store_dir,
@@ -1147,13 +1315,82 @@ pub fn published_variables() -> Vec<(String, String)> {
         ollama_has_existing_models(),
         &user_defined,
     );
-    required_variables(
+    let mut variables = required_variables(
         root.as_deref(),
         categories,
         cfg!(windows),
         &overrides,
         &user_defined,
-    )
+    );
+    // Lo traído con «Traer lo ya instalado»: tras confirmar se borra el
+    // original, y sin la variable en el usuario rustup, cargo o IPython
+    // dejarían de encontrar lo suyo fuera de WTerminal.
+    for cache in CACHES.iter().filter(|cache| adopted(cache.id)) {
+        if let Some(pair) = overrides.iter().find(|(name, _)| name == cache.variable) {
+            if !variables.contains(pair) {
+                variables.push(pair.clone());
+            }
+        }
+    }
+    variables
+}
+
+/// Lo que «Traer lo ya instalado» (`store_adopt`) puede traer por variable:
+/// cada entrada con su ubicación de siempre y su sitio en la carpeta propia.
+/// Fuera quedan las descargas (temporales), los programas (van con una unión,
+/// aparte) y los proyectos (tienen su propia carpeta en Ajustes).
+pub struct AdoptableEntry {
+    pub id: String,
+    pub label: String,
+    pub category: Category,
+    pub variable: &'static str,
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    /// El usuario ya define la variable: manda la suya.
+    pub user_defined: bool,
+}
+
+pub fn adoptable_entries(root: &Path) -> Vec<AdoptableEntry> {
+    let home = crate::paths::home_dir();
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
+    let temp = std::env::temp_dir();
+    CACHES
+        .iter()
+        .filter(|cache| {
+            !matches!(
+                cache.category,
+                Category::Downloads | Category::Programs | Category::Projects
+            )
+        })
+        .filter_map(|cache| {
+            let source = system_location(
+                cache,
+                cfg!(windows),
+                &home,
+                local.as_deref(),
+                roaming.as_deref(),
+                &temp,
+            )?;
+            Some(AdoptableEntry {
+                id: cache.id.to_string(),
+                label: cache.name.to_string(),
+                category: cache.category,
+                variable: cache.variable,
+                source,
+                destination: cache_path(root, cache),
+                user_defined: defined_by_user(Some(root), cache.variable),
+            })
+        })
+        .collect()
+}
+
+/// La categoría de una entrada por su id.
+pub fn entry_category(id: &str) -> Option<Category> {
+    CACHES
+        .iter()
+        .find(|cache| cache.id == id)
+        .map(|cache| cache.category)
 }
 
 /// Recalcula las variables con las preferencias guardadas y las publica para
@@ -1161,6 +1398,7 @@ pub fn published_variables() -> Vec<(String, String)> {
 /// los Ajustes: afecta a las terminales que se abran a partir de entonces.
 pub fn refresh_environment() {
     let preferences = crate::preferences::current();
+    sync_layout(&preferences);
     let root = effective_root(
         preferences.toolchain_store_enabled,
         &preferences.toolchain_store_dir,
@@ -1171,7 +1409,11 @@ pub fn refresh_environment() {
     if let Some(root) = root.as_deref() {
         // Las carpetas existen desde el principio para poder abrirlas en
         // Ajustes, y las de historial para que el REPL pueda crear su archivo.
-        let _ = std::fs::create_dir_all(root.join(Category::Caches.dir()));
+        let _ = std::fs::create_dir_all(category_base(root, Category::Caches));
+        let marker = root.join(STORE_MARKER);
+        if !marker.exists() {
+            let _ = std::fs::write(&marker, STORE_MARKER_TEXT);
+        }
         for cache in active_entries(categories, existing_ollama) {
             let path = cache_path(root, cache);
             let dir = if cache.file {
@@ -1204,7 +1446,7 @@ pub fn refresh_environment() {
 
 /// Tamaño de una carpeta sin seguir enlaces ni uniones (evita bucles y contar
 /// dos veces lo que apunta fuera).
-fn directory_size(path: &Path) -> u64 {
+pub fn directory_size(path: &Path) -> u64 {
     let mut total = 0;
     let mut pending = vec![path.to_path_buf()];
     while let Some(dir) = pending.pop() {
@@ -1326,6 +1568,20 @@ fn cache_info(cache: &CacheDef, user_defined: bool) -> LocationInfo {
                 "Se puede borrar: solo se pierde el historial de ese intérprete.",
             )
         }
+        Category::Config => {
+            return info(
+                Safety::Caution,
+                &format!("Configuración y perfiles de {} ({}). Solo se usa si aún no la tenías en su sitio de siempre, o si la trajiste con «Traer lo ya instalado».", cache.name, cache.variable),
+                "Borrarla quita tu configuración de ese intérprete; se vuelve a crear vacía al abrirlo.",
+            )
+        }
+        Category::Plugins => {
+            return info(
+                Safety::Regenerates,
+                &format!("Caché de {} ({}).", cache.name, cache.variable),
+                "Se puede borrar: se vuelve a generar sola.",
+            )
+        }
     }
     if user_defined {
         info(
@@ -1364,6 +1620,7 @@ pub struct StoreStatus {
 /// [`external_sizes`], porque `~/.rustup` o WinGet tardan decenas de segundos.
 pub fn status() -> StoreStatus {
     let preferences = crate::preferences::current();
+    sync_layout(&preferences);
     let enabled = preferences.toolchain_store_enabled;
     let categories = Categories::from_preferences(&preferences);
     let existing_ollama = ollama_has_existing_models();
@@ -1475,6 +1732,7 @@ const STATUS_MEASURE_BUDGET: Duration = Duration::from_secs(3);
 /// (el hilo de trabajo acabó con un pánico): la carpeta, sin tamaños.
 fn status_unavailable() -> StoreStatus {
     let preferences = crate::preferences::current();
+    sync_layout(&preferences);
     let root = effective_root(true, &preferences.toolchain_store_dir).unwrap_or_else(default_root);
     StoreStatus {
         enabled: preferences.toolchain_store_enabled,
@@ -1590,6 +1848,7 @@ pub fn external_sizes(refresh: bool) -> Vec<ExternalLocation> {
 /// fuera de `<raíz>/cache`). Devuelve los bytes liberados.
 pub fn clear_caches() -> u64 {
     let preferences = crate::preferences::current();
+    sync_layout(&preferences);
     let root = effective_root(true, &preferences.toolchain_store_dir).unwrap_or_else(default_root);
     let cache_root = root.join("cache");
     let mut freed = 0;
@@ -1672,6 +1931,8 @@ mod tests {
         toolchains: true,
         programs: true,
         projects: false,
+        config: true,
+        plugins: true,
     };
 
     /// Lo de antes de centralizarlo todo: sin herramientas ni historial.
@@ -1682,7 +1943,9 @@ mod tests {
             .iter()
             .filter(|cache| cache.category == Category::Toolchains)
             .collect();
-        assert_eq!(toolchains.len(), 6);
+        // rustup, cargo, GOPATH, Gradle, .NET, Android y, desde el 09-11,
+        // cabal, Stack y Mix.
+        assert_eq!(toolchains.len(), 9);
         for cache in &toolchains {
             // Cada una sabe dónde vive cuando no se centraliza: es lo que se
             // comprueba antes de reubicarla.
@@ -1692,13 +1955,14 @@ mod tests {
                 cache.id
             );
         }
-        // Las demás categorías no pasan por esta regla.
+        // Las demás categorías no pasan por esta regla (la configuración de
+        // los REPL sí).
         assert!(CACHES
             .iter()
-            .filter(|cache| cache.category != Category::Toolchains)
+            .filter(|cache| !matches!(cache.category, Category::Toolchains | Category::Config))
             .all(|cache| !toolchain_preinstalled(cache)));
         // Activa de fábrica; apagada, ninguna variable de toolchain.
-        assert!(CATEGORIAS_DE_FABRICA.toolchains && !CATEGORIAS_DE_FABRICA.projects);
+        const _: () = assert!(CATEGORIAS_DE_FABRICA.toolchains && !CATEGORIAS_DE_FABRICA.projects);
         let overrides = overrides_for(
             Some(Path::new("C:/store")),
             Categories {
@@ -1951,6 +2215,29 @@ mod tests {
                 CACHES.iter().any(|cache| cache.category == category),
                 "{category:?} sin entradas"
             );
+        }
+    }
+
+    #[test]
+    fn la_carpeta_de_cada_categoria_solo_acepta_categorias_conocidas_y_rutas_absolutas() {
+        let absoluta = if cfg!(windows) {
+            r"E:\ia"
+        } else {
+            "/mnt/datos/ia"
+        };
+        let texto =
+            format!("aiModels={absoluta}\ninventada=/x\ncaches=relativa\n\nplugins = {absoluta}");
+        let dirs = parse_category_dirs(&texto);
+        assert_eq!(
+            dirs,
+            vec![
+                (Category::AiModels, PathBuf::from(absoluta)),
+                (Category::Plugins, PathBuf::from(absoluta)),
+            ]
+        );
+        // Cada categoría tiene su id y se encuentra por él.
+        for category in Category::ALL {
+            assert_eq!(Category::from_id(category.id()), Some(category));
         }
     }
 

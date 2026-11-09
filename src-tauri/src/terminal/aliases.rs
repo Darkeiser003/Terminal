@@ -247,7 +247,13 @@ fn clear_command_with_marker(
     };
 
     if kind == ShellKind::Cmd {
-        let separator = if inside_doskey_macro { "$T" } else { "&" };
+        // Dentro de la macro, las órdenes van unidas con `&` (escrito `^&`
+        // en el `.cmd` para que no termine el `doskey`; `split_cmd_macros` lo
+        // deja en `&` en el archivo de macros). Con `$T` cmd ejecutaba cada
+        // trozo como una línea aparte y pintaba un prompt entre ellos: con la
+        // pantalla ya vaciada por el marcador se veían uno o dos prompts un
+        // instante antes del banner (larga 50, 08-11).
+        let separator = if inside_doskey_macro { "^&" } else { "&" };
         // Dentro de una macro doskey el % hay que duplicarlo: si no, cmd
         // expande %RANDOM% al DEFINIR la macro y el título queda fijo. Un
         // título que no cambia no genera ningún evento, así que la segunda
@@ -447,7 +453,8 @@ fn clear_command_with_toggle(
             unix_path_for(banner, transport)
         ),
     };
-    let separator = if kind == ShellKind::Cmd { " $T " } else { "; " };
+    // cmd: una sola línea con `&` (ver `clear_command_with_marker`).
+    let separator = if kind == ShellKind::Cmd { " ^& " } else { "; " };
     format!("{body}{separator}{print_banner}")
 }
 
@@ -1550,8 +1557,9 @@ pub const CMD_MACRO_EXT: &str = "mac";
 /// precarga de Dependencias en un portátil de 2 núcleos) retrasaban el primer
 /// prompt hasta 20 s.
 ///
-/// Dentro de un `.cmd` el `%%` llega a doskey como `%`; en el archivo de
-/// macros no hay esa pasada, así que se escribe ya sin duplicar. Si alguna
+/// Dentro de un `.cmd` el `%%` llega a doskey como `%` y el `^&` como `&`; en
+/// el archivo de macros no hay esa pasada, así que se escriben ya sin
+/// duplicar ni escapar (`clear` une sus órdenes con `&`). Si alguna
 /// macro lleva caracteres no ASCII (rutas con «ñ», por ejemplo) se devuelve
 /// `None` y el init conserva sus líneas: doskey lee el archivo con la página
 /// de códigos de la consola y podría estropear la ruta.
@@ -1564,7 +1572,12 @@ pub fn split_cmd_macros(content: &str, eol: &str, macro_path: &str) -> Option<(S
                 if macros.is_empty() {
                     init.push(format!("doskey /macrofile=\"{macro_path}\""));
                 }
-                macros.push(definition.trim_start().replace("%%", "%"));
+                macros.push(
+                    definition
+                        .trim_start()
+                        .replace("%%", "%")
+                        .replace("^&", "&"),
+                );
             }
             _ => init.push(line.to_string()),
         }
@@ -2060,9 +2073,11 @@ mod tests {
         let fuera = clear_command(ShellKind::Cmd, None, false, Transport::Native, "App");
         assert!(dentro.contains("%%RANDOM%%"));
         assert!(fuera.contains("%RANDOM%") && !fuera.contains("%%RANDOM%%"));
-        // Y el separador cambia: dentro de la macro, & terminaría la macro.
-        assert!(dentro.contains("$T"));
-        assert!(fuera.contains('&'));
+        // Dentro de la macro el `&` va escapado: sin `^`, terminaría el
+        // `doskey` del `.cmd`. Y nunca `$T`, que pintaba un prompt entre cada
+        // orden.
+        assert!(dentro.contains("^&") && !dentro.contains("$T"), "{dentro}");
+        assert!(fuera.contains('&') && !fuera.contains("^&"), "{fuera}");
     }
 
     #[test]
@@ -2077,9 +2092,18 @@ mod tests {
         assert!(init.find("doskey /macrofile").unwrap() > init.find("@cls").unwrap());
         assert!(macros.lines().any(|line| line.starts_with("cls=")));
         assert!(macros.lines().any(|line| line.starts_with("ls=")));
-        // En el archivo de macros no hay pasada de `%%` -> `%` como en un .cmd.
+        // En el archivo de macros no hay pasada de `%%` -> `%` ni de `^&` -> `&`
+        // como en un .cmd.
         assert!(macros.contains("%RANDOM%") && !macros.contains("%%"));
         assert!(!init.contains("for /f"));
+        let clear = macros
+            .lines()
+            .find(|line| line.starts_with("clear="))
+            .unwrap();
+        assert!(
+            clear.contains('&') && !clear.contains("^&") && !clear.contains("$T"),
+            "clear en una sola línea, sin prompts intermedios: {clear}"
+        );
     }
 
     #[test]

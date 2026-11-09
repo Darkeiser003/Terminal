@@ -882,7 +882,7 @@
         return rows;
     });
 
-    type StoreCategoryPreference = "toolchainStoreDownloads" | "toolchainStoreAiModels" | "toolchainStoreTools" | "toolchainStoreReplHistory" | "toolchainStoreToolchains" | "toolchainStorePrograms" | "toolchainStoreProjects";
+    type StoreCategoryPreference = "toolchainStoreDownloads" | "toolchainStoreAiModels" | "toolchainStoreTools" | "toolchainStoreReplHistory" | "toolchainStoreToolchains" | "toolchainStorePrograms" | "toolchainStoreProjects" | "toolchainStoreConfig" | "toolchainStorePlugins";
 
     /** Categorías de la carpeta propia: cada una con su interruptor (las
      *  cachés van con el general) y una explicación de lo que cambia. */
@@ -911,7 +911,20 @@
         { id: "projects" as ToolchainStoreCategory, preference: "toolchainStoreProjects" as StoreCategoryPreference,
             title: app.t("settings.storeCategoryProjects", "Proyectos de GitHub"),
             hint: app.t("settings.storeCategoryProjectsHint", "Lo que clonas o creas desde Proyectos va aquí en vez de a Documentos. Si ya elegiste una carpeta de Proyectos, se usa la tuya. Los proyectos que ya tienes no se mueven.") },
+        { id: "config" as ToolchainStoreCategory, preference: "toolchainStoreConfig" as StoreCategoryPreference,
+            title: app.t("settings.storeCategoryConfig", "Configuración de los REPL"),
+            hint: app.t("settings.storeCategoryConfigHint", "Perfiles y configuración de IPython y Jupyter. Solo si aún no la tenías: la que ya tienes se trae a propósito desde la vista de la carpeta propia.") },
+        { id: "plugins" as ToolchainStoreCategory, preference: "toolchainStorePlugins" as StoreCategoryPreference,
+            title: app.t("settings.storeCategoryPlugins", "Plugins de las shells"),
+            hint: app.t("settings.storeCategoryPluginsHint", "La caché de starship y el perfil de Clink que usa WTerminal en cmd (historial y ajustes).") },
     ]);
+
+    /** La vista propia de la carpeta propia: carpeta por categoría, cada
+     *  elemento con su interruptor, «Traer lo ya instalado» y exportar o
+     *  importar la lista. */
+    function openStoreView(): void {
+        window.dispatchEvent(new CustomEvent("winslim:open-panel", { detail: { panel: "store" } }));
+    }
 
     type AssistColorKey = "shellAssistSuggestionColor" | "shellAssistCommandColor" | "shellAssistArgumentColor" | "shellAssistErrorColor";
 
@@ -2243,6 +2256,7 @@
                         <button type="button" data-testid="settings-toolchain-store-open" disabled={!toolchainStore} onclick={() => toolchainStore && void openToolchainFolder(toolchainStore.root)}>{app.t("settings.toolchainStoreOpen", "Abrir carpeta")}</button>
                         <button type="button" disabled={!draft.toolchainStoreDir} onclick={() => commitToolchainStoreDir("")}>{app.t("settings.toolchainStoreReset", "Usar la carpeta por defecto")}</button>
                         <button type="button" data-testid="settings-toolchain-store-refresh" disabled={toolchainStoreBusy} onclick={() => void refreshToolchainStore(true)}>{app.t("settings.toolchainStoreRefresh", "Recalcular")}</button>
+                        <button type="button" data-testid="settings-toolchain-store-view" title={app.t("settings.toolchainStoreViewHint", "Carpeta de cada categoría, cada elemento con su interruptor, traer lo ya instalado y exportar o importar la lista.")} onclick={openStoreView}>{app.t("settings.toolchainStoreView", "Gestionar la carpeta propia…")}</button>
                     </div>
                     {#if !toolchainStore}
                         <div class="field-hint">{app.t("settings.toolchainStoreCalculating", "Calculando el espacio…")}</div>

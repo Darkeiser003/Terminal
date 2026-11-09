@@ -483,10 +483,17 @@ fn filter_available_actions_with_depth(
                 }
             }
             if action.installed.is_none() && action.detection_status.is_none() {
-                action.installed = if action.requires_cmd.is_some() {
+                // Manda la sonda propia: si sigue visible, lo que instala
+                // falta, aunque su runtime exista (Django sin instalar con pip
+                // presente salía en verde, con «Instalar» y fuera de
+                // «Faltantes»). Solo las acciones sin sonda propia, como
+                // actualizar o desinstalar, se dan por instaladas con su requisito.
+                action.installed = if action.check_cmd.is_some() {
+                    Some(false)
+                } else if action.requires_cmd.is_some() {
                     Some(true)
                 } else {
-                    action.check_cmd.as_ref().map(|_| false)
+                    None
                 };
             }
             Some(action)
@@ -2331,11 +2338,12 @@ fn wrap_powershell_command(ps_command: &str, kind: ShellKind, transport: Transpo
         // `throw` de una acción no cierre la sesión interactiva ni impida que
         // `console_ui::decorate` pinte el resultado de la operación.
         ShellKind::Powershell => format!("try {{ {ps_command} }} catch {{ Write-Error $_ }}"),
-        // cmd.exe no expande "$", así que las comillas dobles son seguras (los
-        // scripts del catálogo no llevan comillas dobles dentro).
-        ShellKind::Cmd => {
-            format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{ps_command}\"")
-        }
+        // cmd no sabe escapar comillas dentro de comillas: cada `"` del script
+        // le cambia el estado y un `|` o un `>` que queda «fuera» parte la
+        // línea. La plantilla de WinGet lleva muchas, y «Instalar GitHub CLI»
+        // desde una pestaña cmd acababa en «"Out-Null" no se reconoce». El
+        // script viaja en un archivo de la carpeta de sesión.
+        ShellKind::Cmd => cmd_powershell_command(ps_command, cmd_script_dir().as_deref()),
         // Shells unix sobre Windows (Git Bash, WSL, zsh...): comillas simples,
         // que no interpolan. WSL necesita el sufijo .exe para distinguir el
         // binario de Windows de un comando de Linux.
@@ -2356,6 +2364,54 @@ fn wrap_powershell_command(ps_command: &str, kind: ShellKind, transport: Transpo
             format!("{exe} -NoProfile -ExecutionPolicy Bypass -Command {quoted}")
         }
     }
+}
+
+/// La carpeta de sesión, la misma que cmd conoce como `%WSTERM_UI%`. Las
+/// pruebas de unidad no escriben en la real.
+fn cmd_script_dir() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        crate::session_files::dir()
+    }
+}
+
+static CMD_PS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// El script tal cual, con el mismo veredicto que en una pestaña PowerShell
+/// (`console_ui`: éxito si `$?` y `$LASTEXITCODE` es 0). cmd solo mira
+/// `if errorlevel 1`, que no ve los códigos negativos de WinGet: un fallo sale
+/// siempre con un código positivo.
+fn cmd_powershell_script(ps_command: &str) -> String {
+    format!(
+        "$global:LASTEXITCODE = 0\r\n{ps_command}\r\n$wstermOk = $? -and ($LASTEXITCODE -eq 0)\r\nif ($wstermOk) {{ exit 0 }}\r\nif ([int]$LASTEXITCODE -gt 0) {{ exit ([int]$LASTEXITCODE) }}\r\nexit 1\r\n"
+    )
+}
+
+/// La línea que se teclea en cmd: `-File` con el script escrito en `dir`
+/// (UTF-8 con BOM, o Windows PowerShell lo leería en ANSI y rompería las
+/// tildes). Sin carpeta, el script va en `-EncodedCommand`, que tampoco
+/// pasa por el análisis de cmd.
+fn cmd_powershell_command(ps_command: &str, dir: Option<&Path>) -> String {
+    let script = cmd_powershell_script(ps_command);
+    if let Some(dir) = dir {
+        let seq = CMD_PS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("ps-{seq}.ps1");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(script.as_bytes());
+        if std::fs::write(dir.join(&name), bytes).is_ok() {
+            return format!(
+                "powershell -NoProfile -ExecutionPolicy Bypass -File \"%{}%\\{name}\"",
+                crate::console_ui::CMD_FRAME_DIR_VAR
+            );
+        }
+    }
+    use base64::Engine as _;
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!(
+        "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
+        base64::engine::general_purpose::STANDARD.encode(utf16)
+    )
 }
 
 /// Las acciones del panel informan por pantalla (versiones, listados, salida
@@ -3035,6 +3091,25 @@ mod tests {
     }
 
     #[test]
+    fn un_framework_ausente_sigue_instalable_aunque_su_runtime_exista() {
+        // El catálogo trae `installed` vacío (el `accion` de estas pruebas lo
+        // rellena y ocultaba el caso). Con el runtime presente y la sonda del
+        // paquete diciendo que falta, la acción salía como instalada.
+        let runtime = if cfg!(windows) { "cmd" } else { "sh" };
+        let mut install = accion(
+            "framework-ausente",
+            Some("ecosystem:pip|programa-que-no-existe|paquete"),
+            Some(runtime),
+        );
+        install.installed = None;
+        install.verb = None;
+        let actions = filter_available_actions(vec![install]);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].installed, Some(false));
+        assert_eq!(actions[0].detection_status, None);
+    }
+
+    #[test]
     fn el_estado_que_ya_traia_el_catalogo_no_lo_pisa_el_filtro() {
         // Las distros WSL lo saben por el inventario de la sonda, no por el
         // PATH: ahí no hay comando que comprobar.
@@ -3065,12 +3140,87 @@ mod tests {
     }
 
     #[test]
-    fn desde_cmd_el_script_va_entre_comillas_dobles_porque_cmd_no_expande_dolar() {
-        let wrapped = wrap_powershell_command("$env:Path", ShellKind::Cmd, Transport::Native);
-        assert_eq!(
-            wrapped,
-            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:Path\""
+    fn desde_cmd_el_script_va_en_un_archivo_y_la_linea_no_lleva_nada_que_cmd_pueda_partir() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"Write-Host "a | b > c & d"; New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null"#;
+        let line = cmd_powershell_command(script, Some(dir.path()));
+        assert!(
+            line.starts_with(
+                "powershell -NoProfile -ExecutionPolicy Bypass -File \"%WSTERM_UI%\\ps-"
+            ),
+            "{line}"
         );
+        assert!(
+            !line.contains('|') && !line.contains('$') && !line.contains('>'),
+            "{line}"
+        );
+        let name = line.rsplit('\\').next().unwrap().trim_end_matches('"');
+        let bytes = std::fs::read(dir.path().join(name)).unwrap();
+        assert!(
+            bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+            "sin BOM, Windows PowerShell lo leería en ANSI"
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains(script));
+    }
+
+    #[test]
+    fn sin_carpeta_de_sesion_cmd_recibe_el_script_codificado() {
+        use base64::Engine as _;
+        let script = r#"Write-Host "x | y""#;
+        let line = cmd_powershell_command(script, None);
+        let encoded = line
+            .strip_prefix("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ")
+            .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(
+            String::from_utf16(&units).unwrap(),
+            cmd_powershell_script(script)
+        );
+    }
+
+    /// cmd.exe real: un script con comillas, tuberías y tildes corre entero, y
+    /// el código de salida que ve `if errorlevel 1` es el mismo veredicto que
+    /// en PowerShell, también con los códigos negativos de WinGet.
+    #[cfg(windows)]
+    #[test]
+    fn desde_cmd_el_script_con_comillas_y_tuberias_corre_entero_con_su_codigo_de_salida() {
+        use std::os::windows::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let run = |script: &str| {
+            let line = cmd_powershell_command(script, Some(dir.path()));
+            let salida = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c"])
+                .raw_arg(format!(
+                    "{line} & if errorlevel 1 (echo VEREDICTO-FALLO) else (echo VEREDICTO-BIEN)"
+                ))
+                .env(crate::console_ui::CMD_FRAME_DIR_VAR, dir.path())
+                .output()
+                .unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&salida.stdout),
+                String::from_utf8_lossy(&salida.stderr)
+            )
+        };
+        let bien = run(
+            r#"$x = "uno | dos"; New-Item -ItemType Directory -Force -Path (Join-Path $env:WSTERM_UI 'sub') | Out-Null; if ('ñ'.Length -eq 1) { Write-Host "eco: $x utf8" }"#,
+        );
+        assert!(
+            bien.contains("eco: uno | dos utf8")
+                && bien.contains("VEREDICTO-BIEN")
+                && !bien.contains("Out-Null"),
+            "{bien}"
+        );
+        for script in ["cmd /c exit 3", "cmd /c exit -5", "throw 'fallo de prueba'"] {
+            let mal = run(script);
+            assert!(mal.contains("VEREDICTO-FALLO"), "{script}: {mal}");
+        }
     }
 
     #[test]

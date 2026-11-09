@@ -59,6 +59,59 @@ try {
             }
         }
     }
+    // El menú de idioma (16 idiomas, unos 480 px) se salía por abajo con la
+    // ventana por defecto en pantallas pequeñas y con la interfaz agrandada
+    // (aviso de un usuario, 09-11). Se aplica el zoom igual que app.css
+    // (`main > .toolbar { zoom: var(--ui-scale) }`) y se exige que quepa y que
+    // el último idioma se alcance con scroll.
+    const menuResults = [];
+    for (const [width, height, scales] of [
+        [980, 640, [1, 1.5, 2]],
+        [980, 480, [1, 1.5, 2]],
+        [1366, 768, [1, 1.5, 2]],
+        [480, 270, [1]],
+    ]) {
+        await page.setViewportSize({ width, height });
+        for (const scale of scales) {
+            await page.evaluate(async scale => {
+                await window.configureToolbar({ language: 'es' });
+                document.documentElement.style.setProperty('--ui-scale', String(scale));
+                document.querySelector('.toolbar').style.zoom = String(scale);
+                document.querySelector('.lang-btn').click();
+            }, scale);
+            await page.locator('.lang-menu').waitFor();
+            const fit = await page.evaluate(() => {
+                const menu = document.querySelector('.lang-menu');
+                const before = menu.getBoundingClientRect();
+                const items = menu.querySelectorAll('.lang-item');
+                const last = items[items.length - 1];
+                menu.scrollTop = menu.scrollHeight;
+                const after = menu.getBoundingClientRect();
+                const lastRect = last.getBoundingClientRect();
+                menu.scrollTop = 0;
+                return {
+                    items: items.length, top: before.top, bottom: before.bottom, left: before.left, right: before.right,
+                    innerWidth, innerHeight, lastBottom: lastRect.bottom, menuBottom: after.bottom,
+                };
+            });
+            const passed = fit.items >= 16 && fit.top >= -1 && fit.left >= -1
+                && fit.bottom <= fit.innerHeight + 1 && fit.right <= fit.innerWidth + 1
+                && fit.lastBottom <= fit.menuBottom + 1 && fit.lastBottom <= fit.innerHeight + 1;
+            menuResults.push({ width, height, scale, ...fit, passed });
+            if (width === 980 && height === 640 && scale === 1.5) {
+                await page.screenshot({ path: join(output, 'language-menu-980x640-150.png') });
+            }
+            await page.locator('.lang-backdrop').dispatchEvent('mousedown');
+            await page.locator('.lang-menu').waitFor({ state: 'detached' });
+        }
+    }
+    await page.evaluate(() => {
+        document.documentElement.style.removeProperty('--ui-scale');
+        document.querySelector('.toolbar').style.zoom = '';
+    });
+    const menuFailures = menuResults.filter(result => !result.passed);
+    assert.equal(menuFailures.length, 0, `Menú de idioma fuera de la ventana: ${JSON.stringify(menuFailures.slice(0, 3))}`);
+    results.push(...menuResults.map(result => ({ languageMenu: true, ...result })));
     const failures = results.filter(result => !result.passed);
     assert.deepEqual(pageErrors, [], 'el componente no debe producir errores de JavaScript');
     assert.equal(failures.length, 0, `Controles solapados o recortados: ${JSON.stringify(failures.slice(0, 3))}`);

@@ -218,9 +218,40 @@ Internet.
 El asistente lleva el icono y las imágenes de WTerminal (barra lateral de
 bienvenida y final, cabeceras del instalador y del desinstalador, en
 `src-tauri/windows/installer/`, generadas con
-`scripts/generate-installer-art.ps1`) y pregunta el idioma al empezar: español,
-inglés, francés, alemán, italiano, portugués, ruso, ucraniano, árabe,
-japonés, coreano o chino. Al desinstalar, el propio `wterminal.exe`
+`scripts/generate-installer-art.ps1`) y pregunta el idioma al empezar, en los
+mismos 15 de la app: español, inglés, francés, alemán, italiano, portugués,
+ruso, ucraniano, polaco, rumano, árabe, japonés, coreano, chino e hindi. La CLI
+de Tauri no trae polaco, rumano ni hindi: sus textos van en
+`src-tauri/windows/installer/{Polish,Romanian,Hindi}.nsh`
+(`customLanguageFiles`).
+
+**Instalador modular.** El asistente usa una plantilla propia,
+`src-tauri/windows/installer/installer.nsi`: la de Tauri 2.11.5 con tres
+cambios marcados con «WTerminal:» (al actualizar la CLI de Tauri hay que volver
+a partir de la suya).
+
+- Tras elegir la carpeta, una página de **componentes** deja elegir **WTerminal
+  en el PATH** y **«Abrir con WTerminal» en el Explorador con los enlaces
+  `wterminal://`**, las dos marcadas. Lo elegido queda en `first-run.json`
+  junto al ejecutable (`hooks.nsh`), y cada usuario lo aplica una vez en su
+  primer arranque (`platform::first_run::apply`, antes de añadirse al PATH de
+  fábrica).
+- Shells, sugerencias, paquetes y LTools no van en el instalador: se instalan
+  desde la propia WTerminal, en una pestaña visible.
+- En silencio (`/S`), en pasivo (`/P`) o al actualizar no hay página ni
+  `first-run.json`: queda lo de fábrica de siempre (el PATH sí, el menú del
+  Explorador no) y la suite del instalador no cambia.
+- El **desinstalador** pregunta antes a `wterminal.exe
+  --wterminal-uninstall-report` cuánto ocupan los datos y la carpeta propia.
+  Ofrece dos casillas con su tamaño: **Borrar los datos de la aplicación** y
+  **Borrar la carpeta propia** (cachés, herramientas y programas instalados
+  desde WTerminal).
+- La segunda casilla solo sale si la carpeta propia es la de fábrica o lleva
+  la marca `LEEME-carpeta-propia-WTerminal.txt`, que WTerminal deja al crearla.
+  Una carpeta elegida a mano que no sea suya (una raíz de disco, una carpeta
+  con otras cosas) nunca se ofrece borrar.
+
+Al desinstalar, el propio `wterminal.exe`
 (`--wterminal-uninstall-cleanup`, `platform::uninstall_cleanup`) deshace lo que
 registró en el perfil del usuario: su carpeta y las `bin` de herramientas que
 añadió al PATH de HKCU, los menús «Abrir con WTerminal», App Paths, el
@@ -228,8 +259,8 @@ protocolo `wterminal://` y la marca RUNASADMIN; antes quedaban apuntando a un
 ejecutable borrado. Lo que registró otra copia que sigue existiendo (un portable
 junto a la instalada) se queda como está. La casilla **Borrar los datos de la aplicación** borra
 además `%APPDATA%\wterminal` (ajustes y registros) y `%LOCALAPPDATA%\WTerminal`
-(carpeta propia de fábrica, perfil de Clink y caché del portable); una carpeta
-propia movida a otra ruta no se toca. En una actualización (`/UPDATE`) no se
+(perfil de Clink y caché del portable) **menos** la carpeta propia de fábrica
+(`entornos`), que solo se borra con su propia casilla. En una actualización (`/UPDATE`) no se
 deshace nada (`src-tauri/windows/installer/hooks.nsh`).
 `scripts/capture-installer-pages.ps1` recorre el asistente de forma visible y
 captura cada página del instalador y del desinstalador.
@@ -262,12 +293,14 @@ Linux, bajo `~/.local/share/LTerminal/entornos`), por categorías:
 
 | Categoría | Subcarpeta | Variables | De fábrica |
 |---|---|---|---|
-| Cachés | `cache\` | `npm_config_cache`, `YARN_CACHE_FOLDER`, `BUN_INSTALL_CACHE_DIR`, `DENO_DIR`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `NUGET_PACKAGES`, `COURSIER_CACHE`, `COMPOSER_CACHE_DIR` | activa (con el interruptor general) |
+| Cachés | `cache\` | `npm_config_cache`, `YARN_CACHE_FOLDER`, `BUN_INSTALL_CACHE_DIR`, `DENO_DIR`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `NUGET_PACKAGES`, `COURSIER_CACHE`, `COMPOSER_CACHE_DIR`, `PUB_CACHE` | activa (con el interruptor general) |
 | Descargas del panel | `descargas\panel` | `WTERMINAL_DOWNLOADS` (lo usan las acciones que descargan antes de instalar, como ADB) | activa |
 | Modelos de IA | `ia\` | `HF_HOME`; `OLLAMA_MODELS` solo si aún no hay modelos en la carpeta de siempre de Ollama | activa |
 | Herramientas y lenguajes nuevos | `herramientas\` | `npm_config_prefix`, `CARGO_INSTALL_ROOT`, `GOBIN`, `PYTHONUSERBASE`, y su carpeta de programas delante en el PATH de WTerminal y, con la integración con el PATH, también en el del usuario | activa |
 | Historial de los REPL | `historial\` | `NODE_REPL_HISTORY`, `PYTHON_HISTORY` (3.13+), `SQLITE_HISTORY`, `PSQL_HISTORY` | activa |
-| Toolchains completas | `toolchains\` | `RUSTUP_HOME`, `CARGO_HOME` (con su `bin`), `GOPATH` (con su `bin`), `GRADLE_USER_HOME`, `DOTNET_CLI_HOME`, `ANDROID_USER_HOME`; cada una solo si no existe ya su carpeta de siempre (`~\.rustup`, `~\.cargo`, `~\go`…) | activa |
+| Toolchains completas | `toolchains\` | `RUSTUP_HOME`, `CARGO_HOME` (con su `bin`), `GOPATH` (con su `bin`), `GRADLE_USER_HOME`, `DOTNET_CLI_HOME`, `ANDROID_USER_HOME`, `CABAL_DIR`, `STACK_ROOT`, `MIX_HOME`; cada una solo si no existe ya su carpeta de siempre (`~\.rustup`, `~\.cargo`, `~\go`…) o si la trajiste con «Traer lo ya instalado» | activa |
+| Configuración de los REPL | `configuracion\` | `IPYTHONDIR`, `JUPYTER_CONFIG_DIR`; como las toolchains, solo si aún no existía la de siempre o si la trajiste | activa |
+| Plugins de las shells | `plugins\` | `STARSHIP_CACHE`, y el perfil de Clink que WTerminal pasa a cmd con `--profile` (`plugins\clink`; no se usa `CLINK_PROFILE`, que lo anularía) | activa |
 | Proyectos de GitHub | `proyectos\<propietario>\<repositorio>` | Carpeta de Proyectos de fábrica (`projects::github::projects_folder`) si no elegiste otra en Ajustes; los que ya tenías en Documentos no se mueven | apagada |
 | Programas (WinGet y Chocolatey) | `programas\<id>` | `WTERMINAL_PROGRAMS`: las acciones «Instalar» de WinGet añaden `--location`; Chocolatey va a `programas\chocolatey` (sus paquetes, en su `lib\`) y sus herramientas sueltas a `programas\chocolatey-tools` | activa |
 
@@ -322,6 +355,43 @@ Documentos:
   en vez de dejarlo partido. Lo ya instalado no se mueve, y la detección
   encuentra estos programas por WinGet y por la carpeta que registran en
   «Aplicaciones instaladas». Sin la categoría, la orden es la de siempre.
+
+**Gestionar la carpeta propia** (Ajustes → Comportamiento → «Gestionar la
+carpeta propia…», vista propia `StorePanel.svelte`):
+
+- **Carpeta de cada categoría.** De fábrica todas van dentro de la carpeta
+  propia; cualquiera puede ir a otro sitio (por ejemplo los modelos de IA a
+  otro disco). Se guarda en `toolchainStoreCategoryDirs` (`categoría=carpeta`
+  por línea) y lo aplica `toolchain_store::category_base`. Lo que ya estaba en
+  la carpeta anterior no se mueve.
+- **Interruptor por elemento.** Cada entrada de una categoría activa se puede
+  apagar sola (`toolchainStoreDisabled`): las terminales nuevas vuelven a su
+  sitio de siempre.
+- **Traer lo ya instalado** (`config::store_adopt`). Busca lo que tienes fuera
+  de la carpeta propia (cachés, herramientas, toolchains, configuración de los
+  REPL, el perfil de Clink y los programas de «Aplicaciones instaladas» en
+  Program Files o `%LOCALAPPDATA%\Programs`) y enseña su espacio y qué se haría.
+  Al traerlo, primero **copia** sin tocar el original y comprueba que cada
+  archivo está en la copia; después la variable apunta a la copia (la entrada
+  queda «traída» en `store-journal.json` y se reubica aunque ya existiera) o,
+  para un programa, el original pasa a `<carpeta>.wterminal-antes` y en su
+  sitio queda una unión hacia la copia (con permisos de administrador si está
+  en Program Files; si el programa está abierto, no se toca nada).
+  **Confirmar** borra el original; hasta entonces **Deshacer** lo deja todo
+  como estaba. Las cachés y las herramientas se mezclan con lo que ya hubiera
+  en la carpeta propia; lo demás exige que el destino esté vacío. Los
+  programas instalados con **MSI no se traen**: sus actualizaciones fallan si
+  su carpeta es una unión (mongosh dio el error 1603 al poner permisos); para
+  ellos, desinstalar e instalar desde Dependencias, que ya los pone en
+  `programas\<id>`. Con la integración con el PATH activa, las variables de lo
+  traído se publican también en el usuario (`published_variables`), así que
+  rustup, cargo o IPython lo siguen encontrando fuera de WTerminal tras borrar
+  el original; si está apagada, la vista lo avisa.
+- **Exportar e importar la lista** (`wterminal-store-v1`): la configuración
+  de la carpeta propia y las acciones «Instalar» del catálogo que ya están
+  hechas. Al importar se aplican los ajustes y la vista enseña lo que falta,
+  cada cosa con su botón «Instalar» (en una pestaña visible, como desde
+  Dependencias); lo que este catálogo no conoce se lista aparte.
 
 Con Ollama hay un matiz: los modelos los guarda su servidor, que suele
 arrancar la aplicación de Ollama fuera de WTerminal con su propia carpeta. Por
@@ -587,7 +657,7 @@ catálogo versionado y LTerminal las descubre y ejecuta de forma segura.
 | `npm run check:flows` | Comprueba que el mapa técnico del README nombra cada archivo de código y script, y que los diagramas citan funciones que siguen existiendo. |
 | `npm run check:contracts` | Cruza las preferencias Rust/TOML/TypeScript, los comandos internos Rust/Svelte y los recursos nativos Linux/Windows. |
 | `npm run test:frontend-logic` | Ejecuta la lógica pura de idioma, identidad, scroll de terminal y los 20 atajos sin necesitar una ventana. |
-| `npm run test:toolbar-layout` | Monta la barra real en Chromium sin ventana y prueba 504 combinaciones de ancho, idioma, controles y favoritos. Preparar el navegador una vez con `npx playwright install chromium --only-shell` (en Linux, añadir `--with-deps`). Guarda mediciones y capturas en un temporal, o en `E2E_CAPTURE_DIR` si se define. |
+| `npm run test:toolbar-layout` | Monta la barra real en Chromium sin ventana y prueba 504 combinaciones de ancho, idioma, controles y favoritos, y que el menú de idioma quepa en la ventana y llegue a su último idioma con scroll (980×640, 980×480 y 1366×768 al 100, 150 y 200 % de interfaz, y 480×270). Preparar el navegador una vez con `npx playwright install chromium --only-shell` (en Linux, añadir `--with-deps`). Guarda mediciones y capturas en un temporal, o en `E2E_CAPTURE_DIR` si se define. |
 | `npm run test:ltools-contract` | Comprueba el contrato `ltools-actions-v1`, la validación de plataforma y la integración opcional de LTools; con `LTOOLS_TEST_BINARY` también prueba el CLI real. |
 | `npm run test:e2e:ltools` | Ejecuta, contra un binario ya compilado, la E2E optativa de LTools: descubre el catálogo JSON real, abre el selector, fija una acción segura, cierra/reabre la Biblioteca para probar persistencia y verifica el comando canónico. Autodetecta el binario de la release más reciente; `E2E_BINARY` y `LTOOLS_TEST_BINARY` permiten fijarlos explícitamente. Si no hay release de LTools, lo informa como prueba omitida, nunca como éxito falso. |
 | `npm run test:cleaner` | Prueba los limpiadores Bash y PowerShell en proyectos temporales; verifica los enlaces, conserva `release/` y descargas externas genéricas, y elimina solo temporales identificados de LTerminal. |
@@ -1721,9 +1791,11 @@ cinco herramientas salían como no instaladas.
 | `src/components/CommandPalette.svelte` | Paleta de comandos (`Ctrl+Shift+P`): diálogo modal con un `combobox` que controla un `listbox` agrupado (`role="group"` por sección) y anuncia la opción activa con `aria-activedescendant`, así el foco no sale del buscador. Flechas, RePág/AvPág, Intro y Escape (que no cierra el panel de detrás); Tab no escapa del diálogo. Pide el catálogo de LTools con una caché de 60 s (`LTOOLS_CACHE_MS`) y resuelve las fijadas con los helpers de `ltools-selection.ts`. Al cerrar devuelve el foco a donde estaba (cancelar) o a la terminal activa (ejecutar), salvo que la acción se lo haya llevado a un panel o al buscador. |
 | `src/components/HistorySearch.svelte` | Búsqueda en las órdenes escritas (`Ctrl+Shift+R`): diálogo como la paleta (`combobox` + `listbox`) sobre `app.commandHistory`; Intro deja la orden escrita sin ejecutarla con `insertLine` y un rechazo (`draft`, `busy`) se enseña sin cerrar. |
 | `src/components/SettingsPanel.svelte` | Edita tema, terminal, atajos, idioma, integración, perfiles y plugins; guarda el borrador por `app.savePreferences`. |
+| `src/components/StorePanel.svelte` | Vista propia de la carpeta propia (panel `store`, se abre desde Ajustes con «Gestionar la carpeta propia…»): carpeta de cada categoría, interruptor por elemento, «Traer lo ya instalado» con progreso, confirmar y deshacer, y exportar o importar la lista con «Instalar» para lo que falte. |
 | `src/components/DependenciesPanel.svelte` | Muestra secciones y acciones, combina catálogo con estado cacheado, consulta acciones pendientes y solicita refresco o ejecución. |
 | `src/components/ProjectsPanel.svelte` | Busca repositorios, gestiona favoritos, releases y acciones de proyecto. |
 | `src/components/GithubRepoManager.svelte` | «Gestionar…» de un repositorio de «Mi GitHub»: detalles, releases (crear con adjuntos, subir, publicar, borrar), git local (commit, ramas, push/pull en la terminal), pull requests, issues y Actions. |
+| `src/components/GithubAdmin.svelte` | Las áreas de `gh_admin.rs` dentro de «Gestionar…» (Actions: más, Configuración, Seguridad, Comunidad y Cuenta): lista de cada área con sus acciones, formularios, borrar con dos pulsaciones y «Pedir permisos». |
 | `src/components/ScriptsPanel.svelte` | Biblioteca de scripts, filtros, LTools, argumentos y ejecución opcional elevada. La selección, el nombre y la confirmación de las acciones de LTools salen de `ltools-selection.ts`, igual que en la paleta de comandos. La lista de tipos usa `bind:open` (`typesOpen`): con `open={…}` Svelte reescribía `open` en el mismo efecto que el contador del resumen y la lista se cerraba tras cada casilla. |
 | `src/components/ExplorerSidebar.svelte` | Lista y manipula archivos; sigue el cwd del tab activo y descarta respuestas antiguas. |
 | `src/lib/api.ts` | Envoltorios tipados de todos los comandos y eventos; cola y época de entrada por pestaña; APIs de ventana, diálogos y portapapeles. |
@@ -1777,11 +1849,13 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/config/i18n.rs` | Catálogos y traductor backend. |
 | `src-tauri/src/config/plugins.rs` | Inventario y operaciones del sistema de plugins. |
 | `src-tauri/src/config/toolchain_store.rs` | Carpeta propia (`%LOCALAPPDATA%\WTerminal\entornos`) por categorías (`Category`: cachés, descargas del panel, modelos de IA, herramientas nuevas, historial de los REPL; `Categories::from_preferences`): variables estándar inyectadas solo en procesos de WTerminal (`overrides_for`), carpetas `bin` de las herramientas nuevas delante del PATH de WTerminal (`extra_path_dirs` → `process::set_extra_path`, que aplican `child_environment`, `hidden_command` y `path_env::which`), `OLLAMA_MODELS` solo si no había modelos, tamaños y vaciado (solo la categoría de cachés); las ubicaciones de siempre de las categorías apagadas se miden con `cached_system_size` y se reutilizan 10 min, las propias se miden siempre. Además mide y explica cada ubicación: `app_locations` (ajustes, scripts, plugins, registros, caché de detección, datos del WebView, temporales de sesión, proyectos, runtime del portable, perfil de Clink) y `external_locations` (Cargo, rustup, Go, Bun, Ollama, cachés de npm/pip/pnpm/Yarn/uv/Deno, WinGet, Docker, Chocolatey, Scoop y el disco de cada distro WSL leído de `HKCU\…\Lxss`). Cada una lleva `LocationInfo` (para qué sirve, si se puede borrar y `Safety`: `safe`/`regenerates`/`caution`/`keep`), que Ajustes enseña en una tarjeta al pasar el ratón. |
+| `src-tauri/src/config/store_adopt.rs` | «Traer lo ya instalado» a la carpeta propia: vista previa con el espacio de cada cosa, copia sin tocar el original (`copy_tree` + `verify_copy`), diario en `store-journal.json` para confirmar (borra el original) o deshacer, programas con unión y el original en `<carpeta>.wterminal-antes` (los MSI se bloquean: sus actualizaciones fallan en una unión), perfil de Clink propio, y exportar o importar la lista (`wterminal-store-v1`: ajustes de la carpeta propia y acciones «Instalar» ya hechas). |
 | `src-tauri/src/platform/mod.rs` | Selección de implementación de host por sistema. |
 | `src-tauri/src/platform/traits.rs` | Contratos de operaciones dependientes de plataforma. |
 | `src-tauri/src/platform/system_info.rs` | Datos de sistema y hardware para banner e información. `build_banner`/`build_banner_with` componen el banner; con la imagen activada lo hacen en lo que queda tras el margen de `banner_image_padding` y desplazan cada línea con espacios. |
 | `src-tauri/src/terminal/banner_image.rs` | Imagen propia del banner: `banner_image_read` la valida por su firma (`image_mime`: PNG, JPEG, GIF, WebP, BMP, ICO, SVG con `<svg`) y tamaño (`MAX_BANNER_IMAGE_BYTES`, 8 MB) y la devuelve como `data:`. |
 | `src-tauri/src/platform/recycle.rs` | Envío a papelera del sistema. |
+| `src-tauri/src/platform/first_run.rs` | Une el instalador modular con la app: aplica una vez por usuario lo elegido en la página de componentes (`first-run.json`: PATH y menú del Explorador con `wterminal://`) y escribe para el desinstalador el informe `--wterminal-uninstall-report` (INI en UTF-16 con lo que ocupan los datos y la carpeta propia, y si esta es de WTerminal). |
 | `src-tauri/src/platform/path_integration.rs` | Integración del ejecutable en PATH (HKCU). Ajustes bloquea la casilla mientras se aplica: dos escrituras cruzadas dejaban entradas sueltas. El E2E guarda y repone una copia exacta de `HKCU\Environment\Path` y `HKCU\Software\WTerminal\PathIntegration`, porque el perfil aislado no cubre el registro. |
 | `src-tauri/src/platform/windows_integration.rs` | Estado y activación de integración Windows (menús, App Paths, `wterminal://`) y de los permisos de administrador: `WindowsIntegrationStatus` lleva `elevated`, `nsudoLauncher`, `gsudoPath` y `windowsSudo`; `StartElevation::should_relaunch` decide «Iniciar siempre como administrador»; `relaunch_elevated` y el IPC `app_restart_as_admin` relanzan con `--elevated-relaunch`; `relaunch_unelevated` y el IPC `app_restart_unelevated` vuelven sin permisos (con `unelevated_restart_blocker` como guarda). |
 | `src-tauri/src/platform/windows/mod.rs` | Adaptador Windows. |
@@ -1850,6 +1924,7 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/projects/gh_code.rs` | «Gestionar…» → Código de «Mi GitHub» con `gh api`: archivos y carpetas por rama (`contents`), commits con sus cambios, comparar ramas o etiquetas, y listar, crear y borrar ramas (nunca la rama por defecto, confirmando el nombre). Rutas fijas con parámetros validados (`encode_repo_path`, `valid_ref_name`), respuestas saneadas y recortadas (`parse_*`) y solo repositorios del listado (`gh_cli::own`). |
 | `src-tauri/src/projects/gh_work.rs` | «Gestionar…» de «Mi GitHub», fase de trabajo diario: ver una issue o PR con descripción, etiquetas, comentarios y archivos (`gh issue|pr view --json`), comentar, cerrar y reabrir, PR de borrador a lista (`gh pr ready`) y revisiones (`gh pr review --approve|--request-changes`), issues por estado y el log de lo que falló en Actions (`gh run view --log-failed`, sin colores y recortado por el final) o cancelar una ejecución. Argumentos fijos y validados, solo repositorios de la cuenta. |
 | `src-tauri/src/projects/gh_manage.rs` | «Gestionar…» de «Mi GitHub» con `gh`: detalles (`gh repo view/edit`), releases (`gh release list/view/create/upload/edit/delete/delete-asset`), pull requests (`gh pr list/create/merge`), issues (`gh issue list/create/close`) y Actions (`gh run list/rerun`). Argumentos fijos y validados (`valid_ref_name`, `valid_topic`, `valid_homepage`, `valid_files`…), JSON saneado (`parse_*`) y solo repositorios del listado (`gh_cli::own`). |
+| `src-tauri/src/projects/gh_admin.rs` | «Gestionar…» de «Mi GitHub», áreas de administración: artefactos, workflows con entradas, secretos (valor por la entrada estándar de `gh secret set`), variables, entornos, colaboradores, webhooks, claves de despliegue, Pages, protección de ramas, alertas de seguridad, comunidad y cuenta (perfil, claves SSH y GPG). `list_args` y `action_plan` traducen cada operación a una orden `gh` fija; lo que necesita permisos extra devuelve `needs_admin_scope`. |
 | `src-tauri/src/projects/git_local.rs` | Git en la copia local de un repositorio de la cuenta (`local_clone`: la carpeta la calcula el backend): estado (`parse_status`), commit de todo y ramas (`branch_args`: `switch -c`, `switch`, `branch -d`), sin preguntas (`GIT_TERMINAL_PROMPT=0`). Push, pull y publicar rama van a una pestaña visible (`commands::github_git_terminal` con `github::build_git_sync_command`). |
 | `src-tauri/src/updater/mod.rs` | Declara actualizador. |
 | `src-tauri/src/updater/commands.rs` | Consulta release, manifiesto, estado y aplicación. |
@@ -3154,7 +3229,7 @@ Se inyectan al crear una pestaña, solo en shells reales.
 | Alias | Qué hace |
 |---|---|
 | `edit`, `ip`, `ll`, `ls`, `pwd` | Vocabulario común a todas las shells reales. El nombre y la intención son iguales; cambia únicamente el comando nativo que hay detrás. |
-| `clear`, `cls` | Limpieza real de pantalla e historial; por defecto vuelve a mostrar el fastfetch esencial. Se puede desactivar en Ajustes (`Reimprimir fastfetch al ejecutar clear`). |
+| `clear`, `cls` | Limpieza real de pantalla e historial; por defecto vuelve a mostrar el fastfetch esencial. Se puede desactivar en Ajustes (`Reimprimir fastfetch al ejecutar clear`). En cmd es una macro de `doskey` con sus órdenes unidas con `&` (escrito `^&` en el `.cmd`, `&` en el archivo de macros): con `$T` cmd pintaba un prompt entre cada orden y se veían un instante antes del banner. |
 | `sysinfo` | Reimprime el banner del sistema. |
 | `ayuda` | Ayuda explicada: qué hace cada alias, qué gestor los atiende y qué scripts se han registrado. Se lee de un archivo generado por sesión, así que ocupa varias líneas y va traducida. |
 | `nsudo` | Solo si el ejecutable existe en la máquina. |
@@ -3463,6 +3538,17 @@ la orden. `&&` y `||` atan más que `&`, así que una orden compuesta sigue
 siendo un solo bloque. Si esos archivos no se pueden escribir se vuelve al
 formato de varias líneas.
 
+Las acciones que son scripts de PowerShell (las instalaciones con WinGet, por
+ejemplo) no viajan dentro de la línea de cmd: cmd no sabe escapar comillas
+dentro de comillas, y un `|` o un `>` del script partía la orden («"Out-Null"
+no se reconoce» al instalar GitHub CLI desde una pestaña cmd). El script se
+escribe en `ps-N.ps1` de la misma carpeta de sesión, en UTF-8 con BOM, y la
+orden real es `powershell -NoProfile -ExecutionPolicy Bypass -File
+"%WSTERM_UI%\ps-N.ps1"`. El archivo termina con el mismo veredicto que en una
+pestaña PowerShell (`$?` y `$LASTEXITCODE` a 0) y sale con un código positivo
+si falla, para que `if errorlevel 1` vea también los códigos negativos de
+WinGet. Sin carpeta de sesión, el script va en `-EncodedCommand`.
+
 Al terminar, cada acción espera a que se pulse Enter para que su salida se
 pueda leer. El siguiente comando que escriba un panel cierra esa pausa antes de
 ejecutarse, para que no se consuma como respuesta.
@@ -3554,7 +3640,7 @@ La cuarta pestaña del panel trabaja con tu cuenta a través de **GitHub CLI**
 - **Nuevo repositorio**: nombre, descripción, privado o público, README
   inicial y, si se quiere, clonarlo en la carpeta de proyectos.
 - **Gestionar…** (en «⋯» de cada repositorio de la cuenta) abre bajo su fila
-  una ficha con siete secciones (`GithubRepoManager.svelte`):
+  una ficha con doce secciones (`GithubRepoManager.svelte`):
   - **Detalles**: descripción, web, temas, rama por defecto, issues y wiki
     (`gh repo view` para leerlos, `gh repo edit` para guardarlos; solo se
     añaden y quitan los temas que cambian).
@@ -3592,6 +3678,37 @@ La cuarta pestaña del panel trabaja con tu cuenta a través de **GitHub CLI**
     rerun --failed`), **Ver log** de los pasos que fallaron (sin colores y
     recortado a los últimos 60 000 caracteres, que es donde está el error) y
     **Cancelar** las que siguen en cola o en marcha.
+  - **Actions: más** (`projects/gh_admin.rs` y `GithubAdmin.svelte`):
+    **Workflows** (lanzar en una rama con entradas `nombre=valor`, que es `gh
+    workflow run -f`, y activar o desactivar), **Artefactos** (descargar a
+    una carpeta con `gh run download` y borrar), **Secretos** (el valor va por
+    la entrada estándar de `gh secret set`: nunca en los argumentos, la lista
+    de procesos ni el registro, y no se vuelve a mostrar), **Variables** y
+    **Entornos**.
+  - **Configuración**: **Colaboradores** (invitar con su permiso y quitar),
+    **Webhooks** (crear uno https para push, ping y borrar), **Claves de
+    despliegue** (solo claves públicas SSH, de solo lectura o no), **Pages**
+    (activar desde una rama y `/` o `/docs`, desactivar; sin activar se
+    explica en vez de fallar) y **Protección de ramas** (revisiones
+    obligatorias, también para administradores, historial lineal; quitarla).
+  - **Seguridad**: alertas abiertas de Dependabot, code scanning y secret
+    scanning, y activar o desactivar las alertas de vulnerabilidades. Si un
+    tipo de alerta no está activado, se dice en vez de fallar.
+  - **Comunidad**: el perfil de comunidad (porcentaje de salud, README,
+    licencia, CONTRIBUTING, código de conducta y plantillas).
+  - **Cuenta**: el perfil, las claves SSH (añadir y borrar) y las GPG de la
+    cuenta.
+  - **Vista grande** (⤢): la ficha deja el panel estrecho y ocupa la ventana
+    bajo la barra, con cualquier tamaño de interfaz.
+
+  Lo que pide un permiso que `gh auth login` no concede (claves de la cuenta,
+  webhooks, lanzar workflows) avisa con «Pedir permisos», que abre `gh auth
+  refresh --scopes admin:public_key,admin:gpg_key,admin:repo_hook,workflow` en
+  una pestaña visible (`TerminalAction::GrantAdmin`). Cada operación es una
+  orden `gh` con método y ruta fijos (`list_args` y `action_plan`), con el
+  repositorio del listado de la cuenta y cada campo validado: nombres de
+  secretos sin `GITHUB_`, usuarios de GitHub, webhooks solo https, claves
+  públicas en una línea (nunca una privada), ramas con las reglas de git.
 - **Cerrar sesión** (`gh auth logout`) también va a la terminal, porque `gh`
   pide confirmación.
 

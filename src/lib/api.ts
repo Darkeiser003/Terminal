@@ -15,6 +15,9 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 
 import type {
     ActionResult,
+    GhAdminAction,
+    GhAdminArea,
+    GhAdminList,
     ImportableRepository,
     GhBranch,
     GhItemView,
@@ -65,6 +68,8 @@ import type {
     PathIntegrationStatus,
     ToolchainStoreLocation,
     ToolchainStoreStatus,
+    StoreAdoptItem,
+    StoreImportResult,
     ShellAssistStatus,
     PreferencesPayload,
     Preferences,
@@ -311,6 +316,36 @@ export const openTerminalLink = (url: string) =>
 export const clearToolchainCaches = () =>
     invokeLogged<number>('toolchain_store_clear_caches');
 
+/** «Traer lo ya instalado»: lo que se puede traer a la carpeta propia, con su
+ *  espacio y su estado (también el progreso de las copias en marcha). Mide
+ *  carpetas grandes: la primera vez puede tardar. */
+export const getStoreAdoptCandidates = () =>
+    invokeLogged<StoreAdoptItem[]>('store_adopt_candidates');
+/** Copia y cambia en segundo plano; el progreso se lee con la lista. */
+export const runStoreAdopt = (ids: string[]) =>
+    invokeLogged<void>('store_adopt_run', { ids });
+/** Borra el original de algo ya traído (sin vuelta atrás). */
+export const confirmStoreAdopt = (id: string) =>
+    invokeLogged<void>('store_adopt_confirm', { id });
+/** Lo deja como estaba antes de traerlo (solo antes de confirmar). */
+export const undoStoreAdopt = (id: string) =>
+    invokeLogged<void>('store_adopt_undo', { id });
+
+/** Guarda la configuración de la carpeta propia y la lista de lo instalado
+ *  del catálogo en un archivo para llevarlo a otro equipo. */
+export async function exportStoreList(): Promise<boolean> {
+    const path = await save({ defaultPath: 'carpeta-propia.wterminal-store.json', filters: [{ name: 'Lista de la carpeta propia', extensions: ['json'] }] });
+    if (!path) return false;
+    await invokeLogged<void>('store_export', { path });
+    return true;
+}
+
+/** Lee una lista exportada: aplica su configuración y dice qué falta instalar. */
+export async function importStoreList(): Promise<StoreImportResult | null> {
+    const path = await open({ multiple: false, directory: false, filters: [{ name: 'Lista de la carpeta propia', extensions: ['json'] }] });
+    return typeof path === 'string' ? invokeLogged<StoreImportResult>('store_import', { path }) : null;
+}
+
 /** `exact`: la PTY toma justo esas columnas, sin la reserva mínima de las
  *  shells; lo usan los programas a pantalla completa (`full-screen-app.ts`). */
 export const resize = (tabId: string, cols: number, rows: number, exact = false) =>
@@ -533,6 +568,14 @@ export const runProject = (tabId: string, fullName: string) =>
 export const githubCliStatus = () => invokeLogged<GhStatus>('github_cli_status');
 export const githubCliRepositories = () => invokeLogged<OwnRepository[]>('github_cli_repositories');
 /** Iniciar o cerrar sesión, o pedir el permiso de borrar, en una pestaña nueva. */
+/** Listas de «Gestionar…» que van por `gh_admin.rs` (Actions, configuración,
+ *  seguridad, comunidad y cuenta). `branch` solo para la protección de ramas. */
+export const githubAdminList = (fullName: string, area: GhAdminArea, branch?: string) =>
+    invokeLogged<GhAdminList>('github_admin_list', { fullName, area, branch: branch ?? null });
+/** Un cambio de esas áreas. El valor de un secreto viaja al backend y de ahí a
+ *  la entrada estándar de `gh secret set`; nunca se registra. */
+export const githubAdminAction = (fullName: string, action: GhAdminAction) =>
+    invokeLogged<GhResult>('github_admin_action', { fullName, action });
 export const githubCliTerminal = (tabId: string, action: GhTerminalAction) =>
     invokeLogged<GitRunResult>('github_cli_terminal', { tabId, action });
 export const githubCliCreate = (name: string, description: string, isPrivate: boolean, readme: boolean) =>

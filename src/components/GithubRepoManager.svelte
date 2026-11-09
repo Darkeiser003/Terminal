@@ -7,6 +7,7 @@
      * (push, pull, publicar rama) va a una pestaña visible.
      */
     import { untrack } from 'svelte';
+    import GithubAdmin from './GithubAdmin.svelte';
     import { app } from '../lib/appState.svelte';
     import * as api from '../lib/api';
     import type {
@@ -30,7 +31,12 @@
         LocalGitStatus,
     } from '../lib/types';
 
-    type Section = 'details' | 'code' | 'releases' | 'git' | 'pulls' | 'issues' | 'runs';
+    type Section = 'details' | 'code' | 'releases' | 'git' | 'pulls' | 'issues' | 'runs' | AdminGroup;
+    /** Áreas que van por `gh_admin.rs` (`GithubAdmin.svelte`). */
+    type AdminGroup = 'actions' | 'settings' | 'security' | 'community' | 'account';
+    const ADMIN_GROUPS: AdminGroup[] = ['actions', 'settings', 'security', 'community', 'account'];
+    const adminGroup = (value: Section): AdminGroup | null =>
+        (ADMIN_GROUPS as string[]).includes(value) ? (value as AdminGroup) : null;
     type CodeView = 'files' | 'commits' | 'branches' | 'tags';
 
     let {
@@ -46,6 +52,8 @@
     } = $props();
 
     let section = $state<Section>('details');
+    /** Vista grande: ocupa la ventana en vez del panel estrecho. */
+    let expanded = $state(false);
     let busy = $state(false);
     let message = $state('');
     let messageError = $state(false);
@@ -123,6 +131,11 @@
         { id: 'pulls', label: app.t('ghm.tabPulls', 'Pull requests') },
         { id: 'issues', label: app.t('ghm.tabIssues', 'Issues') },
         { id: 'runs', label: app.t('ghm.tabRuns', 'Actions') },
+        { id: 'actions', label: app.t('ghm.tabActionsAdmin', 'Actions: más') },
+        { id: 'settings', label: app.t('ghm.tabSettings', 'Configuración') },
+        { id: 'security', label: app.t('ghm.tabSecurity', 'Seguridad') },
+        { id: 'community', label: app.t('ghm.tabCommunity', 'Comunidad') },
+        { id: 'account', label: app.t('ghm.tabAccount', 'Cuenta') },
     ]);
 
     function show(text: string, error = false): void {
@@ -177,6 +190,8 @@
         } else if (next === 'issues') {
             issues = (await work(() => issueState === 'open' ? api.githubIssues(fullName) : api.githubIssuesByState(fullName, issueState))) ?? issues;
             openItem = '';
+        } else if (adminGroup(next)) {
+            // Lo lee `GithubAdmin` al montarse.
         } else {
             runs = (await work(() => api.githubRuns(fullName))) ?? runs;
         }
@@ -423,7 +438,7 @@
     </div>
 {/snippet}
 
-<div class="manage" data-testid="gh-manage" data-full-name={fullName} data-section={section} aria-busy={busy}>
+<div class="manage" class:expanded data-testid="gh-manage" data-full-name={fullName} data-section={section} data-expanded={expanded} aria-busy={busy}>
     <div class="manage-head">
         <div class="tabs" role="tablist">
             {#each sections as tab (tab.id)}
@@ -439,6 +454,7 @@
             {/each}
         </div>
         <button type="button" class="icon" data-testid="gh-manage-refresh" title={app.t('ghm.refresh', 'Volver a leer')} disabled={busy} onclick={() => load(section)}>⟳</button>
+        <button type="button" class="icon" data-testid="gh-manage-expand" aria-pressed={expanded} title={expanded ? app.t('ghm.shrink', 'Volver al panel') : app.t('ghm.expand', 'Vista grande')} onclick={() => (expanded = !expanded)}>{expanded ? '⤡' : '⤢'}</button>
         <button type="button" class="icon" data-testid="gh-manage-close" title={app.t('common.close', 'Cerrar')} onclick={onClose}>✕</button>
     </div>
 
@@ -775,6 +791,10 @@
         {:else}
             <small>{app.t('ghm.empty', 'Nada por aquí.')}</small>
         {/each}
+    {:else if adminGroup(section)}
+        {#key section}
+            <GithubAdmin {fullName} group={adminGroup(section) ?? 'actions'} {onTerminal} />
+        {/key}
     {/if}
 </div>
 
@@ -824,6 +844,22 @@
     .diff summary {
         cursor: pointer;
     }
+    /* Vista grande (diseño del 23-10): la gestión ocupa la ventana bajo la
+       barra. Va dentro de un panel con `zoom: var(--ui-scale)`, que también
+       multiplica vw y vh: se dividen para que quepa con cualquier tamaño. */
+    .manage.expanded {
+        position: fixed;
+        top: 48px;
+        left: 16px;
+        z-index: 80;
+        width: calc(100vw / var(--ui-scale, 1) - 32px);
+        height: calc(100vh / var(--ui-scale, 1) - 64px);
+        margin: 0;
+        overflow: auto;
+        font-size: 12px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    }
+
     .manage {
         display: flex;
         flex-direction: column;

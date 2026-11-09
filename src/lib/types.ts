@@ -238,6 +238,14 @@ export interface Preferences {
     toolchainStorePrograms: boolean;
     /** Proyectos de GitHub en `<carpeta propia>\proyectos` (si no hay otra carpeta elegida). */
     toolchainStoreProjects: boolean;
+    /** Configuración de los REPL (IPython, Jupyter) en `configuracion\`, solo si aún no existía. */
+    toolchainStoreConfig: boolean;
+    /** Plugins de las shells (caché de starship) en `plugins\`. */
+    toolchainStorePlugins: boolean;
+    /** Carpeta de cada categoría, `categoría=carpeta` por línea. */
+    toolchainStoreCategoryDirs: string;
+    /** Entradas apagadas una a una (ids separados por comas). */
+    toolchainStoreDisabled: string;
     shellAssist: boolean;
     shellAssistCmd: boolean;
     shellAssistPowershell: boolean;
@@ -377,7 +385,40 @@ export interface ToolchainStoreCache {
     info: StorageLocationInfo;
 }
 
-export type ToolchainStoreCategory = 'caches' | 'downloads' | 'aiModels' | 'tools' | 'replHistory' | 'toolchains' | 'programs' | 'projects';
+export type ToolchainStoreCategory = 'caches' | 'downloads' | 'aiModels' | 'tools' | 'replHistory' | 'toolchains' | 'programs' | 'projects' | 'config' | 'plugins';
+
+/** Cómo se trae algo ya instalado a la carpeta propia (`store_adopt`). */
+export type StoreAdoptMethod = 'variable' | 'junction' | 'profile';
+
+/** En qué punto está cada elemento de «Traer lo ya instalado». */
+export type StoreAdoptState = 'available' | 'blocked' | 'copying' | 'done' | 'confirmed' | 'failed';
+
+export interface StoreAdoptItem {
+    id: string;
+    label: string;
+    category: ToolchainStoreCategory;
+    source: string;
+    destination: string;
+    bytes: number;
+    method: StoreAdoptMethod;
+    state: StoreAdoptState;
+    /** Bytes copiados mientras `state` es `copying`. */
+    copiedBytes: number;
+    /** Hace falta elevar (programas en Program Files). */
+    needsAdmin: boolean;
+    /** Por qué no se puede traer, o qué falló. */
+    reason?: string | null;
+}
+
+/** El archivo de «Exportar la lista» (`wterminal-store-v1`). */
+export interface StoreImportResult {
+    ok: boolean;
+    error?: string | null;
+    /** Acciones del catálogo de la lista que aquí faltan, para instalarlas. */
+    missing: { id: string; label: string }[];
+    /** Ids de la lista que este catálogo no conoce (otro sistema u otra versión). */
+    unknown: string[];
+}
 
 /** Carpeta de WTerminal (`app`) o de otra herramienta (`external`); solo se
  *  mide y se explica. */
@@ -764,6 +805,8 @@ export interface GhResult {
     url?: string | null;
     /** Falta el permiso `delete_repo`: el panel ofrece pedirlo. */
     needsDeleteScope: boolean;
+    /** Faltan los permisos de administración (claves, webhooks, workflows). */
+    needsAdminScope?: boolean;
 }
 
 export type GhRepositoryChange = 'make-public' | 'make-private' | 'archive' | 'unarchive';
@@ -849,7 +892,54 @@ export interface LocalGitStatus {
 
 export type GitBranchAction = 'create' | 'switch' | 'delete';
 export type GitTerminalAction = 'push' | 'pull' | 'publish';
-export type GhTerminalAction = 'login' | 'logout' | 'grant-delete';
+export type GhTerminalAction = 'login' | 'logout' | 'grant-delete' | 'grant-admin';
+
+/** Áreas de «Gestionar…» que van por `gh_admin.rs`. */
+export type GhAdminArea =
+    | 'artifacts' | 'workflows' | 'secrets' | 'variables' | 'environments'
+    | 'collaborators' | 'hooks' | 'deployKeys' | 'pages' | 'protection'
+    | 'dependabot' | 'codeScanning' | 'secretScanning' | 'community'
+    | 'account' | 'sshKeys' | 'gpgKeys';
+
+export interface GhAdminRow {
+    id: string;
+    title: string;
+    detail: string;
+    state: string;
+    url?: string | null;
+}
+
+export interface GhAdminList {
+    rows: GhAdminRow[];
+    /** Por qué no hay lista (Pages sin activar, rama sin proteger, alertas apagadas). */
+    note?: string | null;
+    needsAdminScope: boolean;
+}
+
+/** Cambios de `gh_admin.rs`; el backend valida cada campo. */
+export type GhAdminAction =
+    | { kind: 'artifactDelete'; id: number }
+    | { kind: 'artifactDownload'; runId: number; name: string; dir: string }
+    | { kind: 'workflowRun'; workflow: number; gitRef: string; inputs: [string, string][] }
+    | { kind: 'workflowEnable'; workflow: number; enable: boolean }
+    | { kind: 'secretSet'; name: string; value: string }
+    | { kind: 'secretDelete'; name: string }
+    | { kind: 'variableSet'; name: string; value: string }
+    | { kind: 'variableDelete'; name: string }
+    | { kind: 'collaboratorAdd'; login: string; permission: string }
+    | { kind: 'collaboratorRemove'; login: string }
+    | { kind: 'hookCreate'; url: string }
+    | { kind: 'hookPing'; id: number }
+    | { kind: 'hookDelete'; id: number }
+    | { kind: 'deployKeyAdd'; title: string; key: string; readOnly: boolean }
+    | { kind: 'deployKeyDelete'; id: number }
+    | { kind: 'pagesEnable'; branch: string; path: string }
+    | { kind: 'pagesDisable' }
+    | { kind: 'protectionSet'; branch: string; reviews: number; enforceAdmins: boolean; linearHistory: boolean }
+    | { kind: 'protectionRemove'; branch: string }
+    | { kind: 'vulnerabilityAlerts'; enable: boolean }
+    | { kind: 'sshKeyAdd'; title: string; key: string }
+    | { kind: 'sshKeyDelete'; id: number };
 
 export interface GitRunResult {
     ok: boolean;

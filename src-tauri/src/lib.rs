@@ -33,7 +33,7 @@ pub mod updater;
 // de golpe las APIs Tauri y los módulos ya probados.
 pub use app::{commands, panel_commands as commands_panels, state};
 pub use config::{
-    i18n, identity, install_dir, migration, paths, preferences, settings, single_file,
+    i18n, identity, install_dir, migration, paths, preferences, settings, single_file, store_adopt,
     toolchain_store,
 };
 pub use environments::{
@@ -210,6 +210,11 @@ pub fn run() {
     #[cfg(windows)]
     if std::env::args().any(|argument| argument == platform::UNINSTALL_CLEANUP_ARG) {
         std::process::exit(platform::uninstall_cleanup());
+    }
+    // El desinstalador pregunta cuánto ocupan los datos y la carpeta propia
+    // para ofrecer borrarlos con su tamaño (`platform::first_run`).
+    if let Some(report) = platform::first_run::uninstall_report_argument() {
+        std::process::exit(platform::first_run::uninstall_report(&report));
     }
     // `--install-webview2 [ruta]`: instala WebView2 sin ventana y sale.
     #[cfg(windows)]
@@ -443,6 +448,12 @@ pub fn run() {
             terminal::links::terminal_open_link,
             toolchain_store::toolchain_store_external_sizes,
             toolchain_store::toolchain_store_clear_caches,
+            store_adopt::store_adopt_candidates,
+            store_adopt::store_adopt_run,
+            store_adopt::store_adopt_confirm,
+            store_adopt::store_adopt_undo,
+            store_adopt::store_export,
+            store_adopt::store_import,
             platform::path_integration::path_integration_set,
             commands::app_info,
             commands::log_frontend_error,
@@ -527,6 +538,8 @@ pub fn run() {
             projects::gh_manage::github_issue_close,
             projects::gh_manage::github_runs,
             projects::gh_manage::github_run_rerun,
+            projects::gh_admin::github_admin_list,
+            projects::gh_admin::github_admin_action,
             projects::git_local::git_local_status,
             projects::git_local::git_downloaded_status,
             projects::git_local::git_local_commit,
@@ -547,6 +560,9 @@ pub fn run() {
             let state = app.state::<std::sync::Arc<AppState>>();
             state.tabs.attach_app(app.handle());
 
+            // Lo elegido en la página de componentes del instalador, una vez
+            // por usuario y antes de añadirse al PATH de fábrica.
+            platform::first_run::apply();
             if let Err(error) = platform::path_integration::ensure_default_enabled() {
                 log_warn!(
                     "No se pudo añadir WTerminal automáticamente al PATH",

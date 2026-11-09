@@ -7,7 +7,7 @@
 
 import * as perf from './performance';
 
-export type PanelId = 'deps' | 'projects' | 'scripts' | 'explorer' | 'settings';
+export type PanelId = 'deps' | 'projects' | 'scripts' | 'explorer' | 'settings' | 'store';
 
 class PanelStore {
     open = $state<PanelId | null>(null);

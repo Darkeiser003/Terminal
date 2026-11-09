@@ -610,6 +610,18 @@ pub struct Preferences {
     /// otra carpeta de Proyectos. Apagado de fábrica: los que ya están en
     /// Documentos dejarían de verse en la lista.
     pub toolchain_store_projects: bool,
+    /// Configuración de los REPL (IPython, Jupyter) en `configuracion/`:
+    /// solo si aún no existía en su sitio de siempre.
+    pub toolchain_store_config: bool,
+    /// Plugins de las shells (caché de starship) en `plugins/`.
+    pub toolchain_store_plugins: bool,
+    /// Carpeta propia de cada categoría, `categoría=carpeta` por línea
+    /// (`config::toolchain_store::parse_category_dirs`). Las que no salen
+    /// van en `<carpeta propia>\<subcarpeta>`.
+    pub toolchain_store_category_dirs: String,
+    /// Entradas apagadas una a una (ids de `toolchain_store::CACHES`,
+    /// separados por comas) aunque su categoría siga activa.
+    pub toolchain_store_disabled: String,
     /// Sugerencias del historial en gris y colores para órdenes y argumentos
     /// en la línea de órdenes de cada shell, con las herramientas propias de
     /// cada una (Clink en cmd, PSReadLine en PowerShell, ble.sh o los plugins
@@ -871,6 +883,27 @@ fn safe_hex_color(value: Option<&Value>, fallback: &str) -> String {
 /// validador, con lo que cambiar `default_settings.toml` no surtía efecto.
 fn bool_or_default(value: Option<&Value>, fallback: bool) -> bool {
     value.and_then(Value::as_bool).unwrap_or(fallback)
+}
+
+/// `categoría=carpeta` por línea, solo con categorías conocidas y carpetas
+/// absolutas válidas (las mismas reglas que [`safe_absolute_dir`]). Una
+/// categoría repetida se queda con la primera.
+fn safe_category_dirs(value: Option<&Value>) -> String {
+    let Some(text) = value.and_then(Value::as_str) else {
+        return String::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    text.lines()
+        .take(32)
+        .filter_map(|line| {
+            let (id, dir) = line.split_once('=')?;
+            let category = crate::toolchain_store::Category::from_id(id.trim())?;
+            let dir = safe_absolute_dir(Some(&Value::String(dir.trim().to_string())));
+            (!dir.is_empty() && seen.insert(category.id()))
+                .then(|| format!("{}={dir}", category.id()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Carpeta absoluta elegida por el usuario. Cualquier otra cosa (relativa,
@@ -1481,6 +1514,19 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             defaults.shell_assist_list_view,
         ),
         toolchain_store_dir: safe_absolute_dir(get("toolchainStoreDir")),
+        toolchain_store_config: bool_or_default(
+            get("toolchainStoreConfig"),
+            defaults.toolchain_store_config,
+        ),
+        toolchain_store_plugins: bool_or_default(
+            get("toolchainStorePlugins"),
+            defaults.toolchain_store_plugins,
+        ),
+        toolchain_store_category_dirs: safe_category_dirs(get("toolchainStoreCategoryDirs")),
+        toolchain_store_disabled: get("toolchainStoreDisabled")
+            .and_then(Value::as_str)
+            .map(|text| sanitize_id_list(text, 64))
+            .unwrap_or_else(|| defaults.toolchain_store_disabled.clone()),
         default_script_environment_id: safe_environment_id(get("defaultScriptEnvironmentId")),
         file_manager_id: safe_identifier(get("fileManagerId")),
         viewport_cols: integer_in_range(get("viewportCols"), 20, 1000, defaults.viewport_cols),

@@ -596,6 +596,13 @@ if (githubAccountOnly) {
         'if "%~1"=="pr" goto pr',
         'if "%~1"=="issue" goto issue',
         'if "%~1"=="run" goto run',
+        'if "%~1"=="secret" goto secret',
+        'exit /b 0',
+        // Secretos (gh_admin.rs): el valor llega por la entrada estándar y se
+        // guarda aparte; calls.log solo ve los argumentos, que no lo llevan.
+        ':secret',
+        `if "%~2"=="list" type "%STATE%${String.fromCharCode(92)}secrets.json" & exit /b 0`,
+        `if "%~2"=="set" findstr "^" > "%STATE%${String.fromCharCode(92)}secret-%~3.txt" & exit /b 0`,
         'exit /b 0',
         // «Gestionar…»: las consultas devuelven JSON fijo y los cambios solo
         // quedan anotados en calls.log.
@@ -621,7 +628,18 @@ if (githubAccountOnly) {
         // «Gestionar…» → Código pide rutas fijas de la API; cada una tiene su
         // respuesta guardada. Las escrituras (-X POST/DELETE) solo se anotan.
         'set "ARG=%~2"',
+        // Las listas de «Gestionar…» (gh_admin.rs) mandan antes la cabecera
+        // Accept: la ruta es el cuarto argumento.
+        'if "%~2"=="-H" set "ARG=%~4"',
         'if "%~2"=="-X" exit /b 0',
+        `if not "%ARG:/actions/artifacts=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}artifacts.json" & exit /b 0`,
+        `if not "%ARG:/actions/workflows=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}workflows.json" & exit /b 0`,
+        `if not "%ARG:/hooks=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}hooks.json" & exit /b 0`,
+        `if not "%ARG:/community/profile=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}community.json" & exit /b 0`,
+        'if not "%ARG:/pages=%"=="%ARG%" (',
+        '  >&2 echo HTTP 404: Not Found',
+        '  exit /b 1',
+        ')',
         `if not "%ARG:/branches=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}branches.json" & exit /b 0`,
         `if not "%ARG:/tags=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}tags.json" & exit /b 0`,
         `if not "%ARG:/commits/=%"=="%ARG%" type "%STATE%${String.fromCharCode(92)}commit.json" & exit /b 0`,
@@ -715,6 +733,11 @@ if (githubAccountOnly) {
     await writeFile(join(fakeGhDirectory, 'state', 'run-log.txt'), 'build\tcompile\tError: falta un punto y coma\n');
     await state('issues.json', [{ number: 3, title: 'Fallo', url: 'https://github.com/wterminal-e2e/demo/issues/3' }]);
     await state('runs.json', [{ databaseId: 99, displayTitle: 'CI', status: 'completed', conclusion: 'failure', workflowName: 'ci', headBranch: 'main', createdAt: '2026-10-21T10:00:00Z', url: 'https://github.com/wterminal-e2e/demo/actions/runs/99' }]);
+    await state('artifacts.json', { artifacts: [{ id: 7, name: 'demo-x64', size_in_bytes: 2097152, expired: false, created_at: '2026-10-21T10:00:00Z', workflow_run: { id: 99 } }] });
+    await state('workflows.json', { workflows: [{ id: 42, name: 'ci', path: '.github/workflows/ci.yml', state: 'active', html_url: 'https://github.com/wterminal-e2e/demo/actions/workflows/ci.yml' }] });
+    await state('hooks.json', [{ id: 5, active: true, events: ['push'], config: { url: 'https://hooks.ejemplo.dev/demo' } }]);
+    await state('community.json', { health_percentage: 71, files: { readme: { html_url: 'https://github.com/wterminal-e2e/demo/blob/main/README.md' }, license: null, contributing: null, code_of_conduct: null, issue_template: null, pull_request_template: null } });
+    await state('secrets.json', [{ name: 'DEPLOY_TOKEN', updatedAt: '2026-10-21T10:00:00Z' }]);
     await writeFile(join(fakeGhDirectory, 'adjunto.zip'), 'zip de prueba');
     process.env.PATH = [fakeGhDirectory, process.env.PATH].filter(Boolean).join(delimiter);
 }
@@ -4381,6 +4404,47 @@ async function exerciseHorizontalSequenceIntegrity() {
     await clickWhenReady('.tab.active .tab-close');
     await waitUntil(async () => (await findAll('.tab')).length === originalTabCount,
         10000, 'cierre de pestaña de secuencia horizontal');
+    // Una fila de espacios no ocupa aunque llegue escrita. zsh rellena así la
+    // fila de cada prompt (`PROMPT_SP`) y, con la PTY aún en las 1024
+    // columnas del precalentado de la entrada, el DOM pintaba el relleno
+    // entero: la barra horizontal se quedaba con todas las filas cortas (la
+    // larga 49 lo vio en Kali zsh, solo cuando ConPTY mandaba el relleno como
+    // espacios). Con fondo de color ConPTY manda siempre esas celdas, y en
+    // PowerShell la salida llega sin arrancar otro proceso, con la PTY ancha.
+    // La fila lleva texto delante, como el prompt de Kali sobre su relleno:
+    // una fila solo de espacios ya la descartaba otra regla (la tomaba por
+    // continuación del eco de cualquier orden con un espacio).
+    const paddingTabCount = (await findAll('.tab')).length;
+    await openFreshTab(paddingTabCount, 'fila de espacios escritos');
+    await switchToEnvironment('powershell');
+    await waitForBannerPanes(1, 60000);
+    const paddingCell = await activeTerminalCell();
+    await sendLineAndAssertPrompt(
+        "Write-Host (('WTERM' + 'ROW') + (' ' * 900)) -BackgroundColor DarkBlue; Write-Host ('WTERM' + 'PADDING')",
+        paddingCell, 'WTERMPADDING', 'fila corta con 900 espacios de relleno',
+    );
+    const paddingState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const pane = document.querySelector('.tab-pane:not(.hidden)');
+            const rows = [...(pane?.querySelectorAll('.xterm-rows > div') ?? [])].map((row) => (row.textContent ?? '').length);
+            return { overflow: pane?.dataset.horizontalOverflow ?? null, widestRow: Math.max(0, ...rows) };`,
+        args: [],
+    });
+    const paddingFirst = await paddingState();
+    let padding = paddingFirst;
+    const paddingDeadline = Date.now() + 8000;
+    while (padding.overflow === 'true' && Date.now() < paddingDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        padding = await paddingState();
+    }
+    if (padding.overflow === 'true') {
+        await captureScreenshot('scroll-blank-padding-overflow');
+        const snapshot = await terminalHorizontalSnapshot(paddingCell);
+        throw new Error(`Una fila de espacios dejó la barra horizontal con todas las filas cortas: ${JSON.stringify({ paddingFirst, padding, screen: snapshot?.screen, host: snapshot?.host })}`);
+    }
+    recordEvent('horizontal-blank-padding', { paddingFirst, padding, passed: true });
+    await clickWhenReady('.tab.active .tab-close');
+    await waitUntil(async () => (await findAll('.tab')).length === paddingTabCount,
+        10000, 'cierre de pestaña de la fila de espacios');
     return { before, horizontalProbe, final, passed: true };
 }
 
@@ -6903,6 +6967,11 @@ async function exerciseShellMatrix() {
             startupHintCapture = 'shell-lang-forth-startup-help';
             await captureScreenshot(startupHintCapture);
         }
+        // Traza cruda de la PTY: si zsh deja la barra horizontal, el informe
+        // dice con qué secuencias llegó su relleno (`PROMPT_SP`).
+        if (id.endsWith(':zsh')) {
+            await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'window.__wtermPtyTrace = []; return true;', args: [] }).catch(() => null);
+        }
         const terminalFocusMethod = await sendTerminalLine(probe.command);
         let markerOutputDetected = false;
         let expectedIdentityDetected = probe.expectedIdentity === undefined;
@@ -7013,6 +7082,10 @@ async function exerciseShellMatrix() {
                 script: 'return document.querySelector(".tab-pane:not(.hidden)")?.dataset.horizontalOverflow ?? null;',
                 args: [],
             });
+            const ptyTrace = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: 'const trace = window.__wtermPtyTrace ?? []; delete window.__wtermPtyTrace; return trace.join("").slice(-4000);',
+                args: [],
+            }).catch(() => '');
             if (overflow === 'true') {
                 // Qué ancho sacó la barra: el lógico pedido o el del lienzo.
                 const pane = await findWhenReady('.tab-pane:not(.hidden)');
@@ -7033,7 +7106,7 @@ async function exerciseShellMatrix() {
                     args: [{ [elementKey]: pane }],
                 });
                 const details = JSON.stringify({ screen: snapshot?.screen, host: snapshot?.host, scrollers: snapshot?.horizontalScrollers, ...widths });
-                recordEvent('prompt-sp-overflow', { id, details });
+                recordEvent('prompt-sp-overflow', { id, details, ptyTrace });
                 throw new Error(`${id}: barra horizontal con todas las filas cortas (PROMPT_SP). ${details.slice(0, 6000)}`);
             }
         }
@@ -8815,6 +8888,48 @@ try {
             for (const edge of await panelEdgeViolations(8 * Math.min(1, applied / 100))) violations.push(`margen al ${scale} %: ${JSON.stringify(edge)}`);
             await captureScreenshot(`escala-${scale}-ajustes`);
             await clickWhenReady('[role="dialog"] .panel-close');
+            // Los desplegables de la barra se quedan dentro de la ventana y se
+            // llega a su último elemento con scroll. El de idioma (16 idiomas)
+            // se salía por abajo con la ventana por defecto en una pantalla
+            // pequeña y con la interfaz agrandada (aviso de un usuario, 09-11).
+            const menus = [];
+            for (const [menuLabel, opener, menuSelector, backdrop] of [
+                ['idioma', '.lang-btn', '.lang-menu', '.lang-backdrop'],
+                ['entornos', '.env-select', '.env-menu', '.env-backdrop'],
+            ]) {
+                if ((await findAll(opener)).length === 0) continue;
+                await clickWhenReady(opener);
+                await findWhenReady(menuSelector);
+                await pause(200);
+                const fit = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                    script: `const menu = document.querySelector(${JSON.stringify(menuSelector)});
+                        const before = menu.getBoundingClientRect();
+                        const buttons = menu.querySelectorAll('button');
+                        const last = buttons[buttons.length - 1];
+                        menu.scrollTop = menu.scrollHeight;
+                        const after = menu.getBoundingClientRect();
+                        const lastRect = last ? last.getBoundingClientRect() : null;
+                        menu.scrollTop = 0;
+                        return { top: before.top, bottom: before.bottom, left: before.left, right: before.right,
+                            innerWidth, innerHeight, scrollHeight: menu.scrollHeight, clientHeight: menu.clientHeight,
+                            lastTop: lastRect ? lastRect.top : null, lastBottom: lastRect ? lastRect.bottom : null, menuBottom: after.bottom };`,
+                    args: [],
+                });
+                menus.push({ menu: menuLabel, ...fit });
+                if (fit.bottom > fit.innerHeight + 1 || fit.right > fit.innerWidth + 1 || fit.left < -1 || fit.top < -1) {
+                    violations.push(`menú de ${menuLabel} fuera de la ventana al ${scale} %: ${JSON.stringify(fit)}`);
+                }
+                if (fit.lastBottom !== null && (fit.lastBottom > fit.menuBottom + 1 || fit.lastBottom > fit.innerHeight + 1)) {
+                    violations.push(`no se llega al final del menú de ${menuLabel} al ${scale} %: ${JSON.stringify(fit)}`);
+                }
+                if (menuLabel === 'idioma') await captureScreenshot(`escala-${scale}-menu-idioma`);
+                await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                    script: `document.querySelector(${JSON.stringify(backdrop)})?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return true;`,
+                    args: [],
+                });
+                await waitUntil(async () => (await findAll(menuSelector)).length === 0, 5000, `cierre del menú de ${menuLabel}`);
+            }
+            recordEvent('ui-scale-menus', { scale, applied, menus });
             results.push({ scale, applied, ...metrics });
         }
         // Atajos: Ctrl+Alt+= sube un paso, Ctrl+Alt+- baja y Ctrl+Alt+0 vuelve al 100 %.
@@ -9987,6 +10102,46 @@ try {
             15000, 'log de lo que falló en Actions');
         results.runLog = true;
         await captureScreenshot('mi-github-gestionar-actions');
+        // 3b. Áreas de gh_admin.rs (09-11): workflows y secretos, webhooks,
+        // comunidad y la vista grande. El valor del secreto va por la entrada
+        // estándar de `gh secret set`: nunca aparece en los argumentos.
+        await manageTab('actions');
+        await findWhenReady('[data-testid="gh-admin-row"][data-id="42"]', 15000);
+        await clickWhenReady('[data-testid="gh-admin-area-secrets"]');
+        await findWhenReady('[data-testid="gh-admin-row"][data-id="DEPLOY_TOKEN"]', 15000);
+        const secretValue = 'valor-secreto-e2e-0911';
+        await setInput('[data-testid="gh-admin-secret-name"]', 'E2E_TOKEN');
+        await setInput('[data-testid="gh-admin-secret-value"]', secretValue);
+        await clickWhenReady('[data-testid="gh-admin"] .form button');
+        await waitForArgs(['secret', 'set', 'E2E_TOKEN', '--repo', repo], 'gh secret set sin el valor en los argumentos');
+        await waitUntil(async () => (await readFile(join(fakeGhDirectory, 'state', 'secret-E2E_TOKEN.txt'), 'utf8').catch(() => '')).includes(secretValue),
+            15000, 'el valor del secreto llega por la entrada estándar');
+        if ((await calls()).some((line) => line.includes(secretValue))) throw new Error('El valor del secreto apareció en los argumentos de gh');
+        results.secrets = true;
+        await manageTab('settings');
+        await clickWhenReady('[data-testid="gh-admin-area-hooks"]');
+        await findWhenReady('[data-testid="gh-admin-row"][data-id="5"]', 15000);
+        await setInput('[data-testid="gh-admin-hook-url"]', 'https://hooks.ejemplo.dev/nuevo');
+        await clickWhenReady('[data-testid="gh-admin"] .form button');
+        await waitUntil(async () => (await calls()).some((line) => line.includes('repos/wterminal-e2e/demo/hooks') && line.includes('-X POST') && line.includes('config[url]=https://hooks.ejemplo.dev/nuevo')),
+            15000, 'gh api para crear el webhook');
+        await clickWhenReady('[data-testid="gh-admin-area-pages"]');
+        await waitUntil(async () => (await textOf(await findWhenReady('[data-testid="gh-admin-note"]'))).includes('Pages'),
+            15000, 'Pages sin activar se explica en vez de fallar');
+        await manageTab('community');
+        await waitUntil(async () => (await findAll('[data-testid="gh-admin-row"][data-id="health"]')).length === 1, 15000, 'perfil de comunidad');
+        await clickWhenReady('[data-testid="gh-manage-expand"]');
+        const expandedRect = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const box = document.querySelector('[data-testid="gh-manage"]').getBoundingClientRect();
+                return { width: box.width, height: box.height, innerWidth, innerHeight, right: box.right, bottom: box.bottom };`,
+            args: [],
+        });
+        if (expandedRect.width < expandedRect.innerWidth * 0.8 || expandedRect.right > expandedRect.innerWidth + 1 || expandedRect.bottom > expandedRect.innerHeight + 1) {
+            throw new Error(`La vista grande de «Gestionar…» no ocupa la ventana: ${JSON.stringify(expandedRect)}`);
+        }
+        await captureScreenshot('mi-github-gestionar-vista-grande');
+        await clickWhenReady('[data-testid="gh-manage-expand"]');
+        results.admin = true;
         await clickWhenReady('[data-testid="gh-manage-close"]');
         await waitUntil(async () => (await findAll('[data-testid="gh-manage"]')).length === 0, 5000, 'Gestionar se cierra');
         results.manage = true;
@@ -11504,14 +11659,60 @@ try {
         // 8. Limpiar ejecuta el `clear` real: pantalla e historial vacíos y el
         // eco siguiente pegado al prompt (antes, `terminal.clear()` de xterm
         // dejaba a ConPTY con el cursor varias filas más abajo).
+        // En cmd, `clear` es una macro doskey de varias órdenes: título con
+        // el marcador, `cls`, título y, si Ajustes lo pide, el banner con su
+        // propio borrado delante (ESC[H ESC[2J ESC[3J). Hasta el 09-11 iban
+        // separadas con $T y cmd pintaba un prompt entre cada una: con la
+        // pantalla ya vaciada por el marcador, la espera los daba por el
+        // final y la foto siguiente caía en el borrado del banner (cursor en
+        // la fila 0 y ningún prompt; larga 50). Ahora van unidas con `&` y no
+        // hay prompts intermedios, pero la espera sigue reconociendo el final
+        // por el banner, que solo imprime la última orden, con el prompt
+        // debajo y el cursor en él; sin banner, por un estado que no cambia
+        // en 1,5 s.
+        const clearPreferences = (await invokeJson('settings_get').catch(() => null))?.preferences ?? {};
+        const clearReprintsBanner = clearPreferences.showSystemBanner !== false && clearPreferences.clearReprintBanner !== false;
+        await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'window.__wtermPtyTrace = []; return true;', args: [] }).catch(() => null);
+        const clearStartedAt = Date.now();
+        const clearPolls = [];
+        let clearStableKey = '';
+        let clearStableSince = 0;
         await openPalette();
         await filterPalette('clear', 'app:clearTerminal');
         await pressKeys('\uE007');
-        await waitUntil(async () => {
-            const text = String(await fullTerminalTextWithin(cell));
-            return !text.includes('WTERMINAL_PALETA_ECO') && !text.includes('Parámetros de terminal')
-                && snapshotPromptVisible(await terminalRowSnapshot(cell));
-        }, 20000, 'terminal limpia desde la paleta');
+        try {
+            await waitUntil(async () => {
+                const text = String(await fullTerminalTextWithin(cell));
+                const snapshot = await terminalRowSnapshot(cell);
+                const filled = (snapshot?.rows ?? []).filter((row) => row.text.trim());
+                const last = filled.at(-1);
+                const filledText = filled.map((row) => row.text).join('\n');
+                const banner = bannerLooksReady(filledText) || /\b[WL]Terminal\b/u.test(filledText);
+                const promptOnCursor = Boolean(last && promptLooksVisible(last.text) && snapshot.cursorRow === last.index);
+                const cleared = !text.includes('WTERMINAL_PALETA_ECO') && !text.includes('Parámetros de terminal');
+                const done = cleared && promptOnCursor && (!clearReprintsBanner || banner);
+                if (clearPolls.length < 60) {
+                    clearPolls.push({ ms: Date.now() - clearStartedAt, cursorRow: snapshot?.cursorRow, cleared, promptOnCursor, banner,
+                        rows: filled.map((row) => `${row.index}:${row.text.trim().slice(0, 32)}`) });
+                }
+                if (!done) {
+                    clearStableKey = '';
+                    return false;
+                }
+                const key = JSON.stringify([snapshot.cursorRow, filled.map((row) => `${row.index}:${row.text}`)]);
+                if (key !== clearStableKey) {
+                    clearStableKey = key;
+                    clearStableSince = Date.now();
+                }
+                return Date.now() - clearStableSince >= (clearReprintsBanner ? 300 : 1500);
+            }, 20000, 'terminal limpia desde la paleta');
+        } catch (error) {
+            const ptyTrace = await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'const t = window.__wtermPtyTrace || []; delete window.__wtermPtyTrace; return t;', args: [] }).catch(() => []);
+            recordEvent('palette-clear-wait', { clearReprintsBanner, polls: clearPolls, ptyTrace, passed: false });
+            throw error;
+        }
+        await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'delete window.__wtermPtyTrace; return true;', args: [] }).catch(() => null);
+        recordEvent('palette-clear-wait', { clearReprintsBanner, polls: clearPolls.length, ms: Date.now() - clearStartedAt, passed: true });
         const scrollback = String(await scrollbackTerminalTextWithin(cell) ?? '');
         if (scrollback.includes('WTERMINAL_PALETA_INICIO')) problems.push('Limpiar dejó el historial anterior');
         await sendLineAndAssertPrompt('echo WTERMINAL_PALETA_TRAS_CLEAR', cell, 'WTERMINAL_PALETA_TRAS_CLEAR', 'eco tras limpiar');
@@ -12491,6 +12692,48 @@ try {
             await clickWhenReady('[role="dialog"] .panel-close');
             await rm(work, { recursive: true, force: true }).catch(() => undefined);
         }
+        // Vista propia de la carpeta propia (09-11): se abre desde Ajustes y
+        // enseña la carpeta de cada categoría, cada elemento con su
+        // interruptor, «Traer lo ya instalado» y exportar o importar. Aquí se
+        // prueban la carpeta de una categoría y apagar un elemento; nada se
+        // trae ni se copia (mediría y movería cosas reales del perfil).
+        const storeViewWork = await mkdtemp(join(tmpdir(), 'wterminal-store-view-'));
+        const storePrefsBefore = (await invokeJson('settings_get')).preferences;
+        const storeView = {};
+        try {
+            await clickWhenReady('[data-testid="toolbar-settings"]');
+            await clickWhenReady('[data-testid="settings-tab-behavior"]');
+            await clickInView(await findWhenReady('[data-testid="settings-toolchain-store-view"]'));
+            await findWhenReady('[data-testid="store-view"]', 15000);
+            storeView.categories = (await findAll('[data-testid="store-category-dir"]')).length;
+            if (storeView.categories !== 10) throw new Error(`La vista de la carpeta propia enseña ${storeView.categories} categorías, no 10`);
+            await waitUntil(async () => (await findAll('[data-testid="store-entry"][data-entry-id="npm"]')).length > 0,
+                20000, 'elemento npm en la vista de la carpeta propia');
+            await captureScreenshot('carpeta-propia-vista');
+            // Apagar npm con su casilla, como una persona: se guarda y deja de
+            // estar activo aunque las cachés sigan activas.
+            await clickInView(await findWhenReady('[data-testid="store-entry"][data-entry-id="npm"] input'));
+            await waitUntil(async () => String((await invokeJson('settings_get')).preferences.toolchainStoreDisabled ?? '').split(',').includes('npm'),
+                10000, 'npm apagado en las preferencias');
+            const afterToggle = await invokeJson('toolchain_store_status');
+            storeView.npmActive = afterToggle.caches.find((cache) => cache.id === 'npm')?.active;
+            if (storeView.npmActive !== false) throw new Error(`npm sigue activo tras apagarlo: ${JSON.stringify(afterToggle.caches.find((cache) => cache.id === 'npm'))}`);
+            // Carpeta propia para los modelos de IA: el diálogo de carpetas es
+            // nativo, así que se guarda por la misma preferencia que escribe la vista.
+            const aiDir = join(storeViewWork, 'ia-en-otro-disco');
+            await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, toolchainStoreCategoryDirs: `aiModels=${aiDir}` } });
+            const afterDir = await invokeJson('toolchain_store_status');
+            const hf = afterDir.caches.find((cache) => cache.id === 'huggingface');
+            storeView.hfPath = hf?.path;
+            if (!hf || hf.location !== 'own' || resolve(hf.path) !== resolve(join(aiDir, 'huggingface'))) {
+                throw new Error(`Hugging Face no usa la carpeta propia de su categoría: ${JSON.stringify(hf)}`);
+            }
+            await clickWhenReady('[role="dialog"] .panel-close');
+        } finally {
+            await invokeJson('settings_save', { incoming: storePrefsBefore }).catch(() => undefined);
+            await rm(storeViewWork, { recursive: true, force: true }).catch(() => undefined);
+        }
+        recordEvent('store-view', { ...storeView, passed: true });
         recordEvent('toolchain-store', {
             root: store.placeholder,
             caches: store.rows.length,

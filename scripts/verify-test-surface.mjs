@@ -431,7 +431,7 @@ check('La configuración nativa deja maximizar y decoraciones activas', (() => {
 check('Paneles estrechos usan el ancho real para reordenar controles', [
     read('src/components/DependenciesPanel.svelte').includes('@container (max-width: 360px)'),
     read('src/components/DependenciesPanel.svelte').includes('overflow-wrap: anywhere'),
-    read('src/components/Toolbar.svelte').includes('width: min(480px, calc(100vw - 20px))')
+    read('src/components/Toolbar.svelte').includes('width: min(480px, calc(100vw / var(--ui-scale, 1) - 20px))')
 ].every(Boolean));
 check('Todos los paneles redimensionables responden al ancho del panel', [
     read('src/components/SettingsPanel.svelte').includes('@container (max-width: 480px)'),
@@ -552,6 +552,58 @@ check('Clear borra el historial sin reiniciar el cursor y el E2E lo repite',
 check('El E2E rechaza prompts que conservan el wrap de un tamaño anterior',
     read('tests/e2e/smoke.mjs').includes('assertPromptReflowsAfterResize')
         && read('tests/e2e/smoke.mjs').includes("recordEvent('prompt-resize-reflow'"));
+check('Los espacios finales de una fila no ensanchan la rejilla (PROMPT_SP) y el E2E horizontal lo exige',
+    terminalPane.includes('const logicalTextColumns = Array.from(text.trimEnd()).length;')
+        && read('tests/e2e/smoke.mjs').includes("recordEvent('horizontal-blank-padding'"));
+check('Limpiar desde la paleta espera al final de la macro de cmd (banner y prompt con el cursor), no a un prompt intermedio',
+    read('tests/e2e/smoke.mjs').includes("recordEvent('palette-clear-wait'")
+        && read('tests/e2e/smoke.mjs').includes('(!clearReprintsBanner || banner)'));
+check('Los menús de idioma y de entornos caben en la ventana con cualquier tamaño de interfaz (scroll y vh/vw entre --ui-scale)',
+    read('src/components/Toolbar.svelte').includes('max-height: calc(100vh / var(--ui-scale, 1) - 40px - 6px - 10px)')
+        && read('src/components/Toolbar.svelte').includes('max-height: min(calc(70vh / var(--ui-scale, 1)), 480px)')
+        && read('tests/e2e/smoke.mjs').includes("recordEvent('ui-scale-menus'")
+        && read('tests/e2e/smoke.mjs').includes("['idioma', '.lang-btn', '.lang-menu', '.lang-backdrop']"));
+check('Desde cmd, los scripts de PowerShell del panel van en un .ps1 de la sesión (cmd partía las comillas y las tuberías)',
+    read('src-tauri/src/packages/commands.rs').includes('ShellKind::Cmd => cmd_powershell_command(ps_command, cmd_script_dir().as_deref())')
+        && read('src-tauri/src/packages/commands.rs').includes('fn desde_cmd_el_script_con_comillas_y_tuberias_corre_entero_con_su_codigo_de_salida()')
+        && !read('src-tauri/src/packages/commands.rs').includes('format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \\"{ps_command}\\"")'));
+check('Un framework ausente sigue instalable aunque su runtime exista (manda la sonda propia)',
+    read('src-tauri/src/packages/commands.rs').includes('fn un_framework_ausente_sigue_instalable_aunque_su_runtime_exista()')
+        && read('src-tauri/src/packages/commands.rs').includes('action.installed = if action.check_cmd.is_some() {'));
+check('clear en cmd es una sola línea con & (sin $T ni prompts intermedios) y el archivo de macros la deja sin escapar',
+    read('src-tauri/src/terminal/aliases.rs').includes('let separator = if inside_doskey_macro { "^&" } else { "&" };')
+        && /\.replace\("%%", "%"\)\s*\.replace\("\^&", "&"\)/.test(read('src-tauri/src/terminal/aliases.rs'))
+        && read('src-tauri/src/terminal/aliases.rs').includes('"clear en una sola línea, sin prompts intermedios: {clear}"'));
+check('Carpeta propia: vista propia con carpeta por categoría, interruptor por elemento, traer lo instalado con diario, MSI bloqueado y exportar/importar',
+    read('src-tauri/src/config/store_adopt.rs').includes('fn copiar_mezcla_sin_pisar_y_comprueba_cada_archivo()')
+        && read('src-tauri/src/config/store_adopt.rs').includes('fn importar_dice_que_falta_y_que_no_conoce_este_catalogo()')
+        && read('src-tauri/src/config/store_adopt.rs').includes('"Instalado con MSI: sus actualizaciones fallan si su carpeta es una unión')
+        && read('src-tauri/src/config/store_adopt.rs').includes('.wterminal-antes')
+        && read('src-tauri/src/lib.rs').includes('store_adopt::store_adopt_candidates,')
+        && read('src-tauri/src/config/toolchain_store.rs').includes('pub fn sync_layout(preferences: &crate::preferences::Preferences)')
+        && read('src-tauri/src/config/toolchain_store.rs').includes('pub fn clink_profile_in_store(default_dir: &Path)')
+        && read('src/components/StorePanel.svelte').includes('data-testid="store-adopt-confirm"')
+        && read('src/App.svelte').includes("} else if (panel === 'store') {")
+        && read('tests/e2e/smoke.mjs').includes("recordEvent('store-view'"));
+check('Mi GitHub completo: Actions (artefactos, workflows con entradas, secretos por stdin, variables, entornos), configuración, seguridad, comunidad, cuenta y vista grande',
+    read('src-tauri/src/projects/gh_admin.rs').includes('fn el_valor_de_un_secreto_va_por_la_entrada_estandar_y_nunca_en_los_argumentos()')
+        && read('src-tauri/src/projects/gh_admin.rs').includes('fn las_rutas_de_la_api_son_fijas_con_el_repositorio_validado()')
+        && read('src-tauri/src/projects/gh_cli.rs').includes('pub fn run_args_with_input(')
+        && read('src-tauri/src/infrastructure/process.rs').includes('pub fn run_with_timeout_capture_stdin(')
+        && read('src-tauri/src/lib.rs').includes('projects::gh_admin::github_admin_action,')
+        && read('src/components/GithubRepoManager.svelte').includes('data-testid="gh-manage-expand"')
+        && read('src/components/GithubAdmin.svelte').includes('data-testid="gh-admin-secret-value" type="password"')
+        && read('tests/e2e/smoke.mjs').includes("'El valor del secreto apareció en los argumentos de gh'")
+        && read('tests/e2e/smoke.mjs').includes('mi-github-gestionar-vista-grande'));
+check('Instalador modular: plantilla propia con página de componentes, first-run.json, desinstalador con la carpeta propia y su tamaño, y 15 idiomas',
+    read('src-tauri/windows/installer/installer.nsi').includes('Page custom WtComponentsPage WtComponentsLeave')
+        && read('src-tauri/windows/installer/installer.nsi').includes('--wterminal-uninstall-report')
+        && read('src-tauri/windows/installer/hooks.nsh').includes('FileOpen $0 "$INSTDIR\\first-run.json" w')
+        && read('src-tauri/windows/installer/hooks.nsh').includes('!insertmacro WT_STRINGS HINDI')
+        && read('src-tauri/tauri.windows.installer.conf.json').includes('"template": "windows/installer/installer.nsi"')
+        && read('src-tauri/tauri.windows.installer.conf.json').includes('"Hindi": "windows/installer/Hindi.nsh"')
+        && read('src-tauri/src/platform/first_run.rs').includes('fn el_informe_solo_ofrece_borrar_una_carpeta_propia_de_wterminal()')
+        && read('src-tauri/src/lib.rs').includes('platform::first_run::apply();'));
 check('La integración Windows registra y consume rutas de archivos',
     windowsIntegration.includes('Software\\Classes\\*\\shell\\WTerminal')
         && windowsIntegration.includes('--open-path')

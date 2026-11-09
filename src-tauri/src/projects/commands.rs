@@ -1314,6 +1314,10 @@ pub fn github_cli_terminal(
         crate::projects::gh_cli::TerminalAction::GrantDelete => {
             t.t("verb.ghGrantDelete", "Permitir borrar repositorios")
         }
+        crate::projects::gh_cli::TerminalAction::GrantAdmin => t.t(
+            "verb.ghGrantAdmin",
+            "Permitir administrar claves, webhooks y workflows",
+        ),
     };
     let notice = crate::console_ui::Notice::new(verb, "GitHub", &command);
     let decorated = crate::console_ui::decorate(&command, &notice, env.kind, false, &t);
@@ -1331,6 +1335,7 @@ pub fn github_cli_terminal(
             crate::projects::gh_cli::TerminalAction::Login => "login",
             crate::projects::gh_cli::TerminalAction::Logout => "logout",
             crate::projects::gh_cli::TerminalAction::GrantDelete => "grant-delete",
+            crate::projects::gh_cli::TerminalAction::GrantAdmin => "grant-admin",
         }),
         tab_id: Some(target_tab),
         created: true,

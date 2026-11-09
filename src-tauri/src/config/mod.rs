@@ -9,4 +9,5 @@ pub mod plugins;
 pub mod preferences;
 pub mod settings;
 pub mod single_file;
+pub mod store_adopt;
 pub mod toolchain_store;

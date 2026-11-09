@@ -2044,7 +2044,12 @@
             // visible hasta 113 aunque 114–120 siguieran en el DOM. Medir el
             // Range del texto publica el borde real sin crear un viewport
             // secundario ni depender de que xterm genere spans.
-            const logicalTextColumns = Array.from(row.textContent ?? '').length;
+            // Los espacios finales no ocupan, igual que en las medidas del
+            // buffer: zsh rellena la fila antes de cada prompt (`PROMPT_SP`)
+            // y, si la PTY sigue en las 1024 columnas del precalentado de la
+            // entrada, el DOM pinta ese relleno hasta la última columna y la
+            // rejilla no volvía al ancho del panel mientras esa fila se viera.
+            const logicalTextColumns = Array.from(text.trimEnd()).length;
             // Borde real de los glifos. La fila mide toda la rejilla compartida
             // con ConPTY (>= 1024 columnas), así que el texto ya no «rebasa»
             // su caja: hay que compararlo con el ancho visible del host.
@@ -2064,10 +2069,13 @@
                 const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
                 while (walker.nextNode()) {
                     const node = walker.currentNode as Text;
-                    if (!node.data) continue;
+                    // El borde que cuenta es el del último glifo, no el del
+                    // relleno de espacios que lo sigue.
+                    const glyphsEnd = node.data.trimEnd().length;
+                    if (!glyphsEnd) continue;
                     const range = document.createRange();
                     range.setStart(node, 0);
-                    range.setEnd(node, node.data.length);
+                    range.setEnd(node, glyphsEnd);
                     const rangeRight = range.getBoundingClientRect().right;
                     right = Math.max(right, rangeRight);
                     textRight = Math.max(textRight, rangeRight);

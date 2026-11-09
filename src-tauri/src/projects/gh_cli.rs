@@ -61,6 +61,9 @@ pub struct GhResult {
     pub url: Option<String>,
     /// Falta el permiso `delete_repo`: el panel ofrece pedirlo.
     pub needs_delete_scope: bool,
+    /// Faltan los permisos de administración (claves, webhooks, workflows):
+    /// «Gestionar…» ofrece pedirlos (`TerminalAction::GrantAdmin`).
+    pub needs_admin_scope: bool,
 }
 
 impl GhResult {
@@ -102,6 +105,10 @@ pub enum TerminalAction {
     Logout,
     /// Pide el permiso `delete_repo`, que `gh auth login` no concede.
     GrantDelete,
+    /// Pide los permisos de administración que usa «Gestionar…» (claves SSH
+    /// y GPG de la cuenta, webhooks y lanzar workflows), que tampoco concede
+    /// `gh auth login`.
+    GrantAdmin,
 }
 
 impl TerminalAction {
@@ -110,6 +117,7 @@ impl TerminalAction {
             "login" => Some(TerminalAction::Login),
             "logout" => Some(TerminalAction::Logout),
             "grant-delete" => Some(TerminalAction::GrantDelete),
+            "grant-admin" => Some(TerminalAction::GrantAdmin),
             _ => None,
         }
     }
@@ -134,6 +142,14 @@ impl TerminalAction {
                 "github.com",
                 "--scopes",
                 "delete_repo",
+            ],
+            TerminalAction::GrantAdmin => &[
+                "auth",
+                "refresh",
+                "--hostname",
+                "github.com",
+                "--scopes",
+                "admin:public_key,admin:gpg_key,admin:repo_hook,workflow",
             ],
         }
     }
@@ -328,6 +344,34 @@ pub fn own(full_name: &str) -> Option<GhRepository> {
 
 /// `gh` con argumentos ya validados y un tiempo límite propio (subir los
 /// adjuntos de una release puede tardar bastante más que una consulta).
+/// Igual que [`run_args`], con `input` por la entrada estándar (secretos).
+pub fn run_args_with_input(
+    args: &[String],
+    input: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let gh = gh_path().ok_or_else(|| "GitHub CLI no está instalado.".to_string())?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = crate::process::run_with_timeout_capture_stdin(
+        &gh,
+        &args,
+        timeout,
+        &GH_ENVIRONMENT,
+        input.as_bytes(),
+    )
+    .ok_or_else(|| "GitHub CLI no respondió a tiempo.".to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(short_message(if stderr.is_empty() {
+        &stdout
+    } else {
+        &stderr
+    }))
+}
+
 pub fn run_args(args: &[String], timeout: Duration) -> Result<String, String> {
     let gh = gh_path().ok_or_else(|| "GitHub CLI no está instalado.".to_string())?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

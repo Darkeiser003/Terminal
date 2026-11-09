@@ -149,6 +149,16 @@ toolchainStoreReplHistory = true
 toolchainStoreToolchains = true
 toolchainStorePrograms = true
 toolchainStoreProjects = false
+# Configuración de los REPL (IPython, Jupyter; solo si aún no existía) y
+# plugins de las shells (caché de starship).
+toolchainStoreConfig = true
+toolchainStorePlugins = true
+# Carpeta propia de cada categoría, «categoría=carpeta» por línea; las que no
+# salen van dentro de la carpeta propia.
+toolchainStoreCategoryDirs = ""
+# Entradas apagadas una a una aunque su categoría siga activa (ids separados
+# por comas).
+toolchainStoreDisabled = ""
 # Sugerencias del historial y colores en la línea de órdenes (Clink en cmd,
 # PSReadLine en PowerShell, ble.sh o plugins de zsh) si están instalados.
 shellAssist = true
