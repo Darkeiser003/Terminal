@@ -1,4 +1,4 @@
-﻿; Textos de la plantilla NSIS de Tauri en Hindi: su CLI 2.11.5 no lo trae
+; Textos de la plantilla NSIS de Tauri en Hindi: su CLI 2.11.5 no lo trae
 ; (tauri.windows.installer.conf.json > customLanguageFiles).
 LangString addOrReinstall ${LANG_HINDI} "घटक जोड़ें/फिर से इंस्टॉल करें"
 LangString alreadyInstalled ${LANG_HINDI} "पहले से इंस्टॉल है"

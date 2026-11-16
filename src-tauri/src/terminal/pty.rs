@@ -12,7 +12,9 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child as ProcessChild, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -72,6 +74,12 @@ pub struct SpawnConfig<'a> {
     pub args: &'a [String],
     pub cwd: &'a Path,
     pub viewport: Viewport,
+    /// Agrupar la salida desde el primer byte: la pestaña nace con el ancho
+    /// exacto (IA, Python en Windows). Ver [`PtySession::set_coalesce`].
+    pub coalesce: bool,
+    /// Variables que se añaden al entorno heredado: la clave guardada de una
+    /// IA (`environments::ai_keys::spawn_env`). Casi siempre, ninguna.
+    pub extra_env: &'a [(String, String)],
 }
 
 /// Un pty vivo. Al soltar la sesión se termina el proceso y se cierra el
@@ -91,6 +99,93 @@ pub struct PtySession {
     /// un programa con ventana que se abra desde ella debe sobrevivir a la
     /// pestaña, como en cualquier terminal.
     kill_tree: std::sync::atomic::AtomicBool,
+    /// Lo que decide cómo entrega el hilo lector: agrupar a pantalla completa
+    /// ([`Self::set_coalesce`]) y retener el eco de una orden de una acción
+    /// ([`Self::hold_echo`]).
+    control: Arc<ReadControl>,
+}
+
+/// Cómo entrega `read_loop` lo que lee. Lo comparten la sesión, que lo cambia,
+/// y el hilo lector, que lo consulta en cada lectura.
+pub(crate) struct ReadControl {
+    /// Agrupar lo que ConPTY entrega seguido antes de pasarlo a la pestaña.
+    coalesce: AtomicBool,
+    /// Retener la salida hasta este instante o hasta ver tantos saltos de
+    /// línea (el Intro de la orden), lo que llegue antes.
+    echo_hold: Mutex<Option<(Instant, usize)>>,
+    /// Lo leído y lo entregado: el aviso de fin espera a que esté todo
+    /// entregado ([`OutputActivity::wait_drained`]).
+    activity: Arc<OutputActivity>,
+}
+
+/// Cuánto tiene que llevar callada la salida, ya entregada entera, para dar
+/// por terminada una pestaña cuyo proceso salió.
+const EXIT_QUIET: Duration = Duration::from_millis(100);
+/// Lo que más se retrasa el aviso de fin aunque siga llegando salida.
+const EXIT_DRAIN_MAX: Duration = Duration::from_millis(1500);
+
+/// El hilo que espera al proceso y el que lee su salida van por libre. En
+/// ConPTY las últimas líneas llegan después de que el proceso sale: Grok
+/// escribía «API key required…» y salía en 0,3 s, y el aviso de fin se
+/// adelantaba a ese texto (13-11, larga 60: la pestaña no ofreció la clave y
+/// «Proceso finalizado» salió encima del error). Con esto el fin espera a la
+/// salida: el hilo lector cuenta lo que lee y lo que entrega.
+pub(crate) struct OutputActivity {
+    read: AtomicU64,
+    delivered: AtomicU64,
+    last_read: Mutex<Instant>,
+}
+
+impl OutputActivity {
+    fn new() -> Self {
+        OutputActivity {
+            read: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
+            last_read: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn note_read(&self) {
+        *self.last_read.lock() = Instant::now();
+        self.read.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn note_delivered(&self, chunks: u64) {
+        self.delivered.fetch_add(chunks, Ordering::SeqCst);
+    }
+
+    /// Vuelve cuando todo lo leído está entregado y no llega nada desde hace
+    /// `quiet`, o a los `max` como mucho.
+    pub(crate) fn wait_drained(&self, quiet: Duration, max: Duration) {
+        let started = Instant::now();
+        loop {
+            let pending = self.read.load(Ordering::SeqCst) != self.delivered.load(Ordering::SeqCst);
+            if !pending && self.last_read.lock().elapsed() >= quiet {
+                return;
+            }
+            if started.elapsed() >= max {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl ReadControl {
+    pub(crate) fn new(coalesce: bool) -> Self {
+        ReadControl {
+            coalesce: AtomicBool::new(coalesce),
+            echo_hold: Mutex::new(None),
+            activity: Arc::new(OutputActivity::new()),
+        }
+    }
+
+    /// La retención pendiente, si sigue en plazo. Se consume: la recoge la
+    /// primera lectura que llega después de pedirla.
+    fn take_echo_hold(&self) -> Option<(Instant, usize)> {
+        let (until, newlines) = self.echo_hold.lock().take()?;
+        (until > Instant::now()).then_some((until, newlines))
+    }
 }
 
 enum PtyBackend {
@@ -145,6 +240,37 @@ impl PtySession {
             PtyBackend::Pipe { .. } => {}
         }
         Ok(())
+    }
+
+    /// Agrupa la salida mientras la pestaña usa el ancho exacto (una IA,
+    /// Python en Windows, vim). Un programa que dibuja con la API de consola
+    /// llega muy troceado: con pyreadline3, cada tecla del REPL de Python son
+    /// 63-127 lecturas en 13-26 ms, y cada una era un evento con su escritura
+    /// y su repintado en el frontend (~250 ms por letra). Fuera de ese modo no
+    /// se agrupa: la reserva horizontal de las shells mide la salida trozo a
+    /// trozo, y agruparla para todas rompió la suite `horizontal` (10-11).
+    pub fn set_coalesce(&self, on: bool) {
+        self.control.coalesce.store(on, Ordering::Relaxed);
+    }
+
+    /// Una acción (instalar, actualizar…) va a escribir una orden entera y el
+    /// usuario la quiere ver de una vez (`actionCommandsAtOnce`). La shell
+    /// recibe las teclas de golpe, pero Clink, PSReadLine o ble.sh repintan la
+    /// línea a cada una y la orden se veía escribir letra a letra. Si la shell
+    /// empieza a repintar antes de `max`, se retiene la salida hasta ver
+    /// `newlines` saltos de línea (los Intro escritos) mientras siga llegando
+    /// eco ([`ECHO_HOLD_GAP`], [`ECHO_HOLD_TOTAL`]), y se entrega junta. Si
+    /// algo sale antes de tiempo, se entrega igual: nunca se pierde nada,
+    /// como mucho se ve como antes.
+    pub fn hold_echo(&self, max: Duration, newlines: usize) {
+        *self.control.echo_hold.lock() = Some((Instant::now() + max, newlines.max(1)));
+    }
+
+    /// Vuelve cuando todo lo leído está entregado a la pestaña y la shell lleva
+    /// `quiet` sin escribir, o a los `max` como mucho. Para escribir una orden
+    /// en cola cuando una shell recién abierta ya ha pintado su prompt.
+    pub fn wait_output_quiet(&self, quiet: Duration, max: Duration) {
+        self.control.activity.wait_drained(quiet, max);
     }
 
     /// Ver `kill_tree`.
@@ -279,6 +405,9 @@ where
         crate::console_ui::CMD_FRAME_DIR_VAR,
         crate::paths::SESSION_DIR.as_os_str(),
     );
+    for (key, value) in config.extra_env {
+        command.env(key, value);
+    }
 
     let child = pair.slave.spawn_command(command)?;
     // El esclavo tiene que soltarse aquí: mientras siga abierto en el proceso
@@ -303,18 +432,22 @@ where
         }
     };
 
+    let control = Arc::new(ReadControl::new(config.coalesce));
+    let reader_control = Arc::clone(&control);
     if let Err(error) = std::thread::Builder::new()
         .name("pty-reader".into())
-        .spawn(move || read_loop(reader, &mut on_event))
+        .spawn(move || read_loop(reader, &reader_control, &mut on_event))
     {
         let _ = killer.kill();
         return Err(error.into());
     }
 
+    let activity = Arc::clone(&control.activity);
     if let Err(error) = std::thread::Builder::new()
         .name("pty-waiter".into())
         .spawn(move || {
             let code = wait_for_exit(child);
+            activity.wait_drained(EXIT_QUIET, EXIT_DRAIN_MAX);
             on_exit(code);
         })
     {
@@ -331,6 +464,7 @@ where
         process_id,
         operation: Mutex::new(()),
         kill_tree: std::sync::atomic::AtomicBool::new(false),
+        control,
     })
 }
 
@@ -343,6 +477,9 @@ where
     command.args(config.args);
     command.current_dir(config.cwd);
     for (key, value) in crate::process::child_environment() {
+        command.env(key, value);
+    }
+    for (key, value) in config.extra_env {
         command.env(key, value);
     }
     command
@@ -386,15 +523,17 @@ where
     };
 
     let on_event = Arc::new(Mutex::new(on_event));
+    let control = Arc::new(ReadControl::new(config.coalesce));
     let readers: [(&str, Box<dyn Read + Send>); 2] =
         [("stdout", Box::new(stdout)), ("stderr", Box::new(stderr))];
     for (name, reader) in readers {
         let event_callback = Arc::clone(&on_event);
+        let reader_control = Arc::clone(&control);
         if let Err(error) = std::thread::Builder::new()
             .name(format!("wine-pipe-{name}"))
             .spawn(move || {
                 let mut emit = |event| (event_callback.lock())(event);
-                read_loop(reader, &mut emit);
+                read_loop(reader, &reader_control, &mut emit);
             })
         {
             let _ = child.kill();
@@ -404,6 +543,7 @@ where
 
     let child = Arc::new(Mutex::new(child));
     let waiter_child = Arc::clone(&child);
+    let activity = Arc::clone(&control.activity);
     if let Err(error) = std::thread::Builder::new()
         .name("pipe-waiter".into())
         .spawn(move || {
@@ -417,6 +557,7 @@ where
                     Err(_) => break None,
                 }
             };
+            activity.wait_drained(EXIT_QUIET, EXIT_DRAIN_MAX);
             on_exit(code);
         })
     {
@@ -432,34 +573,180 @@ where
         process_id,
         operation: Mutex::new(()),
         kill_tree: std::sync::atomic::AtomicBool::new(false),
+        control,
     })
 }
 
-fn read_loop<E>(mut reader: Box<dyn Read + Send>, on_event: &mut E)
+/// Tras una lectura, cuánto se espera a la siguiente para entregarlas juntas
+/// (solo con [`PtySession::set_coalesce`]). Las de pyreadline3 llegan con 0,2 ms
+/// de hueco medio y 2,5 ms como mucho; un eco suelto solo se retrasa esto.
+const COALESCE_GAP: Duration = Duration::from_millis(3);
+/// Lo que más se retiene una entrega aunque sigan llegando trozos (un frame).
+const COALESCE_MAX_DELAY: Duration = Duration::from_millis(16);
+/// Tope de bytes de una entrega agrupada.
+const COALESCE_MAX_BYTES: usize = 256 * 1024;
+/// Trozos que el hilo lector puede adelantar: si la pestaña va lenta, la PTY
+/// espera en vez de acumular memoria sin límite.
+const COALESCE_QUEUE_CHUNKS: usize = 64;
+/// Retención del eco de una acción ([`PtySession::hold_echo`]): una vez que la
+/// shell empieza a repintar, lo más que se espera al trozo siguiente antes de
+/// soltar lo juntado (si deja de repintar, se ve lo que haya)…
+const ECHO_HOLD_GAP: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_millis(1500)
+};
+/// …y lo más que dura en total, aunque siga llegando eco sin su Intro.
+const ECHO_HOLD_TOTAL: Duration = if cfg!(test) {
+    Duration::from_millis(800)
+} else {
+    Duration::from_secs(8)
+};
+
+/// Lee la salida y la entrega decodificada. Un hilo solo lee (bloqueante) y
+/// este entrega: cada lectura por separado, como siempre, o, con `coalesce`
+/// encendido, juntando lo que siga llegando con huecos de menos de
+/// [`COALESCE_GAP`] hasta [`COALESCE_MAX_DELAY`]. Con una retención de eco
+/// pendiente ([`PtySession::hold_echo`]), la lectura que llega la recoge y se
+/// junta todo hasta el Intro de la orden. Si el hilo lector no se puede crear,
+/// se lee aquí mismo, una entrega por lectura.
+fn read_loop<E>(reader: Box<dyn Read + Send>, control: &ReadControl, on_event: &mut E)
+where
+    E: FnMut(PtyEvent),
+{
+    let shared = Arc::new(Mutex::new(Some(reader)));
+    let for_reader = Arc::clone(&shared);
+    let reader_activity = Arc::clone(&control.activity);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(COALESCE_QUEUE_CHUNKS);
+    let spawned = std::thread::Builder::new()
+        .name("pty-read-raw".into())
+        .spawn(move || {
+            let Some(mut reader) = for_reader.lock().take() else {
+                return;
+            };
+            let mut buffer = vec![0u8; READ_BUFFER_BYTES];
+            loop {
+                match reader.read(&mut buffer) {
+                    // EOF: la shell cerró su extremo. En Windows, cerrar el pty
+                    // hace que la lectura falle en vez de dar EOF: significa lo
+                    // mismo, no habrá más salida.
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        reader_activity.note_read();
+                        if sender.send(buffer[..read].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    if spawned.is_err() {
+        if let Some(reader) = shared.lock().take() {
+            read_loop_direct(reader, control, on_event);
+        }
+        return;
+    }
+
+    let mut decoder = Utf8Decoder::new();
+    let mut splitter = ClearSplitter::new();
+    let mut batch = Vec::with_capacity(READ_BUFFER_BYTES);
+    while let Ok(first) = receiver.recv() {
+        // Cuántas lecturas van en esta entrega, para el aviso de fin.
+        let mut chunks = 1u64;
+        if let Some((_, newlines)) = control.take_echo_hold() {
+            batch.clear();
+            batch.extend_from_slice(&first);
+            let mut missing = newlines.saturating_sub(count_newlines(&first));
+            // El plazo cuenta desde que la shell empieza a repintar y se
+            // alarga mientras siga llegando eco: con el equipo cargado, Clink
+            // tardaba más de 2 s en repintar la orden y la retención, que
+            // contaba desde que se pidió, se soltaba antes (15-11, dirigidas
+            // de la 64: el .bat de la Biblioteca llegó en 23 trozos).
+            let started = Instant::now();
+            while missing > 0 && batch.len() < COALESCE_MAX_BYTES {
+                let elapsed = started.elapsed();
+                if elapsed >= ECHO_HOLD_TOTAL {
+                    break;
+                }
+                match receiver.recv_timeout(ECHO_HOLD_GAP.min(ECHO_HOLD_TOTAL - elapsed)) {
+                    Ok(more) => {
+                        chunks += 1;
+                        missing = missing.saturating_sub(count_newlines(&more));
+                        batch.extend_from_slice(&more);
+                    }
+                    Err(_) => break,
+                }
+            }
+            deliver(&mut decoder, &mut splitter, &batch, on_event);
+            control.activity.note_delivered(chunks);
+            continue;
+        }
+        if !control.coalesce.load(Ordering::Relaxed) {
+            deliver(&mut decoder, &mut splitter, &first, on_event);
+            control.activity.note_delivered(chunks);
+            continue;
+        }
+        batch.clear();
+        batch.extend_from_slice(&first);
+        let started = Instant::now();
+        while batch.len() < COALESCE_MAX_BYTES {
+            let waited = started.elapsed();
+            if waited >= COALESCE_MAX_DELAY {
+                break;
+            }
+            match receiver.recv_timeout(COALESCE_GAP.min(COALESCE_MAX_DELAY - waited)) {
+                Ok(more) => {
+                    chunks += 1;
+                    batch.extend_from_slice(&more);
+                }
+                // Sin más por ahora, o la lectura terminó: se entrega lo que hay.
+                Err(_) => break,
+            }
+        }
+        deliver(&mut decoder, &mut splitter, &batch, on_event);
+        control.activity.note_delivered(chunks);
+    }
+}
+
+fn count_newlines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|byte| **byte == b'\n').count()
+}
+
+/// La lectura de siempre, una entrega por lectura: solo si no se pudo crear el
+/// hilo lector.
+fn read_loop_direct<E>(mut reader: Box<dyn Read + Send>, control: &ReadControl, on_event: &mut E)
 where
     E: FnMut(PtyEvent),
 {
     let mut buffer = vec![0u8; READ_BUFFER_BYTES];
     let mut decoder = Utf8Decoder::new();
     let mut splitter = ClearSplitter::new();
-
     loop {
         match reader.read(&mut buffer) {
-            // EOF: la shell cerró su extremo.
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(read) => {
-                let text = decoder.push(&buffer[..read]);
-                if text.is_empty() {
-                    continue;
-                }
-                for event in splitter.push(&text) {
-                    on_event(event);
-                }
+                control.activity.note_read();
+                deliver(&mut decoder, &mut splitter, &buffer[..read], on_event);
+                control.activity.note_delivered(1);
             }
-            // En Windows, cerrar el pty hace que la lectura falle en vez de dar
-            // EOF. En los dos casos significa lo mismo: no habrá más salida.
-            Err(_) => break,
         }
+    }
+}
+
+fn deliver<E>(
+    decoder: &mut Utf8Decoder,
+    splitter: &mut ClearSplitter,
+    bytes: &[u8],
+    on_event: &mut E,
+) where
+    E: FnMut(PtyEvent),
+{
+    let text = decoder.push(bytes);
+    if text.is_empty() {
+        return;
+    }
+    for event in splitter.push(&text) {
+        on_event(event);
     }
 }
 
@@ -496,6 +783,230 @@ mod tests {
         }
     }
 
+    /// Un lector que entrega trozos ya preparados, con una pausa antes de cada
+    /// uno (cero: todos seguidos, como pyreadline3 en ConPTY).
+    struct ChunkedReader {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+        pause: Duration,
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let Some(chunk) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            if !self.pause.is_zero() {
+                std::thread::sleep(self.pause);
+            }
+            buffer[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        }
+    }
+
+    fn delivered(reader: ChunkedReader, coalesce: bool) -> Vec<String> {
+        delivered_with(reader, &ReadControl::new(coalesce))
+    }
+
+    fn delivered_with(reader: ChunkedReader, control: &ReadControl) -> Vec<String> {
+        let mut data = Vec::new();
+        read_loop(Box::new(reader), control, &mut |event| {
+            if let PtyEvent::Data(text) = event {
+                data.push(text);
+            }
+        });
+        data
+    }
+
+    /// Lo que repinta Clink al recibir una orden escrita por una acción: la
+    /// línea crece tecla a tecla, luego el Intro y la salida de la orden.
+    fn typed_echo() -> std::collections::VecDeque<Vec<u8>> {
+        [
+            "w",
+            "wi",
+            "win",
+            "winget",
+            " upgrade",
+            "\r\n",
+            "Actualizando…\r\n",
+        ]
+        .iter()
+        .map(|chunk| chunk.as_bytes().to_vec())
+        .collect()
+    }
+
+    #[test]
+    fn el_eco_de_una_accion_de_una_vez_sale_entero_hasta_el_intro() {
+        let control = ReadControl::new(false);
+        *control.echo_hold.lock() = Some((Instant::now() + Duration::from_secs(5), 1));
+        let data = delivered_with(
+            ChunkedReader {
+                chunks: typed_echo(),
+                // Más que COALESCE_GAP: agrupar sin más no los juntaría.
+                pause: Duration::from_millis(8),
+            },
+            &control,
+        );
+        assert_eq!(
+            data[0], "wwiwinwinget upgrade\r\n",
+            "la orden y su Intro, juntos"
+        );
+        assert_eq!(
+            data[1..].concat(),
+            "Actualizando…\r\n",
+            "lo de después, como siempre"
+        );
+        assert!(
+            control.echo_hold.lock().is_none(),
+            "la retención se consume"
+        );
+    }
+
+    #[test]
+    fn el_eco_retenido_se_suelta_si_la_shell_deja_de_repintar_sin_perder_nada() {
+        let control = ReadControl::new(false);
+        *control.echo_hold.lock() = Some((Instant::now() + Duration::from_secs(5), 1));
+        let chunks: std::collections::VecDeque<Vec<u8>> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|c| c.as_bytes().to_vec())
+            .collect();
+        let data = delivered_with(
+            ChunkedReader {
+                chunks,
+                // Más que ECHO_HOLD_GAP (100 ms en las pruebas).
+                pause: Duration::from_millis(250),
+            },
+            &control,
+        );
+        assert!(
+            data.len() > 1,
+            "sin Intro y con la shell parada, se suelta la salida: {data:?}"
+        );
+        assert_eq!(data.concat(), "abcd");
+    }
+
+    /// El plazo cuenta desde que la shell empieza a repintar, no desde que se
+    /// pidió: con el equipo cargado, Clink tardaba más que el plazo en
+    /// empezar y la orden se veía letra a letra (15-11).
+    #[test]
+    fn el_eco_de_una_shell_lenta_en_empezar_tambien_sale_entero() {
+        let control = ReadControl::new(false);
+        // Pedida con 500 ms para empezar; la shell tarda ~280 ms en el primer
+        // trozo y repinta cada 30 ms (menos que el hueco de 100 ms), así que
+        // el Intro llega hacia los 450-550 ms: contando desde que se pidió, se
+        // habría soltado a los 500 ms, a veces con la orden a medias.
+        *control.echo_hold.lock() = Some((Instant::now() + Duration::from_millis(500), 1));
+        std::thread::sleep(Duration::from_millis(250));
+        let data = delivered_with(
+            ChunkedReader {
+                chunks: typed_echo(),
+                pause: Duration::from_millis(30),
+            },
+            &control,
+        );
+        assert_eq!(data[0], "wwiwinwinget upgrade\r\n");
+    }
+
+    #[test]
+    fn sin_la_opcion_el_eco_de_una_accion_llega_como_siempre() {
+        let data = delivered(
+            ChunkedReader {
+                chunks: typed_echo(),
+                pause: Duration::from_millis(8),
+            },
+            false,
+        );
+        assert_eq!(
+            data.len(),
+            typed_echo().len(),
+            "cada repintado por separado"
+        );
+    }
+
+    #[test]
+    fn una_retencion_vencida_no_retiene_nada() {
+        let control = ReadControl::new(false);
+        let past = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or_else(Instant::now);
+        *control.echo_hold.lock() = Some((past, 1));
+        assert!(control.take_echo_hold().is_none());
+        assert!(control.echo_hold.lock().is_none());
+    }
+
+    fn redraw_chunks(count: usize) -> std::collections::VecDeque<Vec<u8>> {
+        (0..count)
+            .map(|row| format!("\x1b7\x1b[{};1H\x1b[0m   \x1b8", row % 30 + 1).into_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn a_pantalla_completa_los_trozos_seguidos_llegan_juntos() {
+        let chunks = redraw_chunks(100);
+        let expected: String = chunks
+            .iter()
+            .map(|chunk| String::from_utf8(chunk.clone()).unwrap())
+            .collect();
+        let events = delivered(
+            ChunkedReader {
+                chunks,
+                pause: Duration::ZERO,
+            },
+            true,
+        );
+        assert!(
+            events.len() < 10,
+            "{} entregas para 100 trozos seguidos",
+            events.len()
+        );
+        assert_eq!(events.concat(), expected, "sin perder ni reordenar nada");
+    }
+
+    #[test]
+    fn una_shell_recibe_cada_lectura_por_separado_como_siempre() {
+        // La reserva horizontal mide la salida trozo a trozo: sin el modo
+        // pantalla completa no se agrupa nada (agruparlo rompió `horizontal`).
+        let events = delivered(
+            ChunkedReader {
+                chunks: redraw_chunks(100),
+                pause: Duration::ZERO,
+            },
+            false,
+        );
+        assert_eq!(events.len(), 100);
+    }
+
+    #[test]
+    fn a_pantalla_completa_un_eco_suelto_no_espera_al_siguiente() {
+        let chunks = ["a", "b", "c"]
+            .map(|text| text.as_bytes().to_vec())
+            .into_iter()
+            .collect();
+        let events = delivered(
+            ChunkedReader {
+                chunks,
+                pause: Duration::from_millis(200),
+            },
+            true,
+        );
+        assert_eq!(events, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn un_caracter_partido_entre_dos_lecturas_se_recompone() {
+        let euro = "€".as_bytes();
+        for coalesce in [false, true] {
+            let chunks = std::collections::VecDeque::from([euro[..1].to_vec(), euro[1..].to_vec()]);
+            let events = delivered(
+                ChunkedReader {
+                    chunks,
+                    pause: Duration::from_millis(100),
+                },
+                coalesce,
+            );
+            assert_eq!(events.concat(), "€", "coalesce={coalesce}");
+        }
+    }
+
     #[test]
     fn el_viewport_por_defecto_es_80x24() {
         let size: PtySize = Viewport::default().into();
@@ -519,6 +1030,8 @@ mod tests {
                 args: &args,
                 cwd: &cwd,
                 viewport: Viewport::default(),
+                coalesce: false,
+                extra_env: &[],
             },
             move |event| {
                 if let PtyEvent::Data(text) = event {
@@ -546,6 +1059,100 @@ mod tests {
         session.kill();
     }
 
+    #[test]
+    fn el_aviso_de_fin_espera_a_que_se_entregue_lo_leido() {
+        let activity = Arc::new(OutputActivity::new());
+        activity.note_read();
+        activity.note_read();
+        let late = Arc::clone(&activity);
+        let deliverer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            late.note_delivered(2);
+        });
+        let started = Instant::now();
+        activity.wait_drained(Duration::from_millis(20), Duration::from_secs(5));
+        let waited = started.elapsed();
+        deliverer.join().unwrap();
+        assert!(
+            waited >= Duration::from_millis(140),
+            "no esperó a la entrega: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "esperó hasta el tope: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn el_aviso_de_fin_espera_a_que_la_salida_se_calle_y_tiene_tope() {
+        // Todo entregado pero recién leído: espera a que se calle.
+        let activity = OutputActivity::new();
+        activity.note_read();
+        activity.note_delivered(1);
+        let started = Instant::now();
+        activity.wait_drained(Duration::from_millis(120), Duration::from_secs(5));
+        assert!(started.elapsed() >= Duration::from_millis(110));
+        // Algo leído que nunca se entrega: no se queda colgado, sale al tope.
+        let stuck = OutputActivity::new();
+        stuck.note_read();
+        let started = Instant::now();
+        stuck.wait_drained(Duration::from_millis(10), Duration::from_millis(200));
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(190) && waited < Duration::from_secs(2),
+            "{waited:?}"
+        );
+    }
+
+    /// El fin llega detrás de toda la salida, también agrupada (pestañas de IA):
+    /// Grok escribía su error y salía, y el aviso de fin se le adelantaba.
+    #[test]
+    fn el_fin_llega_despues_de_toda_la_salida() {
+        if !conpty_disponible_en_este_runtime() {
+            eprintln!("ConPTY se valida en Windows nativo; Wine no implementa esta API.");
+            return;
+        }
+        for round in 0..3 {
+            let (exe, args) = shell_echo("ultima-linea-antes-del-fin");
+            let seen = Arc::new(Mutex::new(String::new()));
+            let at_exit = Arc::new(Mutex::new(None::<String>));
+            let (exit_tx, exit_rx) = mpsc::channel();
+            let cwd = std::env::temp_dir();
+            let for_data = Arc::clone(&seen);
+            let for_exit = Arc::clone(&seen);
+            let snapshot = Arc::clone(&at_exit);
+            let session = spawn(
+                SpawnConfig {
+                    exe: &exe,
+                    args: &args,
+                    cwd: &cwd,
+                    viewport: Viewport::default(),
+                    coalesce: true,
+                    extra_env: &[],
+                },
+                move |event| {
+                    if let PtyEvent::Data(text) = event {
+                        for_data.lock().push_str(&text);
+                    }
+                },
+                move |code| {
+                    *snapshot.lock() = Some(for_exit.lock().clone());
+                    let _ = exit_tx.send(code);
+                },
+            )
+            .expect("el pty arranca");
+            exit_rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("la shell termina");
+            let before_exit = at_exit.lock().clone().unwrap_or_default();
+            assert!(
+                before_exit.contains("ultima-linea-antes-del-fin"),
+                "vuelta {round}: el fin llegó antes que la salida: {before_exit:?}"
+            );
+            session.kill();
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn la_sesion_pipe_reenvia_entrada_y_stdout_stderr() {
@@ -562,6 +1169,8 @@ mod tests {
                 args: &args,
                 cwd: &cwd,
                 viewport: Viewport::default(),
+                coalesce: false,
+                extra_env: &[],
             },
             move |event| {
                 if let PtyEvent::Data(text) = event {
@@ -615,6 +1224,8 @@ mod tests {
                 args: &args,
                 cwd: &cwd,
                 viewport: Viewport::default(),
+                coalesce: false,
+                extra_env: &[],
             },
             move |event| {
                 if let PtyEvent::Data(text) = event {
@@ -663,6 +1274,8 @@ mod tests {
                 args: &[],
                 cwd: &cwd,
                 viewport: Viewport::default(),
+                coalesce: false,
+                extra_env: &[],
             },
             |_| {},
             |_| {},
@@ -682,6 +1295,8 @@ mod tests {
                 args: &args,
                 cwd: &cwd,
                 viewport: Viewport::default(),
+                coalesce: false,
+                extra_env: &[],
             },
             |_| {},
             move |code| {
@@ -730,6 +1345,8 @@ mod tests {
                 args: &[],
                 cwd: &cwd,
                 viewport: Viewport::default(),
+                coalesce: false,
+                extra_env: &[],
             },
             |_| {},
             |_| {},

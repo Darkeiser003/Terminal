@@ -408,21 +408,48 @@ pub fn settings_save(
     )))
 }
 
-/// `settings:reset`
+/// Lo que se escribe al restablecer: los valores de fábrica de `keys`, o de
+/// todo si no se dice nada. Una clave que no es una preferencia se ignora.
+fn reset_patch(
+    defaults: serde_json::Map<String, Value>,
+    keys: Option<&[String]>,
+) -> serde_json::Map<String, Value> {
+    match keys {
+        None => defaults,
+        Some(keys) => defaults
+            .into_iter()
+            .filter(|(key, _)| keys.iter().any(|wanted| wanted == key))
+            .collect(),
+    }
+}
+
+/// `settings:reset`. Con `keys`, solo esas preferencias (el diálogo de
+/// «Restablecer» deja elegir apartados: 13-11, restablecer todo sin avisar
+/// devolvió la carpeta propia a la de fábrica y rompió aider, llm e IPython).
 #[tauri::command(async)]
-pub fn settings_reset(state: State<'_, Arc<AppState>>) -> Result<PreferencesPayload, String> {
+pub fn settings_reset(
+    state: State<'_, Arc<AppState>>,
+    keys: Option<Vec<String>>,
+) -> Result<PreferencesPayload, String> {
     let defaults = Preferences::default();
-    let Value::Object(patch) = serde_json::to_value(&defaults)
+    let Value::Object(defaults) = serde_json::to_value(&defaults)
         .map_err(|error| format!("Las preferencias no se pudieron serializar: {error}"))?
     else {
         return Err("Las preferencias no se pudieron serializar como objeto".to_string());
     };
+    let patch = reset_patch(defaults, keys.as_deref());
+    if patch.is_empty() {
+        return Err("No se eligió nada que restablecer".to_string());
+    }
     let saved = settings::save_settings(&patch).ok_or_else(|| {
         "No se pudieron restablecer las preferencias en settings.json".to_string()
     })?;
     state.tabs.refresh_all_banner_files();
     state.tabs.refresh_all_help_files();
-    log_info!("Preferencias restablecidas");
+    log_info!(
+        "Preferencias restablecidas",
+        serde_json::json!({ "todas": keys.is_none(), "claves": patch.keys().collect::<Vec<_>>() })
+    );
     Ok(payload_for(preferences::sanitize_preferences(
         &Value::Object(saved),
     )))
@@ -651,6 +678,12 @@ pub struct AppInfo {
     /// Hilos de CPU y memoria total: deciden si se sugiere el modo de bajo consumo.
     pub cpu_threads: usize,
     pub memory_gb: Option<f32>,
+    /// NSudo está instalado y esta copia no puede abrirlo: se ofrece instalar
+    /// gsudo (`environments::offer_gsudo`, `offerGsudo`).
+    pub nsudo_needs_gsudo: bool,
+    /// Corren las pruebas E2E: los avisos que ofrecen instalar algo no salen
+    /// (moverían la terminal que miden).
+    pub e2e_testing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -703,6 +736,12 @@ pub fn app_info(app: AppHandle) -> AppInfo {
                 .unwrap_or(1)
         }),
         memory_gb: crate::environments::ai::total_memory_gb(),
+        nsudo_needs_gsudo: crate::environments::offer_gsudo(
+            crate::platform::nsudo_path().is_some(),
+            &crate::environments::current_nsudo_launcher(),
+            std::env::var("LTERMINAL_E2E_TESTING").as_deref() == Ok("1"),
+        ),
+        e2e_testing: std::env::var("LTERMINAL_E2E_TESTING").as_deref() == Ok("1"),
     }
 }
 
@@ -770,6 +809,27 @@ pub fn log_frontend_performance(payload: FrontendPerformancePayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restablecer_solo_toca_lo_elegido_y_sin_eleccion_todo() {
+        let Value::Object(defaults) = serde_json::to_value(Preferences::default()).unwrap() else {
+            panic!("las preferencias son un objeto");
+        };
+        let total = defaults.len();
+        assert_eq!(reset_patch(defaults.clone(), None).len(), total);
+        let elegidas = vec![
+            "themeId".to_string(),
+            "uiScale".to_string(),
+            "noExiste".to_string(),
+        ];
+        let patch = reset_patch(defaults.clone(), Some(&elegidas));
+        assert_eq!(
+            patch.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["themeId", "uiScale"]
+        );
+        // Sin elegir nada no se restablece nada (y el comando lo rechaza).
+        assert!(reset_patch(defaults, Some(&[])).is_empty());
+    }
 
     #[test]
     fn el_perfil_se_puede_extraer_de_los_dos_scripts() {

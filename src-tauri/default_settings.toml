@@ -39,6 +39,10 @@ showTerminalOnlyGuide = true
 # Maximiza la ventana al iniciar, sin obligar a usar siempre ese tamaño.
 startMaximized = false
 startAsAdmin = false
+# Si NSudo está instalado y WTerminal no es administrador (y no hay gsudo ni el
+# sudo de Windows en línea), ofrece instalar gsudo: así cada pestaña de NSudo
+# pide el UAC solo para ella. «No volver a ofrecer» lo apaga.
+offerGsudo = true
 manualAliasesText = ""
 favoriteReplIds = ""
 hiddenEnvironmentIds = ""
@@ -76,6 +80,15 @@ shortcutUiScaleUp = "Ctrl+Alt+Equal"
 shortcutUiScaleDown = "Ctrl+Alt+Minus"
 shortcutUiScaleReset = "Ctrl+Alt+0"
 shortcutOpenSystemExplorer = ""
+# Sin tecla de fábrica: se asignan en Ajustes → Atajos.
+shortcutCloseTab = ""
+shortcutRenameTab = ""
+shortcutCopyLastOutput = ""
+shortcutSaveTerminalOutput = ""
+shortcutTerminalFontUp = ""
+shortcutTerminalFontDown = ""
+shortcutTerminalFontReset = ""
+shortcutToggleAgentChat = ""
 
 # Los temas de fábrica comparten la base negra de «Cian técnico» y solo
 # cambian el acento y la selección. themeRecolorAll = true deja que el tema
@@ -114,6 +127,46 @@ terminalCursorBlink = true
 terminalCommandMarks = true
 terminalLinks = true
 terminalLinksConfirm = true
+# Windows: el REPL de Python con el ancho visible y no con la reserva de 1024
+# columnas (con pyreadline3 repinta toda la ventana a cada tecla).
+pythonReplVisibleWidth = true
+# Las órdenes de las acciones (instalar, actualizar…): false = se ven escribir
+# poco a poco, como las repinta la shell; true = salen de una vez (de fábrica
+# desde el 15-11, por petición de Romen).
+actionCommandsAtOnce = true
+# Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de API, la
+# pestaña ofrece meterla; se guarda cifrada para este usuario de Windows.
+aiKeyOffer = true
+# El chat lateral con los agentes de IA: preguntar sin entrar en su CLI.
+agentChat = true
+# Modo consejero: al fallar una orden, ofrecer preguntar al agente. Encendido de
+# fábrica desde el 13-11 (Romen): solo ofrece, nunca pregunta solo.
+agentChatAdvisor = true
+# El botón «Chat» de la barra superior (abre y cierra el chat de agentes).
+showAgentChatButton = true
+# El chat recuerda la conversación: con cada pregunta va lo hablado antes.
+agentChatRemember = true
+# Los agentes del chat pueden editar la carpeta de la pestaña. Apagado de
+# fábrica: solo leen (Codex en solo lectura, Qwen en `plan`). Encendido, el
+# chat deja elegir «Aceptar ediciones» y «Auto».
+agentChatCanEdit = false
+# Deja elegir «Omitir permisos» en el chat: el agente hace todo sin preguntar,
+# órdenes incluidas. Apagado de fábrica; pide también agentChatCanEdit.
+agentChatAllowBypass = false
+# Con cada pregunta del chat va, oculta, una guía corta de WTerminal para el
+# agente: que proponga Entorno y dependencias, las órdenes internas (:shell,
+# :panel, :set…) y los ajustes antes que winget, apt o pip a pelo, y cómo pedir
+# la guía entera (wterminal --agent-guide).
+agentChatGuide = true
+# Al abrir la pestaña de una IA, su guía de WTerminal: Claude Code y Codex como
+# instrucciones de arranque (no salen en la conversación); Gemini y Qwen como
+# primer mensaje.
+agentTabGuide = true
+# Las IA que lanza WTerminal (sus pestañas y el chat) pueden manejarlo con
+# `wterminal --ctl <orden>`: órdenes internas y acciones de Entorno y
+# dependencias. Lo que cambie el equipo o los ajustes pide permiso en un aviso;
+# los permisos del chat y la seguridad nunca se pueden tocar así.
+agentControl = true
 terminalScrollSensitivity = 3
 copyOnSelect = false
 uiDensity = "comfortable"
@@ -167,6 +220,10 @@ shellAssistCmd = true
 shellAssistPowershell = true
 shellAssistBash = true
 shellAssistZsh = true
+# Si a la pestaña activa (cmd, PowerShell, bash o zsh) le falta su ayudante,
+# un aviso abajo ofrece instalarlo, con «Cerrar esta vez» y «No volver a
+# ofrecer».
+offerShellAssist = true
 # Aspecto de las sugerencias y del coloreado en todas las shells. Un color
 # vacío deja el de cada herramienta (Clink, PSReadLine, ble.sh, zsh).
 shellAssistSuggestionColor = ""

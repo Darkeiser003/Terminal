@@ -356,10 +356,22 @@ pub fn ensure_clink_profile(dir: &Path) -> Option<PathBuf> {
 pub fn ensure_clink_profile_with(dir: &Path, settings: &str) -> Option<PathBuf> {
     std::fs::create_dir_all(dir).ok()?;
     let defaults = dir.join("default_settings");
-    if std::fs::read_to_string(&defaults).ok().as_deref() != Some(settings) {
-        std::fs::write(&defaults, settings).ok()?;
+    let settings = with_e2e_clink_settings(settings, e2e_testing());
+    if std::fs::read_to_string(&defaults).ok().as_deref() != Some(settings.as_ref()) {
+        std::fs::write(&defaults, settings.as_ref()).ok()?;
     }
     Some(dir.to_path_buf())
+}
+
+/// Solo E2E: sin el aviso de versión nueva de Clink («Clink v1.9.36 is
+/// available»). Clink lo pinta al arrancar cmd con `clink.autoupdate = check`
+/// (su valor de fábrica) y ensuciaba las capturas y la primera fila que miden
+/// las pruebas. Al usuario no se le cambia: ese aviso le puede servir.
+fn with_e2e_clink_settings(settings: &str, e2e: bool) -> std::borrow::Cow<'_, str> {
+    if !e2e {
+        return std::borrow::Cow::Borrowed(settings);
+    }
+    std::borrow::Cow::Owned(format!("{settings}{:<34}= off\n", "clink.autoupdate"))
 }
 
 fn e2e_testing() -> bool {
@@ -1094,6 +1106,27 @@ mod tests {
             error: Rgb::parse("#ff0000"),
             list_view: true,
         }
+    }
+
+    #[test]
+    fn en_e2e_clink_no_avisa_de_versiones_nuevas_y_fuera_no_se_toca() {
+        // Fuera de E2E, los valores de fábrica tal cual.
+        assert_eq!(
+            with_e2e_clink_settings(CLINK_DEFAULT_SETTINGS, false),
+            CLINK_DEFAULT_SETTINGS
+        );
+        // En E2E, lo mismo más el aviso de versión apagado, al final.
+        let e2e = with_e2e_clink_settings(CLINK_DEFAULT_SETTINGS, true);
+        assert!(e2e.starts_with(CLINK_DEFAULT_SETTINGS));
+        assert!(e2e.ends_with("clink.autoupdate                  = off\n"));
+        // Escrito en el perfil: el archivo lleva lo que toca.
+        let dir = tempfile::tempdir().unwrap();
+        ensure_clink_profile_with(dir.path(), CLINK_DEFAULT_SETTINGS).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("default_settings")).unwrap();
+        assert_eq!(
+            written,
+            with_e2e_clink_settings(CLINK_DEFAULT_SETTINGS, e2e_testing())
+        );
     }
 
     #[test]

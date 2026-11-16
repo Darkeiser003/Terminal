@@ -46,6 +46,11 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "font" | "fuente" => "font",
         "language" | "lang" | "idioma" => "language",
         "terminal" | "term" => "terminal",
+        // Cualquier ajuste por su nombre: `:set` los lista, `:set clave` lo
+        // enseña y `:set clave valor` lo cambia (lo valida el backend).
+        "set" | "ajuste" | "pref" => "set",
+        // El chat lateral con los agentes de IA: lo muestra u oculta.
+        "chat" | "agentes" | "agents" if argument.is_none() => "chat",
         "panes" | "layout" | "grid" => "panes",
         "explorer-here" => "openDirectory",
         "explorerhere" => "openDirectory",
@@ -101,6 +106,17 @@ mod tests {
         assert_eq!(parse(":lang es").unwrap().action, "language");
         assert_eq!(parse(":terminal fontsize 14").unwrap().action, "terminal");
         assert_eq!(parse(":layout 4").unwrap().action, "panes");
+        assert_eq!(parse(":set").unwrap().action, "set");
+        assert_eq!(
+            parse(":ajuste actionCommandsAtOnce on")
+                .unwrap()
+                .argument
+                .as_deref(),
+            Some("actionCommandsAtOnce on")
+        );
+        assert_eq!(parse(":pref list python").unwrap().action, "set");
+        assert_eq!(parse(":chat").unwrap().action, "chat");
+        assert_eq!(parse(":agentes").unwrap().action, "chat");
         assert_eq!(parse(":banner preset compact").unwrap().action, "banner");
         assert_eq!(
             parse(":banner preset compact").unwrap().argument.as_deref(),

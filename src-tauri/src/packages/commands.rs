@@ -1580,6 +1580,66 @@ fn filter_available_actions(actions: Vec<InstallAction>) -> Vec<InstallAction> {
     filter_available_actions_with_depth(actions, DetectionDepth::Full)
 }
 
+/// Las acciones del catálogo cuyo id, nombre o grupo casan con todas las
+/// palabras de `query` (sin tildes ni mayúsculas): id y nombre, hasta `limit`.
+/// Para `wterminal --ctl acciones <texto>` (14-11): la lista que enseñó el
+/// panel si la hay; si no, el catálogo sin sondear (no ejecuta nada).
+pub fn search_actions(state: &AppState, query: &str, limit: usize) -> Vec<(String, String)> {
+    let t = Translator::new(&crate::i18n::active_language());
+    let actions = state.install_actions().unwrap_or_else(|| {
+        let context = install_context(state.inventory().pkg_manager, DetectionDepth::Catalog);
+        install_actions::get_install_actions(&context, &t)
+    });
+    matching_actions(&actions, query, limit)
+}
+
+fn matching_actions(actions: &[InstallAction], query: &str, limit: usize) -> Vec<(String, String)> {
+    let fold = |text: &str| -> String {
+        text.to_lowercase()
+            .chars()
+            .map(|c| match c {
+                'á' | 'à' | 'ä' | 'â' => 'a',
+                'é' | 'è' | 'ë' | 'ê' => 'e',
+                'í' | 'ì' | 'ï' | 'î' => 'i',
+                'ó' | 'ò' | 'ö' | 'ô' => 'o',
+                'ú' | 'ù' | 'ü' | 'û' => 'u',
+                'ñ' => 'n',
+                other => other,
+            })
+            .collect()
+    };
+    let words: Vec<String> = query.split_whitespace().map(fold).collect();
+    actions
+        .iter()
+        .filter(|action| {
+            let haystack = fold(&format!("{} {} {}", action.id, action.label, action.group));
+            words.iter().all(|word| haystack.contains(word.as_str()))
+        })
+        .take(limit)
+        .map(|action| (action.id.clone(), action.label.clone()))
+        .collect()
+}
+
+/// Ids de todas las acciones «Instalar» con sonda propia del catálogo de este
+/// sistema, sin filtrar ni sondear (barato: no ejecuta nada ni entra en WSL).
+/// `store_adopt` las compara con la lista completa guardada: una que falta en
+/// ella es una que su sonda dio por instalada, porque el filtro la quita
+/// (`DetectionState::Installed => return None`). Con el contexto de catálogo
+/// faltan las acciones de WSL: nunca se exportan, y nada sale como instalado
+/// sin estarlo.
+pub fn probed_install_ids(pkg_manager: Option<String>) -> Vec<String> {
+    let t = Translator::new(&crate::i18n::active_language());
+    let context = install_context(pkg_manager, DetectionDepth::Catalog);
+    let mut ids: Vec<String> = install_actions::get_install_actions(&context, &t)
+        .into_iter()
+        .filter(|action| is_install_action(action) && action.check_cmd.is_some())
+        .map(|action| action.id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// Comprueba un paquete de ecosistema sin instalar ni modificar nada.
 ///
 /// Formato: `ecosystem:<gestor>|<programa>|<paquetes>`. Los nombres vienen del
@@ -2566,7 +2626,8 @@ pub fn install_run(
     // `powershell -NoProfile -Command '...'` de alrededor es fontanería para
     // llegar a la shell correcta, y taparía lo que de verdad se va a ejecutar.
     let notice = notice_for(&action, &action.command, &t);
-    let command = crate::console_ui::decorate(&base_command, &notice, env.kind, true, &t);
+    let command =
+        crate::console_ui::decorate(&base_command, &notice, env.kind, env.transport, true, &t);
 
     log_info!(
         "Accion de instalacion ejecutada",
@@ -2577,7 +2638,10 @@ pub fn install_run(
     // El comando se escribe en la terminal visible: el usuario ve exactamente
     // qué se ejecuta y conserva el control (puede cancelar con Ctrl+C, igual
     // que con cualquier otro comando).
-    if !state.tabs.write_command(&target_tab, &command) {
+    if !state
+        .tabs
+        .write_command_shown(&target_tab, &command, &action.command)
+    {
         return InstallRunResult::failed(t.t(
             "error.writeFailed",
             "No se pudo escribir en la terminal activa.",
@@ -2606,6 +2670,32 @@ pub fn install_run(
 mod tests {
     use super::*;
     use crate::install_actions::InstallAction;
+
+    /// `wterminal --ctl acciones <texto>` (14-11): todas las palabras, sin
+    /// tildes ni mayúsculas, en el id, el nombre o el grupo.
+    #[test]
+    fn buscar_acciones_casa_todas_las_palabras_sin_tildes() {
+        let mut python =
+            InstallAction::new("winget-python", "Python 3.13", "winget install python");
+        python.group = "Intérpretes".to_string();
+        let gsudo = InstallAction::new(
+            "winget-gsudo",
+            "gsudo · administrador en la misma pestaña",
+            "x",
+        );
+        let actions = vec![python, gsudo];
+        assert_eq!(
+            matching_actions(&actions, "PYTHON interpretes", 10),
+            vec![("winget-python".to_string(), "Python 3.13".to_string())]
+        );
+        assert_eq!(matching_actions(&actions, "pestana", 10).len(), 1);
+        assert_eq!(
+            matching_actions(&actions, "", 1).len(),
+            1,
+            "sin texto, las primeras"
+        );
+        assert!(matching_actions(&actions, "nada", 10).is_empty());
+    }
 
     fn accion(id: &str, check: Option<&str>, requires: Option<&str>) -> InstallAction {
         let mut action = InstallAction::new(id, "Etiqueta", "comando");

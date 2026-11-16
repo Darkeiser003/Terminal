@@ -1138,6 +1138,14 @@ fn render_internal(lines: &mut Vec<String>, app_name: &str) {
         "Muestra o cambia fuente, tamaño, cursor, colores, scrollback, densidad y otros parámetros de xterm.",
     ));
     lines.push(help_row(
+        ":set [list [texto]|<ajuste> [valor]]",
+        "Lista, muestra o cambia cualquier ajuste por su nombre (on/off, números, textos), con la misma validación que Ajustes.",
+    ));
+    lines.push(help_row(
+        ":chat",
+        "Muestra u oculta el chat lateral con los agentes de IA (preguntar sin entrar en su CLI).",
+    ));
+    lines.push(help_row(
         ":panes [1|2|3|4|cycle]",
         "Muestra o cambia directamente el número de terminales visibles en la rejilla.",
     ));
@@ -1145,8 +1153,8 @@ fn render_internal(lines: &mut Vec<String>, app_name: &str) {
         ":explorer-here",
         "Abre el gestor de archivos del sistema en la ruta actual de esta terminal (Windows y Linux).",
     ));
-    lines.push("    Alias equivalentes: :open para :panel; :env para :shell; :term para :terminal; :layout/:grid para :panes; :open-here/:explorerhere para :explorer-here.".to_string());
-    lines.push("    Ejemplos: :shell powershell · :panel settings · :theme ocean · :terminal font-size 14 · :panes 2".to_string());
+    lines.push("    Alias equivalentes: :open para :panel; :env para :shell; :term para :terminal; :ajuste/:pref para :set; :layout/:grid para :panes; :open-here/:explorerhere para :explorer-here.".to_string());
+    lines.push("    Ejemplos: :shell powershell · :panel settings · :theme ocean · :terminal font-size 14 · :set actionCommandsAtOnce on · :panes 2".to_string());
     lines.push(
         "    Si una línea no empieza por : (y no es un crédito reconocido), se deja intacta para que la interprete la shell."
             .to_string(),
@@ -1499,7 +1507,12 @@ fn command_mark_lines(kind: ShellKind) -> Vec<String> {
             "if (-not $global:wtOriginalPrompt) {",
             "    $global:wtOriginalPrompt = $function:prompt",
             "    function global:prompt {",
-            "        $wtCode = if ($?) { 0 } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }",
+            // `$?` lo primero, antes de que otra línea lo cambie. Tras una
+            // acción de la app manda el código que dejó su marco
+            // (`console_ui::PS_ACTION_CODE_VAR`): su pie y su pausa lo taparían.
+            "        $wtOk = $?",
+            "        $wtCode = if ($null -ne $global:wtActionCode) { $global:wtActionCode } elseif ($wtOk) { 0 } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }",
+            "        $global:wtActionCode = $null",
             "        $wtText = (& $global:wtOriginalPrompt) -join ''",
             "        $wtOsc = [char]27 + ']133;'",
             "        $wtEnd = [char]7",
@@ -1927,6 +1940,12 @@ mod tests {
         let mut opts = options(Transport::Native);
         opts.command_marks = true;
         assert!(!build(ShellKind::Fish, &opts).content.contains("]133;"));
+        // El prompt de PowerShell lee el código que deja el marco de una acción.
+        let powershell = build(ShellKind::Powershell, &opts).content;
+        assert!(powershell.contains(&format!(
+            "$global:{} = $null",
+            crate::console_ui::PS_ACTION_CODE_VAR
+        )));
     }
 
     fn build(kind: ShellKind, options: &InitOptions<'_>) -> InitScript {

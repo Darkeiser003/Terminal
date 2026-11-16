@@ -44,15 +44,32 @@
         });
     });
 
-    function insert(command: string | undefined): void {
-        if (!command) return;
-        const problem = onInsert(command);
-        if (problem) {
-            status = problem;
-            input?.focus();
-            return;
+    /** Tras una salida larga o un cambio en la pestaña, la terminal puede
+     *  tardar un momento en volver a enseñar su prompt (la build 56 lo vio:
+     *  «La terminal está ocupada» con la orden ya elegida). Se reintenta
+     *  hasta 1,5 s antes de rendirse y explicar el motivo. */
+    const INSERT_RETRY_MS = 1500;
+    let inserting = false;
+
+    async function insert(command: string | undefined): Promise<void> {
+        if (!command || inserting) return;
+        inserting = true;
+        try {
+            const deadline = Date.now() + INSERT_RETRY_MS;
+            let problem = onInsert(command);
+            while (problem && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 150));
+                problem = onInsert(command);
+            }
+            if (problem) {
+                status = problem;
+                input?.focus();
+                return;
+            }
+            onClose();
+        } finally {
+            inserting = false;
         }
-        onClose();
     }
 
     function onKeydown(event: KeyboardEvent): void {
@@ -64,7 +81,7 @@
         }
         if (event.key === 'Enter') {
             event.preventDefault();
-            insert(results[selected]);
+            void insert(results[selected]);
             return;
         }
         if (event.key === 'Tab') {
@@ -142,7 +159,7 @@
                         if (selected !== index) selected = index;
                     }}
                     onmousedown={(event) => event.preventDefault()}
-                    onclick={() => insert(command)}
+                    onclick={() => void insert(command)}
                     onkeydown={onKeydown}
                 >{command}</div>
             {:else}

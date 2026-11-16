@@ -37,6 +37,51 @@ guarantee that it will be merged or a response by a particular date.
 
 ## Licensing
 
-Contributions to the project are offered under the repository's MIT License.
+The project is distributed under the GNU Affero General Public License,
+version 3 only (`AGPL-3.0-only`, see `LICENSE`). The copyright holder also
+offers it under separate commercial licenses (see "Licencia" in `README.md`).
 Do not submit third-party material unless its license permits redistribution
 and attribution; preserve required notices.
+
+### Contributor License Agreement (CLA)
+
+Because the same code is offered under the AGPL and under commercial licenses,
+every contribution needs the Contributor License Agreement below before it can
+be merged. You only accept it once; commenting on your first pull request with
+the sentence that the CLA bot asks for (or ticking its checkbox) counts as
+signing it. Automated dependency updates (Dependabot, Renovate) that only
+change version numbers do not need it.
+
+> **WTerminal / LTerminal Individual Contributor License Agreement, v1.0**
+>
+> "You" are the person or legal entity submitting a "Contribution": any
+> original work of authorship, including modifications or additions to existing
+> work, that you intentionally submit to the project maintained by Darkeiser003
+> (the "Maintainer").
+>
+> 1. **Copyright license.** You grant the Maintainer and recipients of software
+>    distributed by the Maintainer a perpetual, worldwide, non-exclusive,
+>    no-charge, royalty-free, irrevocable copyright license to reproduce,
+>    prepare derivative works of, publicly display, publicly perform,
+>    sublicense and distribute your Contributions and such derivative works,
+>    **under the AGPL-3.0-only or under any other license terms, including
+>    proprietary and commercial licenses.**
+> 2. **Patent license.** You grant the same parties a perpetual, worldwide,
+>    non-exclusive, no-charge, royalty-free, irrevocable patent license to make,
+>    have made, use, offer to sell, sell, import and otherwise transfer your
+>    Contributions, for the patent claims you can license that are necessarily
+>    infringed by your Contribution alone or combined with the project.
+> 3. **You keep your rights.** Apart from these licenses, you keep all right,
+>    title and interest in your Contributions and may use them for any purpose.
+> 4. **Your representations.** Each Contribution is your original creation, or
+>    you have the right to submit it under this agreement; if your employer has
+>    rights to your work, you have its permission or a waiver. You will name any
+>    third-party material and its license in the pull request.
+> 5. **No warranty and no obligation.** Contributions are provided "as is". The
+>    Maintainer is not required to use them, and you are not required to
+>    provide support for them.
+>
+> This agreement is governed by the laws of Spain.
+
+The CLA is a draft maintained by the project owner and has not been reviewed
+by a lawyer; it will be updated if legal review requires changes.

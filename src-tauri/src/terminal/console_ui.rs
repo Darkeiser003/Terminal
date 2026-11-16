@@ -35,7 +35,7 @@
 //! lo que hace el script de inicialización de cada pestaña (ver
 //! `alias_profiles::escape_capture_line`). Aquí solo se usa esa variable.
 
-use crate::environments::ShellKind;
+use crate::environments::{ShellKind, Transport};
 use crate::i18n::Translator;
 
 /// Nombre de la variable de entorno donde las pestañas de cmd guardan el
@@ -46,7 +46,15 @@ pub const CMD_ESC_VAR: &str = "WSTERM_ESC";
 /// escriben la cabecera y el cierre de las acciones de cmd.
 pub const CMD_FRAME_DIR_VAR: &str = "WSTERM_UI";
 
-/// Numera los pares cabecera/cierre de cmd de esta ejecución.
+/// Donde el cierre de cmd guarda el código de la orden mientras pinta el pie.
+const CMD_RC_VAR: &str = "WSTERM_RC";
+
+/// La variable global de PowerShell con el código de la última acción
+/// enmarcada. El prompt con marcas la lee una vez y la vacía.
+pub const PS_ACTION_CODE_VAR: &str = "wtActionCode";
+
+/// Numera los archivos de las acciones de esta ejecución (`ui-N-ini.cmd`,
+/// `ui-N.ps1`, `ui-N.sh`, `ui-N.fish`).
 static CMD_FRAME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Ancho de las reglas. 60 columnas caben en cualquier terminal que alguien use
@@ -223,11 +231,20 @@ fn header_lines(notice: &Notice) -> Vec<Line> {
 /// del wrap y conserva la línea completa en el scrollback y en el scroll
 /// horizontal; dividir a 24 o 12 columnas hacía que el usuario viera varias
 /// cabeceras incompletas y perdiera la relación entre el comando y su estado.
-fn cmd_header_lines(notice: &Notice) -> Vec<Line> {
-    let mut lines = vec![line(
-        Tone::Frame,
-        format!("┌─ {}", flatten_text(&notice.verb).to_uppercase()),
-    )];
+///
+/// El asunto y la orden van enteros (en cmd la línea tecleada se borra y la
+/// cabecera es el único sitio donde se lee la orden). `ruled` pone las reglas
+/// de las demás shells (`┌─ VER ────…` y `└────…`): en los archivos
+/// `ui-N-ini.cmd` no se teclea nada y caben (16-11). En la forma tecleada, la
+/// de reserva sin carpeta de sesión, el marco sigue corto para no alargar la
+/// línea que repite cmd.
+fn cmd_header_lines(notice: &Notice, ruled: bool) -> Vec<Line> {
+    let top = if ruled {
+        top_rule(&flatten_text(&notice.verb))
+    } else {
+        format!("┌─ {}", flatten_text(&notice.verb).to_uppercase())
+    };
+    let mut lines = vec![line(Tone::Frame, top)];
     lines.push(line(
         Tone::Subject,
         format!("│ {}", flatten_text(&notice.subject)),
@@ -239,7 +256,14 @@ fn cmd_header_lines(notice: &Notice) -> Vec<Line> {
     if let Some(note) = &notice.note {
         lines.push(line(Tone::Muted, format!("│ {}", flatten_text(note))));
     }
-    lines.push(line(Tone::Frame, "└"));
+    lines.push(line(
+        Tone::Frame,
+        if ruled {
+            bottom_rule()
+        } else {
+            "└".to_string()
+        },
+    ));
     lines
 }
 
@@ -283,11 +307,12 @@ fn sh_quote(value: &str) -> String {
 /// `printf` en vez de `echo`: `echo -e` no es portable (el `sh` de Debian es
 /// dash y no lo admite) y `printf` interpreta `\033` en todas partes.
 fn posix_echo(line: &Line) -> String {
-    let texto = line.text.replace('%', "%%");
+    // El texto va como argumento de `%s`, no en el formato: un `%` suyo sale
+    // tal cual (doblarlo enseñaba «100%%», 16-11).
     format!(
         "printf '\\033[{}m%s\\033[0m\\n' {}",
         line.tone.sgr(),
-        sh_quote(&texto)
+        sh_quote(&line.text)
     )
 }
 
@@ -396,13 +421,16 @@ fn cmd_frame_scripts(
         ini.push(CMD_ERASE_TYPED_LINE.to_string());
     }
     ini.push("@echo.".to_string());
-    ini.extend(cmd_header_lines(notice).iter().map(cmd_file_echo));
+    ini.extend(cmd_header_lines(notice, true).iter().map(cmd_file_echo));
     ini.push("@echo.".to_string());
     let mut fin = vec![
+        // El código que dejó la orden, antes que nada (`call` no lo cambia).
+        // Después de guardarlo da igual que `set` lo ponga a 0 en un `.cmd`.
+        format!("@set \"{CMD_RC_VAR}=%errorlevel%\""),
         "@echo.".to_string(),
-        // `if errorlevel` lee el código que dejó la orden: ni `call` ni `echo`
-        // lo cambian.
-        "@if errorlevel 1 goto wsterm_fail".to_string(),
+        // Distinto de 0 y no `if errorlevel 1`: winget falla con códigos
+        // negativos (-1978335212…) y esos pasaban por buenos (13-11).
+        format!("@if not \"%{CMD_RC_VAR}%\"==\"0\" goto wsterm_fail"),
     ];
     fin.extend(
         footer_lines(notice, true, pause, t)
@@ -418,9 +446,16 @@ fn cmd_frame_scripts(
     );
     fin.push(":wsterm_end".to_string());
     fin.push(format!("@{}", cmd_path_refresh("%%")));
+    // El prompt de cmd no puede decir cómo acabó la orden: lo dice aquí la
+    // marca `D` con el código real, y la pestaña la pinta en rojo y ofrece el
+    // consejero si falló. `set /p` la escribe sin salto de línea.
+    fin.push(format!("@<nul set /p \"=\x1b]133;D;%{CMD_RC_VAR}%\x07\""));
     if pause.is_some() {
         fin.push("@pause >nul".to_string());
     }
+    // La sesión se queda con el código de la orden (`echo %errorlevel%` lo
+    // dice) y sin la variable: `%…%` se expande antes de vaciarla.
+    fin.push(format!("@set \"{CMD_RC_VAR}=\" & exit /b %{CMD_RC_VAR}%"));
     (ini.join("\r\n") + "\r\n", fin.join("\r\n") + "\r\n")
 }
 
@@ -452,6 +487,207 @@ fn cmd_framed(
     Some(line)
 }
 
+/// Lo mismo que [`CMD_ERASE_TYPED_LINE`] para PowerShell: tras el Intro el
+/// cursor está al principio de la fila siguiente; se sube a la tecleada y se
+/// vacía, y el `Write-Host ''` que abre la cabecera la deja en blanco, igual
+/// que en cmd. `[char]27` y no `` `e ``: Windows PowerShell 5.1 no lo conoce.
+const PS_ERASE_TYPED_LINE: &str = "Write-Host -NoNewline \"$([char]27)[1A$([char]27)[2K\"";
+
+/// Las sentencias de una acción en PowerShell, en orden: cabecera, la orden,
+/// el veredicto con `$?` y `$LASTEXITCODE`, el PATH nuevo, el cierre y la
+/// pausa. Se encadenan con `;` en una línea o van una por línea en un archivo.
+fn powershell_statements(
+    command: &str,
+    notice: &Notice,
+    pause: Option<&str>,
+    t: &Translator,
+) -> Vec<String> {
+    let ok = footer_lines(notice, true, pause, t);
+    let fail = footer_lines(notice, false, pause, t);
+    let mut parts: Vec<String> = vec!["Write-Host ''".to_string()];
+    parts.extend(header_lines(notice).iter().map(powershell_echo));
+    parts.push("Write-Host ''".to_string());
+    parts.push(format!("$global:LASTEXITCODE = 0; {command}"));
+    parts.push("$wstermOk = $?  -and ($LASTEXITCODE -eq 0)".to_string());
+    // El pie y la pausa dejan `$?` en verdadero: el prompt (marca `D`)
+    // toma de aquí cómo acabó la orden de verdad.
+    parts.push(format!(
+        "$global:{PS_ACTION_CODE_VAR} = if ($wstermOk) {{ 0 }} elseif ($LASTEXITCODE) {{ $LASTEXITCODE }} else {{ 1 }}"
+    ));
+    parts.push(format!("{PATH_REFRESH_PS}; $env:Path = $wtPath"));
+    parts.push("Write-Host ''".to_string());
+    let bien = ok
+        .iter()
+        .map(powershell_echo)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mal = fail
+        .iter()
+        .map(powershell_echo)
+        .collect::<Vec<_>>()
+        .join("; ");
+    parts.push(format!("if ($wstermOk) {{ {bien} }} else {{ {mal} }}"));
+    // El pie ya dice «Pulsa Enter…»: se espera en silencio, como el
+    // `pause >nul` de cmd (con texto salía dos veces, 16-11).
+    if pause.is_some() {
+        parts.push("$null = Read-Host".to_string());
+    }
+    parts
+}
+
+/// La forma corta de PowerShell, como la de cmd (14-11): toda la acción va en
+/// `ui-N.ps1` de la carpeta de sesión y solo se teclea `. 'ruta\ui-N.ps1'`.
+///
+/// Encadenada en una línea medía unos mil caracteres, y PSReadLine la repinta
+/// entera a cada tecla: «Escribir de una vez» se rendía (cientos de entregas,
+/// más de 2 s) y la orden se veía escribir letra a letra, también la de un
+/// `.ps1` de la Biblioteca, que siempre va a una pestaña de PowerShell.
+/// `.` la ejecuta en la sesión, como si se hubiera tecleado: lo que cambie
+/// (variables, carpeta, `$LASTEXITCODE`) se queda. Las pestañas de PowerShell
+/// arrancan con `-ExecutionPolicy Bypass`, que es lo que deja cargar el
+/// inicializador de la misma carpeta. La ruta va entera y no con
+/// `$env:WSTERM_UI`: una pestaña elevada con NSudo puede no heredar la
+/// variable. UTF-8 con BOM: sin él Windows PowerShell lo leería en ANSI.
+fn ps_framed(
+    command: &str,
+    notice: &Notice,
+    pause: Option<&str>,
+    t: &Translator,
+    dir: &std::path::Path,
+    transport: Transport,
+) -> Option<String> {
+    let seq = CMD_FRAME_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("ui-{seq}.ps1"));
+    let shown = path_in_shell(&path, ShellKind::Powershell, transport);
+    let line = format!(". '{}'", shown.replace('\'', "''"));
+    let mut statements = Vec::new();
+    // Como en cmd: si la línea pudiera ocupar más de una fila, no se borra.
+    if line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX {
+        statements.push(PS_ERASE_TYPED_LINE.to_string());
+    }
+    statements.extend(powershell_statements(command, notice, pause, t));
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice((statements.join("\r\n") + "\r\n").as_bytes());
+    std::fs::write(&path, bytes).ok()?;
+    Some(line)
+}
+
+/// Lo mismo que [`PS_ERASE_TYPED_LINE`] para bash, zsh, sh y fish: subir a la
+/// fila tecleada y vaciarla. El `printf '\n'` que abre la cabecera la deja en
+/// blanco. fish también tiene `printf` como orden interna y entiende `\033`.
+const SH_ERASE_TYPED_LINE: &str = r"printf '\033[1A\033[2K'";
+
+/// La familia de shells POSIX (bash, zsh, sh): cabecera, la orden, el
+/// veredicto con `$?`, el cierre y la pausa. Se encadenan con `;` en una línea
+/// o van una por línea en un archivo.
+fn posix_statements(
+    command: &str,
+    notice: &Notice,
+    pause: Option<&str>,
+    t: &Translator,
+) -> Vec<String> {
+    let ok = footer_lines(notice, true, pause, t);
+    let fail = footer_lines(notice, false, pause, t);
+    let mut parts: Vec<String> = vec!["printf '\\n'".to_string()];
+    parts.extend(header_lines(notice).iter().map(posix_echo));
+    parts.push("printf '\\n'".to_string());
+    parts.push(command.to_string());
+    parts.push("__wsterm_rc=$?".to_string());
+    parts.push("printf '\\n'".to_string());
+    let bien = ok.iter().map(posix_echo).collect::<Vec<_>>().join("; ");
+    let mal = fail.iter().map(posix_echo).collect::<Vec<_>>().join("; ");
+    parts.push(format!(
+        "if [ $__wsterm_rc -eq 0 ]; then {bien}; else {mal}; fi"
+    ));
+    // El pie ya dice «Pulsa Enter…»: se espera en silencio, como en cmd.
+    if pause.is_some() {
+        parts.push("read __wsterm_pause".to_string());
+    }
+    // El prompt lee `$?`: que sea el de la orden, no el del pie. Cargada con
+    // `.`, el archivo devuelve también el de su última línea.
+    parts.push("(exit $__wsterm_rc)".to_string());
+    parts
+}
+
+fn fish_statements(
+    command: &str,
+    notice: &Notice,
+    pause: Option<&str>,
+    t: &Translator,
+) -> Vec<String> {
+    // En fish el aviso de la pausa lo pinta su `read -P`: el pie no lo
+    // repite (salía dos veces, 16-11).
+    let ok = footer_lines(notice, true, None, t);
+    let fail = footer_lines(notice, false, None, t);
+    let mut parts: Vec<String> = vec!["echo".to_string()];
+    parts.extend(header_lines(notice).iter().map(fish_echo));
+    parts.push("echo".to_string());
+    parts.push(command.to_string());
+    parts.push("set __wsterm_rc $status".to_string());
+    parts.push("echo".to_string());
+    let bien = ok.iter().map(fish_echo).collect::<Vec<_>>().join("; ");
+    let mal = fail.iter().map(fish_echo).collect::<Vec<_>>().join("; ");
+    parts.push(format!(
+        "if test $__wsterm_rc -eq 0; {bien}; else; {mal}; end"
+    ));
+    if let Some(pause) = pause {
+        parts.push(format!(
+            "read -P {} __wsterm_pause",
+            sh_quote(&format!("{pause} "))
+        ));
+    }
+    parts
+}
+
+/// La ruta del archivo de la acción tal como la ve la shell: la de Windows en
+/// cmd y PowerShell, `/mnt/c/…` dentro de WSL y `/c/…` en Git Bash. Es la
+/// misma traducción con la que esa shell ya cargó su inicializador.
+fn path_in_shell(path: &std::path::Path, kind: ShellKind, transport: Transport) -> String {
+    let raw = path.to_string_lossy();
+    match (kind, transport) {
+        (_, Transport::Wsl) => crate::shell_paths::to_wsl_path(&raw),
+        (ShellKind::Cmd | ShellKind::Powershell, _) => raw.into_owned(),
+        _ => crate::shell_paths::unix_path_for(&raw, transport),
+    }
+}
+
+/// La forma corta de bash, zsh, sh y fish (16-11), como la de PowerShell: toda
+/// la acción va en `ui-N.sh` (o `.fish`) y solo se teclea `. '<ruta>'`
+/// (`source` en fish). Encadenada medía cientos de caracteres y la shell la
+/// repetía entera; ahora la orden se lee en la cabecera, como en las demás.
+/// `.` la ejecuta en la sesión: un `cd` o una variable de la orden se quedan.
+/// Fin de línea LF y sin BOM, o bash leería `\r` al final de cada orden.
+fn sh_framed(
+    command: &str,
+    notice: &Notice,
+    kind: ShellKind,
+    transport: Transport,
+    pause: Option<&str>,
+    t: &Translator,
+    dir: &std::path::Path,
+) -> Option<String> {
+    let fish = kind == ShellKind::Fish;
+    let seq = CMD_FRAME_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("ui-{seq}.{}", if fish { "fish" } else { "sh" }));
+    let shown = sh_quote(&path_in_shell(&path, kind, transport));
+    let line = if fish {
+        format!("source {shown}")
+    } else {
+        format!(". {shown}")
+    };
+    let mut statements = Vec::new();
+    if line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX {
+        statements.push(SH_ERASE_TYPED_LINE.to_string());
+    }
+    if fish {
+        statements.extend(fish_statements(command, notice, pause, t));
+    } else {
+        statements.extend(posix_statements(command, notice, pause, t));
+    }
+    std::fs::write(&path, statements.join("\n") + "\n").ok()?;
+    Some(line)
+}
+
 /// Envuelve el comando con su cabecera y su cierre, en la sintaxis de esta
 /// shell. `pause` es el mensaje de "pulsa Enter"; sin él el comando termina y
 /// devuelve el prompt directamente.
@@ -459,46 +695,95 @@ fn cmd_framed(
 /// El cierre distingue entre bien y mal usando el código de salida REAL del
 /// comando, no un mensaje fijo: decir "completado" después de que winget haya
 /// fallado sería peor que no decir nada.
+///
+/// `transport` dice si la shell ve la carpeta de sesión del equipo: en Docker,
+/// ADB o Wine no la ve y la acción se teclea entera, encadenada en una línea.
 pub fn decorate(
     command: &str,
     notice: &Notice,
     kind: ShellKind,
+    transport: Transport,
     pause: bool,
     t: &Translator,
 ) -> String {
     // Las pruebas de unidad no escriben en la carpeta de sesión real.
-    let frame_dir = if cfg!(test) || kind != ShellKind::Cmd {
+    let frame_dir = if cfg!(test) || !uses_session_files(kind, transport) {
         None
     } else {
         crate::session_files::dir()
     };
-    decorate_in(command, notice, kind, pause, t, frame_dir.as_deref())
+    decorate_via(
+        command,
+        notice,
+        kind,
+        transport,
+        pause,
+        t,
+        frame_dir.as_deref(),
+    )
 }
 
+/// Si la acción puede ir en un archivo de la carpeta de sesión: la shell tiene
+/// que ver esa carpeta (no en Docker, ADB ni Wine) y entender el marco (un
+/// REPL no).
+fn uses_session_files(kind: ShellKind, transport: Transport) -> bool {
+    transport.loads_host_files() && !matches!(kind, ShellKind::Repl | ShellKind::Android)
+}
+
+/// [`decorate_via`] en una shell del propio equipo.
+#[cfg(test)]
 fn decorate_in(
     command: &str,
     notice: &Notice,
     kind: ShellKind,
     pause: bool,
     t: &Translator,
-    cmd_frame_dir: Option<&std::path::Path>,
+    frame_dir: Option<&std::path::Path>,
+) -> String {
+    decorate_via(
+        command,
+        notice,
+        kind,
+        Transport::Native,
+        pause,
+        t,
+        frame_dir,
+    )
+}
+
+fn decorate_via(
+    command: &str,
+    notice: &Notice,
+    kind: ShellKind,
+    transport: Transport,
+    pause: bool,
+    t: &Translator,
+    frame_dir: Option<&std::path::Path>,
 ) -> String {
     let pause_text = pause.then(|| t.t("console.pause", "Pulsa Enter para volver a la terminal"));
-    if kind == ShellKind::Cmd {
-        if let Some(line) =
-            cmd_frame_dir.and_then(|dir| cmd_framed(command, notice, pause_text.as_deref(), t, dir))
-        {
+    if let Some(dir) = frame_dir {
+        let pause = pause_text.as_deref();
+        let framed = match kind {
+            ShellKind::Cmd => cmd_framed(command, notice, pause, t, dir),
+            ShellKind::Powershell => ps_framed(command, notice, pause, t, dir, transport),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh | ShellKind::Fish => {
+                sh_framed(command, notice, kind, transport, pause, t, dir)
+            }
+            ShellKind::Repl | ShellKind::Android => None,
+        };
+        if let Some(line) = framed {
             return line;
         }
     }
-    let header = header_lines(notice);
-    let ok = footer_lines(notice, true, pause_text.as_deref(), t);
-    let fail = footer_lines(notice, false, pause_text.as_deref(), t);
 
+    // Sin carpeta de sesión (o si no se pudo escribir): todo encadenado en una
+    // línea, la forma de antes del 14-11.
     match kind {
         ShellKind::Cmd => {
+            let ok = footer_lines(notice, true, pause_text.as_deref(), t);
+            let fail = footer_lines(notice, false, pause_text.as_deref(), t);
             let mut parts: Vec<String> = vec!["echo.".to_string()];
-            parts.extend(cmd_header_lines(notice).iter().map(cmd_echo));
+            parts.extend(cmd_header_lines(notice, false).iter().map(cmd_echo));
             parts.push("echo.".to_string());
             parts.push(command.to_string());
             parts.push("echo.".to_string());
@@ -526,71 +811,11 @@ fn decorate_in(
             parts.join("\r")
         }
         ShellKind::Powershell => {
-            let mut parts: Vec<String> = vec!["Write-Host ''".to_string()];
-            parts.extend(header.iter().map(powershell_echo));
-            parts.push("Write-Host ''".to_string());
-            parts.push(format!("$global:LASTEXITCODE = 0; {command}"));
-            parts.push("$wstermOk = $?  -and ($LASTEXITCODE -eq 0)".to_string());
-            parts.push(format!("{PATH_REFRESH_PS}; $env:Path = $wtPath"));
-            parts.push("Write-Host ''".to_string());
-            let bien = ok
-                .iter()
-                .map(powershell_echo)
-                .collect::<Vec<_>>()
-                .join("; ");
-            let mal = fail
-                .iter()
-                .map(powershell_echo)
-                .collect::<Vec<_>>()
-                .join("; ");
-            parts.push(format!("if ($wstermOk) {{ {bien} }} else {{ {mal} }}"));
-            if let Some(pause) = &pause_text {
-                parts.push(format!(
-                    "Read-Host '{}' | Out-Null",
-                    pause.replace('\'', "''")
-                ));
-            }
-            parts.join("; ")
+            powershell_statements(command, notice, pause_text.as_deref(), t).join("; ")
         }
-        ShellKind::Fish => {
-            let mut parts: Vec<String> = vec!["echo".to_string()];
-            parts.extend(header.iter().map(fish_echo));
-            parts.push("echo".to_string());
-            parts.push(command.to_string());
-            parts.push("set __wsterm_rc $status".to_string());
-            parts.push("echo".to_string());
-            let bien = ok.iter().map(fish_echo).collect::<Vec<_>>().join("; ");
-            let mal = fail.iter().map(fish_echo).collect::<Vec<_>>().join("; ");
-            parts.push(format!(
-                "if test $__wsterm_rc -eq 0; {bien}; else; {mal}; end"
-            ));
-            if let Some(pause) = &pause_text {
-                parts.push(format!(
-                    "read -P {} __wsterm_pause",
-                    sh_quote(&format!("{pause} "))
-                ));
-            }
-            parts.join("; ")
-        }
+        ShellKind::Fish => fish_statements(command, notice, pause_text.as_deref(), t).join("; "),
         ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => {
-            let mut parts: Vec<String> = vec!["printf '\\n'".to_string()];
-            parts.extend(header.iter().map(posix_echo));
-            parts.push("printf '\\n'".to_string());
-            parts.push(command.to_string());
-            parts.push("__wsterm_rc=$?".to_string());
-            parts.push("printf '\\n'".to_string());
-            let bien = ok.iter().map(posix_echo).collect::<Vec<_>>().join("; ");
-            let mal = fail.iter().map(posix_echo).collect::<Vec<_>>().join("; ");
-            parts.push(format!(
-                "if [ $__wsterm_rc -eq 0 ]; then {bien}; else {mal}; fi"
-            ));
-            if let Some(pause) = &pause_text {
-                parts.push(format!(
-                    "printf {}; read __wsterm_pause",
-                    sh_quote(&format!("{pause} "))
-                ));
-            }
-            parts.join("; ")
+            posix_statements(command, notice, pause_text.as_deref(), t).join("; ")
         }
         // Un REPL o la shell de un móvil no entienden nada de esto: el comando
         // se escribe pelado, como hasta ahora.
@@ -612,6 +837,17 @@ mod tests {
 
     fn t() -> Translator {
         Translator::default()
+    }
+
+    /// Las pruebas de siempre decoran para una shell del propio equipo.
+    fn decorate(
+        command: &str,
+        notice: &Notice,
+        kind: ShellKind,
+        pause: bool,
+        t: &Translator,
+    ) -> String {
+        super::decorate(command, notice, kind, Transport::Native, pause, t)
     }
 
     #[test]
@@ -698,7 +934,7 @@ mod tests {
             "Una herramienta con un nombre suficientemente largo para envolver",
             "powershell -NoProfile -Command \"winget uninstall --id ejemplo\"",
         );
-        let lines = cmd_header_lines(&notice);
+        let lines = cmd_header_lines(&notice, false);
         assert_eq!(lines.len(), 4);
         assert!(lines.iter().any(|item| item.text.contains(&notice.subject)));
         assert!(lines
@@ -800,6 +1036,11 @@ mod tests {
         let con = decorate("x", &aviso(), ShellKind::Bash, true, &t());
         let sin = decorate("x", &aviso(), ShellKind::Bash, false, &t());
         assert!(con.contains("read __wsterm_pause"));
+        // Lo último deja en $? el código de la orden, para la marca D del prompt.
+        assert!(
+            con.ends_with("; (exit $__wsterm_rc)") && sin.ends_with("; (exit $__wsterm_rc)"),
+            "{con}"
+        );
         assert!(!sin.contains("read __wsterm_pause"));
         assert!(con.contains("Pulsa Enter"));
         assert!(!sin.contains("Pulsa Enter"));
@@ -845,6 +1086,11 @@ mod tests {
         );
         assert!(salida.contains("$? "));
         assert!(salida.contains("$LASTEXITCODE -eq 0"));
+        // El prompt (marca D) toma de aquí el código: el pie lo taparía.
+        assert!(
+            salida.contains("$global:wtActionCode = if ($wstermOk) { 0 }"),
+            "{salida}"
+        );
     }
 
     #[test]
@@ -875,6 +1121,15 @@ mod tests {
         // con ESC literal y los metacaracteres neutralizados.
         assert!(!ini.to_ascii_lowercase().contains("echo off"));
         assert!(ini.contains("\x1b[36m┌─ INSTALAR"));
+        // Con las reglas de las demás shells, a la misma anchura arriba y abajo.
+        assert!(
+            ini.contains(&format!("\x1b[36m{}\x1b[0m", top_rule("Instalar"))),
+            "{ini}"
+        );
+        assert!(
+            ini.contains(&format!("\x1b[36m{}\x1b[0m", bottom_rule())),
+            "{ini}"
+        );
         assert!(ini.contains("Editor ^(VS Code^) 100%%"));
         assert!(ini.lines().all(|line| line.starts_with('@')), "{ini}");
         // La línea tecleada se borra antes de la cabecera…
@@ -896,7 +1151,9 @@ mod tests {
         let ini_larga =
             std::fs::read_to_string(dir.path().join(format!("ui-{seq_larga}-ini.cmd"))).unwrap();
         assert!(!ini_larga.contains(CMD_ERASE_TYPED_LINE), "{ini_larga}");
-        assert!(fin.contains("@if errorlevel 1 goto wsterm_fail"));
+        assert!(fin.contains("@if not \"%WSTERM_RC%\"==\"0\" goto wsterm_fail"));
+        assert!(fin.contains("\x1b]133;D;%WSTERM_RC%\x07"));
+        assert!(fin.trim_end().ends_with("exit /b %WSTERM_RC%"), "{fin}");
         assert!(fin.contains("@pause >nul"));
         assert!(fin.contains("✔") && fin.contains("✘"));
         // Si no se pueden escribir los archivos se vuelve al formato antiguo.
@@ -911,6 +1168,101 @@ mod tests {
             Some(&dir.path().join("no-existe")),
         );
         assert!(roto.contains('\r'));
+    }
+
+    #[test]
+    fn powershell_teclea_solo_la_carga_de_un_archivo_con_toda_la_accion() {
+        let dir = tempfile::tempdir().unwrap();
+        let notice = Notice::new("Instalar", "Editor (VS Code) 100%", "winget install x");
+        let linea = decorate_in(
+            "winget install x",
+            &notice,
+            ShellKind::Powershell,
+            true,
+            &t(),
+            Some(dir.path()),
+        );
+        // Una línea corta: `. '<carpeta>\ui-N.ps1'`, sin la orden ni el marco.
+        assert!(!linea.contains('\r') && !linea.contains('\n'), "{linea}");
+        assert!(
+            linea.starts_with(". '") && linea.ends_with(".ps1'"),
+            "{linea}"
+        );
+        assert!(
+            !linea.contains("Write-Host") && !linea.contains("winget"),
+            "{linea}"
+        );
+        let ruta = linea[3..linea.len() - 1].replace("''", "'");
+        let bytes = std::fs::read(&ruta).unwrap();
+        // UTF-8 con BOM, o Windows PowerShell leería las tildes en ANSI.
+        assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+        let archivo = String::from_utf8(bytes[3..].to_vec()).unwrap();
+        let lineas: Vec<&str> = archivo.lines().collect();
+        // Primero se borra la línea tecleada; después, lo de siempre.
+        assert_eq!(lineas[0], PS_ERASE_TYPED_LINE);
+        assert!(archivo.contains("┌─ INSTALAR"), "{archivo}");
+        assert!(
+            lineas.contains(&"$global:LASTEXITCODE = 0; winget install x"),
+            "{archivo}"
+        );
+        assert!(archivo.contains("$wstermOk = $?  -and ($LASTEXITCODE -eq 0)"));
+        assert!(archivo.contains("$global:wtActionCode = if ($wstermOk) { 0 }"));
+        // La pausa espera en silencio: el pie ya dice «Pulsa Enter…».
+        assert!(lineas.contains(&"$null = Read-Host"), "{archivo}");
+        assert_eq!(archivo.matches("Pulsa Enter").count(), 2, "{archivo}");
+        // Sin carpeta, o si no se puede escribir, todo en una línea como antes.
+        let sin_dir = decorate_in("x", &aviso(), ShellKind::Powershell, false, &t(), None);
+        assert!(sin_dir.starts_with("Write-Host ''; "), "{sin_dir}");
+        let roto = decorate_in(
+            "x",
+            &aviso(),
+            ShellKind::Powershell,
+            false,
+            &t(),
+            Some(&dir.path().join("no-existe")),
+        );
+        assert!(roto.contains("$global:LASTEXITCODE = 0; x"), "{roto}");
+    }
+
+    /// El archivo se ejecuta en la sesión, como si se hubiera tecleado: lo que
+    /// deja la orden (una variable, `$LASTEXITCODE`) sigue ahí después, y el
+    /// código que lee el prompt es el de la orden, no el del cierre.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_ejecuta_el_archivo_en_la_sesion_con_el_codigo_real() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |command: &str| {
+            let linea = decorate_in(
+                command,
+                &aviso(),
+                ShellKind::Powershell,
+                false,
+                &t(),
+                Some(dir.path()),
+            );
+            let salida = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                ])
+                .arg(format!(
+                    "{linea}; Write-Output \"CODE=$wtActionCode LAST=$LASTEXITCODE VAR=$wtPrueba\""
+                ))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&salida.stdout).to_string()
+        };
+        let bien = run("$wtPrueba = 'queda'; Write-Output orden-real");
+        assert!(
+            bien.contains("orden-real") && bien.contains("INSTALAR"),
+            "{bien}"
+        );
+        assert!(bien.contains("CODE=0 LAST=0 VAR=queda"), "{bien}");
+        let mal = run("cmd /c exit 3");
+        assert!(mal.contains("CODE=3 LAST=3"), "{mal}");
     }
 
     #[cfg(windows)]
@@ -943,11 +1295,46 @@ mod tests {
         assert!(bien.contains("[32m") && !bien.contains("[31m"), "{bien}");
         let mal = run("cmd /c exit 3");
         assert!(mal.contains("[31m") && !mal.contains("[32m"), "{mal}");
+        // La marca de fin lleva el código real (el prompt de cmd no puede).
+        assert!(mal.contains("\x1b]133;D;3\x07"), "{mal:?}");
+        assert!(bien.contains("\x1b]133;D;0\x07"), "{bien:?}");
+        // winget falla con códigos negativos: también son un fallo.
+        let negativo = run("cmd /c exit -1978335212");
+        assert!(
+            negativo.contains("[31m") && !negativo.contains("[32m"),
+            "{negativo}"
+        );
+        assert!(negativo.contains("]133;D;-1978335212"), "{negativo:?}");
         // `&&` ata más que `&`: la segunda parte no corre y el cierre ve el fallo.
         let compuesta = run("cmd /c exit 1 && echo no-debe-salir");
         assert!(
             !compuesta.contains("no-debe-salir") && compuesta.contains("[31m"),
             "{compuesta}"
+        );
+        // Tras el cierre, la sesión conserva el código de la orden y no la
+        // variable de trabajo.
+        let linea = decorate_in(
+            "cmd /c exit 5",
+            &aviso(),
+            ShellKind::Cmd,
+            false,
+            &t(),
+            Some(dir.path()),
+        );
+        let salida = std::process::Command::new("cmd.exe")
+            .args(["/d", "/v:on", "/s", "/c"])
+            .raw_arg(format!(
+                "\"{linea} & echo RC=!ERRORLEVEL! VAR=[!WSTERM_RC!]\""
+            ))
+            .env(CMD_FRAME_DIR_VAR, dir.path())
+            .output()
+            .unwrap();
+        let salida = String::from_utf8_lossy(&salida.stdout);
+        // Una variable sin definir sale vacía o tal cual según la versión de
+        // cmd; lo que no puede es seguir valiendo 5.
+        assert!(
+            salida.contains("RC=5 ") && !salida.contains("VAR=[5]"),
+            "{salida}"
         );
     }
 
@@ -979,9 +1366,11 @@ mod tests {
             .output()
             .unwrap();
         let texto = String::from_utf8_lossy(&salida.stdout).to_lowercase();
+        // La marca `D` del cierre va sin salto de línea (en la terminal no
+        // ocupa nada), así que aquí queda delante de `PATH=` en la misma línea.
         let path = texto
             .lines()
-            .find(|line| line.starts_with("path="))
+            .find_map(|line| line.find("path=").map(|start| &line[start..]))
             .unwrap_or("");
         assert!(path.contains(&wbem.to_lowercase()), "cmd: {texto}");
         assert!(
@@ -1021,5 +1410,167 @@ mod tests {
     fn el_texto_del_cierre_se_traduce() {
         let ingles = decorate("x", &aviso(), ShellKind::Bash, true, &Translator::new("en"));
         assert!(!ingles.contains("Pulsa Enter"));
+    }
+
+    /// bash, zsh, sh y fish teclean solo la carga del archivo (16-11), con la
+    /// ruta como la ve esa shell: `/mnt/c/…` en WSL y `/c/…` en Git Bash.
+    #[test]
+    fn bash_zsh_y_fish_teclean_solo_la_carga_de_un_archivo_con_toda_la_accion() {
+        let dir = tempfile::tempdir().unwrap();
+        let notice = Notice::new("Instalar", "Editor (VS Code) 100%", "sudo apt install x");
+        for (kind, transport, verb, ext) in [
+            (ShellKind::Bash, Transport::Wsl, ". ", "sh"),
+            (ShellKind::Zsh, Transport::Wsl, ". ", "sh"),
+            (ShellKind::Sh, Transport::Msys, ". ", "sh"),
+            (ShellKind::Fish, Transport::Wsl, "source ", "fish"),
+        ] {
+            let linea = decorate_via(
+                "sudo apt install x",
+                &notice,
+                kind,
+                transport,
+                true,
+                &t(),
+                Some(dir.path()),
+            );
+            assert!(!linea.contains('\r') && !linea.contains('\n'), "{linea}");
+            assert!(
+                !linea.contains("apt") && !linea.contains("printf"),
+                "{linea}"
+            );
+            let seq: String = linea
+                .rsplit("ui-")
+                .next()
+                .unwrap()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            let path = dir.path().join(format!("ui-{seq}.{ext}"));
+            let shown = match transport {
+                Transport::Wsl => crate::shell_paths::to_wsl_path(&path.to_string_lossy()),
+                _ => crate::shell_paths::unix_path_for(&path.to_string_lossy(), transport),
+            };
+            assert_eq!(linea, format!("{verb}{}", sh_quote(&shown)), "{kind:?}");
+            if cfg!(windows) {
+                assert!(
+                    shown.starts_with(if transport == Transport::Wsl {
+                        "/mnt/"
+                    } else {
+                        "/"
+                    }) && !shown.contains('\\'),
+                    "{shown}"
+                );
+            }
+            let archivo = std::fs::read_to_string(&path).unwrap();
+            // LF y sin BOM: bash leería el `\r` como parte de cada orden.
+            assert!(!archivo.contains('\r') && !archivo.starts_with('\u{feff}'));
+            let lineas: Vec<&str> = archivo.lines().collect();
+            assert_eq!(lineas[0], SH_ERASE_TYPED_LINE, "{kind:?}");
+            assert!(lineas.contains(&"sudo apt install x"), "{archivo}");
+            assert!(archivo.contains("INSTALAR") && archivo.contains("✔") && archivo.contains("✘"));
+            assert!(archivo.contains("__wsterm_pause"), "{archivo}");
+            // El `%` va como argumento de `printf`: no se dobla.
+            assert!(
+                archivo.contains("100%") && !archivo.contains("100%%"),
+                "{archivo}"
+            );
+            // «Pulsa Enter…» sin repetir: en el pie de cada desenlace (bien y
+            // mal) con una espera muda, o solo en el `read -P` de fish.
+            let avisos = if kind == ShellKind::Fish { 1 } else { 2 };
+            assert_eq!(archivo.matches("Pulsa Enter").count(), avisos, "{archivo}");
+            if kind == ShellKind::Fish {
+                assert!(archivo.contains("set __wsterm_rc $status"), "{archivo}");
+            } else {
+                // El prompt lee el código de la orden, no el del cierre.
+                assert_eq!(lineas.last(), Some(&"(exit $__wsterm_rc)"), "{archivo}");
+            }
+        }
+        // Sin carpeta, como antes: todo encadenado en una línea.
+        let sin_dir = decorate_via(
+            "x",
+            &aviso(),
+            ShellKind::Bash,
+            Transport::Wsl,
+            false,
+            &t(),
+            None,
+        );
+        assert!(sin_dir.starts_with("printf '\\n'; "), "{sin_dir}");
+    }
+
+    /// La ruta del archivo de PowerShell también se traduce: un `pwsh` dentro de
+    /// WSL no entiende `C:\…`.
+    #[test]
+    fn powershell_dentro_de_wsl_carga_el_archivo_con_la_ruta_de_linux() {
+        let dir = tempfile::tempdir().unwrap();
+        let linea = decorate_via(
+            "Get-Date",
+            &aviso(),
+            ShellKind::Powershell,
+            Transport::Wsl,
+            false,
+            &t(),
+            Some(dir.path()),
+        );
+        assert!(!linea.contains('\\'), "{linea}");
+        if cfg!(windows) {
+            assert!(linea.starts_with(". '/mnt/"), "{linea}");
+        }
+    }
+
+    /// El archivo se carga en la sesión: lo que deja la orden se queda, y `$?`
+    /// al volver es el de la orden. Con `sh` en Linux y macOS, y con el bash de
+    /// Git en Windows si está instalado (lo está en los equipos de CI).
+    #[test]
+    fn bash_ejecuta_el_archivo_en_la_sesion_con_el_codigo_real() {
+        let (shell, transport) = if cfg!(windows) {
+            let git = std::path::PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+            if !git.exists() {
+                eprintln!("sin Git Bash: no se ejecuta");
+                return;
+            }
+            (git, Transport::Msys)
+        } else {
+            (std::path::PathBuf::from("sh"), Transport::Native)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let run = |command: &str| {
+            let linea = decorate_via(
+                command,
+                &aviso(),
+                ShellKind::Bash,
+                transport,
+                false,
+                &t(),
+                Some(dir.path()),
+            );
+            let salida = std::process::Command::new(&shell)
+                .arg("-c")
+                .arg(format!("{linea}; echo \"CODE=$? VAR=$wtPrueba\""))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&salida.stdout).to_string()
+        };
+        let bien = run("wtPrueba=queda; echo orden-real");
+        assert!(
+            bien.contains("orden-real") && bien.contains("INSTALAR") && bien.contains("✔"),
+            "{bien}"
+        );
+        assert!(bien.contains("CODE=0 VAR=queda"), "{bien}");
+        let mal = run("(exit 3)");
+        assert!(mal.contains("CODE=3") && mal.contains("✘"), "{mal}");
+    }
+
+    #[test]
+    fn solo_las_shells_que_ven_la_carpeta_de_sesion_usan_archivo() {
+        for transport in [Transport::Native, Transport::Msys, Transport::Wsl] {
+            assert!(uses_session_files(ShellKind::Bash, transport));
+        }
+        for transport in [Transport::Docker, Transport::Android, Transport::Wine] {
+            assert!(!uses_session_files(ShellKind::Bash, transport));
+            assert!(!uses_session_files(ShellKind::Cmd, transport));
+        }
+        assert!(!uses_session_files(ShellKind::Repl, Transport::Native));
+        assert!(!uses_session_files(ShellKind::Android, Transport::Native));
     }
 }

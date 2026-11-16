@@ -202,6 +202,7 @@ pub(super) fn action_description(id: &str) -> Option<&'static str> {
         "pkg-winetricks" => "Instala runtimes, fuentes y componentes que algunas aplicaciones necesitan dentro de Wine.",
         "pkg-adb" | "adb" | "adb-install" | "adb-authorize" => "Conecta, depura, transfiere archivos y ejecuta comandos en dispositivos Android.",
         "pkg-ssh" | "ssh" | "winget-ssh" => "Cliente seguro para sesiones remotas, túneles y transferencia de archivos.",
+        "tool-pyreadline3" => "Tab, historial (Ctrl+R) y edición de línea en el REPL de Python 3.12 o anterior en Windows.",
 
         id if id.starts_with("framework-") => return framework_description(id),
         _ => return None,

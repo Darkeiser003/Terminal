@@ -749,7 +749,7 @@ const ZSH_PLUGIN_HINT: &str = "WTerminal lo carga en sus pestañas de zsh si est
 const BLESH_URL: &str = "https://github.com/akinomyoga/ble.sh/releases/download/nightly/ble-nightly-20260908%2Bd81fd54.tar.xz";
 const BLESH_SHA256: &str = "7a2445f138e7f099dd5dee749391a8b045646d1b8a605975885be5b34b6b5f7e";
 const BLESH_DIR_IN_TARBALL: &str = "ble-nightly-20260908+d81fd54";
-const BLESH_HINT: &str = "Se instala solo para tu usuario, sin sudo, en ~/.local/share/blesh, desde la versión fijada del repositorio oficial y comprobando su SHA-256. Necesita curl o wget, tar con xz o Python 3, y awk: Ubuntu, Kali y Arch lo traen todo; a Debian, openSUSE, Fedora y otras distros recién instaladas les falta algo, y la instalación se detiene diciendo qué paquetes añadir. WTerminal lo carga en sus pestañas de bash si la opción «Sugerencias y colores en la línea de órdenes» (y la de bash) está activa; no toca tu .bashrc.";
+const BLESH_HINT: &str = "Se instala para tu usuario en ~/.local/share/blesh, desde la versión fijada del repositorio oficial y comprobando su SHA-256. Necesita curl o wget, tar con xz o Python 3, y awk: Ubuntu, Kali y Arch lo traen todo; a Debian, openSUSE, Fedora y otras distros recién instaladas les falta algo. En WSL, lo que falte se instala antes con el gestor de paquetes de la distro (apt, dnf, zypper, pacman o apk), como root o con sudo, que te pedirá la contraseña en la pestaña. WTerminal lo carga en sus pestañas de bash si la opción «Sugerencias y colores en la línea de órdenes» (y la de bash) está activa; no toca tu .bashrc.";
 
 /// Órdenes que ble.sh exige al cargarse (`_ble_init_posix_command_list` de
 /// la versión fijada). Si falta alguna, `ble.sh --install` no termina nunca:
@@ -758,39 +758,60 @@ const BLESH_HINT: &str = "Se instala solo para tu usuario, sin sudo, en ~/.local
 const BLESH_REQUIRED_COMMANDS: &str =
     "sed date rm mkdir mkfifo sleep stty tty sort awk chmod grep cat wc mv sh od cp ps";
 
-/// Comprobación previa a la instalación de ble.sh dentro de una distro WSL:
-/// sin descargador, o sin tar+xz y sin Python 3 de respaldo, o sin alguna de
-/// las órdenes que ble.sh necesita, se detiene con la orden exacta para
-/// añadir lo que falta. Medido en WSL recién instalado: Debian no trae curl,
-/// wget, xz ni Python; openSUSE Tumbleweed no trae tar ni Python; Fedora 44
-/// no trae awk. Sin comillas ni paréntesis, por la misma razón que
-/// `blesh_install_script`.
-fn blesh_prerequisite_check(package_manager: Option<&str>) -> String {
-    let (install, commands) = match package_manager {
-        Some("apt") => (
-            "sudo apt install -y curl tar xz-utils",
-            "sudo apt install -y gawk procps",
+/// Los paquetes que dan a ble.sh lo que necesita (descargar, descomprimir y
+/// sus órdenes) y la orden que los instala con el gestor de la distro, con
+/// `$S` delante (vacío si ya es root, `sudo` si no). `None` si no se conoce
+/// el gestor.
+fn blesh_package_install(package_manager: Option<&str>) -> Option<(&'static str, &'static str)> {
+    Some(match package_manager? {
+        "apt" => (
+            "curl tar xz-utils gawk procps",
+            "$S env DEBIAN_FRONTEND=noninteractive apt-get update && $S env DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar xz-utils gawk procps",
         ),
-        Some("dnf") => (
-            "sudo dnf install -y curl tar xz",
-            "sudo dnf install -y gawk procps-ng",
+        "dnf" => (
+            "curl tar xz gawk procps-ng",
+            "$S dnf install -y curl tar xz gawk procps-ng",
         ),
-        Some("zypper") => (
-            "sudo zypper install -y curl tar xz",
-            "sudo zypper install -y gawk procps",
+        "zypper" => (
+            "curl tar xz gawk procps",
+            "$S zypper --non-interactive install curl tar xz gawk procps",
         ),
-        Some("pacman") => (
-            "sudo pacman -S --needed curl tar xz",
-            "sudo pacman -S --needed gawk procps-ng",
+        // Arch no admite instalar sin sincronizar y actualizar (`-Syu`).
+        "pacman" => (
+            "curl tar xz gawk procps-ng",
+            "$S pacman -Syu --needed --noconfirm curl tar xz gawk procps-ng",
         ),
-        Some("apk") => ("sudo apk add bash curl tar xz", "sudo apk add gawk procps"),
-        _ => (
-            "curl o wget, tar y xz con el gestor de paquetes de la distro",
-            "awk y ps con el gestor de paquetes de la distro",
+        "apk" => (
+            "bash curl tar xz gawk procps",
+            "$S apk add bash curl tar xz gawk procps",
         ),
+        _ => return None,
+    })
+}
+
+/// Antes de instalar ble.sh dentro de una distro WSL: si le falta un
+/// descargador, tar+xz (o Python 3 de respaldo) o alguna orden que ble.sh
+/// exige, lo instala con su gestor de paquetes, como root o con `sudo` (que
+/// pide la contraseña en la propia pestaña), y vuelve a comprobar. Medido en
+/// WSL recién instalado: Debian no trae curl, wget, xz ni Python; openSUSE
+/// Tumbleweed no trae tar ni Python; Fedora 44 no trae awk (13-11, Romen:
+/// solo Kali, Ubuntu y Arch lo instalaban; antes esto se detenía diciendo
+/// qué instalar). Sin comillas, paréntesis en los mensajes ni tildes, por la
+/// misma razón que `blesh_install_script`.
+fn blesh_prerequisites(package_manager: Option<&str>) -> String {
+    let check = format!(
+        "need=; if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then need=1; fi; if {{ ! command -v tar >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; }} && ! command -v python3 >/dev/null 2>&1; then need=1; fi; for c in {BLESH_REQUIRED_COMMANDS}; do command -v $c >/dev/null 2>&1 || need=1; done; "
+    );
+    let install = match blesh_package_install(package_manager) {
+        Some((packages, command)) => format!(
+            "if test ${{#need}} -gt 0; then if test $(id -u) -eq 0; then S=; elif command -v sudo >/dev/null 2>&1; then S=sudo; else echo Faltan paquetes para ble.sh y no hay sudo: instala como root {packages} >&2; exit 1; fi; echo Instalando lo que le falta a la distro para ble.sh: {packages}; {command} || {{ echo No se pudieron instalar {packages}: revisa la salida de arriba >&2; exit 1; }}; fi; "
+        ),
+        None => "if test ${#need} -gt 0; then echo Faltan programas para ble.sh: instala curl o wget, tar y xz, awk y ps con el gestor de paquetes de la distro >&2; exit 1; fi; ".to_string(),
     };
+    // Después de instalar, la misma comprobación: si aún falta algo, no se
+    // sigue (sin awk, `ble.sh --install` se queda en un bucle).
     format!(
-        "if {{ ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; }} || {{ {{ ! command -v tar >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; }} && ! command -v python3 >/dev/null 2>&1; }}; then echo Faltan herramientas para instalar ble.sh: curl o wget, y tar con xz o Python 3. Para instalarlas: {install} >&2; exit 1; fi; missing=; for c in {BLESH_REQUIRED_COMMANDS}; do command -v $c >/dev/null 2>&1 || missing=${{missing:+$missing,}}$c; done; if test ${{#missing}} -gt 0; then echo Faltan programas que necesita ble.sh: $missing. Para instalarlos: {commands} >&2; exit 1; fi; "
+        "{check}{install}{check}if test ${{#need}} -gt 0; then echo Siguen faltando programas para ble.sh: revisa la salida de arriba >&2; exit 1; fi; "
     )
 }
 
@@ -1176,11 +1197,13 @@ fn centralized_install(leaf: &str, flag: &str, install: &str) -> String {
 /// (`WTERMINAL_DOWNLOADS`), `TEMP` y `TMP` apuntan a `descargas\winget` de la
 /// carpeta propia: WinGet descarga ahí el instalador (cientos de MB) en vez de
 /// en C:, aunque la carpeta propia esté en otro disco. Se restauran después,
-/// porque en una pestaña de PowerShell el script corre en la propia sesión.
+/// porque en una pestaña de PowerShell el script corre en la propia sesión,
+/// y en un `finally`: con Ctrl+C durante la descarga PowerShell corta la
+/// línea entera y la pestaña se quedaba con `TEMP` en la carpeta propia.
 ///
 /// Plantilla de [`centralized_install`]; sin `format!` para no duplicar cada
 /// llave de PowerShell.
-const CENTRALIZED_INSTALL: &str = r#"$wtTarget = $null; $wtBefore = @(); $wtWatch = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ -and (Test-Path $_) }; if ($env:WTERMINAL_PROGRAMS) { $wtTarget = Join-Path $env:WTERMINAL_PROGRAMS '__LEAF__'; $wtBefore = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object FullName }) }; $wtLocation = @(); if ($wtTarget -and '__FLAG__') { $wtLocation = @('__FLAG__', $wtTarget) }; $wtOldTemp = $env:TEMP; $wtOldTmp = $env:TMP; if ($env:WTERMINAL_DOWNLOADS) { $wtDl = Join-Path (Split-Path $env:WTERMINAL_DOWNLOADS -Parent) 'winget'; New-Item -ItemType Directory -Force -Path $wtDl -ErrorAction SilentlyContinue | Out-Null; if (Test-Path -LiteralPath $wtDl) { $env:TEMP = $wtDl; $env:TMP = $wtDl } }; __INSTALL__; $wtCode = $LASTEXITCODE; $env:TEMP = $wtOldTemp; $env:TMP = $wtOldTmp; if ($wtTarget -and $wtCode -eq 0 -and -not (Get-ChildItem -LiteralPath $wtTarget -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { $wtNew = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue } | Where-Object { $wtBefore -notcontains $_.FullName -and -not $_.LinkType } | ForEach-Object FullName); if ($wtNew.Count -eq 0) { if ('__FLAG__') { Write-Host "__LEAF__ no usó la carpeta propia ($wtTarget) y no se encontró una carpeta nueva en Program Files ni en LOCALAPPDATA\Programs." } } else { Write-Host "__LEAF__ no se instaló en la carpeta propia; está en: $($wtNew -join ', ')"; $wtAnswer = Read-Host '¿Moverlo a la carpeta propia y dejar una unión en su sitio? Pide permisos de administrador (s/N)'; if ($wtAnswer -match '^[sSyY]') { $wtQuote = { param($text) "'" + ($text -replace "'", "''") + "'" }; $wtFlags = '/E /MOVE /IS /IT /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP'; $wtLines = @(); foreach ($wtDir in $wtNew) { $wtDest = Join-Path $wtTarget (Split-Path $wtDir -Leaf); Get-Process | Where-Object { $_.Path -like "$wtDir\*" } | Stop-Process -Force -ErrorAction SilentlyContinue; $wtSrc = & $wtQuote $wtDir; $wtDst = & $wtQuote $wtDest; $wtLines += "robocopy $wtSrc $wtDst $wtFlags | Out-Null; if (@(Get-ChildItem -LiteralPath $wtSrc -Recurse -File -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $wtSrc -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Junction -Path $wtSrc -Target $wtDst | Out-Null } else { robocopy $wtDst $wtSrc $wtFlags | Out-Null }" }; $wtScript = Join-Path $env:TEMP ('wterminal-move-' + [guid]::NewGuid().ToString() + '.ps1'); Set-Content -LiteralPath $wtScript -Value $wtLines -Encoding UTF8; Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$wtScript`"" -Verb RunAs -Wait -WindowStyle Hidden; Remove-Item -LiteralPath $wtScript -ErrorAction SilentlyContinue; foreach ($wtDir in $wtNew) { $wtItem = Get-Item -LiteralPath $wtDir -Force -ErrorAction SilentlyContinue; if ($wtItem -and $wtItem.LinkType -eq 'Junction') { Write-Host "Movido: $wtDir -> $(@($wtItem.Target)[0])" } else { Write-Host "No se pudo mover $wtDir (¿algún archivo en uso?): sigue en su sitio." } } } } }; $global:LASTEXITCODE = $wtCode"#;
+const CENTRALIZED_INSTALL: &str = r#"$wtTarget = $null; $wtBefore = @(); $wtWatch = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ -and (Test-Path $_) }; if ($env:WTERMINAL_PROGRAMS) { $wtTarget = Join-Path $env:WTERMINAL_PROGRAMS '__LEAF__'; $wtBefore = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object FullName }) }; $wtLocation = @(); if ($wtTarget -and '__FLAG__') { $wtLocation = @('__FLAG__', $wtTarget) }; $wtOldTemp = $env:TEMP; $wtOldTmp = $env:TMP; if ($env:WTERMINAL_DOWNLOADS) { $wtDl = Join-Path (Split-Path $env:WTERMINAL_DOWNLOADS -Parent) 'winget'; New-Item -ItemType Directory -Force -Path $wtDl -ErrorAction SilentlyContinue | Out-Null; if (Test-Path -LiteralPath $wtDl) { $env:TEMP = $wtDl; $env:TMP = $wtDl } }; try { __INSTALL__; $wtCode = $LASTEXITCODE } finally { $env:TEMP = $wtOldTemp; $env:TMP = $wtOldTmp }; if ($wtTarget -and $wtCode -eq 0 -and -not (Get-ChildItem -LiteralPath $wtTarget -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { $wtNew = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue } | Where-Object { $wtBefore -notcontains $_.FullName -and -not $_.LinkType } | ForEach-Object FullName); if ($wtNew.Count -eq 0) { if ('__FLAG__') { Write-Host "__LEAF__ no usó la carpeta propia ($wtTarget) y no se encontró una carpeta nueva en Program Files ni en LOCALAPPDATA\Programs." } } else { Write-Host "__LEAF__ no se instaló en la carpeta propia; está en: $($wtNew -join ', ')"; $wtAnswer = Read-Host '¿Moverlo a la carpeta propia y dejar una unión en su sitio? Pide permisos de administrador (s/N)'; if ($wtAnswer -match '^[sSyY]') { $wtQuote = { param($text) "'" + ($text -replace "'", "''") + "'" }; $wtFlags = '/E /MOVE /IS /IT /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP'; $wtLines = @(); foreach ($wtDir in $wtNew) { $wtDest = Join-Path $wtTarget (Split-Path $wtDir -Leaf); Get-Process | Where-Object { $_.Path -like "$wtDir\*" } | Stop-Process -Force -ErrorAction SilentlyContinue; $wtSrc = & $wtQuote $wtDir; $wtDst = & $wtQuote $wtDest; $wtLines += "robocopy $wtSrc $wtDst $wtFlags | Out-Null; if (@(Get-ChildItem -LiteralPath $wtSrc -Recurse -File -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $wtSrc -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Junction -Path $wtSrc -Target $wtDst | Out-Null } else { robocopy $wtDst $wtSrc $wtFlags | Out-Null }" }; $wtScript = Join-Path $env:TEMP ('wterminal-move-' + [guid]::NewGuid().ToString() + '.ps1'); Set-Content -LiteralPath $wtScript -Value $wtLines -Encoding UTF8; Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$wtScript`"" -Verb RunAs -Wait -WindowStyle Hidden; Remove-Item -LiteralPath $wtScript -ErrorAction SilentlyContinue; foreach ($wtDir in $wtNew) { $wtItem = Get-Item -LiteralPath $wtDir -Force -ErrorAction SilentlyContinue; if ($wtItem -and $wtItem.LinkType -eq 'Junction') { Write-Host "Movido: $wtDir -> $(@($wtItem.Target)[0])" } else { Write-Host "No se pudo mover $wtDir (¿algún archivo en uso?): sigue en su sitio." } } } } }; $global:LASTEXITCODE = $wtCode"#;
 
 /// RubyGems compila extensiones nativas de muchas gemas (Rails, Nokogiri,
 /// Jekyll, etc.) y en Windows necesita `make`.  La acción de Ruby prepara
@@ -2451,6 +2474,34 @@ fn python_pip_action(platform: &str, pkg_manager: Option<&str>, python_cmd: &str
         )
 }
 
+/// La orden que instala pyreadline3. Lleva un marcador de entorno de pip: en
+/// Python 3.13 o posterior pip avisa de que no aplica y no instala nada (esas
+/// versiones ya traen su propio REPL con Tab e historial). Con `--user` va a la
+/// carpeta de paquetes de esa versión de Python, así que las demás ni lo ven.
+const PYREADLINE3_INSTALL: &str =
+    "python -m pip install --user \"pyreadline3; python_version < '3.13'\"";
+
+const PYREADLINE3_HINT: &str = "Completar con Tab, buscar en el historial (Ctrl+R) y editar la línea en el REPL de Python de Windows. Recomendado solo para Python 3.12 o anterior: el 3.13 y posteriores ya lo traen de serie y pip no lo instala en ellos (la orden lo indica). Se instala en el Python que abre `python`, solo para tu usuario, y no toca otras versiones. Coste en WTerminal: el REPL repinta la línea a cada tecla, así que escribir puede ir más lento, y mucho más si apagas «Python con el ancho visible».";
+
+/// pyreadline3 para el REPL de Python de Windows (Romen, 12-11: «ponlo en
+/// Entorno y dependencias, especifica su coste y recomiéndalo solo para
+/// versiones anteriores a la 3.13»). El coste está medido en el README
+/// («El REPL de Python con `pyreadline3`»): cada tecla llega en decenas de
+/// trozos. La sonda, actualizar y desinstalar salen de la orden simple
+/// (`ecosystem_lifecycle_actions`); la que se ejecuta lleva el marcador.
+fn pyreadline3_actions() -> Vec<InstallAction> {
+    let mut install = ecosystem_action(
+        "tool-pyreadline3",
+        "pyreadline3 (Python 3.12 o anterior)",
+        "python -m pip install --user pyreadline3".to_string(),
+        "Python",
+        PYREADLINE3_HINT,
+    );
+    install.group = LANGUAGES_GROUP.to_string();
+    install.command = PYREADLINE3_INSTALL.to_string();
+    ecosystem_lifecycle_actions(vec![install])
+}
+
 /// `mix` puede existir aunque a Erlang le falte la aplicación OTP
 /// `public_key`. Hex la necesita para descargar y verificar paquetes TLS;
 /// detectar solo `mix` dejaba Credo/ExDoc fallando después de empezar.
@@ -3558,7 +3609,7 @@ fn wsl_blesh_actions(distro: &crate::wsl_env::InstalledDistro) -> Vec<InstallAct
     let subgroup = format!("{} · {}", distro.name, distro.shell);
     let install_script = format!(
         "{}{}",
-        blesh_prerequisite_check(distro.package_manager.as_deref()),
+        blesh_prerequisites(distro.package_manager.as_deref()),
         blesh_install_script()
     );
     let mut actions = Vec::new();
@@ -4045,6 +4096,7 @@ fn windows_actions(
     ));
 
     actions.push(python_pip_action("windows", None, "python"));
+    actions.extend(pyreadline3_actions());
     actions.push(elixir_otp_action("windows", None));
     actions.extend(ecosystem_actions("python", "npm"));
     actions.extend(ai_actions("windows", "python", "npm"));
@@ -5889,6 +5941,17 @@ mod tests {
         let restore = command.find("$env:TEMP = $wtOldTemp").unwrap();
         assert!(redirect < install && install < restore, "{command}");
         assert!(command.contains("if ($env:WTERMINAL_DOWNLOADS)"));
+        // Se restauran también si se interrumpe (Ctrl+C): en un `finally`.
+        assert!(
+            command.contains("try { winget install --id Git.Git"),
+            "{command}"
+        );
+        assert!(
+            command.contains(
+                "$wtCode = $LASTEXITCODE } finally { $env:TEMP = $wtOldTemp; $env:TMP = $wtOldTmp }"
+            ),
+            "{command}"
+        );
     }
 
     #[test]
@@ -7034,7 +7097,7 @@ exit 0
     }
 
     #[test]
-    fn ble_sh_se_instala_en_cada_distro_sin_sudo_y_con_la_suma_fijada() {
+    fn ble_sh_se_instala_en_cada_distro_con_lo_que_le_falte_y_la_suma_fijada() {
         let mut ubuntu = distro("Ubuntu", "apt");
         let context = |ubuntu: InstalledDistro| InstallContext {
             wsl: Some(WslContext {
@@ -7054,19 +7117,22 @@ exit 0
         assert_eq!(install.subgroup_item.as_deref(), Some(BLESH_SUBGROUP));
         assert!(install
             .command
-            .starts_with("wsl.exe -d 'Ubuntu' --exec bash -lc 'if {"));
+            .starts_with("wsl.exe -d 'Ubuntu' --exec bash -lc 'need=; if !"));
         assert!(install.command.contains("tmp=$(mktemp -d)"));
         assert!(install.command.contains(BLESH_URL));
         assert!(install
             .command
             .contains(&format!("grep -q ^{BLESH_SHA256}")));
         assert!(install.command.contains("--install ~/.local/share;"));
-        // `sudo` solo aparece en el mensaje que dice qué instalar; nunca se ejecuta.
-        assert!(!install.command.contains("; sudo") && !install.command.contains("&& sudo"));
+        // Lo que le falte a la distro se instala antes, con su gestor, como
+        // root o con sudo (13-11: en Debian, Fedora y openSUSE se detenía).
         assert!(install
             .command
-            .contains("Para instalarlas: sudo apt install -y curl tar xz-utils >&2; exit 1;"));
-        assert!(install.command.find("exit 1; fi;") < install.command.find("tmp=$(mktemp -d)"));
+            .contains("apt-get install -y curl tar xz-utils gawk procps"));
+        assert!(install
+            .command
+            .contains("if test $(id -u) -eq 0; then S=; elif command -v sudo"));
+        assert!(install.command.find("apt-get install") < install.command.find("tmp=$(mktemp -d)"));
         // El título de la tarjeta dice de qué distro es: comparten subgrupo.
         assert_eq!(
             install.short_label.as_deref(),
@@ -7088,7 +7154,7 @@ exit 0
     }
 
     #[test]
-    fn la_comprobacion_previa_de_ble_sh_no_lleva_comillas_ni_parentesis() {
+    fn lo_previo_de_ble_sh_no_lleva_comillas_ni_parentesis_ni_tildes() {
         for manager in [
             Some("apt"),
             Some("dnf"),
@@ -7097,48 +7163,56 @@ exit 0
             Some("apk"),
             None,
         ] {
-            let check = blesh_prerequisite_check(manager);
-            assert!(!check.contains('\'') && !check.contains('"') && !check.contains('\n'));
+            let script = blesh_prerequisites(manager);
+            assert!(!script.contains('\'') && !script.contains('"') && !script.contains('\n'));
             // `echo` sin comillas: un paréntesis rompería la orden de sh.
-            let message = check.split("then echo").nth(1).unwrap();
-            assert!(!message.contains('(') && !message.contains(')'), "{check}");
+            for message in script.split("echo ").skip(1) {
+                let message = message.split(['>', ';']).next().unwrap_or_default();
+                assert!(!message.contains('(') && !message.contains(')'), "{script}");
+            }
             assert!(
-                check.is_ascii(),
+                script.is_ascii(),
                 "PowerShell 5.1 no garantiza pasar tildes a wsl.exe"
             );
+            // La comprobación va antes y después de instalar.
+            assert_eq!(
+                script
+                    .matches(&format!("for c in {BLESH_REQUIRED_COMMANDS}; do"))
+                    .count(),
+                2
+            );
         }
-        assert!(
-            blesh_prerequisite_check(Some("zypper")).contains("sudo zypper install -y curl tar xz")
-        );
+        // Cada gestor, con los paquetes que faltan en sus distros de WSL.
+        assert!(blesh_prerequisites(Some("zypper"))
+            .contains("$S zypper --non-interactive install curl tar xz gawk procps"));
+        assert!(blesh_prerequisites(Some("pacman")).contains("$S pacman -Syu --needed --noconfirm"));
         // Sin awk (Fedora 44 en WSL), `ble.sh --install` se queda en bucle:
-        // la comprobación lo detiene antes con el paquete que lo trae.
-        let fedora = blesh_prerequisite_check(Some("dnf"));
-        assert!(fedora.contains(&format!("for c in {BLESH_REQUIRED_COMMANDS}; do")));
+        // se instala gawk antes.
         assert!(BLESH_REQUIRED_COMMANDS
             .split(' ')
             .any(|command| command == "awk"));
-        assert!(fedora
-            .contains("Para instalarlos: sudo dnf install -y gawk procps-ng >&2; exit 1; fi; "));
-        assert!(fedora.ends_with("fi; "));
+        assert!(blesh_prerequisites(Some("dnf"))
+            .contains("$S dnf install -y curl tar xz gawk procps-ng"));
+        // Sin gestor conocido, no se instala nada: se dice qué falta.
+        let unknown = blesh_prerequisites(None);
+        assert!(!unknown.contains("$S "));
+        assert!(unknown.contains("con el gestor de paquetes de la distro >&2; exit 1;"));
     }
 
-    /// Ejecuta de verdad la comprobación previa en `sh` con un PATH sin
-    /// descargadores: debe detenerse con el mensaje y código 1.
+    /// Ejecuta de verdad lo previo en `sh` con un PATH vacío: sin root (sin
+    /// `id`) ni `sudo`, debe detenerse diciendo qué instalar, con código 1.
     #[cfg(unix)]
     #[test]
-    fn la_comprobacion_previa_de_ble_sh_se_detiene_si_faltan_herramientas() {
+    fn lo_previo_de_ble_sh_se_detiene_si_no_puede_instalar() {
         let output = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!(
-                "{}echo SIGUE",
-                blesh_prerequisite_check(Some("apt"))
-            ))
+            .arg(format!("{}echo SIGUE", blesh_prerequisites(Some("apt"))))
             .env("PATH", "/nonexistent")
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&output.stderr)
-            .contains("sudo apt install -y curl tar xz-utils"));
+            .contains("no hay sudo: instala como root curl tar xz-utils gawk procps"));
         assert!(!String::from_utf8_lossy(&output.stdout).contains("SIGUE"));
     }
 
@@ -7689,7 +7763,11 @@ exit 0
             .filter(|a| {
                 a.group == LANGUAGES_GROUP
                     && a.check_cmd.is_some()
+                    // Las ayudas de un lenguaje ya instalado (pip, OTP de
+                    // Erlang y pyreadline3 para el REPL de Python) van detrás
+                    // de los lenguajes, en el orden en que se añaden.
                     && !matches!(a.id.as_str(), "pkg-python-pip" | "pkg-elixir-otp")
+                    && !a.id.starts_with("tool-pyreadline3")
             })
             .map(|a| a.id.as_str())
             .collect();
@@ -8267,6 +8345,40 @@ exit 0
         assert!(!tiene_hueco("if ($x) { Write-Host 'hola' }"));
         assert!(!tiene_hueco("sin llaves"));
         assert!(!tiene_hueco("{}"));
+    }
+
+    #[test]
+    fn pyreadline3_solo_en_windows_y_sin_tocar_python_3_13_o_posterior() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let install = buscar(&actions, "tool-pyreadline3");
+        // pip se salta el paquete en 3.13 o posterior y `--user` lo deja en la
+        // carpeta de esa versión de Python.
+        assert_eq!(install.command, PYREADLINE3_INSTALL);
+        assert!(install
+            .command
+            .contains("\"pyreadline3; python_version < '3.13'\""));
+        assert!(install.command.contains(" --user "));
+        assert_eq!(install.group, LANGUAGES_GROUP);
+        assert_eq!(install.subgroup.as_deref(), Some("Python"));
+        assert_eq!(
+            install.check_cmd.as_deref(),
+            Some("ecosystem:pip|python|pyreadline3")
+        );
+        assert_eq!(install.requires_cmd.as_deref(), Some("module:python:pip"));
+        let hint = install.hint.as_deref().unwrap_or_default();
+        // Recomendado solo hasta 3.12 y con su coste dicho.
+        assert!(hint.contains("3.12 o anterior") && hint.contains("Coste en WTerminal"));
+        let update = buscar(&actions, "tool-pyreadline3-update");
+        assert!(update.command.contains("--upgrade"));
+        assert!(update.command.contains("python_version < '3.13'"));
+        let remove = buscar(&actions, "tool-pyreadline3-uninstall");
+        assert_eq!(remove.command, "python -m pip uninstall -y pyreadline3");
+        // En Linux y macOS Python ya usa GNU readline: no se ofrece.
+        for platform in ["linux", "macos"] {
+            assert!(get_install_actions(&contexto(platform), &t())
+                .iter()
+                .all(|action| !action.id.starts_with("tool-pyreadline3")));
+        }
     }
 
     #[test]

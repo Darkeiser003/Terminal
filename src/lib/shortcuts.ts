@@ -34,6 +34,14 @@ export const SHORTCUT_PREFERENCE_KEYS = [
     'shortcutUiScaleUp',
     'shortcutUiScaleDown',
     'shortcutUiScaleReset',
+    'shortcutCloseTab',
+    'shortcutRenameTab',
+    'shortcutCopyLastOutput',
+    'shortcutSaveTerminalOutput',
+    'shortcutTerminalFontUp',
+    'shortcutTerminalFontDown',
+    'shortcutTerminalFontReset',
+    'shortcutToggleAgentChat',
 ] as const;
 
 export type ShortcutPreferenceKey = (typeof SHORTCUT_PREFERENCE_KEYS)[number];
@@ -74,6 +82,14 @@ export const SHORTCUT_DEFINITIONS: ReadonlyArray<{
     { key: 'shortcutUiScaleUp', labelKey: 'palette.action.uiScaleUp', fallback: 'Aumentar el tamaño de la interfaz' },
     { key: 'shortcutUiScaleDown', labelKey: 'palette.action.uiScaleDown', fallback: 'Reducir el tamaño de la interfaz' },
     { key: 'shortcutUiScaleReset', labelKey: 'palette.action.uiScaleReset', fallback: 'Tamaño de la interfaz al 100 %' },
+    { key: 'shortcutCloseTab', labelKey: 'palette.action.closeTab', fallback: 'Cerrar la pestaña' },
+    { key: 'shortcutRenameTab', labelKey: 'palette.action.renameTab', fallback: 'Renombrar la pestaña' },
+    { key: 'shortcutCopyLastOutput', labelKey: 'menu.copyLastOutput', fallback: 'Copiar la salida de la última orden' },
+    { key: 'shortcutSaveTerminalOutput', labelKey: 'palette.action.saveTerminalOutput', fallback: 'Guardar la salida en un archivo' },
+    { key: 'shortcutTerminalFontUp', labelKey: 'palette.action.terminalFontUp', fallback: 'Agrandar la letra de la terminal' },
+    { key: 'shortcutTerminalFontDown', labelKey: 'palette.action.terminalFontDown', fallback: 'Achicar la letra de la terminal' },
+    { key: 'shortcutTerminalFontReset', labelKey: 'palette.action.terminalFontReset', fallback: 'Letra de la terminal a su tamaño de fábrica' },
+    { key: 'shortcutToggleAgentChat', labelKey: 'palette.action.toggleAgentChat', fallback: 'Mostrar u ocultar el chat de agentes' },
 ];
 
 const MODIFIER_ORDER = ['ctrl', 'alt', 'shift', 'meta'] as const;
@@ -195,4 +211,26 @@ export function matchesPaneShortcut(
     if (!normalized) return false;
     return matchesShortcut(event, normalized)
         && (!normalized.split('+').includes('ctrl') || leftControlPressed);
+}
+
+/** Combinaciones que las shells usan para editar la línea (readline de bash y
+ *  zsh, PSReadLine, cmd): un atajo de la app con una de ellas gana dentro de
+ *  la terminal y la shell deja de recibirla. Ajustes lo avisa al grabarlo. */
+export const SHELL_RESERVED_SHORTCUTS: ReadonlyArray<string> = [
+    'ctrl+a', 'ctrl+b', 'ctrl+c', 'ctrl+d', 'ctrl+e', 'ctrl+f', 'ctrl+k', 'ctrl+l',
+    'ctrl+n', 'ctrl+p', 'ctrl+q', 'ctrl+r', 'ctrl+s', 'ctrl+t', 'ctrl+u', 'ctrl+v',
+    'ctrl+w', 'ctrl+y', 'ctrl+z', 'ctrl+space', 'alt+b', 'alt+d', 'alt+f', 'shift+tab',
+];
+
+/** Con qué choca un atajo: con la edición de línea de las shells o con otro
+ *  atajo de la app. Solo informa; grabarlo sigue siendo decisión del usuario. */
+export function shortcutConflicts(
+    key: ShortcutPreferenceKey,
+    shortcuts: Readonly<Partial<Record<ShortcutPreferenceKey, string>>>,
+): { shell: boolean; duplicateOf: ShortcutPreferenceKey | null } {
+    const normalized = normalizeShortcut(shortcuts[key] ?? '');
+    if (!normalized) return { shell: false, duplicateOf: null };
+    const duplicateOf = SHORTCUT_PREFERENCE_KEYS.find((other) =>
+        other !== key && normalizeShortcut(shortcuts[other] ?? '') === normalized) ?? null;
+    return { shell: SHELL_RESERVED_SHORTCUTS.includes(normalized), duplicateOf };
 }

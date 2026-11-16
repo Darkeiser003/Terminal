@@ -239,7 +239,8 @@
             type="button"
             class="icon"
             data-testid="refresh-environments"
-            title={app.t('env.refresh', 'Volver a detectar entornos')}
+            data-tip={app.t('env.refresh', 'Volver a detectar entornos')}
+            aria-label={app.t('env.refresh', 'Volver a detectar entornos')}
             onclick={() => app.refreshEnvironments()}
         >⟳</button>{/if}
         {#if app.appInfo?.processElevated}
@@ -269,52 +270,63 @@
             type="button"
             data-panel-toggle
             data-testid="toolbar-projects"
-            title={app.t('toolbar.projects', 'Proyectos')}
+            data-tip={app.t('toolbar.projects', 'Proyectos')}
+            aria-label={app.t('toolbar.projects', 'Proyectos')}
             class:active={panels.isOpen('projects')}
             onclick={() => {
                 if (panels.toggle('projects')) onOpenProjects();
             }}
         >
-            {app.t('toolbar.projects', 'Proyectos')}
+            <svg class="panel-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.4l1.5 1.6h5.6a1 1 0 0 1 1 1v6.4a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1z" /></svg>
+            <span class="panel-label">{app.t('toolbar.projects', 'Proyectos')}</span>
         </button>{/if}
 
         {#if app.preferences?.showScriptsPanel !== false}<button
             type="button"
             data-panel-toggle
             data-testid="toolbar-library"
-            title={app.t('toolbar.scripts', 'Biblioteca')}
+            data-tip={app.t('toolbar.scripts', 'Biblioteca')}
+            aria-label={app.t('toolbar.scripts', 'Biblioteca')}
             class:active={panels.isOpen('scripts')}
             onclick={() => {
                 if (panels.toggle('scripts')) onOpenScripts();
             }}
         >
-            {app.t('toolbar.scripts', 'Biblioteca')}
+            <svg class="panel-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 2.5h8.5a.75.75 0 0 1 .75.75v10.25h-8.5a.75.75 0 0 1-.75-.75zM3.25 12.75a1 1 0 0 1 1-1h8.25M5.75 5.25h4.5M5.75 7.75h3" /></svg>
+            <span class="panel-label">{app.t('toolbar.scripts', 'Biblioteca')}</span>
         </button>{/if}
 
         {#if app.preferences?.showDependenciesPanel !== false}<button
             type="button"
             data-panel-toggle
             data-testid="toolbar-dependencies"
-            title={app.t('toolbar.deps', 'Entorno y dependencias')}
+            data-tip={app.t('toolbar.deps', 'Entorno y dependencias')}
+            aria-label={app.t('toolbar.deps', 'Entorno y dependencias')}
             class:active={panels.isOpen('deps')}
             onclick={() => {
                 if (panels.toggle('deps')) onOpenDeps();
             }}
         >
-            {app.t('toolbar.deps', 'Entorno y dependencias')}
+            <svg class="panel-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.75 13.5 4.6v6.8L8 14.25 2.5 11.4V4.6zM2.5 4.6 8 7.45l5.5-2.85M8 7.45v6.8" /></svg>
+            <span class="panel-label">{app.t('toolbar.deps', 'Entorno y dependencias')}</span>
         </button>{/if}
+
+        <!-- El botón del chat de agentes ya no va aquí: está al final de la
+             fila de pestañas, con un icono (TabBar.svelte, 14-11). -->
 
         <button
             type="button"
             data-panel-toggle
             data-testid="toolbar-settings"
-            title={app.t('toolbar.settings', 'Ajustes')}
+            data-tip={app.t('toolbar.settings', 'Ajustes')}
+            aria-label={app.t('toolbar.settings', 'Ajustes')}
             class:active={panels.isOpen('settings')}
             onclick={() => {
                 if (panels.toggle('settings')) onOpenSettings();
             }}
         >
-            {app.t('toolbar.settings', 'Ajustes')}
+            <svg class="panel-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7" /><circle cx="10.5" cy="4.5" r="1.5" /><circle cx="5.5" cy="11.5" r="1.5" /></svg>
+            <span class="panel-label">{app.t('toolbar.settings', 'Ajustes')}</span>
         </button>
 
         <!-- Selector rápido de idioma -->
@@ -323,7 +335,8 @@
                 type="button"
                 class="icon lang-btn"
                 class:active={langMenuOpen}
-                title={app.t('toolbar.language', 'Cambiar idioma')}
+                data-tip={app.t('toolbar.language', 'Cambiar idioma')}
+                aria-label={app.t('toolbar.language', 'Cambiar idioma')}
                 onclick={(e) => {
                     e.stopPropagation();
                     envMenuOpen = false;
@@ -671,6 +684,104 @@
     .toolbar-group:not(.grow) > button {
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+
+    /* Barra estrecha (ventana pequeña o interfaz al 137 % o más): los cuatro
+       botones de panel pasan a icono en vez de quedarse en «Pro…», «Bib…», y
+       el selector de entorno recupera el sitio (antes se quedaba en «(»). El
+       título y el nombre accesible siguen siendo la etiqueta. */
+    .toolbar {
+        container-type: inline-size;
+    }
+
+    .panel-icon {
+        display: none;
+        width: 15px;
+        height: 15px;
+        flex: 0 0 auto;
+    }
+
+    .panel-icon :global(path),
+    .panel-icon :global(circle) {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+    }
+
+    .panel-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    /* El aviso al pasar el ratón o al llegar con el teclado. El `title`
+       nativo de WebView2 tarda, a veces no sale y se perdía al pasar entre
+       botones pequeños pegados (14-11, Romen: «cuando los botones están
+       reducidos el hover no se detecta y no muestra el mensaje»). Sale bajo
+       el botón, sin taparlo, y no estorba al ratón. */
+    button[data-tip] {
+        position: relative;
+    }
+
+    button[data-tip]::after {
+        content: attr(data-tip);
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 50%;
+        z-index: 90;
+        padding: 3px 8px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--surface);
+        box-shadow: 0 4px 12px rgb(0 0 0 / 35%);
+        color: var(--text);
+        font-size: 11px;
+        font-weight: 400;
+        white-space: nowrap;
+        pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateX(-50%);
+    }
+
+    /* El de idioma va pegado al borde derecho: su aviso, hacia dentro. */
+    .lang-btn[data-tip]::after {
+        right: 0;
+        left: auto;
+        transform: none;
+    }
+
+    button.icon[data-tip]:hover::after,
+    button.icon[data-tip]:focus-visible::after {
+        opacity: 1;
+        visibility: visible;
+        transition: opacity 0.1s ease 0.2s;
+    }
+
+    @container (max-width: 640px) {
+        .toolbar-group:not(.grow) > button[data-panel-toggle] {
+            display: grid;
+            place-items: center;
+            padding: 4px 7px;
+            /* Sin etiqueta no hay nada que cortar, y el aviso sale fuera. */
+            overflow: visible;
+        }
+
+        .toolbar-group:not(.grow) > button[data-panel-toggle]:hover::after,
+        .toolbar-group:not(.grow) > button[data-panel-toggle]:focus-visible::after {
+            opacity: 1;
+            visibility: visible;
+            transition: opacity 0.1s ease 0.2s;
+        }
+
+        .toolbar-group:not(.grow) > button[data-panel-toggle] .panel-icon {
+            display: block;
+        }
+
+        .toolbar-group:not(.grow) > button[data-panel-toggle] .panel-label {
+            display: none;
+        }
     }
 
     button:hover {

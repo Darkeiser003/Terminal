@@ -63,9 +63,14 @@ const contextMenuEditOnly = process.env.E2E_CONTEXT_MENU_EDIT_ONLY === '1';
 // Ajustes: buscador en todas las secciones, índice de apartados y explicación
 // de cada fila al pasar el ratón.
 const settingsSearchOnly = process.env.E2E_SETTINGS_SEARCH_ONLY === '1';
-if (shellAssistOnly) process.env.LTERMINAL_E2E_DISABLE_SHELL_ASSIST = '0';
+// Con los componentes (12-11, visto por Romen): cualquier escenario puede
+// correr con las sugerencias encendidas (Clink y PSReadLine), como las tiene
+// el usuario, en vez de apagadas. Es la suite `components`. ble.sh en WSL
+// sigue solo en `shell-assist`.
+const withComponents = process.env.E2E_WITH_COMPONENTS === '1';
+if (shellAssistOnly || withComponents) process.env.LTERMINAL_E2E_DISABLE_SHELL_ASSIST = '0';
 process.env.LTERMINAL_E2E_DISABLE_SHELL_ASSIST ??= '1';
-if (shellAssistOnly && process.platform === 'win32') {
+if ((shellAssistOnly || withComponents) && process.platform === 'win32') {
     const { prepareShellTools } = await import('../../scripts/prepare-e2e-shell-tools.mjs');
     const shellTools = await prepareShellTools(process.env.E2E_SHELL_TOOLS_DIR || undefined);
     process.env.PATH = [shellTools.clinkDir, process.env.PATH].filter(Boolean).join(delimiter);
@@ -390,6 +395,21 @@ const tabToolsOnly = process.env.E2E_TAB_TOOLS_ONLY === '1';
 // Marcas OSC 133 en cmd, PowerShell y Git Bash: fin de orden, código de salida,
 // Intro vacío, eco pegado al prompt, copiar la salida, saltos y orden larga.
 const commandMarksOnly = process.env.E2E_COMMAND_MARKS_ONLY === '1';
+// Escribir de una vez las órdenes de las acciones (`actionCommandsAtOnce`,
+// 12-11): con Clink encendido, la orden de una acción y su Intro llegan a
+// xterm en una sola entrega en vez de repintarse tecla a tecla.
+const actionAtOnceOnly = process.env.E2E_ACTION_AT_ONCE_ONLY === '1';
+// Lo mismo con los scripts de la Biblioteca (14-11, visto por Romen: «el
+// comando se construye de la forma antigua»), lanzados desde el panel como lo
+// hace él: un .bat en la pestaña cmd, un .ps1 que abre una pestaña de
+// PowerShell nueva y el mismo .ps1 otra vez en esa pestaña.
+const libraryAtOnceOnly = process.env.E2E_LIBRARY_AT_ONCE_ONLY === '1';
+// `:set` (12-11): cualquier ajuste por su nombre desde la terminal.
+const internalSetOnly = process.env.E2E_INTERNAL_SET_ONLY === '1';
+// Intro con la ventana minimizada (13-11): una orden larga, y una corta de
+// control, se tienen que ejecutar aunque la ventana no se vea. Es el
+// experimento del fallo intermitente de `tab-tools` (builds 56 y 58).
+const hiddenEnterOnly = process.env.E2E_HIDDEN_ENTER_ONLY === '1';
 let saveOutputFile = null;
 if (tabToolsOnly) {
     saveOutputFile = join(await mkdtemp(join(tmpdir(), 'wterminal-e2e-salida-')), 'salida.txt');
@@ -470,6 +490,37 @@ if (aiEnvironmentsOnly) {
     // list`: `set /p` con la entrada vacía deja ERRORLEVEL=1 y el cierre de la
     // acción del panel lo mostraría (con razón) como error.
     await writeFile(join(fakeAiBin, 'ollama.cmd'), '@echo off\r\necho WTERMINAL_FAKE_OLLAMA %*\r\nset /p WTERMINAL_FAKE_WAIT=\r\nexit /b 0\r\n');
+    // Grok sin clave (11-11): sale con 1 y el mensaje real. Con GROK_API_KEY
+    // enseña solo sus 4 primeros caracteres y espera, como si arrancara.
+    await writeFile(join(fakeAiBin, 'grok.cmd'), [
+        '@echo off',
+        'if defined GROK_API_KEY goto :clave',
+        'echo Error: API key required. Set GROK_API_KEY environment variable, use --api-key flag, or set "apiKey" field in ~/.grok/user-settings.json',
+        'exit /b 1',
+        ':clave',
+        'echo WTERMINAL_FAKE_GROK clave=%GROK_API_KEY:~0,4%',
+        'set /p WTERMINAL_FAKE_WAIT=',
+        'exit /b 0',
+        '',
+    ].join('\r\n'));
+    // La clave de quien lanza la prueba mandaría sobre la guardada.
+    delete process.env.GROK_API_KEY;
+    // Un agente para el chat lateral: repite lo que le llega por la entrada
+    // estándar (así se ve que la pregunta llega entera y sin que ninguna
+    // shell la interprete) y contesta con un bloque de código de una línea.
+    // También dice con qué argumentos lo llamaron: así se ve el modelo elegido.
+    await writeFile(join(fakeAiBin, 'llm.cmd'), [
+        '@echo off',
+        'echo ARGUMENTOS: %*',
+        'echo PREGUNTA RECIBIDA:',
+        'findstr "^"',
+        'echo.',
+        'echo ```bat',
+        'echo echo WT_CHAT_OK',
+        'echo ```',
+        'exit /b 0',
+        '',
+    ].join('\r\n'));
     const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
     const bundled = join(fakeAiDirectory, 'known', 'roaming', 'Claude', 'claude-code');
     for (const [version, hash, source] of [['2.1.30', 'aaaa', 'whoami.exe'], ['2.1.295', 'd2e29494ec83', 'choice.exe']]) {
@@ -488,7 +539,7 @@ if (aiEnvironmentsOnly) {
     const keptPath = [];
     for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
         let real = false;
-        for (const name of ['claude.exe', 'claude.cmd', 'claude', 'ollama.exe', 'ollama.cmd']) {
+        for (const name of ['claude.exe', 'claude.cmd', 'claude', 'ollama.exe', 'ollama.cmd', 'grok.exe', 'grok.cmd', 'grok', 'llm.exe', 'llm.cmd', 'llm']) {
             if (await access(join(dir, name)).then(() => true, () => false)) real = true;
         }
         if (real) realAiDirs.push(dir);
@@ -4414,37 +4465,50 @@ async function exerciseHorizontalSequenceIntegrity() {
     // La fila lleva texto delante, como el prompt de Kali sobre su relleno:
     // una fila solo de espacios ya la descartaba otra regla (la tomaba por
     // continuación del eco de cualquier orden con un espacio).
-    const paddingTabCount = (await findAll('.tab')).length;
-    await openFreshTab(paddingTabCount, 'fila de espacios escritos');
-    await switchToEnvironment('powershell');
-    await waitForBannerPanes(1, 60000);
-    const paddingCell = await activeTerminalCell();
-    await sendLineAndAssertPrompt(
-        "Write-Host (('WTERM' + 'ROW') + (' ' * 900)) -BackgroundColor DarkBlue; Write-Host ('WTERM' + 'PADDING')",
-        paddingCell, 'WTERMPADDING', 'fila corta con 900 espacios de relleno',
-    );
-    const paddingState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
-        script: `const pane = document.querySelector('.tab-pane:not(.hidden)');
-            const rows = [...(pane?.querySelectorAll('.xterm-rows > div') ?? [])].map((row) => (row.textContent ?? '').length);
-            return { overflow: pane?.dataset.horizontalOverflow ?? null, widestRow: Math.max(0, ...rows) };`,
-        args: [],
-    });
-    const paddingFirst = await paddingState();
-    let padding = paddingFirst;
-    const paddingDeadline = Date.now() + 8000;
-    while (padding.overflow === 'true' && Date.now() < paddingDeadline) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        padding = await paddingState();
+    // Solo en Windows, a diferencia de las ramas `/bin/sh` de arriba: lo que
+    // se reproduce es de ConPTY (celdas de fondo enviadas como espacios con
+    // la PTY aún en las columnas del precalentado) y la orden es de Windows
+    // PowerShell, cuyo entorno `powershell` no existe en Linux (allí solo hay
+    // `pwsh`, si está): `switchToEnvironment` agotaba su plazo y cortaba el
+    // E2E de LTerminal. Una variante con `printf` en una PTY de Linux no
+    // repetiría las condiciones de ConPTY ni está validada, y podría fallar
+    // por otra causa; el arreglo (`trimEnd`) es común y lo exige
+    // verify-test-surface en cualquier plataforma.
+    if (process.platform === 'win32') {
+        const paddingTabCount = (await findAll('.tab')).length;
+        await openFreshTab(paddingTabCount, 'fila de espacios escritos');
+        await switchToEnvironment('powershell');
+        await waitForBannerPanes(1, 60000);
+        const paddingCell = await activeTerminalCell();
+        await sendLineAndAssertPrompt(
+            "Write-Host (('WTERM' + 'ROW') + (' ' * 900)) -BackgroundColor DarkBlue; Write-Host ('WTERM' + 'PADDING')",
+            paddingCell, 'WTERMPADDING', 'fila corta con 900 espacios de relleno',
+        );
+        const paddingState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const pane = document.querySelector('.tab-pane:not(.hidden)');
+                const rows = [...(pane?.querySelectorAll('.xterm-rows > div') ?? [])].map((row) => (row.textContent ?? '').length);
+                return { overflow: pane?.dataset.horizontalOverflow ?? null, widestRow: Math.max(0, ...rows) };`,
+            args: [],
+        });
+        const paddingFirst = await paddingState();
+        let padding = paddingFirst;
+        const paddingDeadline = Date.now() + 8000;
+        while (padding.overflow === 'true' && Date.now() < paddingDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            padding = await paddingState();
+        }
+        if (padding.overflow === 'true') {
+            await captureScreenshot('scroll-blank-padding-overflow');
+            const snapshot = await terminalHorizontalSnapshot(paddingCell);
+            throw new Error(`Una fila de espacios dejó la barra horizontal con todas las filas cortas: ${JSON.stringify({ paddingFirst, padding, screen: snapshot?.screen, host: snapshot?.host })}`);
+        }
+        recordEvent('horizontal-blank-padding', { paddingFirst, padding, passed: true });
+        await clickWhenReady('.tab.active .tab-close');
+        await waitUntil(async () => (await findAll('.tab')).length === paddingTabCount,
+            10000, 'cierre de pestaña de la fila de espacios');
+    } else {
+        recordEvent('horizontal-blank-padding', { skipped: true, reason: 'ConPTY y Windows PowerShell solo existen en Windows', passed: true });
     }
-    if (padding.overflow === 'true') {
-        await captureScreenshot('scroll-blank-padding-overflow');
-        const snapshot = await terminalHorizontalSnapshot(paddingCell);
-        throw new Error(`Una fila de espacios dejó la barra horizontal con todas las filas cortas: ${JSON.stringify({ paddingFirst, padding, screen: snapshot?.screen, host: snapshot?.host })}`);
-    }
-    recordEvent('horizontal-blank-padding', { paddingFirst, padding, passed: true });
-    await clickWhenReady('.tab.active .tab-close');
-    await waitUntil(async () => (await findAll('.tab')).length === paddingTabCount,
-        10000, 'cierre de pestaña de la fila de espacios');
     return { before, horizontalProbe, final, passed: true };
 }
 
@@ -6245,26 +6309,38 @@ async function resizeWindowWithoutVideoPolicy(width, height, { waitForBanner = t
 // argument». El fallback solo afecta al arnés E2E: maximiza el toplevel real
 // mediante Win32 para que la regresión de pestañas pruebe la ventana nativa.
 async function maximizeNativeWindowForE2E() {
+    return showNativeWindowForE2E(3);
+}
+
+/** `ShowWindowAsync` sobre la ventana real de la app: 3 maximiza, 6 minimiza
+ *  y 9 restaura. El escenario `hidden-enter` minimiza para comprobar que una
+ *  orden se ejecuta aunque la ventana no se vea. */
+async function showNativeWindowForE2E(command) {
     if (process.platform !== 'win32') return false;
     const script = `Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class WTerminalE2EWindow {
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
 }
 '@;
 $p = Get-Process -Name wterminal -ErrorAction SilentlyContinue |
   Where-Object { $_.MainWindowHandle -ne 0 } |
   Sort-Object StartTime -Descending | Select-Object -First 1;
 if (-not $p) { exit 2 }
-[WTerminalE2EWindow]::ShowWindowAsync($p.MainWindowHandle, 3) | Out-Null;
+[WTerminalE2EWindow]::ShowWindowAsync($p.MainWindowHandle, ${Number(command)}) | Out-Null;
+Start-Sleep -Milliseconds 400;
+Write-Output ("ICONIC=" + [WTerminalE2EWindow]::IsIconic($p.MainWindowHandle));
 exit 0`;
     // PowerShell 5.1 compila Add-Type en el primer uso; bajo carga de
     // Defender, 5 s puede cancelar la prueba antes de maximizar la ventana.
-    await execFile('powershell.exe', [
+    const result = await execFile('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script,
     ], { timeout: 30_000, windowsHide: true });
-    return true;
+    // Si de verdad quedó minimizada (IsIconic), para que el E2E no lo suponga.
+    const iconic = /ICONIC=True/iu.test(String(result?.stdout ?? ''));
+    return { iconic };
 }
 
 function resizeDimensionsChanged(before, after) {
@@ -6943,6 +7019,28 @@ async function exerciseShellMatrix() {
         return readiness;
     };
 
+    // Elm escribe su caché del REPL (`%APPDATA%\elm\<versión>\repl\tmp\elm-stuff`)
+    // sin hacerlo de forma atómica. Si se corta mientras la escribe (la prueba
+    // cambia de entorno y cierra el REPL), `d.dat` queda con 0 bytes y, desde
+    // entonces, elm.exe se queda al 100 % de CPU sin contestar a nada: le pasó
+    // el 13-11 a la 58 y a la 59, desde las pruebas de las 14:02. Esa carpeta
+    // es solo el borrador del REPL y Elm la rehace en menos de un segundo, así
+    // que la prueba la quita si la encuentra rota y lo apunta en el informe.
+    const repairElmReplCache = async () => {
+        const elmHome = process.env.ELM_HOME || (process.env.APPDATA ? join(process.env.APPDATA, 'elm') : null);
+        if (!elmHome) return;
+        const versions = await readdir(elmHome).catch(() => []);
+        for (const version of versions) {
+            const stuff = join(elmHome, version, 'repl', 'tmp', 'elm-stuff');
+            const details = join(stuff, version, 'd.dat');
+            const info = await stat(details).catch(() => null);
+            if (!info || info.size > 0) continue;
+            await rm(stuff, { recursive: true, force: true });
+            recordEvent('elm-repl-cache-repaired', { version, path: stuff });
+            process.stdout.write(`E2E shell/REPL lang:elm: caché del REPL rota (d.dat vacío) en ${stuff}; quitada, Elm la rehace\n`);
+        }
+    };
+
     const selectAndProbe = async (id) => {
         const startedAt = Date.now();
         const readiness = await selectEnvironment(id);
@@ -6978,6 +7076,24 @@ async function exerciseShellMatrix() {
         let expectedResultDetected = probe.expectedResultBeforeMarker === undefined;
         let outputRowSummary = [];
         let probeFailure = null;
+        // Python en Windows va con el ancho visible (`python-environment`):
+        // con pyreadline3 repinta toda la ventana a cada tecla y con la
+        // reserva de 1024 columnas el eco iba a 2-3 letras por segundo (build
+        // 51: la sonda no acababa de escribirse en 15 s y el reintento colaba
+        // lo pendiente en el REPL siguiente). Se comprueba el modo antes de
+        // escribir. Aun así cada tecla llega en 63-127 trozos de ConPTY y
+        // cada uno es un evento: ~250 ms por letra en el E2E (10-14 s la
+        // sonda), por eso su plazo es mayor (README, Problemas conocidos).
+        if (process.platform === 'win32' && id === 'lang:python') {
+            const widthMode = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `return document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)')?.dataset.fullScreenApp ?? null;`,
+                args: [],
+            });
+            if (widthMode !== 'python-environment') {
+                throw new Error(`Python no usa el ancho visible en Windows (data-full-screen-app=${widthMode})`);
+            }
+        }
+        const probeOutputTimeout = process.platform === 'win32' && id === 'lang:python' ? 45000 : 15000;
         // Un WebView ocupado puede aceptar la línea en el PTY y perder el
         // primer lote de eventos de teclado antes de que xterm haya repintado
         // el receptor. Si el prompt ya volvió, repetir una sonda idempotente
@@ -7016,7 +7132,7 @@ async function exerciseShellMatrix() {
                             output ?? '', probe.command, probe.expectedResultBeforeMarker, marker,
                         );
                     return markerOutputDetected && expectedResultDetected && expectedIdentityDetected;
-                }, 15000, probe.expectedIdentity
+                }, probeOutputTimeout, probe.expectedIdentity
                     ? `salida del PTY e identidad ${probe.expectedIdentity} de ${id}`
                     : `salida evaluada por el PTY de ${id}`);
                 probeFailure = null;
@@ -7130,7 +7246,29 @@ async function exerciseShellMatrix() {
     // El aviso de fin de la pestaña puede caer en medio del mensaje.
     const externalReplCrash = (error) => /resource busy \(file is locked\)/u.test(
         String(error?.message ?? error).replace(/\[?Proceso finalizado[^)]*\)\]?/gu, ''),
-    );
+    ) || windowsCrashCode(error) !== null;
+    // Un REPL que muere con un código de fallo de Windows se ha caído por su
+    // cuenta: la terminal no puede corromper la memoria de otro proceso. En la
+    // larga 53, php.exe 8.5 terminó con 0xC0000374 (corrupción del heap) a
+    // mitad de escribir la sonda, con la pestaña mostrando bien el aviso; en
+    // todas las builds anteriores PHP había pasado. Se relanza como Elm.
+    const WINDOWS_CRASH_CODES = new Map([
+        [-1073740940, '0xC0000374, corrupción del heap'],
+        [-1073741819, '0xC0000005, acceso a memoria no válido'],
+        [-1073741571, '0xC00000FD, desbordamiento de pila'],
+        [-1073740791, '0xC0000409, desbordamiento de búfer en la pila'],
+    ]);
+    function windowsCrashCode(error) {
+        const match = /Proceso finalizado \(código (-?\d+)\)/u.exec(String(error?.message ?? error));
+        const code = match ? Number(match[1]) : NaN;
+        return WINDOWS_CRASH_CODES.has(code) ? code : null;
+    }
+    const crashReason = (error) => {
+        const code = windowsCrashCode(error);
+        return code === null
+            ? 'con su caché bloqueada (resource busy, file is locked)'
+            : `con un fallo propio (${WINDOWS_CRASH_CODES.get(code)})`;
+    };
     const EXTERNAL_CRASH_RELAUNCHES = 2;
     for (const id of [
         ...(probes.get(originalId)?.kind !== 'skip' ? [originalId] : []),
@@ -7144,6 +7282,7 @@ async function exerciseShellMatrix() {
                     // del propio Elm. Solo se anota, para saber cuál de las dos
                     // causas es.
                     if (id === 'lang:elm' && process.platform === 'win32') {
+                        await repairElmReplCache();
                         const { stdout } = await execFile('tasklist', ['/FI', 'IMAGENAME eq elm.exe', '/FO', 'CSV', '/NH'], { windowsHide: true })
                             .catch(() => ({ stdout: '' }));
                         const running = String(stdout).split(/\r?\n/u).filter((line) => /^"elm\.exe"/iu.test(line));
@@ -7159,16 +7298,21 @@ async function exerciseShellMatrix() {
                         const skip = {
                             id,
                             kind: 'skip',
-                            reason: `${id} se cerró por su cuenta ${relaunch + 1} veces con su caché bloqueada `
-                                + '(resource busy, file is locked): fallo del propio programa, reproducible fuera de WTerminal',
+                            reason: `${id} se cerró por su cuenta ${relaunch + 1} veces ${crashReason(error)}: `
+                                + 'fallo del propio programa, no de WTerminal',
                         };
                         skipped.push(skip);
                         recordEvent('environment-probe-skipped', skip);
                         process.stdout.write(`E2E omitido: ${id} — ${skip.reason}` + '\n');
                         break;
                     }
-                    recordEvent('environment-probe-relaunch', { id, relaunch: relaunch + 1, reason: 'external-repl-crash' });
-                    process.stdout.write(`E2E shell/REPL ${id}: el programa se cerró solo (caché bloqueada); `
+                    recordEvent('environment-probe-relaunch', {
+                        id,
+                        relaunch: relaunch + 1,
+                        reason: 'external-repl-crash',
+                        exitCode: windowsCrashCode(error),
+                    });
+                    process.stdout.write(`E2E shell/REPL ${id}: el programa se cerró solo ${crashReason(error)}; `
                         + `relanzando (${relaunch + 1}/${EXTERNAL_CRASH_RELAUNCHES})` + '\n');
                     await selectEnvironment(originalId);
                 }
@@ -7619,8 +7763,11 @@ async function exerciseLToolsIntegration() {
     const library = await findWhenReady('[role="dialog"]');
     const fileSectionTitle = await findWhenReady('[data-testid="scripts-file-section-title"]');
     const fileSectionText = await textOf(fileSectionTitle);
-    if (!/Tipos de archivo/i.test(fileSectionText)) {
-        throw new Error(`La Biblioteca no identifica el filtro de archivos con su sección propia: ${JSON.stringify(fileSectionText)}`);
+    // «Archivos»: el desplegable de debajo ya se llama «Tipos de archivo» y el
+    // título no lo repite (16-11).
+    const typesSummaryText = await textOf(await findWhenReady('[data-testid="scripts-types"] > summary'));
+    if (!/^\s*Archivos\s*$/i.test(fileSectionText) || typesSummaryText.includes(fileSectionText.trim())) {
+        throw new Error(`La Biblioteca no identifica el filtro de archivos con su sección propia: ${JSON.stringify({ fileSectionText, typesSummaryText })}`);
     }
     const section = await findWhenReady('[data-testid="scripts-ltools"]');
     await clickWhenReady('[data-testid="scripts-ltools"] > summary');
@@ -7855,11 +8002,33 @@ async function terminalPhraseRect(cell, rowMarker, phrase) {
     });
 }
 
+/** La posición de `phrase` cuando la terminal ya no se mueve: dos medidas
+ *  seguidas iguales. Justo tras cambiar de shell, con el equipo cargado, la
+ *  terminal aún se recolocaba y el arrastre con la medida vieja seleccionaba
+ *  desde la esquina de arriba (15-11, larga 64, pwsh tras powershell). */
+async function stablePhraseRect(cell, rowMarker, phrase) {
+    let previous = null;
+    let rect = null;
+    await waitUntil(async () => {
+        rect = await terminalPhraseRect(cell, rowMarker, phrase);
+        if (rect?.error) {
+            previous = null;
+            return false;
+        }
+        const same = previous !== null && previous.startX === rect.startX
+            && previous.endX === rect.endX && previous.y === rect.y;
+        previous = rect;
+        if (!same) await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+        return same;
+    }, 15000, `«${phrase}» quieta en su fila`).catch(() => undefined);
+    return rect;
+}
+
 /** Selecciona `phrase` con un arrastre real del ratón y abre el menú
  *  contextual encima. Devuelve el estado de sus opciones. */
 async function selectPhraseAndOpenMenu(cell, rowMarker, phrase) {
-    const rect = await terminalPhraseRect(cell, rowMarker, phrase);
-    if (rect?.error) throw new Error(`No se encontró «${phrase}» en la fila de ${rowMarker}: ${JSON.stringify(rect)}`);
+    const rect = await stablePhraseRect(cell, rowMarker, phrase);
+    if (!rect || rect.error) throw new Error(`No se encontró «${phrase}» en la fila de ${rowMarker}: ${JSON.stringify(rect)}`);
     await request(`/session/${sessionId}/actions`, 'POST', {
         actions: [{
             type: 'pointer',
@@ -7914,9 +8083,21 @@ async function exerciseInputSelection(shell, cell) {
     const phrase = 'Hola, soy Romen';
     await sendTerminalKeys(`echo "${phrase}" ${tag}`, cell, { enter: false, settle: true });
     await waitUntil(async () => !(await terminalPhraseRect(cell, tag, phrase))?.error, 15000, `${shell}: línea escrita`);
-    const menuState = await selectPhraseAndOpenMenu(cell, tag, phrase);
-    if (menuState.cut.disabled || menuState.remove.disabled || !menuState.search.text.includes(phrase)
-        || !menuState.cut.text.includes('Ctrl+Shift+X') || !menuState.copy.text.includes('Ctrl+Shift+C')) {
+    const offersCut = (state) => !state.cut.disabled && !state.remove.disabled && state.search.text.includes(phrase)
+        && state.cut.text.includes('Ctrl+Shift+X') && state.copy.text.includes('Ctrl+Shift+C');
+    let menuState = await selectPhraseAndOpenMenu(cell, tag, phrase);
+    if (!offersCut(menuState)) {
+        // Un segundo intento, como haría quien ve la selección mal puesta:
+        // se cierra el menú y se vuelve a arrastrar con la terminal quieta.
+        // Queda en el informe; si también falla, es un fallo de verdad.
+        recordEvent('context-menu-selection-retry', { shell, first: menuState });
+        await pressTerminalKey('');
+        await waitUntil(async () => (await findAll('[data-testid="terminal-context-menu"]')).length === 0,
+            5000, `${shell}: menú cerrado antes de repetir la selección`).catch(() => undefined);
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+        menuState = await selectPhraseAndOpenMenu(cell, tag, phrase);
+    }
+    if (!offersCut(menuState)) {
         throw new Error(`${shell}: el menú no ofrece cortar «${phrase}» de la línea escrita: ${JSON.stringify(menuState)}`);
     }
     await clickWhenReady('[data-testid="terminal-menu-cut"]');
@@ -8633,6 +8814,79 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write(`E2E importar repositorios OK: sugerencia, importar sin mover, quitar, no volver a sugerir e interruptor (${Date.now() - smokeStartedAt} ms).\n`);
+    } else if (process.env.E2E_PYTHON_WIDTH_ONLY === '1') {
+        // Python tecleado en cmd: con pyreadline3 repinta toda la ventana a
+        // cada tecla, así que la pestaña pasa al ancho visible mientras corre
+        // (`python-command`) y vuelve a la reserva al salir. Con la opción de
+        // Ajustes apagada no cambia nada.
+        markPhase('python tecleado en cmd con el ancho visible');
+        if (process.platform !== 'win32') {
+            recordEvent('python-width', { skipped: 'solo Windows', passed: true });
+            phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+            smokeReport.focusedScenario = 'python-width';
+            smokeReport.status = 'passed';
+            process.stdout.write('E2E Python con el ancho visible: no aplica fuera de Windows.\n');
+        } else {
+            await waitForBannerPanes(1, 60000);
+            const widthMode = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `return document.querySelector('.cell:not(.hidden) .tab-pane:not(.hidden)')?.dataset.fullScreenApp ?? 'false';`,
+                args: [],
+            });
+            const lastRow = async () => {
+                const text = String(await rawTerminalTextWithin(await activeTerminalCell()) ?? '');
+                const rows = text.split('\n').map((row) => row.trim()).filter(Boolean);
+                return rows.at(-1) ?? '';
+            };
+            const cmdPrompt = /^[A-Za-z]:\\[^>]*>$/u;
+            const runPython = async (expectedMode) => {
+                await sendTerminalLine('python');
+                await waitUntil(async () => (await lastRow()) === '>>>', 30000, 'prompt >>> de Python en cmd');
+                const mode = await widthMode();
+                if (mode !== expectedMode) throw new Error(`Con Python en cmd, data-full-screen-app=${mode} (se esperaba ${expectedMode}).`);
+                const marker = `LTERMINAL_PY_CMD_${Date.now()}`;
+                const startedAt = Date.now();
+                await sendTerminalLine(`print('${marker}')`);
+                await waitUntil(async () => {
+                    const text = String(await rawTerminalTextWithin(await activeTerminalCell()) ?? '');
+                    return text.split('\n').some((row) => row.trim() === marker);
+                }, 60000, 'salida de print en el Python tecleado');
+                const echoMs = Date.now() - startedAt;
+                await captureScreenshot(`python-cmd-${expectedMode}`);
+                await sendTerminalLine('exit()');
+                await waitUntil(async () => cmdPrompt.test(await lastRow()), 30000, 'vuelta al prompt de cmd');
+                await waitUntil(async () => (await widthMode()) === 'false', 10000, 'la pestaña vuelve a la reserva al salir de Python');
+                return echoMs;
+            };
+            const toggleOption = async () => {
+                await clickWhenReady('[data-testid="toolbar-settings"]');
+                await clickWhenReady('[data-testid="settings-tab-terminal"]');
+                await toggleCheckboxAndWait('[data-testid="settings-python-visible-width"]');
+                await waitForSettingsAutosave();
+                await clickWhenReady('[role="dialog"] .panel-close');
+            };
+            if ((await widthMode()) !== 'false') throw new Error('cmd no empieza con la reserva horizontal.');
+            // Los tiempos se registran, no se exigen: con el prompt a media
+            // pantalla quedan pocas filas por repintar y el ancho apenas cambia
+            // el tiempo (7,9 s frente a 8,4 s el 10-11). Lo que pesa es que
+            // cada tecla llega en 63-127 trozos (README, Problemas conocidos).
+            const visibleEchoMs = await runPython('python-command');
+            await toggleOption();
+            if ((await invokeJson('settings_get')).preferences.pythonReplVisibleWidth !== false) {
+                throw new Error('No se pudo apagar «Python con el ancho visible».');
+            }
+            const reservedEchoMs = await runPython('false');
+            await toggleOption();
+            if ((await invokeJson('settings_get')).preferences.pythonReplVisibleWidth !== true) {
+                throw new Error('No se pudo volver a encender «Python con el ancho visible».');
+            }
+            recordEvent('python-width', { visibleEchoMs, reservedEchoMs, passed: true });
+            await assertCurrentLog();
+            phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+            smokeReport.focusedScenario = 'python-width';
+            smokeReport.status = 'passed';
+            smokeReport.logValidated = true;
+            process.stdout.write(`E2E Python con el ancho visible OK: tecleado en cmd, una línea en ${visibleEchoMs} ms (${reservedEchoMs} ms con la reserva), vuelta a la reserva al salir y opción de Ajustes (${Date.now() - smokeStartedAt} ms).\n`);
+        }
     } else if (process.env.E2E_LOW_POWER_ONLY === '1') {
         markPhase('sugerencia del modo de bajo consumo');
         await waitForBannerPanes(1, 60000);
@@ -9093,6 +9347,11 @@ try {
             await clickWhenReady('[role="dialog"] .panel-close');
             await clickWhenReady('[data-testid="toolbar-dependencies"]');
             await pause(600);
+            // Con 7 distros la primera detección tarda minutos: a los 600 ms
+            // la captura salía en «Comprobando todas las secciones…» (build
+            // 51). Se espera a los grupos, sin fallar el recorrido si tarda.
+            await waitUntil(async () => (await findAll('[data-testid="dependency-group"]')).length > 0,
+                240000, `dependencias cargadas (${density})`).catch(() => undefined);
             await visit('dependencias', density);
             await clickWhenReady('[role="dialog"] .panel-close');
         }
@@ -9224,6 +9483,21 @@ try {
         // Restablecer al final de la sonda deja el perfil de E2E limpio para
         // las fases restantes y verifica que existe una vía de recuperación.
         await clickInView(await findWhenReady('[data-testid="settings-reset-label"]'));
+        // «Restablecer» pide confirmación (13-11): nada marcado de entrada,
+        // «Cancelar» enfocado, y aviso si se marca algo que borra cosas tuyas.
+        await findWhenReady('[data-testid="settings-reset-dialog"]', 5000);
+        if (!(await attribute(await findWhenReady('[data-testid="settings-reset-confirm"]'), 'disabled') !== null)) {
+            throw new Error('El diálogo de «Restablecer» no debe dejar confirmar sin marcar nada.');
+        }
+        const resetFocus = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: 'return document.activeElement?.dataset?.testid ?? null;',
+            args: [],
+        });
+        if (resetFocus !== 'settings-reset-cancel') throw new Error(`El diálogo de «Restablecer» enfoca ${resetFocus}, no «Cancelar».`);
+        await clickInView(await findWhenReady('[data-testid="settings-reset-all"]'));
+        await findWhenReady('[data-testid="settings-reset-danger"]', 5000);
+        await clickInView(await findWhenReady('[data-testid="settings-reset-confirm"]'));
+        await waitUntil(async () => (await findAll('[data-testid="settings-reset-dialog"]')).length === 0, 5000, 'cierre del diálogo de «Restablecer»');
         await waitUntil(async () => Boolean(await property(await findWhenReady('[data-testid="settings-terminal-only-guide"]'), 'disabled')) === false, 5000, 'restauración del checkbox de la guía');
         await clickInView(await findWhenReady('[role="dialog"] .panel-close'));
         await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Ajustes tras restaurar la guía');
@@ -10105,14 +10379,30 @@ try {
         // 3b. Áreas de gh_admin.rs (09-11): workflows y secretos, webhooks,
         // comunidad y la vista grande. El valor del secreto va por la entrada
         // estándar de `gh secret set`: nunca aparece en los argumentos.
+        // El botón que envía el formulario de un campo: el de su `data-testid`
+        // si GithubAdmin.svelte lo tiene y, si no, el último botón del mismo
+        // formulario que el campo. Antes era el primer botón de cualquier
+        // `.form` del panel, que deja de ser «Guardar» en cuanto el formulario
+        // gana otro control. `clickWhenReady` espera a que se active, es decir,
+        // a que el componente haya recibido lo escrito. Este escenario solo
+        // corre en Windows, y WebView2 entiende `:has()`.
+        const adminSubmit = async (submitTestId, fieldTestId) => {
+            const own = `[data-testid="${submitTestId}"]`;
+            await clickWhenReady((await findAll(own)).length
+                ? own
+                : `[data-testid="gh-admin"] .form:has([data-testid="${fieldTestId}"]) > button:last-of-type`);
+        };
         await manageTab('actions');
         await findWhenReady('[data-testid="gh-admin-row"][data-id="42"]', 15000);
         await clickWhenReady('[data-testid="gh-admin-area-secrets"]');
         await findWhenReady('[data-testid="gh-admin-row"][data-id="DEPLOY_TOKEN"]', 15000);
         const secretValue = 'valor-secreto-e2e-0911';
         await setInput('[data-testid="gh-admin-secret-name"]', 'E2E_TOKEN');
+        // `setInput` pone `.value` y lanza `input` y `change`: sirve igual con
+        // un `<input type="password">` que con un `<textarea>` (los dos con
+        // `bind:value`, que escucha `input`), mientras conserve su data-testid.
         await setInput('[data-testid="gh-admin-secret-value"]', secretValue);
-        await clickWhenReady('[data-testid="gh-admin"] .form button');
+        await adminSubmit('gh-admin-secret-save', 'gh-admin-secret-value');
         await waitForArgs(['secret', 'set', 'E2E_TOKEN', '--repo', repo], 'gh secret set sin el valor en los argumentos');
         await waitUntil(async () => (await readFile(join(fakeGhDirectory, 'state', 'secret-E2E_TOKEN.txt'), 'utf8').catch(() => '')).includes(secretValue),
             15000, 'el valor del secreto llega por la entrada estándar');
@@ -10122,7 +10412,7 @@ try {
         await clickWhenReady('[data-testid="gh-admin-area-hooks"]');
         await findWhenReady('[data-testid="gh-admin-row"][data-id="5"]', 15000);
         await setInput('[data-testid="gh-admin-hook-url"]', 'https://hooks.ejemplo.dev/nuevo');
-        await clickWhenReady('[data-testid="gh-admin"] .form button');
+        await adminSubmit('gh-admin-hook-create', 'gh-admin-hook-url');
         await waitUntil(async () => (await calls()).some((line) => line.includes('repos/wterminal-e2e/demo/hooks') && line.includes('-X POST') && line.includes('config[url]=https://hooks.ejemplo.dev/nuevo')),
             15000, 'gh api para crear el webhook');
         await clickWhenReady('[data-testid="gh-admin-area-pages"]');
@@ -10131,6 +10421,10 @@ try {
         await manageTab('community');
         await waitUntil(async () => (await findAll('[data-testid="gh-admin-row"][data-id="health"]')).length === 1, 15000, 'perfil de comunidad');
         await clickWhenReady('[data-testid="gh-manage-expand"]');
+        // Se mide cuando la vista grande ya está puesta, no en el mismo
+        // instante del clic.
+        await waitUntil(async () => (await attribute(await findWhenReady('[data-testid="gh-manage"]'), 'data-expanded')) === 'true',
+            5000, 'vista grande de Gestionar');
         const expandedRect = await request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: `const box = document.querySelector('[data-testid="gh-manage"]').getBoundingClientRect();
                 return { width: box.width, height: box.height, innerWidth, innerHeight, right: box.right, bottom: box.bottom };`,
@@ -10586,6 +10880,52 @@ try {
                 await captureScreenshot(`ia-real-${name}-fallo`).catch(() => undefined);
             }
         }
+        // Todas las demás IA del catálogo que estén instaladas (Grok, Copilot,
+        // aider, Crush, Continue, AIChat, mods, llm, ShellGPT…), no solo las
+        // seis de arriba: el 11-11 Grok acababa al abrirse con «API key
+        // required» y ninguna prueba lo había abierto nunca. Se abre cada una
+        // SIN teclear nada y se mira su primera pantalla: si el proceso acaba
+        // con un código distinto de 0, falla, salvo que pida una clave o una
+        // sesión y la app ofrezca configurarla en la pestaña.
+        const detailedAi = new Set(['claude', 'gemini', 'codex', 'opencode', 'qwen', 'amp']);
+        const otherAi = ((await invokeJson('env_list', { tabId: null })).envs ?? [])
+            .filter((environment) => environment.available && /^ai:[a-z0-9-]+$/u.test(String(environment.id))
+                && !detailedAi.has(String(environment.id).slice(3)))
+            .map((environment) => String(environment.id));
+        const missingKeyPattern = /api[ _-]?key|_API_KEY\b|token|not (?:logged|signed) in|log ?in|sign ?in|authenticat|unauthori[sz]ed|credential/iu;
+        for (const id of otherAi) {
+            const name = id.slice(3);
+            try {
+                const previousScreen = (await rowsText()).filter(Boolean).join('|');
+                await switchToEnvironment(id);
+                let rows = [];
+                await waitUntil(async () => {
+                    rows = (await rowsText()).filter(Boolean);
+                    return rows.length >= 1 && rows.join('|') !== previousScreen;
+                }, 45000, `${name}: primera pantalla`);
+                await pause(4000);
+                rows = (await rowsText()).filter(Boolean);
+                const capture = await captureScreenshot(`ia-real-${name}`);
+                const exit = rows.join('\n').match(/Proceso finalizado \(código (-?\d+)\)/u);
+                const exitCode = exit ? Number(exit[1]) : null;
+                const lastRows = rows.slice(-6).map((row) => row.slice(0, 160));
+                const result = { name, exitCode, capture, lastRows };
+                results.push(result);
+                process.stdout.write(`E2E IA real ${name}: ${JSON.stringify({ exitCode, lastRows })}` + String.fromCharCode(10));
+                if (exitCode !== null && exitCode !== 0) {
+                    const asksForKey = missingKeyPattern.test(lastRows.join('\n'));
+                    const offered = (await findAllWithin(cell, '[data-testid="ai-key-offer"]')).length > 0;
+                    if (!asksForKey) {
+                        failures.push(`${name}: acaba al abrirse con código ${exitCode}: ${lastRows.join(' / ')}`);
+                    } else if (!offered) {
+                        failures.push(`${name}: acaba pidiendo una clave o una sesión (código ${exitCode}) y la pestaña no ofrece configurarla`);
+                    }
+                }
+            } catch (error) {
+                failures.push(`${name}: ${String(error?.message ?? error).slice(0, 300)}`);
+                await captureScreenshot(`ia-real-${name}-fallo`).catch(() => undefined);
+            }
+        }
         // Una IA real tecleada en cmd: el modo se activa al enviarla y, al
         // salir con Ctrl+C, la shell sigue intacta.
         for (const typed of ['claude', 'amp']) {
@@ -10919,6 +11259,12 @@ try {
         // archivo de mensajes) y espera: prueba que se abrió la versión mayor.
         // La menor (whoami.exe) imprimiría «equipo\usuario» y terminaría.
         const machine = (await execFile('hostname.exe', [], { windowsHide: true })).stdout.trim();
+        // La guía para la IA (`agentTabGuide`, de fábrica encendida) añade a
+        // `claude` `--append-system-prompt <guía>`, y esta copia de choice.exe
+        // no admite argumentos: salía con 255 al instante (15-11). Lo que se
+        // añade lo prueban los tests de `agent_guide::tab_args_for`, y con el
+        // Claude Code de verdad, `ai-real`.
+        await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, agentTabGuide: false } });
         const claudeLabel = await switchToEnvironment('ai:claude');
         let claudeRows = [];
         await waitUntil(async () => {
@@ -10929,6 +11275,157 @@ try {
             throw new Error(`Se abrió la versión antigua de Claude Code: ${JSON.stringify(claudeRows.slice(-6))}`);
         }
         await captureScreenshot('ia-claude-code');
+
+        // Una IA que acaba al abrirse pidiendo su clave (Grok, 11-11): la
+        // pestaña ofrece meterla, la guarda cifrada y vuelve a abrirla con
+        // ella. La clave no puede quedar en claro ni en el archivo ni en el log.
+        const fakeKey = 'xai-e2e-clave-de-prueba-123';
+        await switchToEnvironment('ai:grok');
+        const offer = await findWhenReady('[data-testid="ai-key-offer"]', 30000);
+        if (await attribute(offer, 'data-env-var') !== 'GROK_API_KEY') {
+            throw new Error(`La oferta de clave de Grok no nombra GROK_API_KEY: ${await attribute(offer, 'data-env-var')}`);
+        }
+        await captureScreenshot('ia-clave-ofrecida');
+        await clickWhenReady('[data-testid="ai-key-enter"]');
+        const keyInput = await findWhenReady('[data-testid="ai-key-input"]');
+        if (await attribute(keyInput, 'type') !== 'password') throw new Error('El campo de la clave no la oculta');
+        await request(`/session/${sessionId}/element/${keyInput}/value`, 'POST', { text: fakeKey });
+        await clickWhenReady('[data-testid="ai-key-save"]');
+        await waitUntil(async () => (await terminalRowSnapshot(cell)).rows.some((row) => row.text.includes('WTERMINAL_FAKE_GROK clave=xai-')),
+            30000, 'Grok vuelve a abrirse con su clave como GROK_API_KEY');
+        if ((await findAll('[data-testid="ai-key-offer"]')).length) throw new Error('El aviso de la clave sigue a la vista tras guardarla');
+        await captureScreenshot('ia-clave-guardada');
+        {
+            const { readdir, readFile: readText } = await import('node:fs/promises');
+            const root = process.env.LTERMINAL_E2E_APP_DATA_DIR;
+            const store = (await readdir(root, { recursive: true })).find((entry) => String(entry).endsWith('ai-keys.json'));
+            if (!store) throw new Error(`No se guardó ai-keys.json bajo ${root}`);
+            const stored = await readText(join(root, String(store)), 'utf8');
+            if (!stored.includes('GROK_API_KEY') || stored.includes(fakeKey) || stored.includes('clave-de-prueba')) {
+                throw new Error('ai-keys.json no guarda la clave de Grok cifrada');
+            }
+            if ((await readCurrentLog()).text.includes(fakeKey)) throw new Error('La clave de la IA aparece en el log');
+        }
+
+        // Chat lateral con los agentes (12-11): se abre con `:chat`, la
+        // pregunta llega entera por la entrada estándar aunque lleve & | % y
+        // comillas, la respuesta se ve con su bloque de código, y «Insertar»
+        // lo escribe en la terminal SIN ejecutarlo.
+        await switchToEnvironment('cmd');
+        await waitUntil(async () => (await terminalRowSnapshot(cell)).rows.some((row) => />\s*$/u.test(row.text.trimEnd())),
+            30000, 'prompt de cmd para el chat');
+        await sendTerminalLine(':chat');
+        await findWhenReady('[data-testid="agent-chat"]', 15000);
+        await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const select = document.querySelector('[data-testid="agent-chat-agent"]');
+                const option = select && [...select.options].find((item) => item.value === 'ai:llm');
+                if (!option) return false;
+                select.value = 'ai:llm';
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;`,
+            args: [],
+        }), 30000, 'el agente simulado (llm) está en el chat');
+        // Un agente que solo contesta texto no tiene modos de permisos ni modo
+        // rápido (14-11): el panel no los ofrece.
+        await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `return document.querySelector('[data-testid="agent-chat-agent"]')?.value === 'ai:llm'
+                && !document.querySelector('[data-testid="agent-chat-mode"]')
+                && !document.querySelector('[data-testid="agent-chat-fast"]')
+                && !document.querySelector('[data-testid="agent-chat-bypass-warning"]');`,
+            args: [],
+        }), 10000, 'llm sin selector de permisos ni modo rápido');
+        // El modelo elegido va como opción de la CLI (13-11).
+        // Ahora el modelo se elige de una lista; uno que no está, con «Otro…».
+        await findWhenReady('[data-testid="agent-chat-model"]');
+        await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const select = document.querySelector('[data-testid="agent-chat-model"]');
+                select.value = '__other__';
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;`,
+            args: [],
+        });
+        const modelInput = await findWhenReady('[data-testid="agent-chat-model-custom"]', 5000);
+        await request(`/session/${sessionId}/element/${modelInput}/value`, 'POST', { text: 'wt-modelo-e2e' });
+        const question = 'hola & adios | %PATH% "comillas" <menor>';
+        const chatInput = await findWhenReady('[data-testid="agent-chat-input"]');
+        const askChat = async (text, answerCount, what) => {
+            await request(`/session/${sessionId}/element/${chatInput}/value`, 'POST', { text });
+            await clickWhenReady('[data-testid="agent-chat-send"]');
+            let answer = '';
+            await waitUntil(async () => {
+                answer = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                    script: `const answers = [...document.querySelectorAll('[data-testid="agent-chat-message"][data-role="agent"]')];
+                        const last = answers.at(-1);
+                        return answers.length === ${answerCount} && last.dataset.pending === 'false' ? last.textContent : '';`,
+                    args: [],
+                });
+                return answer.includes('echo WT_CHAT_OK');
+            }, 60000, what);
+            return answer;
+        };
+        const chatText = await askChat(question, 1, 'respuesta del agente simulado con su bloque de código');
+        if (!chatText.includes(question)) {
+            throw new Error(`La pregunta no llegó entera al agente por la entrada estándar: ${JSON.stringify(chatText.slice(0, 400))}`);
+        }
+        if (!/ARGUMENTOS:\s*-m wt-modelo-e2e/u.test(chatText)) {
+            throw new Error(`El modelo elegido no llegó a la CLI: ${JSON.stringify(chatText.slice(0, 300))}`);
+        }
+        // La cabecera de la respuesta dice qué modelo contestó (16-11).
+        const answerModels = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `return [...document.querySelectorAll('[data-testid="agent-chat-answer-model"]')].map((node) => node.textContent.trim());`,
+            args: [],
+        });
+        if (!Array.isArray(answerModels) || !answerModels.includes('wt-modelo-e2e')) {
+            throw new Error(`La respuesta no dice qué modelo contestó: ${JSON.stringify(answerModels)}`);
+        }
+        // Memoria: la segunda pregunta lleva la conversación de antes (la
+        // primera pregunta solo puede llegar por ahí; el rótulo depende del idioma).
+        const second = await askChat('segunda pregunta WT_MEMORIA', 2, 'segunda respuesta del agente simulado');
+        if (!second.includes(question) || !second.includes('WT_MEMORIA')) {
+            throw new Error(`La segunda pregunta no llevó la conversación anterior: ${JSON.stringify(second.slice(0, 500))}`);
+        }
+        await captureScreenshot('ia-chat-lateral');
+        await clickWhenReady('[data-testid="agent-chat-insert"]');
+        await waitUntil(async () => (await terminalRowSnapshot(cell)).rows.some((row) => /> ?echo WT_CHAT_OK\s*$/u.test(row.text.trimEnd())),
+            15000, '«Insertar» escribe la orden en el prompt');
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 1500));
+        if ((await terminalRowSnapshot(cell)).rows.some((row) => row.text.trim() === 'WT_CHAT_OK')) {
+            throw new Error('«Insertar en la terminal» ejecutó la orden: tenía que quedarse escrita sin Intro');
+        }
+        // Varios chats en paralelo (14-11): un segundo chat sale en su pestaña,
+        // vacío y con su propio agente; el primero sigue con su conversación,
+        // escondido pero vivo; cerrar el segundo vuelve al primero.
+        const chatTabs = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const tabs = [...document.querySelectorAll('[data-testid="agent-chat-tab"]')];
+                const slots = [...document.querySelectorAll('[data-testid="agent-chats"] .slot')];
+                return {
+                    count: tabs.length,
+                    selected: tabs.findIndex((tab) => tab.getAttribute('aria-selected') === 'true'),
+                    messages: slots.map((slot) => slot.querySelectorAll('[data-testid="agent-chat-message"]').length),
+                    visible: slots.map((slot) => getComputedStyle(slot).display !== 'none'),
+                };`,
+            args: [],
+        });
+        await clickWhenReady('[data-testid="agent-chat-new-chat"]');
+        await waitUntil(async () => {
+            const state = await chatTabs();
+            return state.count === 2 && state.selected === 1 && state.messages[0] >= 4 && state.messages[1] === 0
+                && state.visible[0] === false && state.visible[1] === true;
+        }, 10000, 'un segundo chat, vacío, sin perder la conversación del primero');
+        await clickWhenReady('[data-testid="agent-chat-tab"][aria-selected="true"] + [data-testid="agent-chat-close-chat"]');
+        await waitUntil(async () => {
+            const state = await chatTabs();
+            return state.count === 1 && state.selected === 0 && state.messages[0] >= 4 && state.visible[0] === true;
+        }, 10000, 'cerrar el segundo chat vuelve al primero con su conversación');
+        await clickWhenReady('[data-testid="agent-chat-close"]');
+        // La orden insertada se borra sin ejecutarla (Esc vacía la línea en cmd).
+        {
+            const xterm = (await findAllWithin(cell, '.xterm'))[0]?.[elementKey];
+            const input = (await findAllWithin(cell, '.xterm-helper-textarea'))[0]?.[elementKey];
+            await focusTerminal(xterm, input);
+            await request(`/session/${sessionId}/actions`, 'POST', { actions: [{ type: 'key', id: 'keyboard', actions:
+                [{ type: 'keyDown', value: '' }, { type: 'keyUp', value: '' }] }] });
+        }
 
         // Dependencias: apartado propio y el modelo simulado figura como descargado.
         // El panel no enseña secciones hasta comprobarlas todas, y la de WSL
@@ -11739,6 +12236,332 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write('E2E paleta de comandos OK: atajo, teclado, filtrado, Ajustes, comandos `:`, aviso de línea con texto, limpiar y nueva pestaña.\n');
+    } else if (hiddenEnterOnly) {
+        // Una orden escrita y su Intro, con la ventana visible y minimizada.
+        // Con la línea larga la rejilla se ensancha y, tras su eco, la cola de
+        // entrada espera a que se asiente la geometría; si eso depende de
+        // fotogramas que no llegan con la ventana oculta, el Intro se queda
+        // retenido. La línea corta es el control: no ensancha la rejilla.
+        markPhase('Intro con la ventana minimizada');
+        await waitForBannerPanes(1, 60000);
+        await switchToEnvironment('powershell');
+        await waitForBannerPanes(1, 60000);
+        const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const cell = await activeTerminalCell();
+        const tabId = await runScript("return document.querySelector('.tab.active')?.dataset.tabId;");
+        await sendLineAndAssertPrompt('Write-Output WT_INTRO_LISTO', cell, 'WT_INTRO_LISTO', 'PowerShell listo');
+        const lineRan = (marker) => runScript(`return (window.__wtTerminalText?.(arguments[0]) ?? '').split('\\n').some((line) => line.trim() === arguments[1]);`, [tabId, marker]);
+        const promptAtEnd = () => runScript(`return /^PS .*>\\s*$/u.test((window.__wtTerminalText?.(arguments[0]) ?? '').trimEnd().split('\\n').at(-1) ?? '');`, [tabId]);
+        // Estado en ese momento, y si llega un fotograma en 1 s.
+        const snapshot = () => runScript(`const tabId = arguments[0];
+            return new Promise((resolve) => {
+                let frame = false;
+                requestAnimationFrame(() => { frame = true; });
+                setTimeout(() => resolve({
+                    frame,
+                    visibility: document.visibilityState,
+                    focus: document.hasFocus(),
+                    input: window.__wtInputState?.(tabId) ?? null,
+                    renderPaused: window.__wtTerminalState?.(tabId)?.renderPaused ?? null,
+                }), 1000);
+            });`, [tabId]);
+        const pressEnter = async () => {
+            const input = (await findAllWithin(cell, '.xterm-helper-textarea'))[0]?.[elementKey];
+            if (input) await runScript('arguments[0].focus(); return true;', [{ [elementKey]: input }]).catch(() => false);
+            await request(`/session/${sessionId}/actions`, 'POST', {
+                actions: [{ type: 'key', id: 'keyboard', actions: [{ type: 'keyDown', value: '' }, { type: 'keyUp', value: '' }] }],
+            });
+        };
+        // Una muestra cada ~250 ms tras el Intro: si ya se ejecutó, en qué
+        // barrera espera la cola, si la salida está ocupada y cuánto tarda la
+        // página en contestar (si tarda, su hilo estaba ocupado).
+        const sample = (marker) => {
+            const sentAt = Date.now();
+            return runScript(`const tabId = arguments[0];
+                const ran = (window.__wtTerminalText?.(tabId) ?? '').split('\\n').some((line) => line.trim() === arguments[1]);
+                const input = window.__wtInputState?.(tabId) ?? {};
+                return { ran, stage: input.stage, stageMs: input.stageMs, enters: \`\${input.entersQueued}/\${input.entersSent}\`,
+                    blocked: input.outputInputBlocked, geometry: input.outputGeometryPending, busy: input.terminalOutputBusy,
+                    resizing: input.inputPtyResizeRunning, visibility: document.visibilityState };`, [tabId, marker])
+                .then((value) => ({ atMs: 0, replyMs: Date.now() - sentAt, ...value }));
+        };
+        const waitRan = async (marker, ms, timeline = null) => {
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < ms) {
+                const point = await sample(marker);
+                point.atMs = Date.now() - startedAt;
+                if (timeline && timeline.length < 40) timeline.push(point);
+                if (point.ran) return point.atMs;
+                await sleep(250);
+            }
+            return null;
+        };
+        const rounds = [
+            { name: 'larga-visible', marker: `WT_INTRO_LARGA_VISIBLE_${'x'.repeat(320)}_FIN`, hidden: false },
+            { name: 'larga-visible-2', marker: `WT_INTRO_LARGA_VISIBLE_DOS_${'x'.repeat(320)}_FIN`, hidden: false },
+            { name: 'corta-minimizada', marker: 'WT_INTRO_CORTA_MINIMIZADA', hidden: true },
+            { name: 'larga-minimizada', marker: `WT_INTRO_LARGA_MINIMIZADA_${'x'.repeat(320)}_FIN`, hidden: true },
+        ];
+        const results = [];
+        try {
+            for (const round of rounds) {
+                await sendTerminalKeys(`Write-Output ${round.marker}`, cell, { enter: false, settle: true });
+                let iconic = null;
+                if (round.hidden) {
+                    iconic = (await showNativeWindowForE2E(6))?.iconic ?? null;
+                    await sleep(1500);
+                }
+                const beforeEnter = await snapshot();
+                await pressEnter();
+                const timeline = [];
+                const ranAfterMs = await waitRan(round.marker, 6000, timeline);
+                const afterEnter = await snapshot();
+                let ranAfterRestoreMs = null;
+                if (round.hidden) {
+                    await showNativeWindowForE2E(9);
+                    if (ranAfterMs === null) ranAfterRestoreMs = await waitRan(round.marker, 10000);
+                    await sleep(500);
+                }
+                results.push({ round: round.name, hidden: round.hidden, iconic, ranAfterMs, ranAfterRestoreMs, beforeEnter, afterEnter, timeline });
+                await captureScreenshot(`intro-${round.name}`);
+                if (ranAfterMs === null && ranAfterRestoreMs === null) break;
+                await waitUntil(promptAtEnd, 15000, `prompt tras ${round.name}`);
+            }
+        } finally {
+            await showNativeWindowForE2E(9).catch(() => undefined);
+        }
+        const failed = results.filter((result) => result.ranAfterMs === null).map((result) => result.round);
+        const passed = failed.length === 0 && results.length === rounds.length;
+        recordEvent('hidden-enter', { results, passed });
+        process.stdout.write(`E2E Intro con la ventana minimizada, datos: ${JSON.stringify(results)}\n`);
+        if (!passed) {
+            throw new Error(`Intro con la ventana minimizada: sin ejecutar a tiempo en ${failed.join(', ') || 'ninguna'} (${results.length}/${rounds.length} rondas); `
+                + results.map((result) => `${result.round}: ${result.ranAfterMs === null ? 'no' : `${result.ranAfterMs} ms`}`
+                    + `${result.hidden ? `, tras restaurar ${result.ranAfterRestoreMs === null ? (result.ranAfterMs === null ? 'no' : '-') : `${result.ranAfterRestoreMs} ms`}` : ''}`
+                    + `, fotograma ${result.afterEnter?.frame}, visibilidad ${result.afterEnter?.visibility}, espera ${result.afterEnter?.input?.stage} (${result.afterEnter?.input?.stageMs} ms)`
+                    + `, Intro encolados/enviados ${result.afterEnter?.input?.entersQueued}/${result.afterEnter?.input?.entersSent}`).join(' | '));
+        }
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'hidden-enter';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E Intro con la ventana minimizada OK: una orden larga y una corta se ejecutan aunque la ventana no se vea.\n');
+    } else if (internalSetOnly) {
+        markPhase(':set desde la terminal');
+        await waitForBannerPanes(1, 60000);
+        await switchToEnvironment('cmd');
+        const cell = await activeTerminalCell();
+        const rows = async () => (await terminalRowSnapshot(cell)).rows.map((row) => row.text.trimEnd());
+        const prompt = async () => (await rows()).some((text) => /^[A-Za-z]:\\[^>]*>$/u.test(text));
+        await waitUntil(prompt, 60000, 'prompt de cmd');
+        const before = (await invokeJson('settings_get')).preferences;
+        const expectRow = async (line, pattern, description) => {
+            await sendTerminalLine(line);
+            await waitUntil(async () => (await rows()).some((text) => pattern.test(text)), 15000, description);
+            await waitUntil(prompt, 15000, `prompt tras ${line}`);
+        };
+        try {
+            await expectRow(':set copyOnSelect on', /copyOnSelect = on\.?$/u, ':set cambia un ajuste sí/no');
+            if ((await invokeJson('settings_get')).preferences.copyOnSelect !== true) throw new Error(':set copyOnSelect on no se guardó');
+            await expectRow(':set copy-on-select off', /copyOnSelect = off\.?$/u, ':set acepta el nombre con guiones');
+            await expectRow(':set copyOnSelect quizas', /on.*off.*copyOnSelect|copyOnSelect.*on.*off/u, ':set rechaza un sí/no que no lo es');
+            await expectRow(':set terminalScrollSensitivity 99', /terminalScrollSensitivity.*99/u, ':set avisa si el backend no acepta el valor');
+            if ((await invokeJson('settings_get')).preferences.terminalScrollSensitivity === 99) throw new Error(':set guardó un valor fuera de rango');
+            await expectRow(':set list python', /pythonReplVisibleWidth = /u, ':set list filtra por texto');
+            await expectRow(':set noexiste 1', /noexiste/u, ':set avisa de un ajuste desconocido');
+            await captureScreenshot('set-desde-la-terminal');
+        } finally {
+            await invokeJson('settings_save', { incoming: before }).catch(() => undefined);
+        }
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'internal-set';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E :set OK: sí/no, nombre con guiones, valor no válido, fuera de rango, lista filtrada y ajuste desconocido.\n');
+    } else if (actionAtOnceOnly) {
+        markPhase('órdenes de las acciones de una vez');
+        await waitForBannerPanes(1, 60000);
+        await switchToEnvironment('cmd');
+        const cell = await activeTerminalCell();
+        const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+        const promptRow = async () => (await terminalRowSnapshot(cell)).rows.map((row) => row.text.trimEnd())
+            .filter((text) => /^[A-Za-z]:\\[^>]*>$/u.test(text)).at(-1) ?? '';
+        await waitUntil(async () => Boolean(await promptRow()), 60000, 'prompt de cmd');
+        const tabId = await runScript("return document.querySelector('.tab.active')?.dataset.tabId;");
+        // La carpeta de la shell, leída de su prompt: `scripts_cd_directory`
+        // solo acepta la carpeta actual de la pestaña (o la de la Biblioteca).
+        const directory = (await promptRow()).slice(0, -1);
+        await runScript(`window.__wtActionTab = arguments[0];
+            window.__wtActionChunks = [];
+            if (!window.__wtActionListener) {
+                window.__wtActionListener = (event) => {
+                    if (event.detail?.tabId === window.__wtActionTab && typeof event.detail.data === 'string') window.__wtActionChunks.push(event.detail.data);
+                };
+                window.addEventListener('winslim:terminal-output-busy', window.__wtActionListener);
+            }
+            return true;`, [tabId]);
+        const runAction = async (atOnce) => {
+            await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, actionCommandsAtOnce: atOnce } });
+            await runScript('window.__wtActionChunks = []; return true;');
+            // La salida que llegó desde la acción, sin secuencias ANSI: la orden
+            // y, tras su salto de línea, el prompt de cmd. (Ni las filas
+            // visibles, que son siempre las de la vista, ni las marcas OSC 133,
+            // que cmd no da a una orden que no se tecleó, sirven para saberlo.)
+            // También las de dos caracteres (`ESC 7`/`ESC 8`, guardar y
+            // recuperar el cursor, `ESC =`…) y los retornos de carro: Clink
+            // los deja tras el prompt y el «> al final» no se veía (15-11,
+            // 2 de 3 con la app bien).
+            const arrived = async () => String(await runScript('return window.__wtActionChunks.join("");'))
+                .replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_78=>]/gu, '')
+                .replace(/\r/gu, '');
+            const result = await invokeJson('scripts_cd_directory', { tabId, directory });
+            if (!result?.ok) throw new Error(`La acción cd no se escribió: ${JSON.stringify(result)}`);
+            let lastText = '';
+            try {
+                await waitUntil(async () => {
+                    const text = await arrived();
+                    lastText = text;
+                    // Tecla a tecla, Clink coloca el cursor con `CSI n G` en vez
+                    // de escribir el espacio (sin las secuencias queda «cd/d»,
+                    // 14-11) y al recolorear vuelve a escribir la barra
+                    // («cd //d», 15-11): la prueba fallaba con la app bien.
+                    return /cd[\s/]*\/d/u.test(text) && /\n[^\n]*[A-Za-z]:\\[^\n>]*>\s*$/u.test(text);
+                }, 20000, `la acción termina y vuelve el prompt de cmd (de una vez: ${atOnce})`);
+            } catch (error) {
+                throw new Error(`${error.message}; final de lo recibido: ${JSON.stringify(lastText.slice(-300))}`, { cause: error });
+            }
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+            const chunks = await runScript('return window.__wtActionChunks.slice();');
+            // Las entregas hasta la primera que lleva el Intro de la orden: con
+            // la opción, la orden entera y su salto de línea van en una.
+            const enter = chunks.findIndex((chunk) => chunk.includes('\n'));
+            return { chunks: chunks.length, untilEnter: enter + 1, command: result.command };
+        };
+        const typed = await runAction(false);
+        const atOnce = await runAction(true);
+        await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, actionCommandsAtOnce: false } });
+        recordEvent('action-at-once', { typed, atOnce });
+        process.stdout.write(`E2E acciones de una vez: poco a poco ${typed.untilEnter} entregas hasta el Intro, de una vez ${atOnce.untilEnter}.\n`);
+        if (atOnce.untilEnter !== 1) {
+            throw new Error(`Con actionCommandsAtOnce la orden de la acción llegó en ${atOnce.untilEnter} entregas hasta su Intro (se esperaba 1): ${JSON.stringify(atOnce)}`);
+        }
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'action-at-once';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E órdenes de las acciones de una vez OK.\n');
+    } else if (libraryAtOnceOnly) {
+        markPhase('scripts de la Biblioteca de una vez');
+        await waitForBannerPanes(1, 60000);
+        await switchToEnvironment('cmd');
+        const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+        const cmdCell = await activeTerminalCell();
+        await waitUntil(async () => (await terminalRowSnapshot(cmdCell)).rows
+            .some((row) => /^[A-Za-z]:\\[^>]*>$/u.test(row.text.trimEnd())), 60000, 'prompt de cmd');
+        const folder = (await invokeJson('scripts_list', { categories: null }))?.dir;
+        if (!folder) throw new Error('La Biblioteca no dijo cuál es su carpeta.');
+        await mkdir(folder, { recursive: true });
+        const batName = 'wt-e2e-de-una-vez.bat';
+        const ps1Name = 'wt-e2e-de-una-vez.ps1';
+        await writeFile(join(folder, batName), '@echo hola-biblioteca-bat\r\n');
+        await writeFile(join(folder, ps1Name), "Write-Output 'hola-biblioteca-ps1'\r\n");
+        await runScript(`window.__wtLibraryChunks = [];
+            if (!window.__wtLibraryListener) {
+                window.__wtLibraryListener = (event) => {
+                    if (typeof event.detail?.data === 'string') window.__wtLibraryChunks.push([event.detail.tabId, event.detail.data]);
+                };
+                window.addEventListener('winslim:terminal-output-busy', window.__wtLibraryListener);
+            }
+            return true;`);
+        const strip = (text) => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/gu, '');
+        // Lanza el script con el botón «Ejecutar» del panel y mide, en la
+        // pestaña donde acabó, cuántas entregas separan el principio de la
+        // línea tecleada de su final. Escrita de golpe, las dos marcas llegan
+        // en la misma entrega; tecla a tecla, en entregas distintas.
+        const launch = async ({ name, atOnce, startMark, endMark, outputMark }) => {
+            await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, actionCommandsAtOnce: atOnce } });
+            await runScript('window.__wtLibraryChunks = []; return true;');
+            await clickWhenReady('[data-testid="toolbar-library"]');
+            const findButton = `const item = [...document.querySelectorAll('[role="dialog"] .item')]
+                .find((node) => (node.querySelector('.name')?.textContent ?? '').includes(arguments[0]));
+            const button = item?.querySelector('button.run');`;
+            await waitUntil(async () => runScript(`${findButton} return Boolean(button && !button.disabled);`, [name]),
+                20000, `${name} en la Biblioteca`);
+            await runScript(`${findButton} button.click(); return true;`, [name]);
+            // La pestaña donde acabó el script: la que enseña su salida (la
+            // marca puede llegar partida entre entregas, se busca en lo
+            // juntado de cada pestaña).
+            const outputTab = async () => {
+                const all = await runScript('return window.__wtLibraryChunks.slice();');
+                for (const tab of new Set(all.map(([id]) => id))) {
+                    const chunks = all.filter(([id]) => id === tab).map(([, data]) => data);
+                    const text = strip(chunks.join(''));
+                    const at = text.indexOf(outputMark);
+                    if (at >= 0) return { tabId: tab, chunks, done: /[A-Za-z]:\\[^\n>]*>\s*$/u.test(text.slice(at)) };
+                }
+                return null;
+            };
+            await waitUntil(async () => Boolean((await outputTab())?.done),
+                60000, `${name} se ejecuta y vuelve el prompt (de una vez: ${atOnce})`);
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+            const { tabId, chunks } = await outputTab();
+            let joined = '';
+            let start = -1;
+            let end = -1;
+            // Sin espacios: tecla a tecla, Clink y PSReadLine a veces colocan
+            // el cursor con secuencias en vez de escribir el espacio.
+            const squeeze = (text) => text.replace(/\s+/gu, '');
+            chunks.forEach((data, index) => {
+                joined += data;
+                const text = squeeze(strip(joined));
+                if (start < 0 && text.includes(squeeze(startMark))) start = index;
+                if (end < 0 && text.includes(squeeze(endMark))) end = index;
+            });
+            return {
+                name, atOnce, tabId, chunks: chunks.length, start, end,
+                // Para el informe: qué trae cada entrega desde el principio de la
+                // línea (recortado), para ver qué la partió.
+                detail: chunks.slice(Math.max(0, start - 1), Math.max(start, end) + 2)
+                    .map((data) => JSON.stringify(data.slice(0, 160))),
+            };
+        };
+        const cmdMarks = { startMark: '"%WSTERM_UI%\\ui-', endMark: '-fin.cmd"' };
+        // En PowerShell se teclea solo `. '<sesión>\ui-N.ps1'` (14-11).
+        const psMarks = { startMark: ". '", endMark: ".ps1'" };
+        const runs = [];
+        try {
+            // De referencia, con la opción apagada: así se ve escribir.
+            runs.push(await launch({ name: batName, atOnce: false, ...cmdMarks, outputMark: 'hola-biblioteca-bat' }));
+            runs.push(await launch({ name: batName, atOnce: true, ...cmdMarks, outputMark: 'hola-biblioteca-bat' }));
+            // Un .ps1 desde cmd abre una pestaña de PowerShell nueva: la orden
+            // espera en cola a que arranque.
+            runs.push(await launch({ name: ps1Name, atOnce: true, ...psMarks, outputMark: 'hola-biblioteca-ps1' }));
+            // Y otra vez, ya con esa pestaña abierta y activa.
+            runs.push(await launch({ name: ps1Name, atOnce: true, ...psMarks, outputMark: 'hola-biblioteca-ps1' }));
+            await captureScreenshot('biblioteca-de-una-vez');
+        } finally {
+            await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, actionCommandsAtOnce: false } }).catch(() => undefined);
+            await rm(join(folder, batName), { force: true }).catch(() => undefined);
+            await rm(join(folder, ps1Name), { force: true }).catch(() => undefined);
+        }
+        recordEvent('library-at-once', { runs });
+        for (const run of runs) {
+            process.stdout.write(`E2E Biblioteca ${run.name} (de una vez: ${run.atOnce}): pestaña ${run.tabId}, principio en la entrega ${run.start}, final en la ${run.end} de ${run.chunks}.\n`);
+        }
+        const broken = runs.filter((run) => run.atOnce && (run.start < 0 || run.end < 0 || run.start !== run.end));
+        if (broken.length) {
+            throw new Error(`Con actionCommandsAtOnce, la orden del script de la Biblioteca no llegó de una vez: ${JSON.stringify(broken)}`);
+        }
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'library-at-once';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E scripts de la Biblioteca de una vez OK.\n');
     } else if (commandMarksOnly) {
         markPhase('marcas de orden OSC 133');
         await waitForBannerPanes(1, 60000);
@@ -11763,9 +12586,13 @@ try {
             return now;
         };
         // Cada shell con su orden correcta, su fallo y el código que debe verse.
-        // cmd no puede dar el código de salida en su prompt.
+        // cmd no puede dar el código de salida en su prompt: una orden que no
+        // existe se reconoce por el mensaje de Windows y vale 9009, como su
+        // ERRORLEVEL (`cmd_failure.rs`). En cmd se comprueba además el modo
+        // consejero: con él activado, el fallo ofrece preguntar al agente
+        // (Romen escribió `epo` en cmd y no salía nada).
         const shells = [
-            { id: 'cmd', ok: 'echo WT_MARCA_OK', fail: null },
+            { id: 'cmd', ok: 'echo WT_MARCA_OK', fail: 'wtordenquenoexiste', code: '9009', advisor: true },
             { id: 'powershell', ok: 'Write-Output WT_MARCA_OK', fail: 'cmd /c exit 3', code: '3' },
             { id: 'gitbash', ok: 'echo WT_MARCA_OK', fail: '(exit 4)', code: '4' },
         ].filter((shell) => available.includes(shell.id));
@@ -11781,21 +12608,71 @@ try {
             const passed = await nextMark(cell, before, shell.id);
             if (passed.failed !== before.failed) throw new Error(`${shell.id}: una orden correcta no debe marcarse como fallida`);
             if (shell.fail) {
-                before = passed;
+                if (shell.advisor) {
+                    // Por la app, como el usuario: el frontend no relee ajustes
+                    // guardados por fuera.
+                    await sendTerminalKeys(':set agentChatAdvisor on', cell, { enter: true, settle: true });
+                    await waitUntil(async () => (await invokeJson('settings_get')).preferences.agentChatAdvisor === true,
+                        5000, `${shell.id}: :set agentChatAdvisor on`);
+                }
+                before = await marks(cell);
                 await sendTerminalKeys(shell.fail, cell, { enter: true, settle: true });
                 const failed = await nextMark(cell, before, `${shell.id}: orden fallida`);
                 if (failed.exit !== shell.code) throw new Error(`${shell.id}: código ${failed.exit}, se esperaba ${shell.code}`);
-                await waitUntil(async () => (await marks(cell)).failed === before.failed + 1, 5000, `${shell.id}: marca roja en la orden fallida`);
+                if (shell.advisor) {
+                    // Solo se ofrece si hay algún agente al que preguntar
+                    // (13-11): con agentes, tiene que salir; sin ninguno, no.
+                    const agents = await invokeJson('agent_chat_agents');
+                    if (Array.isArray(agents) && agents.some((agent) => agent.chat)) {
+                        await findWhenReady('[data-testid="agent-chat-advice"]', 5000);
+                    } else {
+                        await new Promise((resolve) => setTimeout(resolve, 1500));
+                        if ((await findAll('[data-testid="agent-chat-advice"]')).length > 0) {
+                            throw new Error(`${shell.id}: el consejero se ofreció sin ningún agente instalado`);
+                        }
+                    }
+                }
+                // La marca roja sale en el siguiente repintado (onRender de la
+                // decoración), después de apuntarse la orden: `failed` puede
+                // leerse sin ella. Lo que vale es el número ya confirmado.
+                const failedMarks = before.failed + 1;
+                await waitUntil(async () => (await marks(cell)).failed === failedMarks, 5000, `${shell.id}: marca roja en la orden fallida`);
                 // Un Intro vacío repite el código anterior, pero no es una orden.
                 await sendTerminalKeys('', cell, { enter: true, settle: true });
                 await new Promise((resolve) => setTimeout(resolve, 1000));
                 const blank = await marks(cell);
-                if (blank.count !== failed.count || blank.failed !== failed.failed) {
+                if (blank.count !== failed.count || blank.failed !== failedMarks) {
                     throw new Error(`${shell.id}: un Intro vacío cuenta como orden: ${JSON.stringify({ failed, blank })}`);
                 }
             }
             await captureScreenshot(`marcas-${shell.id}`);
+            if (shell.advisor) {
+                await sendTerminalKeys(':set agentChatAdvisor off', cell, { enter: true, settle: true });
+                await waitUntil(async () => (await invokeJson('settings_get')).preferences.agentChatAdvisor === false,
+                    5000, `${shell.id}: :set agentChatAdvisor off`);
+            }
             results.push({ shell: shell.id, ...(await marks(cell)) });
+        }
+
+        // Una orden que escribe un botón (13-11): la pestaña no ve su Intro,
+        // pero cuenta como orden y con su propio texto. Antes no contaba y el
+        // chat hablaba de la que se tecleó antes («epo n»).
+        if (available.includes('cmd')) {
+            await switchToEnvironment('cmd');
+            await waitForBannerPanes(1, 60000);
+            const cell = await activeTerminalCell();
+            const promptRow = async () => (await terminalRowSnapshot(cell)).rows.map((row) => row.text.trimEnd())
+                .filter((text) => /^[A-Za-z]:\\[^>]*>$/u.test(text)).at(-1) ?? '';
+            await waitUntil(async () => Boolean(await promptRow()), 30000, 'prompt de cmd para la orden de un botón');
+            const tabId = await runScript("return document.querySelector('.tab.active')?.dataset.tabId;");
+            const before = await marks(cell);
+            const result = await invokeJson('scripts_cd_directory', { tabId, directory: (await promptRow()).slice(0, -1) });
+            if (!result?.ok) throw new Error(`La orden del botón no se escribió: ${JSON.stringify(result)}`);
+            await nextMark(cell, before, 'cmd: orden escrita por un botón');
+            const fromApp = await runScript(`const host = arguments[0].querySelector('.tab-pane:not(.hidden)') ?? arguments[0].closest('.tab-pane');
+                return host?.dataset.lastCommandFromApp ?? '';`, [{ [elementKey]: cell }]);
+            if (fromApp !== '1') throw new Error(`La orden del botón no se apuntó como suya (lastCommandFromApp=${fromApp})`);
+            results.push({ shell: 'cmd-boton', ...(await marks(cell)) });
         }
 
         // Copiar la salida de la última orden, sin su eco ni el prompt.
@@ -11928,11 +12805,78 @@ try {
         await pressKeys('', '');
         await waitUntil(async () => { const title = await activeTitle(); return Boolean(title) && title !== 'Servidor E2E'; }, 5000, 'nombre vacío vuelve al del entorno');
 
+        // 4b. Desde el menú de la pestaña (clic derecho → «Renombrar»): antes
+        // el menú se cerraba primero y la opción leía una pestaña que ya no
+        // existía, sin abrir el campo (14-11, Romen: «la función de renombrar
+        // pestañas no funciona»). «Cerrar pestaña» del menú tenía el mismo fallo.
+        const activeTabElement = await findWhenReady('.tab.active');
+        await request(`/session/${sessionId}/actions`, 'POST', {
+            actions: [{
+                type: 'pointer',
+                id: 'mouse',
+                parameters: { pointerType: 'mouse' },
+                actions: [
+                    { type: 'pointerMove', origin: { [elementKey]: activeTabElement }, x: 0, y: 0 },
+                    { type: 'pointerDown', button: 2 }, { type: 'pointerUp', button: 2 },
+                ],
+            }],
+        });
+        await request(`/session/${sessionId}/actions`, 'DELETE');
+        await clickWhenReady('[data-testid="tab-menu-rename"]');
+        await waitUntil(async () => (await renameState()).focused, 5000, 'campo de renombrar con el foco desde el menú');
+        await pressKeys(...'Desde el menu', '\uE007');
+        await waitUntil(async () => await activeTitle() === 'Desde el menu', 5000, 'nombre puesto desde el menú de la pestaña');
+        await openRenameFromPalette();
+        await pressKeys('\uE017', '\uE007');
+        await waitUntil(async () => { const title = await activeTitle(); return Boolean(title) && title !== 'Desde el menu'; }, 5000, 'nombre vacío vuelve al del entorno tras el menú');
+
         // 5. Guardar la salida: el historial entero, con las líneas partidas unidas.
         const longMarker = `WTERMINAL_LINEA_LARGA_${'x'.repeat(320)}_FIN`;
         await sendLineAndAssertPrompt('Write-Output WTERMINAL_GUARDAR_SALIDA', cell, 'WTERMINAL_GUARDAR_SALIDA', 'marca antes de guardar');
         await sendTerminalKeys(`Write-Output ${longMarker}`, cell, { enter: true, settle: true });
-        await waitUntil(() => runScript(`return (window.__wtTerminalText?.(arguments[0]) ?? '').includes(arguments[1]);`, [tabId, longMarker]), 15000, 'línea larga en la terminal');
+        // La salida, no el eco: la línea larga tiene que haberse EJECUTADO (en
+        // la 56 se quedó escrita sin su Intro y el eco ya contenía el texto).
+        const longLineRan = () => runScript(`return (window.__wtTerminalText?.(arguments[0]) ?? '').split('\\n').some((line) => line.trim() === arguments[1]);`, [tabId, longMarker]);
+        try {
+            await waitUntil(longLineRan, 15000, 'línea larga ejecutada (su salida en una línea propia)');
+        } catch (error) {
+            // Diagnóstico (58: volvió a fallar con el historial ya aislado, así
+            // que no era solo el historial grande). Un segundo Intro distingue
+            // un Intro perdido de un PowerShell bloqueado. La prueba falla
+            // igual: esto solo explica por qué.
+            const rowsBefore = (await runScript('return (window.__wtTerminalText?.(arguments[0]) ?? "").trimEnd().split("\\n").slice(-4);', [tabId]))
+                .map((row) => row.length > 160 ? `${row.slice(0, 80)}…${row.slice(-60)}` : row);
+            // El estado de la cola de entrada y de la ventana ANTES de tocar
+            // nada: en qué espera está el Intro, si llegan fotogramas y si la
+            // terminal recibió la tecla (`inputEventClass`).
+            const stateBefore = await runScript(`const tabId = arguments[0];
+                // inputEventClass vive en el panel de la pestaña (host de TerminalPane).
+                const host = document.querySelector('.tab-pane:not(.hidden)');
+                return new Promise((resolve) => {
+                    let frame = false;
+                    requestAnimationFrame(() => { frame = true; });
+                    setTimeout(() => resolve({
+                        frame,
+                        visibility: document.visibilityState,
+                        focus: document.hasFocus(),
+                        input: window.__wtInputState?.(tabId) ?? null,
+                        renderPaused: window.__wtTerminalState?.(tabId)?.renderPaused ?? null,
+                        inputEventClass: host?.dataset.inputEventClass ?? null,
+                    }), 1000);
+                });`, [tabId]).catch((stateError) => ({ error: String(stateError) }));
+            await sendTerminalKeys('', cell, { enter: true, settle: true });
+            let secondEnterRan = false;
+            try {
+                await waitUntil(longLineRan, 8000, 'línea larga tras un segundo Intro');
+                secondEnterRan = true;
+            } catch {
+                // Sigue sin ejecutarse: PowerShell no atiende la entrada.
+            }
+            recordEvent('long-line-not-run', { secondEnterRan, rowsBefore, stateBefore, passed: false });
+            throw new Error(`${error.message}: ${secondEnterRan
+                ? 'con un segundo Intro sí se ejecutó'
+                : 'tampoco con un segundo Intro'}; estado antes: ${JSON.stringify(stateBefore)}; últimas filas: ${JSON.stringify(rowsBefore)}`);
+        }
         await runScript(`arguments[0].querySelector('[data-testid="terminal-host"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200, button: 2 }));`, [{ [elementKey]: cell }]);
         await clickWhenReady('[data-testid="terminal-menu-save-output"]');
         await waitUntil(async () => (await findAll('[data-testid="terminal-link-notice"]')).length > 0, 10000, 'aviso de salida guardada');
@@ -11965,6 +12909,11 @@ try {
             .match(/^WTERMINAL_TRAS_CAMBIO\s*$/gmu) ?? []).length;
         const historyOpen = async () => (await findAll('[data-testid="history-search"]')).length > 0;
         const runsBefore = await markerRuns();
+        // Tras la línea larga y el menú de la pestaña, PowerShell tiene que
+        // haber vuelto a su prompt antes de elegir una orden del historial (la
+        // 56 eligió antes y la búsqueda dijo «ocupada»).
+        await waitUntil(() => runScript(`return /^PS .*>\\s*$/u.test((window.__wtTerminalText?.(arguments[0]) ?? '').trimEnd().split('\\n').at(-1) ?? '');`, [tabId]),
+            15000, 'prompt de PowerShell antes de buscar en el historial');
         await sendWindowShortcut(['', '', 'r']);
         const historyInput = await findWhenReady('[data-testid="history-search-input"]');
         await request(`/session/${sessionId}/element/${historyInput}/value`, 'POST', { text: 'tras_cambio write' });
@@ -12061,7 +13010,16 @@ try {
                 return expectedLength === null || state.lineLength >= expectedLength;
             }, 10000, `eco de la entrada (${expectedLength ?? 'cursor'})`).catch(() => undefined);
             await new Promise((resolve) => setTimeout(resolve, 120));
-            return probe();
+            // Clink esconde el cursor (\x1b[?25l) mientras repinta la línea, y
+            // xterm quita entonces su elemento: medir ahí no es «cursor perdido»
+            // (13-11: tras 150 retrocesos, 1 de 64 con la vista en su sitio). Se
+            // espera hasta 2 s a que vuelva; si no vuelve, cuenta como fallo.
+            let state = await probe();
+            for (let waited = 0; state.cursorLeft === null && waited < 2000; waited += 100) {
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                state = await probe();
+            }
+            return state;
         };
         const failures = [];
         const samples = [];
@@ -12078,7 +13036,34 @@ try {
         if (!fontState.rows || fontState.rows !== fontState.measure) {
             throw new Error(`Las filas se pintan con otro tamaño de fuente que el que mide xterm: ${JSON.stringify(fontState)}`);
         }
-        const promptLength = (await probe()).lineLength;
+        // La medida del prompt inicial también tiene que ser estable: dos
+        // lecturas iguales seguidas.
+        const promptLength = await (async () => {
+            let previous = -1;
+            let length = 0;
+            for (let attempt = 0; attempt < 40; attempt += 1) {
+                length = (await probe()).lineLength;
+                if (length > 0 && length === previous) return length;
+                previous = length;
+                await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+            return length;
+        })();
+        // El prompt nuevo puede pintarse en varios trozos (Clink lo repinta).
+        // «Listo» es medir lo que el inicial y no cambiar entre dos lecturas:
+        // con «> 0 y <= prompt + 2» se aceptaba uno a medio pintar y la parte
+        // I calculaba la ráfaga corta (13-11: 133 de 137, «no llegó a
+        // desplazar la vista», 1 de 64 muestras con Clink).
+        const promptReady = async (description) => {
+            let previous = -1;
+            await waitUntil(async () => {
+                const length = (await probe()).lineLength;
+                const ready = length === previous && length >= promptLength && length <= promptLength + 2;
+                previous = length;
+                if (!ready) await new Promise((resolve) => setTimeout(resolve, 250));
+                return ready;
+            }, 20000, description).catch(() => undefined);
+        };
         const alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
         const payload = `echo ${Array.from({ length: 360 }, (_, index) => alphabet[index % alphabet.length]).join('')}`;
         // A. Escribir a ritmo humano: el cursor siempre visible y el scroll
@@ -12198,10 +13183,7 @@ try {
         // H. Intro en una línea larga: la orden se ejecuta y el prompt nuevo
         // se ve desde el principio.
         await keys(['\uE007'], 60);
-        await waitUntil(async () => {
-            const state = await probe();
-            return state.lineLength > 0 && state.lineLength <= promptLength + 2;
-        }, 20000, 'prompt nuevo tras una orden larga').catch(() => undefined);
+        await promptReady('prompt nuevo tras una orden larga');
         const afterEnter = record('prompt-tras-intro', await settle());
         if (afterEnter.scrollLeft > 1) failures.push({ ...afterEnter, reason: 'el prompt nuevo no se ve desde el principio' });
         await captureScreenshot('seguimiento-prompt-tras-intro');
@@ -12209,11 +13191,19 @@ try {
         // borde derecho (la vista avanza unas celdas) y, al borrar hasta caber
         // en la primera pantalla, vuelve al principio.
         {
+            await promptReady('prompt estable antes de llenar la línea');
             const start = await probe();
             const fill = Math.max(0, Math.floor(start.clientWidth / start.cellWidth) - start.lineLength);
             await keys(Array.from({ length: fill }, (_, index) => alphabet[index % alphabet.length]), 0);
-            const filled = await settle(start.lineLength + fill);
-            if (filled.scrollLeft <= 1) failures.push({ phase: 'resto-de-scroll', ...filled, reason: 'la línea no llegó a desplazar la vista' });
+            const target = start.lineLength + fill;
+            const filled = await settle(target);
+            // Si faltan letras, decirlo: no es lo mismo que una vista que no
+            // se desplaza con la línea entera.
+            if (filled.lineLength < target) {
+                failures.push({ phase: 'resto-de-scroll', ...filled, expected: target, reason: `faltan ${target - filled.lineLength} letras de la ráfaga` });
+            } else if (filled.scrollLeft <= 1) {
+                failures.push({ phase: 'resto-de-scroll', ...filled, reason: 'la línea no llegó a desplazar la vista' });
+            }
             const backspace = String.fromCharCode(0xE003);
             await keys(Array.from({ length: 12 }, () => backspace), 8);
             await waitUntil(async () => (await probe()).lineLength <= filled.lineLength - 12, 10000, 'borrado del final de la línea').catch(() => undefined);
@@ -12229,10 +13219,7 @@ try {
         // el prompt sin su primera columna; una persona no provoca ese scroll.
         {
             await keys([String.fromCharCode(0xE007)], 60);
-            await waitUntil(async () => {
-                const state = await probe();
-                return state.lineLength > 0 && state.lineLength <= promptLength + 2;
-            }, 20000, 'prompt tras la salida ancha').catch(() => undefined);
+            await promptReady('prompt tras la salida ancha');
             await settle();
             await request(`/session/${sessionId}/execute/sync`, 'POST', {
                 script: `const host = arguments[0].querySelector('[data-testid="terminal-host"]');
@@ -12561,10 +13548,18 @@ try {
             const firstPath = (await echoVariable('PATH')).split(';')[0];
             if (!samePath(firstPath, npmDir)) categoryProblems.push(`la carpeta de npm no va delante en el PATH: ${firstPath}`);
             await captureScreenshot('entornos-herramientas-nuevas');
+            // La casilla se guarda sola al poco (guardado automático de
+            // Ajustes): se espera a verlo en el backend en vez de dar 2 s por
+            // buenos. Si el último guardado llegara tarde, la terminal nueva
+            // heredaría lo de antes y la vista de abajo tomaría como
+            // preferencias de partida (las que restaura) las de la categoría
+            // apagada.
+            const toolsSaved = (on) => waitUntil(async () => (await invokeJson('settings_get')).preferences.toolchainStoreTools === on,
+                10000, `«Herramientas y lenguajes nuevos» ${on ? 'encendida' : 'apagada'} en las preferencias`);
             await clickWhenReady('[data-testid="toolbar-settings"]');
             await clickWhenReady('[data-testid="settings-tab-behavior"]');
             await clickInView(await findWhenReady('[data-testid="settings-store-category-tools"]'));
-            await new Promise((resolve) => setTimeout(resolve, 2000));
+            await toolsSaved(false);
             await clickWhenReady('[role="dialog"] .panel-close');
             await switchToEnvironment('cmd');
             const prefixOff = await echoVariable('npm_config_prefix');
@@ -12582,13 +13577,18 @@ try {
                 categoryProblems.push(`npm_config_prefix sin centralizar no muestra su ubicación actual: ${JSON.stringify(offRow)}`);
             }
             await clickInView(await findWhenReady('[data-testid="settings-store-category-tools"]'));
-            await new Promise((resolve) => setTimeout(resolve, 2000));
+            await toolsSaved(true);
             await clickWhenReady('[role="dialog"] .panel-close');
         }
-        // Las mismas categorías que `toolchain_store::Category`, en su orden.
-        // Comparar la lista (y no solo cuántas) detecta una que falte o sobre;
-        // el «6» de antes se quedó corto al añadir Programas y Proyectos.
-        const expectedCategories = ['caches', 'downloads', 'aiModels', 'tools', 'replHistory', 'toolchains', 'programs', 'projects'];
+        // Las diez categorías de `toolchain_store::Category`, cada una una
+        // sola vez y en el orden en que salen en CACHES (ni el backend ni
+        // Ajustes reordenan; desde el 09-11 Configuración y Plugins van antes
+        // que Programas y Proyectos). Ajustes pinta una cabecera cada vez que
+        // cambia la categoría respecto a la fila anterior: una entrada fuera
+        // de su sitio (pub detrás de las toolchains) repetía «Cachés».
+        // Comparar la lista (y no solo cuántas) detecta una que falte, sobre
+        // o se repita; el «8» de antes se quedó corto con Config y Plugins.
+        const expectedCategories = ['caches', 'downloads', 'aiModels', 'tools', 'replHistory', 'toolchains', 'config', 'plugins', 'programs', 'projects'];
         if (JSON.stringify(headers) !== JSON.stringify(expectedCategories)) {
             categoryProblems.push(`categorías visibles: ${JSON.stringify(headers)}; esperadas: ${JSON.stringify(expectedCategories)}`);
         }
@@ -12712,21 +13712,49 @@ try {
             await captureScreenshot('carpeta-propia-vista');
             // Apagar npm con su casilla, como una persona: se guarda y deja de
             // estar activo aunque las cachés sigan activas.
-            await clickInView(await findWhenReady('[data-testid="store-entry"][data-entry-id="npm"] input'));
-            await waitUntil(async () => String((await invokeJson('settings_get')).preferences.toolchainStoreDisabled ?? '').split(',').includes('npm'),
-                10000, 'npm apagado en las preferencias');
-            const afterToggle = await invokeJson('toolchain_store_status');
-            storeView.npmActive = afterToggle.caches.find((cache) => cache.id === 'npm')?.active;
-            if (storeView.npmActive !== false) throw new Error(`npm sigue activo tras apagarlo: ${JSON.stringify(afterToggle.caches.find((cache) => cache.id === 'npm'))}`);
+            const npmCheckbox = '[data-testid="store-entry"][data-entry-id="npm"] input';
+            const npmDisabled = async () => String((await invokeJson('settings_get')).preferences.toolchainStoreDisabled ?? '')
+                .split(',').map((id) => id.trim()).includes('npm');
+            const npmStatus = async () => (await invokeJson('toolchain_store_status')).caches.find((cache) => cache.id === 'npm');
+            await clickInView(await findWhenReady(npmCheckbox));
+            await waitUntil(npmDisabled, 10000, 'npm apagado en las preferencias');
+            const npmOff = await npmStatus();
+            storeView.npmActive = npmOff?.active;
+            if (storeView.npmActive !== false) throw new Error(`npm sigue activo tras apagarlo: ${JSON.stringify(npmOff)}`);
+            // Y se vuelve a encender con la misma casilla. Así la interfaz y el
+            // backend acaban con las mismas preferencias: si solo las
+            // restaurase el `finally` por IPC, `app.preferences` seguiría con
+            // npm apagado y el siguiente guardado desde la interfaz (que manda
+            // el objeto entero) lo volvería a escribir. Encender no depende de
+            // que la vista ya tenga el primer guardado: quita npm de la lista
+            // tanto si lo ve como si no.
+            await clickInView(await findWhenReady(npmCheckbox));
+            await waitUntil(async () => !(await npmDisabled()), 10000, 'npm encendido otra vez en las preferencias');
+            const npmOn = await npmStatus();
+            storeView.npmActiveAgain = npmOn?.active;
+            if (storeView.npmActiveAgain !== true) throw new Error(`npm no vuelve a estar activo al encenderlo: ${JSON.stringify(npmOn)}`);
             // Carpeta propia para los modelos de IA: el diálogo de carpetas es
-            // nativo, así que se guarda por la misma preferencia que escribe la vista.
+            // nativo, así que se guarda por la misma preferencia que escribe la
+            // vista. Va por IPC después de la casilla, con las preferencias
+            // recién leídas, y nada de la interfaz guarda entre medias; el
+            // `finally` la deshace.
             const aiDir = join(storeViewWork, 'ia-en-otro-disco');
             await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, toolchainStoreCategoryDirs: `aiModels=${aiDir}` } });
             const afterDir = await invokeJson('toolchain_store_status');
-            const hf = afterDir.caches.find((cache) => cache.id === 'huggingface');
+            // Cada modelo de IA que WTerminal reubica va a `<carpeta>\<subcarpeta>`.
+            // Uno definido por el usuario (HF_HOME u OLLAMA_MODELS, como en la
+            // VM con todo el catálogo) manda la suya, y Ollama con modelos ya
+            // descargados se queda en su sitio: esos no cuentan.
+            const aiEntries = afterDir.caches.filter((cache) => cache.category === 'aiModels');
+            const hf = aiEntries.find((cache) => cache.id === 'huggingface');
+            const relocated = aiEntries.filter((cache) => !cache.userDefined && (cache.id !== 'ollama' || cache.active));
             storeView.hfPath = hf?.path;
-            if (!hf || hf.location !== 'own' || resolve(hf.path) !== resolve(join(aiDir, 'huggingface'))) {
-                throw new Error(`Hugging Face no usa la carpeta propia de su categoría: ${JSON.stringify(hf)}`);
+            storeView.aiPaths = relocated.map((cache) => cache.path);
+            if (!hf) throw new Error(`Hugging Face no está entre los modelos de IA: ${JSON.stringify(aiEntries)}`);
+            if (relocated.length === 0) {
+                storeView.aiSkipped = aiEntries.map((cache) => ({ id: cache.id, location: cache.location, userDefined: cache.userDefined }));
+            } else if (relocated.some((cache) => !cache.active || cache.location !== 'own' || !samePath(dirname(cache.path), aiDir))) {
+                throw new Error(`Los modelos de IA no usan la carpeta propia de su categoría: ${JSON.stringify({ aiDir, relocated })}`);
             }
             await clickWhenReady('[role="dialog"] .panel-close');
         } finally {
@@ -16466,6 +17494,16 @@ try {
     // panel contiguo y diagnosticar erróneamente pérdida de salida.
     const horizontalCell = (await findAll('.cell.focused:not(.hidden)'))[0]?.[elementKey]
         ?? await findWhenReady('.cell:not(.hidden)');
+    // El indicador de «hay más a la derecha» aparece con una transición de
+    // 120 ms. En la 61 (14-11) se midió a mitad (opacidad 0,959632) y el
+    // verificador, que exige 1, dio el informe por incompleto aunque la prueba
+    // pasó: se espera a que acabe antes de medir.
+    await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const indicator = arguments[0].querySelector('.horizontal-overflow-indicator');
+            return !indicator || !indicator.classList.contains('visible')
+                || (indicator.getAnimations().length === 0 && getComputedStyle(indicator).opacity === '1');`,
+        args: [{ [elementKey]: horizontalCell }],
+    }), 3000, 'el indicador de desplazamiento horizontal termina de aparecer');
     const horizontalHelpSnapshot = await terminalHorizontalSnapshot(horizontalCell);
     const horizontalProbe = await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `const terminalHost = arguments[0].querySelector('[data-testid="terminal-host"]');

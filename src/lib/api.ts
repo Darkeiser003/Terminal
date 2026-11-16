@@ -15,6 +15,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 
 import type {
     ActionResult,
+    AgentControlRequest,
     GhAdminAction,
     GhAdminArea,
     GhAdminList,
@@ -86,6 +87,10 @@ import type {
     TabList,
     TabSummary,
     TerminalLinkResult,
+    AiKeyOffer,
+    AiKeySaveResult,
+    AgentChatAgent, AgentChatAttachment, AgentChatFailureHelp, AgentChatModels,
+    AiKeyStored,
     UpdateResult,
     UpdateProgress,
     UpdateStatus
@@ -312,6 +317,70 @@ export const getShellAssistStatus = (refresh = false) =>
  *  navegador, carpeta o mostrar el archivo en su carpeta. */
 export const openTerminalLink = (url: string) =>
     invokeLogged<TerminalLinkResult>('terminal_open_link', { url });
+/** Una IA acabó al abrirse: si su última salida pide la clave de API y esta
+ *  IA se usa con una, qué variable es (nunca devuelve la clave). */
+export const aiKeyOffer = (envId: string, output: string) =>
+    invokeLogged<AiKeyOffer | null>('ai_key_offer', { envId, output });
+/** Guarda la clave cifrada para este usuario (DPAPI). `invokeLogged` no
+ *  registra los argumentos: la clave no llega al log. */
+export const aiKeySave = (envId: string, key: string) =>
+    invokeLogged<AiKeySaveResult>('ai_key_save', { envId, key });
+/** Borra la clave guardada de esa IA. */
+export const aiKeyClear = (envId: string) =>
+    invokeLogged<boolean>('ai_key_clear', { envId });
+/** Las variables con clave de IA guardada (nunca las claves), para Ajustes. */
+export const aiKeyList = () => invokeLogged<AiKeyStored[]>('ai_key_list');
+
+/** El texto fijo que escribe cmd cuando una orden no existe, leído de Windows
+ *  en su idioma (`terminal/cmd_failure.rs`). Se pide una sola vez. */
+let cmdNotFoundTextOnce: Promise<string | null> | null = null;
+export const cmdNotFoundText = (): Promise<string | null> => {
+    cmdNotFoundTextOnce ??= invokeLogged<string | null>('cmd_not_found_text').catch(() => null);
+    return cmdNotFoundTextOnce;
+};
+
+// ---- Chat lateral con los agentes de IA ----
+/** Los agentes instalados a los que se puede preguntar desde el chat. */
+export const agentChatAgents = () => invokeLogged<AgentChatAgent[]>('agent_chat_agents');
+/** Lanza una pregunta; la respuesta llega con `onAgentChatData` y
+ *  `onAgentChatDone`. La pregunta va por la entrada estándar de la CLI. */
+export const agentChatAsk = (envId: string, prompt: string, tabId?: string | null, model?: string | null, effort?: string | null, mode?: string | null, fast?: boolean) =>
+    invokeLogged<number>('agent_chat_ask', {
+        envId,
+        prompt,
+        tabId: tabId ?? null,
+        options: { model: model || null, effort: effort || null, mode: mode || null, fast: fast === true },
+    });
+/** Lee un archivo de texto para adjuntarlo a una pregunta (con tope). */
+export const agentChatReadAttachment = (path: string) =>
+    invokeLogged<AgentChatAttachment>('agent_chat_read_attachment', { path });
+/** Elegir archivos para adjuntar al chat (rutas absolutas). */
+export async function pickChatAttachments(): Promise<string[]> {
+    const picked = await open({ multiple: true, directory: false });
+    if (Array.isArray(picked)) return picked.filter((path): path is string => typeof path === 'string');
+    return typeof picked === 'string' ? [picked] : [];
+}
+/** Qué ofrecer tras un fallo: meter la clave, abrir la pestaña del agente
+ *  o avisar de que a su Python le falta el módulo. */
+export const agentChatFailureHelp = (envId: string, output: string) =>
+    invokeLogged<AgentChatFailureHelp>('agent_chat_failure_help', { envId, output });
+/** El modelo de fábrica del agente (de su configuración) y los que se pueden
+ *  elegir. Nunca pregunta nada a la IA. */
+export const agentChatModels = (envId: string) =>
+    invokeLogged<AgentChatModels>('agent_chat_models', { envId });
+/** Corta una pregunta en curso. */
+export const agentChatCancel = (requestId: number) =>
+    invokeLogged<boolean>('agent_chat_cancel', { requestId });
+export const onAgentChatData = (callback: (requestId: number, text: string) => void): Promise<UnlistenFn> =>
+    listen<{ requestId: number; text: string }>('agent-chat-data', (event) => callback(event.payload.requestId, event.payload.text));
+export const onAgentChatDone = (callback: (requestId: number, code: number | null, error: string | null, detail: string | null) => void): Promise<UnlistenFn> =>
+    listen<{ requestId: number; code: number | null; error: string | null; detail?: string | null }>('agent-chat-done',
+        (event) => callback(event.payload.requestId, event.payload.code, event.payload.error, event.payload.detail ?? null));
+/** Mientras llega una respuesta: un reintento por saturación (`retry`) o el
+ *  modelo que dice estar usando la CLI (`model`, p. ej. Codex). */
+export const onAgentChatStatus = (callback: (requestId: number, status: { retry: { attempt: number; max: number; status: number } | null; model: string | null }) => void): Promise<UnlistenFn> =>
+    listen<{ requestId: number; retry?: { attempt: number; max: number; status: number } | null; model?: string | null }>('agent-chat-status',
+        (event) => callback(event.payload.requestId, { retry: event.payload.retry ?? null, model: event.payload.model ?? null }));
 /** Vacía solo las cachés propias; devuelve los bytes liberados. */
 export const clearToolchainCaches = () =>
     invokeLogged<number>('toolchain_store_clear_caches');
@@ -700,7 +769,8 @@ export const getPreferences = () => invokeLogged<PreferencesPayload>('settings_g
 export const savePreferences = (preferences: Partial<Preferences>) =>
     invokeLogged<PreferencesPayload>('settings_save', { incoming: preferences });
 
-export const resetPreferences = () => invokeLogged<PreferencesPayload>('settings_reset');
+/** Devuelve a fábrica esas preferencias, o todas sin `keys`. */
+export const resetPreferences = (keys?: string[]) => invokeLogged<PreferencesPayload>('settings_reset', { keys: keys ?? null });
 
 // ---- Identidad y registro ----
 
@@ -761,6 +831,13 @@ export const onCommandResize = (
 ): Promise<UnlistenFn> =>
     listen<CommandResizeEvent>('pty-command-resize', (event) => callback(event.payload));
 
+/** Un panel escribió una orden en la pestaña (`command` es la de verdad,
+ *  sin el marco): la pestaña la apunta aunque no vea su Intro. */
+export const onCommandWritten = (
+    callback: (tabId: string, command: string) => void,
+): Promise<UnlistenFn> =>
+    listen<{ tabId: string; command: string }>('pty-command-written', (event) => callback(event.payload.tabId, event.payload.command));
+
 export const onExit = (callback: (tabId: string, code: number | null) => void): Promise<UnlistenFn> =>
     listen<ExitEvent>('pty-exit', (event) => callback(event.payload.tabId, event.payload.code));
 
@@ -787,6 +864,12 @@ export const onEnvironmentChanged = (
 
 /** La lista de entornos puede crecer sola después del arranque (p. ej. cuando
  *  Docker termina de arrancar y aparecen sus imágenes/contenedores). */
+/** Una IA pide algo con `wterminal --ctl` (14-11). */
+export const onAgentControl = (callback: (request: AgentControlRequest) => void): Promise<UnlistenFn> =>
+    listen<AgentControlRequest>('agent-control', (event) => callback(event.payload));
+/** Lo que se le contesta: hecho, o el motivo. */
+export const agentControlReply = (id: number, ok: boolean, text: string) =>
+    invokeLogged<void>('agent_control_reply', { id, ok, text });
 export const onEnvironmentsUpdated = (
     callback: (inventory: Inventory) => void
 ): Promise<UnlistenFn> => listen<Inventory>('envs-updated', (event) => callback(event.payload));

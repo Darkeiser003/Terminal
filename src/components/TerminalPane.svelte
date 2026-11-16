@@ -15,7 +15,7 @@
     import { alignSixelWithConpty } from '../lib/sixel-conpty';
     import { attachBannerImages, type BannerImageController } from '../lib/banner-image';
     import { invalidateLinkCache } from '../lib/link-cache';
-    import { AI_COMMAND_MIN_MS, aiCommandName, flattenCsiParams, FULL_SCREEN_MIN_COLS, fullScreenTransition, isAiCommandLine, isAiEnvironmentId, type FullScreenAppReason } from '../lib/full-screen-app';
+    import { AI_COMMAND_MIN_MS, aiCommandName, endsWithShellPrompt, environmentFullScreenReason, flattenCsiParams, FULL_SCREEN_MIN_COLS, fullScreenTransition, isAiCommandLine, isInteractivePythonCommandLine, type EnvironmentWidthOptions, type FullScreenAppReason } from '../lib/full-screen-app';
     import { columnAtTextIndex, comparePoints, contentEndColumn, inputSelectionEdit, promptInputStart, selectionSearchText, type BufferPoint, type InputSelectionEdit } from '../lib/input-selection';
     import { TERMINAL_LINK_REGEX, checkTerminalLink, isLinkActivation, linkRejectionMessageKey, type TerminalLinkScheme } from '../lib/terminal-links';
 
@@ -32,13 +32,15 @@
         interactiveReplInputLine,
         interactiveReplPromptIsVisible,
     } from '../lib/terminal-prompt';
-    import { cursorInactiveStyle, cursorOptions, terminalFont, terminalFontWeight, terminalTheme, themePreferencePatch } from '../lib/theme';
-    import { CommandTracker, formatDuration, outputRange, type CommandRecord } from '../lib/command-marks';
+    import { cursorInactiveStyle, cursorOptions, TERMINAL_FONT_DEFAULT, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, terminalFont, terminalFontWeight, terminalTheme, themePreferencePatch } from '../lib/theme';
+    import { CommandTracker, formatDuration, inferCmdExitCode, outputRange, type CommandRecord } from '../lib/command-marks';
     import {
         bufferText,
         outputFileName,
+        registerInputState,
         registerTerminal,
         registerTerminalControls,
+        unregisterInputState,
         unregisterTerminal,
         unregisterTerminalControls,
         type TerminalLineRejection,
@@ -97,6 +99,7 @@
     let startupEnvironmentId: string | undefined;
     let environmentSwitchSnapshot: EnvironmentSwitchSnapshot | undefined;
     let commandResizeUnlisten: (() => void) | undefined;
+    let commandWrittenUnlisten: (() => void) | undefined;
     // El cursor inactivo no debe depender de que xterm conserve el nodo que
     // anima. Un reloj estable en el host evita que el parpadeo se reinicie al
     // recrear la fila durante un reflow o al cambiar el foco.
@@ -135,6 +138,14 @@
     let terminalLinksEnabled: boolean | undefined;
     let linkDialog = $state<{ url: string; host: string; scheme: TerminalLinkScheme } | null>(null);
     let linkOpenButton = $state<HTMLButtonElement | undefined>(undefined);
+    // Una IA que acaba al abrirse pidiendo su clave de API (Grok, Codex…): la
+    // pestaña ofrece meterla (`ai_key_offer`). La clave solo vive en el campo
+    // mientras se escribe; se manda a cifrar y el campo se vacía.
+    let aiKeyOffer = $state<{ envId: string; envVar: string; stored: boolean; label: string } | null>(null);
+    let aiKeyEditing = $state(false);
+    let aiKeyValue = $state('');
+    let aiKeyError = $state('');
+    let aiKeySaving = $state(false);
     let linkNotice = $state<string | null>(null);
     // Una IA tecleada en una shell con líneas más anchas que la vista no
     // puede encoger (`setFullScreenApp`): se sugiere abrirla en su pestaña.
@@ -834,6 +845,64 @@
         writeInternal('Colores: #rrggbb · booleanos: on/off · cursor: block|underline|bar|beam|underline-thick');
     }
 
+    /** `:set`: cualquier ajuste por su nombre, para usarlo todo sin ratón.
+     *  `:set` o `:set list [texto]` los lista con su valor, `:set clave` lo
+     *  enseña y `:set clave valor` lo cambia. El nombre vale en camelCase
+     *  (`actionCommandsAtOnce`) o con guiones (`action-commands-at-once`).
+     *  El backend valida igual que en Ajustes: si no acepta el valor, el
+     *  ajuste se queda como estaba y se dice. Las listas y los objetos
+     *  (temas, perfiles…) se cambian en Ajustes. */
+    async function configurePreference(argument?: string): Promise<void> {
+        const preferences = app.preferences as unknown as Record<string, unknown> | null;
+        if (!preferences) return;
+        const tokens = (argument ?? '').trim().split(/\s+/).filter(Boolean);
+        const scalar = (value: unknown) => ['boolean', 'number', 'string'].includes(typeof value);
+        const keys = Object.keys(preferences).filter((key) => scalar(preferences[key])).sort();
+        const show = (value: unknown) => typeof value === 'boolean' ? (value ? 'on' : 'off') : JSON.stringify(value);
+        if (tokens.length === 0 || ['list', 'lista'].includes(tokens[0].toLowerCase())) {
+            const filter = foldLocalized(tokens.slice(1).join(' '), app.catalog.language);
+            const shown = keys.filter((key) => !filter || foldLocalized(key, app.catalog.language).includes(filter));
+            writeInternal(`\r\n${translated('terminal.setList', '{count} settings (:set <name> <value> to change one):', { count: String(shown.length) })}`);
+            for (const key of shown) writeInternal(`\r\n  ${key} = ${show(preferences[key])}`);
+            return;
+        }
+        const wanted = tokens[0].replace(/-([a-z])/gu, (_, letter: string) => letter.toUpperCase()).toLowerCase();
+        const key = keys.find((candidate) => candidate.toLowerCase() === wanted);
+        if (!key) {
+            writeInternal(`\r\n[${translated('terminal.setUnknown', 'Unknown setting «{name}». Use :set list.', { name: tokens[0] })}]`);
+            return;
+        }
+        const current = preferences[key];
+        const raw = tokens.slice(1).join(' ');
+        if (!raw) {
+            writeInternal(`\r\n${key} = ${show(current)}`);
+            return;
+        }
+        let value: unknown = raw;
+        if (typeof current === 'boolean') {
+            const lower = raw.toLowerCase();
+            if (['on', 'true', 'yes', 'si', 'sí', '1'].includes(lower)) value = true;
+            else if (['off', 'false', 'no', '0'].includes(lower)) value = false;
+            else {
+                writeInternal(`\r\n[${translated('terminal.setBoolean', 'Use on or off for {name}.', { name: key })}]`);
+                return;
+            }
+        } else if (typeof current === 'number') {
+            value = Number(raw.replace(',', '.'));
+            if (!Number.isFinite(value as number)) {
+                writeInternal(`\r\n[${translated('terminal.setNumber', '{name} needs a number.', { name: key })}]`);
+                return;
+            }
+        }
+        await app.savePreferences({ [key]: value } as unknown as Partial<Preferences>);
+        const saved = (app.preferences as unknown as Record<string, unknown> | null)?.[key];
+        if (saved !== value) {
+            writeInternal(`\r\n[${translated('terminal.setRejected', '{name} does not accept {value}; it stays at {current}.', { name: key, value: raw, current: show(saved) })}]`);
+            return;
+        }
+        writeInternal(`\r\n${translated('terminal.setDone', 'Setting updated: {name} = {value}.', { name: key, value: show(saved) })}`);
+    }
+
     async function configureTerminal(argument?: string): Promise<void> {
         const tokens = (argument ?? 'list').trim().split(/\s+/).filter(Boolean);
         const key = (tokens.shift() ?? 'list').toLowerCase();
@@ -866,7 +935,11 @@
             return;
         }
         let value: string | number | boolean = raw;
-        if (['terminalFontSize', 'terminalPadding', 'terminalScrollback', 'terminalScrollSensitivity'].includes(field)) {
+        if (field === 'terminalFontSize' && (raw === '+' || raw === '-')) {
+            // `:terminal font-size +|-`, lo mismo que sus atajos.
+            const current = Number(app.preferences?.terminalFontSize ?? TERMINAL_FONT_DEFAULT);
+            value = Math.min(TERMINAL_FONT_MAX, Math.max(TERMINAL_FONT_MIN, current + (raw === '+' ? 1 : -1)));
+        } else if (['terminalFontSize', 'terminalPadding', 'terminalScrollback', 'terminalScrollSensitivity'].includes(field)) {
             value = Number(raw);
             if (!Number.isInteger(value) || value <= 0) {
                 writeInternal('\r\n[Debe ser un número entero positivo.]');
@@ -1010,6 +1083,14 @@
             await configureLanguage(command.argument);
         } else if (command.action === 'terminal') {
             await configureTerminal(command.argument);
+        } else if (command.action === 'set') {
+            await configurePreference(command.argument);
+        } else if (command.action === 'chat') {
+            if (app.preferences?.agentChat === false) {
+                writeInternal(`\r\n[${app.t('agentChat.disabled', 'El chat de agentes está apagado en Ajustes.')}]`);
+            } else {
+                app.agentChatVisible = !app.agentChatVisible;
+            }
         } else if (command.action === 'panes') {
             await configurePanes(command.argument);
         } else if (command.action === 'openDirectory') {
@@ -1170,10 +1251,23 @@
     // terminal y conserva el orden exacto de las teclas después de todas las
     // barreras de geometría.
     let terminalInputQueue: Promise<void> = Promise.resolve();
+    // Época de la cola: sube al cambiar de entorno. Las teclas escritas para
+    // el programa anterior que aún esperaban sus barreras no se entregan al
+    // nuevo (build 51: el final de una orden de Python acabó en Node).
+    let terminalInputEpoch = 0;
     let pendingTerminalInputData = '';
     let pendingTerminalInputBarrier: Promise<void> = Promise.resolve();
     let terminalInputBatchTimer: number | undefined;
     const TERMINAL_INPUT_BATCH_MS = 12;
+    // Lotes enviados a la cola y aún sin entregar. Mientras uno espera sus
+    // barreras, las teclas nuevas se juntan en el siguiente lote en vez de
+    // encolarse de 12 en 12 ms: cada lote espera un ciclo de salida completo
+    // (eco y asentado), y con una línea larga en PowerShell, que repinta la
+    // línea entera a cada tecla, ese ciclo es de 50-700 ms. Medido el 13-11
+    // (`hidden-enter`): 34 lotes de la línea larga seguían en cola al pulsar
+    // Intro y salían a ~5 por segundo; el Intro iba detrás y `tab-tools`
+    // agotaba sus 15 s en las builds 56 y 58.
+    let terminalInputInFlight = 0;
     let pendingInputPtyColumns = 0;
     let inputPtyResizeRunning = false;
     // La primera medida local puede estar lista antes de que ConPTY reciba
@@ -1655,6 +1749,39 @@
         return resizeQueue;
     }
 
+    /** Diagnóstico de la cola de entrada (`__wtInputState`): la barrera en la
+     *  que espera el lote que va primero y cuántos lotes con Intro se han
+     *  encolado y enviado. Solo se lee; no cambia el orden ni los envíos. */
+    const inputDiagnostics = {
+        stage: 'idle',
+        stageSince: 0,
+        batchesQueued: 0,
+        batchesSent: 0,
+        batchesDropped: 0,
+        entersQueued: 0,
+        entersSent: 0,
+    };
+    function markInputStage(stage: string): void {
+        inputDiagnostics.stage = stage;
+        inputDiagnostics.stageSince = Date.now();
+    }
+    function readInputState(): Record<string, unknown> {
+        return {
+            ...inputDiagnostics,
+            stageMs: inputDiagnostics.stageSince ? Date.now() - inputDiagnostics.stageSince : 0,
+            pendingBatchBytes: pendingTerminalInputData.length,
+            inFlight: terminalInputInFlight,
+            inputReady,
+            outputInputBlocked,
+            outputGeometryPending,
+            terminalOutputBusy,
+            inputPtyResizeRunning,
+            fullScreenApp,
+            visibility: typeof document !== 'undefined' ? document.visibilityState : null,
+            focus: typeof document !== 'undefined' ? document.hasFocus() : null,
+        };
+    }
+
     function flushTerminalInputBatch(): void {
         terminalInputBatchTimer = undefined;
         const data = pendingTerminalInputData;
@@ -1662,23 +1789,70 @@
         pendingTerminalInputData = '';
         pendingTerminalInputBarrier = Promise.resolve();
         if (!data) return;
+        const epoch = terminalInputEpoch;
+        const hasEnter = /[\r\n]/u.test(data);
+        inputDiagnostics.batchesQueued += 1;
+        if (hasEnter) inputDiagnostics.entersQueued += 1;
         terminalInputQueue = terminalInputQueue
             .catch(() => undefined)
-            .then(() => inputBarrier)
-            .then(() => outputInputReady)
-            .then(() => outputGeometryReady)
-            .then(() => activationGeometryReady)
+            .then(() => {
+                markInputStage('inputBarrier');
+                return inputBarrier;
+            })
+            .then(() => {
+                markInputStage('outputInputReady');
+                return outputInputReady;
+            })
+            .then(() => {
+                markInputStage('outputGeometryReady');
+                return outputGeometryReady;
+            })
+            .then(() => {
+                markInputStage('activationGeometryReady');
+                return activationGeometryReady;
+            })
             // Leer la cola al final incluye un resize de layout que se haya
             // programado mientras se asentaban las barreras anteriores; si aún
             // esperaba su debounce, se envía ahora, antes que las teclas.
             .then(() => {
+                markInputStage('resizeQueue');
                 flushPendingPtyResize();
                 return resizeQueue;
             })
-            .then(() => api.sendInput(tabId, data))
+            .then(() => {
+                markInputStage('sendInput');
+                if (epoch !== terminalInputEpoch) {
+                    inputDiagnostics.batchesDropped += 1;
+                    return undefined;
+                }
+                return api.sendInput(tabId, data).then(() => {
+                    inputDiagnostics.batchesSent += 1;
+                    if (hasEnter) inputDiagnostics.entersSent += 1;
+                });
+            })
+            .then(() => markInputStage('idle'))
             .catch((error) => {
+                markInputStage('error');
                 if (!destroyed) console.debug('[TerminalPane] entrada encolada omitida', error);
+            })
+            .finally(() => {
+                terminalInputInFlight = Math.max(0, terminalInputInFlight - 1);
+                // Lo que se juntó mientras este lote esperaba sale ahora, en
+                // un solo lote y detrás de él.
+                if (!destroyed && pendingTerminalInputData) scheduleTerminalInputFlush();
             });
+        terminalInputInFlight += 1;
+    }
+
+    /** Programa el envío del lote pendiente, salvo que otro lote siga
+     *  esperando sus barreras: entonces lo nuevo se junta con lo pendiente y
+     *  sale cuando aquel se entregue (ver `terminalInputInFlight`). */
+    function scheduleTerminalInputFlush(): void {
+        if (terminalInputBatchTimer !== undefined || terminalInputInFlight > 0) return;
+        terminalInputBatchTimer = window.setTimeout(
+            () => flushTerminalInputBatch(),
+            TERMINAL_INPUT_BATCH_MS,
+        );
     }
 
     function enqueueTerminalInput(data: string, inputBarrier: Promise<void>): void {
@@ -1690,12 +1864,7 @@
         pendingTerminalInputBarrier = pendingTerminalInputBarrier
             .catch(() => undefined)
             .then(() => inputBarrier);
-        if (terminalInputBatchTimer === undefined) {
-            terminalInputBatchTimer = window.setTimeout(
-                () => flushTerminalInputBatch(),
-                TERMINAL_INPUT_BATCH_MS,
-            );
-        }
+        scheduleTerminalInputFlush();
     }
 
     // Un comando interno se intercepta al recibir Enter, mientras que las
@@ -1706,10 +1875,11 @@
     // `cursor-blink = true.`). Drenar la cola antes de limpiar hace que el
     // borrado y la salida interna formen una única secuencia ordenada.
     async function flushTerminalInputBeforeInternal(): Promise<void> {
-        if (terminalInputBatchTimer !== undefined) {
-            window.clearTimeout(terminalInputBatchTimer);
-            flushTerminalInputBatch();
-        }
+        // Puede haber teclas juntándose sin temporizador (otro lote esperaba
+        // sus barreras): salen ya, detrás de él.
+        if (terminalInputBatchTimer !== undefined) window.clearTimeout(terminalInputBatchTimer);
+        terminalInputBatchTimer = undefined;
+        if (pendingTerminalInputData) flushTerminalInputBatch();
         await terminalInputQueue.catch(() => undefined);
     }
 
@@ -2957,8 +3127,9 @@
         // Al pulsar Intro la línea es `…>amp`, que no es un prompt vacío: no
         // hace falta esperar para retirar el aviso.
         if (aiTabHint && shellPromptAtCursor()) aiTabHint = null;
-        // La IA tecleada terminó cuando la shell vuelve a enseñar su prompt.
-        if (fullScreenAppReason === 'ai-command'
+        // La IA (o el Python) tecleada terminó cuando la shell vuelve a
+        // enseñar su prompt.
+        if (endsWithShellPrompt(fullScreenAppReason)
             && Date.now() - fullScreenAppSince > AI_COMMAND_MIN_MS
             && shellPromptAtCursor()) {
             setFullScreenApp(null);
@@ -3272,9 +3443,10 @@
         environmentSwitchRequestId = detail.requestId;
         startupEnvironmentId = detail.envId;
         armStartupHint();
-        // Una IA ocupa la pestaña entera; cualquier otro entorno empieza como
-        // shell aunque el anterior dejara la pantalla alternativa activa.
-        setFullScreenApp(isAiEnvironmentId(detail.envId) ? 'ai-environment' : null);
+        // Una IA (o Python en Windows) ocupa la pestaña entera; cualquier
+        // otro entorno empieza como shell aunque el anterior dejara la
+        // pantalla alternativa activa.
+        setFullScreenApp(environmentFullScreenReason(detail.envId, environmentWidthOptions()));
         if (!environmentSwitchPending) {
             environmentSwitchSnapshot = {
                 inputReady,
@@ -3318,6 +3490,16 @@
         mirroredLine = '';
         userEditing = false;
         queuedInput = '';
+        // Lo tecleado para el programa anterior (en el lote de 12 ms o en la
+        // cola esperando sus barreras) no se entrega al nuevo.
+        terminalInputEpoch += 1;
+        if (terminalInputBatchTimer !== undefined) window.clearTimeout(terminalInputBatchTimer);
+        terminalInputBatchTimer = undefined;
+        pendingTerminalInputData = '';
+        pendingTerminalInputBarrier = Promise.resolve();
+        // Los lotes de la época anterior ya no cuentan: no deben retener lo
+        // que se escriba en la shell nueva.
+        terminalInputInFlight = 0;
         inputReady = false;
         if (host) host.dataset.startupReady = 'false';
         inputReleaseFallbackDeadline = 0;
@@ -3658,6 +3840,87 @@
         return typeLineFromApp(line, false);
     }
 
+    /** Las últimas filas del buffer, hasta el cursor: lo que dijo la IA al
+     *  acabar y el aviso de «Proceso finalizado». */
+    function lastRowsText(count: number): string {
+        if (!term) return '';
+        const buffer = term.buffer.active;
+        const end = buffer.baseY + buffer.cursorY;
+        const rows: string[] = [];
+        for (let row = Math.max(0, end - count); row <= end; row += 1) {
+            rows.push(buffer.getLine(row)?.translateToString(true) ?? '');
+        }
+        return rows.join('\n');
+    }
+
+    /** La pestaña acabó: si es una IA que pedía su clave, ofrecer meterla. */
+    async function onTerminalExited(event: Event): Promise<void> {
+        const detail = (event as CustomEvent<{ tabId: string; code: number | null }>).detail;
+        if (detail?.tabId !== tabId || detail.code === 0 || detail.code === null) return;
+        if (app.preferences?.aiKeyOffer === false) return;
+        const envId = String(app.tabs.find((tab) => tab.id === tabId)?.envId ?? startupEnvironmentId ?? '');
+        if (!envId.startsWith('ai:')) return;
+        try {
+            const offer = await api.aiKeyOffer(envId, lastRowsText(30));
+            if (!offer || destroyed) return;
+            const environment = app.environments.find((candidate) => candidate.id === envId);
+            aiKeyOffer = { envId, envVar: offer.envVar, stored: offer.stored, label: String(environment?.label ?? envId.slice(3)) };
+            aiKeyEditing = false;
+            aiKeyValue = '';
+            aiKeyError = '';
+        } catch {
+            // Sin oferta: la pestaña se queda como estaba, con su aviso.
+        }
+    }
+
+    function onAiKeyEnvironmentSwitch(event: Event): void {
+        if ((event as CustomEvent<{ tabId: string }>).detail?.tabId === tabId) dismissAiKeyOffer();
+    }
+
+    function dismissAiKeyOffer(): void {
+        aiKeyOffer = null;
+        aiKeyEditing = false;
+        aiKeyValue = '';
+        aiKeyError = '';
+    }
+
+    async function saveAiKey(): Promise<void> {
+        const offer = aiKeyOffer;
+        if (!offer || aiKeySaving) return;
+        const key = aiKeyValue;
+        aiKeyValue = '';
+        aiKeySaving = true;
+        try {
+            const result = await api.aiKeySave(offer.envId, key);
+            if (!result.ok) {
+                aiKeyError = result.error === 'store' || result.error === 'unsupported'
+                    ? app.t('terminal.aiKeyStoreFailed', 'No se pudo guardar la clave.')
+                    : app.t('terminal.aiKeyInvalid', 'Esa clave no vale: no puede estar vacía ni llevar espacios.');
+                return;
+            }
+            dismissAiKeyOffer();
+            // La pestaña vuelve a abrir la IA, ahora con su clave como
+            // variable de entorno.
+            await app.switchEnvironment(tabId, offer.envId);
+        } catch {
+            aiKeyError = app.t('terminal.aiKeyStoreFailed', 'No se pudo guardar la clave.');
+        } finally {
+            aiKeySaving = false;
+        }
+    }
+
+    function onAiKeyInputKeydown(event: KeyboardEvent): void {
+        // Las teclas del campo no deben llegar a la terminal ni a los atajos.
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            void saveAiKey();
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            dismissAiKeyOffer();
+        }
+    }
+
     function paneIsRepl(): boolean {
         const tab = app.tabs.find((candidate) => candidate.id === tabId);
         const environmentId = String(startupEnvironmentId ?? tab?.envId ?? '');
@@ -3912,12 +4175,30 @@
             : currentDisplayCols();
     }
 
+    /** Lo que decide si el entorno de la pestaña usa el ancho visible. */
+    function environmentWidthOptions(): EnvironmentWidthOptions {
+        return {
+            windows: app.appInfo?.platform === 'windows',
+            pythonVisibleWidth: app.preferences?.pythonReplVisibleWidth !== false,
+        };
+    }
+
+    /** La fila del cursor empieza por el prompt de una shell (`C:\…>`,
+     *  `PS …>`, `usuario@equipo:~$`): lo que se envía es una orden y no una
+     *  línea de un REPL. */
+    function cursorRowIsShellInput(): boolean {
+        if (!term) return false;
+        const buffer = term.buffer.active;
+        if (buffer.type !== 'normal') return false;
+        return isShellInputLine(buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true) ?? '');
+    }
+
     function setFullScreenApp(reason: FullScreenAppReason | null): void {
         if (reason === fullScreenAppReason) return;
         // Lanzado desde una shell, solo se encoge si nada de lo que hay en
         // pantalla se va a partir. Si no, la pestaña sigue con la reserva y
         // lo indicado es abrir la IA en su propia pestaña (`ai:*`).
-        if ((reason === 'alternate-screen' || reason === 'ai-command')
+        if ((reason === 'alternate-screen' || reason === 'ai-command' || reason === 'python-command')
             && shellViewportHasLinesWiderThan(Math.max(FULL_SCREEN_MIN_COLS, measuredVisibleColumns()))) {
             perf.mark('terminal.full-screen-app', { tabId, active: false, reason, skipped: 'wide-lines-on-screen' });
             if (host) host.dataset.fullScreenSkipped = reason;
@@ -4782,9 +5063,14 @@
         };
         term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, watchPrivateMode(true));
         term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, watchPrivateMode(false));
-        if (isAiEnvironmentId(app.tabs.find((tab) => tab.id === tabId)?.envId)) {
-            fullScreenAppReason = 'ai-environment';
+        const environmentReason = environmentFullScreenReason(
+            app.tabs.find((tab) => tab.id === tabId)?.envId,
+            environmentWidthOptions(),
+        );
+        if (environmentReason) {
+            fullScreenAppReason = environmentReason;
             fullScreenApp = true;
+            if (host) host.dataset.fullScreenApp = environmentReason;
         }
         searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
             if (resultCount === 0 && searchQuery && visibleRowsSearch(searchQuery)) {
@@ -5131,6 +5417,15 @@
                 // dibujar su primera pantalla.
                 if (fullScreenAppReason === null && isAiCommandLine(submittedCommand)) {
                     setFullScreenApp('ai-command');
+                } else if (fullScreenAppReason === null
+                    && isInteractivePythonCommandLine(submittedCommand)
+                    && cursorRowIsShellInput()) {
+                    // El REPL de Python, también tecleado en cmd o PowerShell:
+                    // con la reserva de 1024 columnas cada tecla costaba un
+                    // repintado enorme (`full-screen-app.ts`). Solo desde el
+                    // prompt de una shell, no desde otro REPL.
+                    const options = environmentWidthOptions();
+                    if (options.windows && options.pythonVisibleWidth) setFullScreenApp('python-command');
                 }
             }
             else if (terminators.length > 1) mirroredLine = /[\r\n]$/.test(mirroredLineData) ? '' : null;
@@ -5277,7 +5572,8 @@
         document.addEventListener('visibilitychange', onDocumentVisibilityChange);
 
         registerTerminal(tabId, term);
-        registerTerminalControls(tabId, { openSearch, saveOutput, copyLastOutput, jumpToCommand, submitLine: submitLineFromApp, insertLine: insertLineFromApp });
+        registerTerminalControls(tabId, { openSearch, saveOutput, copyLastOutput, jumpToCommand, submitLine: submitLineFromApp, insertLine: insertLineFromApp, lastCommandContext });
+        registerInputState(tabId, readInputState);
         commandTracker = new CommandTracker((offset) => term?.registerMarker(offset), () => Date.now());
         term.parser.registerOscHandler(133, (data) => {
             if (host) host.dataset.commandMarksSeen = String(Number(host.dataset.commandMarksSeen ?? 0) + 1);
@@ -5305,9 +5601,18 @@
         window.addEventListener('winslim:environment-switch-requested', onEnvironmentSwitchRequested);
         window.addEventListener('winslim:environment-switch-cancelled', onEnvironmentSwitchCancelled);
         window.addEventListener('winslim:open-current-directory', onOpenCurrentDirectory);
+        window.addEventListener('winslim:terminal-exited', onTerminalExited);
+        window.addEventListener('winslim:environment-switch-started', onAiKeyEnvironmentSwitch);
         void api.onCommandResize(onProgrammaticCommandResize).then((unlisten) => {
             if (destroyed) unlisten();
             else commandResizeUnlisten = unlisten;
+        });
+        // Lo que escribe un botón cuenta como orden: marca, chat y consejero.
+        void api.onCommandWritten((target, command) => {
+            if (target === tabId) commandTracker?.appCommand(command);
+        }).then((unlisten) => {
+            if (destroyed) unlisten();
+            else commandWrittenUnlisten = unlisten;
         });
 
         // Algunas instalaciones de cmd tardan varios segundos en terminar
@@ -5489,10 +5794,15 @@
         window.removeEventListener('winslim:environment-switch-started', onEnvironmentSwitchStarted);
         window.removeEventListener('winslim:environment-switch-requested', onEnvironmentSwitchRequested);
         window.removeEventListener('winslim:environment-switch-cancelled', onEnvironmentSwitchCancelled);
+        window.removeEventListener('winslim:terminal-exited', onTerminalExited);
+        window.removeEventListener('winslim:environment-switch-started', onAiKeyEnvironmentSwitch);
         window.removeEventListener('winslim:open-current-directory', onOpenCurrentDirectory);
         commandResizeUnlisten?.();
         commandResizeUnlisten = undefined;
+        commandWrittenUnlisten?.();
+        commandWrittenUnlisten = undefined;
         unregisterTerminalControls(tabId);
+        unregisterInputState(tabId);
         unregisterTerminal(tabId);
         bannerImages?.dispose();
         bannerImages = undefined;
@@ -5659,12 +5969,63 @@
             .replace('{time}', time);
     }
 
+    /** El aviso del modo consejero: la orden que falló y su código. Se va
+     *  solo a los 15 s o con la siguiente orden que salga bien. */
+    let agentAdvice = $state<{ code: number } | null>(null);
+    let agentAdviceTimer: ReturnType<typeof setTimeout> | undefined;
+    /** Sube con cada orden terminada: la lista de agentes llega tarde y no
+     *  puede sacar el aviso de un fallo que ya tapó otra orden. */
+    let agentAdviceSeq = 0;
+    function showAgentAdvice(code: number): void {
+        // Viene encendido de fábrica (13-11): sin ningún agente instalado al
+        // que preguntar, ofrecerlo solo molestaría.
+        const seq = ++agentAdviceSeq;
+        void api.agentChatAgents().then((agents) => {
+            // Solo los que contestan desde el chat: la lista trae también las IA
+            // que solo se abren en su pestaña.
+            if (seq !== agentAdviceSeq || !agents.some((agent) => agent.chat)) return;
+            agentAdvice = { code };
+            clearTimeout(agentAdviceTimer);
+            agentAdviceTimer = setTimeout(() => { agentAdvice = null; }, 15_000);
+        }).catch(() => {});
+    }
+    function askAgentAboutFailure(): void {
+        agentAdvice = null;
+        app.agentChatDraft = {
+            text: app.t('agentChat.adviceQuestion', 'Esta orden ha fallado. ¿Por qué y cómo lo arreglo?'),
+            withContext: true,
+        };
+        app.agentChatVisible = true;
+    }
+
+    /** El texto de Windows para una orden que no existe en cmd (se pide al
+     *  montar la pestaña; null fuera de Windows o hasta que llegue). */
+    let cmdNotFound: string | null = null;
+    void api.cmdNotFoundText().then((text) => { cmdNotFound = text; });
+
+    /** La salida de una orden ya cerrada (como mucho sus últimas 200 filas). */
+    function recordOutput(record: CommandRecord): string {
+        const buffer = term?.buffer.normal;
+        if (!buffer) return '';
+        const range = outputRange(record, (line) => buffer.getLine(line)?.isWrapped ?? false);
+        return range ? bufferText(buffer, Math.max(range[0], range[1] - 199), range[1]).trimEnd() : '';
+    }
+
     function onCommandFinished(record: CommandRecord): void {
         if (!term) return;
+        // cmd no da el código en su marca: una orden que no existe se reconoce
+        // por el mensaje de Windows y cuenta como fallida (9009, su ERRORLEVEL).
+        if (record.exitCode === null && cmdNotFound) {
+            const envId = app.tabs.find((tab) => tab.id === tabId)?.envId;
+            if (app.environments.find((environment) => environment.id === envId)?.kind === 'cmd') {
+                record.exitCode = inferCmdExitCode(recordOutput(record), cmdNotFound);
+            }
+        }
         if (host) {
             host.dataset.commandCount = String(Number(host.dataset.commandCount ?? 0) + 1);
             host.dataset.lastExitCode = String(record.exitCode);
             host.dataset.lastDurationMs = String(record.durationMs);
+            host.dataset.lastCommandFromApp = record.command ? '1' : '0';
         }
         if (record.exitCode !== null && record.exitCode !== 0) {
             const summary = commandSummary(record);
@@ -5672,6 +6033,14 @@
                 element.classList.add('command-failed');
                 element.title = summary;
             });
+            // Modo consejero (encendido de fábrica): ofrecer preguntar al
+            // agente por este fallo. Solo lo ofrece; preguntar es del usuario.
+            if (app.preferences?.agentChatAdvisor === true && app.preferences.agentChat !== false) {
+                showAgentAdvice(record.exitCode);
+            }
+        } else {
+            agentAdviceSeq += 1;
+            agentAdvice = null;
         }
         if ((record.durationMs ?? 0) < LONG_COMMAND_MS) return;
         showTerminalNotice(commandSummary(record));
@@ -5698,6 +6067,19 @@
         }
         void api.writeClipboard(bufferText(buffer, range[0], range[1]).trimEnd());
         showTerminalNotice(app.t('terminal.outputCopied', 'Salida de la última orden copiada'));
+    }
+
+    /** Para el chat de agentes: la última orden, su salida (como mucho las
+     *  últimas 200 líneas) y su código. Solo se lee; no se manda nada. */
+    function lastCommandContext(): { command: string; output: string; exitCode: number | null } | null {
+        const buffer = term?.buffer.normal;
+        const record = commandTracker?.lastFinished() ?? null;
+        if (!buffer || !record) return null;
+        const inputRow = record.input?.line ?? record.prompt.line;
+        // Una orden de un botón lleva la suya: en pantalla está su marco (o
+        // nada, cmd borra la línea tecleada).
+        const command = record.command ?? (buffer.getLine(inputRow)?.translateToString(true) ?? '').slice(record.inputColumn).trim();
+        return { command, output: recordOutput(record), exitCode: record.exitCode };
     }
 
     function jumpToCommand(direction: 'previous' | 'next'): void {
@@ -5939,6 +6321,51 @@
     {#if startupHintVisible}
         <div class="startup-hint" role="status" data-testid="terminal-startup-hint">
             {app.t('terminal.starting', 'Arrancando {name}…').replace('{name}', app.tabs.find((tab) => tab.id === tabId)?.label ?? '')}
+        </div>
+    {/if}
+    {#if agentAdvice && active}
+        <!-- Modo consejero: la orden falló; preguntar al agente es un clic,
+             pero nunca se pregunta solo. -->
+        <div class="agent-advice" role="status" data-testid="agent-chat-advice">
+            <span>{app.t('agentChat.advice', 'La orden falló (código {code}). ¿Preguntas al agente?').replace('{code}', String(agentAdvice.code))}</span>
+            <button type="button" data-testid="agent-chat-advice-ask" onclick={askAgentAboutFailure}>{app.t('agentChat.adviceAsk', 'Preguntar')}</button>
+            <button type="button" class="dismiss" aria-label={app.t('common.close', 'Cerrar')} onclick={() => { agentAdvice = null; }}>×</button>
+        </div>
+    {/if}
+    {#if aiKeyOffer}
+        <!-- Una IA que acabó pidiendo su clave de API: meterla desde aquí. -->
+        <div class="ai-key-offer" role="dialog" aria-label={aiKeyOffer.label} data-testid="ai-key-offer" data-env-var={aiKeyOffer.envVar}>
+            <strong>{(aiKeyOffer.stored
+                ? app.t('terminal.aiKeyRejected', '{name} no acepta la clave guardada ({var}).')
+                : app.t('terminal.aiKeyNeeded', '{name} necesita una clave de API ({var}).'))
+                .replace('{name}', aiKeyOffer.label).replace('{var}', aiKeyOffer.envVar)}</strong>
+            {#if aiKeyEditing}
+                <input
+                    type="password"
+                    class="ai-key-input"
+                    data-testid="ai-key-input"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder={app.t('terminal.aiKeyPlaceholder', 'Pega aquí tu clave')}
+                    bind:value={aiKeyValue}
+                    onkeydown={onAiKeyInputKeydown}
+                />
+                <small>{app.t('terminal.aiKeyNote', 'Se guarda cifrada para tu usuario de Windows y solo se pasa a esta IA al abrirla. Puedes apagar este aviso en Ajustes.')}</small>
+                {#if aiKeyError}<small class="ai-key-error" data-testid="ai-key-error">{aiKeyError}</small>{/if}
+                <div class="ai-key-actions">
+                    <button type="button" data-testid="ai-key-cancel" onclick={dismissAiKeyOffer}>{app.t('terminal.aiKeyCancel', 'Cancelar')}</button>
+                    <button type="button" class="primary" data-testid="ai-key-save" disabled={aiKeySaving || !aiKeyValue.trim()} onclick={() => void saveAiKey()}>
+                        {app.t('terminal.aiKeySave', 'Guardar y volver a abrir')}
+                    </button>
+                </div>
+            {:else}
+                <div class="ai-key-actions">
+                    <button type="button" data-testid="ai-key-dismiss" onclick={dismissAiKeyOffer}>{app.t('terminal.aiKeyDismiss', 'Ahora no')}</button>
+                    <button type="button" class="primary" data-testid="ai-key-enter" onclick={() => { aiKeyEditing = true; }}>
+                        {aiKeyOffer.stored ? app.t('terminal.aiKeyChange', 'Cambiar la clave…') : app.t('terminal.aiKeyEnter', 'Introducir la clave…')}
+                    </button>
+                </div>
+            {/if}
         </div>
     {/if}
     <div
@@ -6497,6 +6924,103 @@
         inset: 0;
         z-index: 62;
         background: rgb(0 0 0 / 35%);
+    }
+
+    .agent-advice {
+        position: absolute;
+        z-index: 4;
+        right: 12px;
+        bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+        box-shadow: 0 6px 18px rgb(0 0 0 / 40%);
+        color: var(--text);
+        font-size: 12px;
+    }
+
+    .agent-advice button {
+        padding: 3px 10px;
+        border: 1px solid var(--accent);
+        border-radius: 4px;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+    }
+
+    .agent-advice button.dismiss {
+        padding: 0 6px;
+        border-color: transparent;
+        background: transparent;
+        color: var(--muted);
+    }
+
+    /* Dentro de la pestaña, arriba: no tapa el aviso de la IA ni el de
+       «Proceso finalizado», que quedan debajo. */
+    .ai-key-offer {
+        position: absolute;
+        z-index: 4;
+        top: 8px;
+        right: 12px;
+        display: flex;
+        width: min(460px, calc(100% - 24px));
+        flex-direction: column;
+        gap: 8px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+        box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+        color: var(--text);
+        font-size: 12px;
+    }
+
+    .ai-key-offer small {
+        color: var(--muted);
+    }
+
+    .ai-key-offer .ai-key-error {
+        color: var(--danger, #f87171);
+    }
+
+    .ai-key-input {
+        padding: 5px 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--terminal-bg);
+        color: var(--text);
+        font: 12px var(--terminal-font, monospace);
+    }
+
+    .ai-key-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+    }
+
+    .ai-key-actions button {
+        min-width: 84px;
+        padding: 5px 12px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text);
+        cursor: pointer;
+    }
+
+    .ai-key-actions button.primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+    }
+
+    .ai-key-actions button:disabled {
+        cursor: default;
+        opacity: 0.5;
     }
 
     .link-dialog {

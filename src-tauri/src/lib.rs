@@ -205,6 +205,36 @@ fn startup_elevated() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // La guía para los agentes de IA (14-11): la imprime y sale, sin ventana
+    // ni ajustes. Un agente que puede ejecutar órdenes la pide así; el chat
+    // se lo dice en su resumen.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        // `wterminal --ctl <orden>`: la manda al WTerminal que lanzó a esta IA
+        // (14-11) y sale, sin ventana.
+        if let Some(position) = args
+            .iter()
+            .position(|argument| argument == app::agent_control::CTL_ARG)
+        {
+            std::process::exit(app::agent_control::run_cli(&args[position + 1..]));
+        }
+        if let Some(position) = args
+            .iter()
+            .position(|argument| argument == environments::agent_guide::AGENT_GUIDE_ARG)
+        {
+            use std::io::Write;
+            let (text, code) = match environments::agent_guide::guide(
+                args.get(position + 1).map(String::as_str),
+            ) {
+                Ok(text) => (text, 0),
+                Err(error) => (error, 2),
+            };
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(text.as_bytes());
+            let _ = stdout.flush();
+            std::process::exit(code);
+        }
+    }
     // El desinstalador llama al ejecutable solo para limpiar lo registrado en
     // el perfil del usuario: sin ventana, sin migraciones y sin tocar ajustes.
     #[cfg(windows)]
@@ -446,6 +476,18 @@ pub fn run() {
             toolchain_store::toolchain_store_status,
             terminal::shell_assist::shell_assist_status,
             terminal::links::terminal_open_link,
+            environments::ai_keys::ai_key_offer,
+            environments::ai_keys::ai_key_save,
+            environments::ai_keys::ai_key_clear,
+            environments::ai_keys::ai_key_list,
+            environments::agent_chat::agent_chat_agents,
+            environments::agent_chat::agent_chat_ask,
+            environments::agent_chat::agent_chat_cancel,
+            environments::agent_chat::agent_chat_read_attachment,
+            environments::agent_chat::agent_chat_failure_help,
+            environments::agent_chat::agent_chat_models,
+            app::agent_control::agent_control_reply,
+            terminal::cmd_failure::cmd_not_found_text,
             toolchain_store::toolchain_store_external_sizes,
             toolchain_store::toolchain_store_clear_caches,
             store_adopt::store_adopt_candidates,
@@ -559,6 +601,8 @@ pub fn run() {
             let setup_started = Instant::now();
             let state = app.state::<std::sync::Arc<AppState>>();
             state.tabs.attach_app(app.handle());
+            // El control de las IA (`wterminal --ctl`, 14-11), si está encendido.
+            app::agent_control::start(app.handle().clone());
 
             // Lo elegido en la página de componentes del instalador, una vez
             // por usuario y antes de añadirse al PATH de fábrica.
@@ -680,6 +724,8 @@ fn run_wine_headless_smoke(state: &std::sync::Arc<AppState>, startup_started: In
             args: &environment.args,
             cwd: &cwd,
             viewport: pty::Viewport::default(),
+            coalesce: false,
+            extra_env: &[],
         },
         move |event| {
             if let crate::stream::PtyEvent::Data(text) = event {

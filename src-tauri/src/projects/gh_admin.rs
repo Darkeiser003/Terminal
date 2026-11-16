@@ -5,7 +5,8 @@
 //!   estándar de `gh secret set`, nunca en los argumentos ni en el registro),
 //!   variables y entornos.
 //! - **Configuración**: colaboradores, webhooks, claves de despliegue, Pages y
-//!   protección de ramas.
+//!   protección de ramas (antes de cambiarla se lee la que hay: el PUT la
+//!   sustituye entera y se conserva lo que el panel no gestiona).
 //! - **Seguridad**: alertas de Dependabot, de code scanning y de secret
 //!   scanning, y activar las alertas de vulnerabilidades.
 //! - **Comunidad**: el perfil de comunidad (README, licencia, CONTRIBUTING…).
@@ -121,6 +122,11 @@ pub fn needs_scope(error: &str) -> bool {
 
 fn not_found(error: &str) -> bool {
     error.contains("HTTP 404") || error.to_ascii_lowercase().contains("not found")
+}
+
+/// `gh` dice que la rama no tiene protección (o que no existe).
+fn unprotected(error: &str) -> bool {
+    not_found(error) || error.contains("Branch not protected")
 }
 
 // ---- Validación ----
@@ -457,6 +463,10 @@ pub fn parse_list(area: Area, json: &str) -> AdminList {
                     .map(str::to_string)
             }),
         }],
+        // El panel rellena su formulario con `reviews`, `enforceAdmins` y
+        // `linearHistory`: su `detail` es el valor tal cual de la API (vacío
+        // si la rama no lo tiene). Las demás filas enseñan lo que «Proteger»
+        // conserva sin tocarlo.
         Area::Protection => vec![
             AdminRow {
                 id: "reviews".into(),
@@ -483,6 +493,45 @@ pub fn parse_list(area: Area, json: &str) -> AdminList {
                 id: "forcePushes".into(),
                 title: "Permite force push".into(),
                 detail: text(&value, "/allow_force_pushes/enabled"),
+                ..AdminRow::default()
+            },
+            AdminRow {
+                id: "statusChecks".into(),
+                title: "Comprobaciones obligatorias".into(),
+                detail: {
+                    let checks: Vec<&str> = match value.pointer("/required_status_checks/checks") {
+                        Some(Value::Array(checks)) => checks
+                            .iter()
+                            .filter_map(|check| check.get("context").and_then(Value::as_str))
+                            .collect(),
+                        _ => array(&value, "/required_status_checks/contexts")
+                            .into_iter()
+                            .filter_map(Value::as_str)
+                            .collect(),
+                    };
+                    clean_line(&checks.join(", "), 300)
+                },
+                ..AdminRow::default()
+            },
+            AdminRow {
+                id: "codeOwners".into(),
+                title: "Revisión de CODEOWNERS".into(),
+                detail: text(
+                    &value,
+                    "/required_pull_request_reviews/require_code_owner_reviews",
+                ),
+                ..AdminRow::default()
+            },
+            AdminRow {
+                id: "conversationResolution".into(),
+                title: "Conversaciones resueltas".into(),
+                detail: text(&value, "/required_conversation_resolution/enabled"),
+                ..AdminRow::default()
+            },
+            AdminRow {
+                id: "deletions".into(),
+                title: "Permite borrar la rama".into(),
+                detail: text(&value, "/allow_deletions/enabled"),
                 ..AdminRow::default()
             },
         ],
@@ -594,7 +643,7 @@ pub fn parse_list(area: Area, json: &str) -> AdminList {
 fn note_for(area: Area, error: &str) -> Option<String> {
     match area {
         Area::Pages if not_found(error) => Some("GitHub Pages no está activado en este repositorio.".into()),
-        Area::Protection if not_found(error) || error.contains("Branch not protected") => {
+        Area::Protection if unprotected(error) => {
             Some("La rama no está protegida.".into())
         }
         Area::Dependabot | Area::CodeScanning | Area::SecretScanning
@@ -720,7 +769,9 @@ pub enum AdminAction {
     #[serde(rename_all = "camelCase")]
     ProtectionSet {
         branch: String,
-        reviews: u8,
+        /// Aprobaciones que pide cada pull request (0 a 6); `None` si la rama
+        /// no exige pull request.
+        reviews: Option<u8>,
         enforce_admins: bool,
         linear_history: bool,
     },
@@ -762,10 +813,21 @@ fn plan(args: Vec<String>, message: impl Into<String>) -> Plan {
     }
 }
 
+/// Un campo de `gh api`. Cada uno dice lo que es en vez de adivinarlo por el
+/// valor: un título «2025» o una rama «2024» son texto, y GitHub contesta 422
+/// si le llegan como número.
+#[derive(Debug, Clone, PartialEq)]
+enum Field {
+    /// `-f`: texto tal cual.
+    Text(String),
+    /// `-F`: `gh` lo convierte en booleano de JSON.
+    Bool(bool),
+}
+
 fn api_call(
     method: &str,
     path: String,
-    fields: &[(&str, String)],
+    fields: &[(&str, Field)],
     message: impl Into<String>,
 ) -> Plan {
     let mut args = strings(&[
@@ -776,12 +838,10 @@ fn api_call(
         "Accept: application/vnd.github+json",
         &path,
     ]);
-    for (key, value) in fields {
-        // `-f` manda texto; `-F` convierte true/false y números.
-        let flag = if value == "true" || value == "false" || value.parse::<u64>().is_ok() {
-            "-F"
-        } else {
-            "-f"
+    for (key, field) in fields {
+        let (flag, value) = match field {
+            Field::Text(value) => ("-f", value.clone()),
+            Field::Bool(flag) => ("-F", flag.to_string()),
         };
         args.push(flag.to_string());
         args.push(format!("{key}={value}"));
@@ -789,8 +849,158 @@ fn api_call(
     plan(args, message)
 }
 
-/// Traduce cada cambio a su orden de `gh`. Puro: se prueba sin `gh`.
-pub fn action_plan(full_name: &str, action: &AdminAction) -> Result<Plan, String> {
+/// Lo que ya hay en GitHub y cambia la orden. `act` lo averigua antes de
+/// llamar a [`action_plan`], que así sigue siendo pura.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Current<'a> {
+    /// El repositorio es de la cuenta personal, no de una organización:
+    /// GitHub da a sus colaboradores lectura y escritura sin mirar el permiso.
+    pub personal: bool,
+    /// La protección que ya tiene la rama (`GET …/protection`), o `None` si
+    /// no tiene ninguna.
+    pub protection: Option<&'a Value>,
+}
+
+/// Hoy todos los repositorios de `own()` son de la cuenta personal: salen de
+/// `gh repo list` sin propietario, que solo lista los de la cuenta con la
+/// sesión. Si el listado llega a incluir los de una organización, esto tiene
+/// que mirar el tipo del propietario, y el panel puede volver a ofrecer el
+/// permiso de cada colaborador.
+fn is_personal(_repository: &gh_cli::GhRepository) -> bool {
+    true
+}
+
+/// `GET …/protection` devuelve los usuarios, equipos y apps como objetos; el
+/// PUT los quiere por su nombre (`login` o `slug`).
+fn actor_names(value: &Value) -> Value {
+    let names = |list: &str, field: &str| -> Vec<Value> {
+        array(value, &format!("/{list}"))
+            .into_iter()
+            .filter_map(|item| item.get(field).and_then(Value::as_str))
+            .map(|name| Value::String(name.to_string()))
+            .collect()
+    };
+    serde_json::json!({
+        "users": names("users", "login"),
+        "teams": names("teams", "slug"),
+        "apps": names("apps", "slug"),
+    })
+}
+
+/// Las comprobaciones obligatorias tal como las pide el PUT. `checks` dice
+/// además qué app tiene que dar cada una: `null` es «cualquiera», que en el
+/// PUT se escribe -1 (sin `app_id`, GitHub ataría la comprobación a la última
+/// app que la dio).
+fn status_checks_body(current: Option<&Value>) -> Value {
+    let Some(current) = current.filter(|current| current.is_object()) else {
+        return Value::Null;
+    };
+    let strict = current
+        .get("strict")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match current.get("checks").and_then(Value::as_array) {
+        Some(checks) => serde_json::json!({
+            "strict": strict,
+            "checks": checks
+                .iter()
+                .filter_map(|check| {
+                    let context = check.get("context")?.as_str()?;
+                    Some(serde_json::json!({
+                        "context": context,
+                        "app_id": check.get("app_id").and_then(Value::as_i64).unwrap_or(-1),
+                    }))
+                })
+                .collect::<Vec<_>>(),
+        }),
+        None => serde_json::json!({
+            "strict": strict,
+            "contexts": array(current, "/contexts")
+                .into_iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
+/// Las revisiones: el número es del panel; lo demás (descartar aprobaciones
+/// antiguas, CODEOWNERS, aprobar el último push, quién puede descartarlas o
+/// saltárselas) se conserva de lo que ya tenía la rama.
+fn reviews_body(current: Option<&Value>, reviews: Option<u8>) -> Value {
+    let Some(count) = reviews else {
+        return Value::Null;
+    };
+    let mut body = serde_json::json!({ "required_approving_review_count": count });
+    let Some(current) = current.filter(|current| current.is_object()) else {
+        return body;
+    };
+    for key in [
+        "dismiss_stale_reviews",
+        "require_code_owner_reviews",
+        "require_last_push_approval",
+    ] {
+        if let Some(flag) = current.get(key).and_then(Value::as_bool) {
+            body[key] = Value::Bool(flag);
+        }
+    }
+    for key in ["dismissal_restrictions", "bypass_pull_request_allowances"] {
+        if let Some(actors) = current.get(key).filter(|actors| actors.is_object()) {
+            body[key] = actor_names(actors);
+        }
+    }
+    body
+}
+
+/// El cuerpo del PUT de la protección de una rama. El PUT sustituye la
+/// protección entera, así que se parte de la que ya tiene la rama (`current`,
+/// de `GET …/protection`) y solo cambia lo que gestiona el panel: revisiones,
+/// administradores e historial lineal. Lo demás (comprobaciones obligatorias
+/// con sus contextos, restricciones, force push, borrar la rama,
+/// conversaciones resueltas, bloqueo y las subopciones de las revisiones) se
+/// conserva tal cual. Pura: se prueba con JSON de ejemplo de la API.
+pub fn protection_body(
+    current: Option<&Value>,
+    reviews: Option<u8>,
+    enforce_admins: bool,
+    linear_history: bool,
+) -> Value {
+    let field = |key: &str| current.and_then(|current| current.get(key));
+    let mut body = serde_json::json!({
+        "required_status_checks": status_checks_body(field("required_status_checks")),
+        "enforce_admins": enforce_admins,
+        "required_pull_request_reviews": reviews_body(field("required_pull_request_reviews"), reviews),
+        // Solo existen en los repositorios de organización.
+        "restrictions": field("restrictions")
+            .filter(|restrictions| restrictions.is_object())
+            .map(actor_names)
+            .unwrap_or(Value::Null),
+        "required_linear_history": linear_history,
+    });
+    for key in [
+        "allow_force_pushes",
+        "allow_deletions",
+        "required_conversation_resolution",
+        "block_creations",
+        "lock_branch",
+        "allow_fork_syncing",
+    ] {
+        if let Some(flag) = field(key)
+            .and_then(|setting| setting.get("enabled"))
+            .and_then(Value::as_bool)
+        {
+            body[key] = Value::Bool(flag);
+        }
+    }
+    body
+}
+
+/// Traduce cada cambio a su orden de `gh`. Puro: se prueba sin `gh`; lo que
+/// hay que saber de GitHub llega en `current`.
+pub fn action_plan(
+    full_name: &str,
+    action: &AdminAction,
+    current: Current<'_>,
+) -> Result<Plan, String> {
     let repo = full_name;
     Ok(match action {
         AdminAction::ArtifactDelete { id } => {
@@ -929,11 +1139,24 @@ pub fn action_plan(full_name: &str, action: &AdminAction) -> Result<Plan, String
             if !crate::github::is_github_owner(login) || !valid_permission(permission) {
                 return Err("Usuario o permiso no válidos.".into());
             }
+            // GitHub solo mira `permission` en los repositorios de una
+            // organización: en uno personal el colaborador siempre tiene
+            // lectura y escritura. Mejor no dejar creer que tendrá menos.
+            if current.personal && permission != "push" {
+                return Err(
+                    "En un repositorio de tu cuenta personal, cada colaborador tiene lectura y escritura (push): GitHub no admite otro permiso."
+                        .into(),
+                );
+            }
             api_call(
                 "PUT",
                 format!("repos/{repo}/collaborators/{login}"),
-                &[("permission", permission.clone())],
-                format!("Invitación enviada a {login}."),
+                &[("permission", Field::Text(permission.clone()))],
+                if current.personal {
+                    format!("Invitación enviada a {login}: tendrá lectura y escritura.")
+                } else {
+                    format!("Invitación enviada a {login}.")
+                },
             )
         }
         AdminAction::CollaboratorRemove { login } => {
@@ -955,11 +1178,11 @@ pub fn action_plan(full_name: &str, action: &AdminAction) -> Result<Plan, String
                 "POST",
                 format!("repos/{repo}/hooks"),
                 &[
-                    ("name", "web".into()),
-                    ("config[url]", url.clone()),
-                    ("config[content_type]", "json".into()),
-                    ("active", "true".into()),
-                    ("events[]", "push".into()),
+                    ("name", Field::Text("web".into())),
+                    ("config[url]", Field::Text(url.clone())),
+                    ("config[content_type]", Field::Text("json".into())),
+                    ("active", Field::Bool(true)),
+                    ("events[]", Field::Text("push".into())),
                 ],
                 "Webhook creado (eventos push).",
             )
@@ -989,9 +1212,9 @@ pub fn action_plan(full_name: &str, action: &AdminAction) -> Result<Plan, String
                 "POST",
                 format!("repos/{repo}/keys"),
                 &[
-                    ("title", title),
-                    ("key", key.trim().to_string()),
-                    ("read_only", read_only.to_string()),
+                    ("title", Field::Text(title)),
+                    ("key", Field::Text(key.trim().to_string())),
+                    ("read_only", Field::Bool(*read_only)),
                 ],
                 "Clave de despliegue añadida.",
             )
@@ -1010,8 +1233,8 @@ pub fn action_plan(full_name: &str, action: &AdminAction) -> Result<Plan, String
                 "POST",
                 format!("repos/{repo}/pages"),
                 &[
-                    ("source[branch]", branch.clone()),
-                    ("source[path]", path.clone()),
+                    ("source[branch]", Field::Text(branch.clone())),
+                    ("source[path]", Field::Text(path.clone())),
                 ],
                 "GitHub Pages activado.",
             )
@@ -1028,20 +1251,15 @@ pub fn action_plan(full_name: &str, action: &AdminAction) -> Result<Plan, String
             enforce_admins,
             linear_history,
         } => {
-            if !valid_ref_name(branch) || *reviews > 6 {
+            if !valid_ref_name(branch) || reviews.is_some_and(|count| count > 6) {
                 return Err("Rama o número de revisiones no válidos (0 a 6).".into());
             }
-            let body = serde_json::json!({
-                "required_status_checks": null,
-                "enforce_admins": enforce_admins,
-                "required_pull_request_reviews": (if *reviews > 0 {
-                    serde_json::json!({ "required_approving_review_count": reviews })
-                } else {
-                    Value::Null
-                }),
-                "restrictions": null,
-                "required_linear_history": linear_history,
-            });
+            let body = protection_body(
+                current.protection,
+                *reviews,
+                *enforce_admins,
+                *linear_history,
+            );
             Plan {
                 input: Some(body.to_string()),
                 ..plan(
@@ -1088,7 +1306,10 @@ pub fn action_plan(full_name: &str, action: &AdminAction) -> Result<Plan, String
             api_call(
                 "POST",
                 "user/keys".into(),
-                &[("title", title), ("key", key.trim().to_string())],
+                &[
+                    ("title", Field::Text(title)),
+                    ("key", Field::Text(key.trim().to_string())),
+                ],
                 "Clave SSH añadida a tu cuenta.",
             )
         }
@@ -1108,16 +1329,47 @@ fn is_account_action(action: &AdminAction) -> bool {
     )
 }
 
+/// La protección que ya tiene la rama, o `None` si no tiene ninguna. Es la
+/// misma orden fija que la lista del área.
+fn read_protection(repo: &str, branch: &str) -> Result<Option<Value>, String> {
+    let args = list_args(repo, Area::Protection, branch)?;
+    match gh_cli::run_args(&args, QUICK) {
+        Ok(json) => serde_json::from_str::<Value>(&json)
+            .map(Some)
+            .map_err(|_| "Respuesta de GitHub no válida; no se ha cambiado nada.".to_string()),
+        Err(error) if unprotected(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn act(full_name: &str, action: &AdminAction) -> GhResult {
-    let name = if is_account_action(action) {
-        String::new()
+    let repository = if is_account_action(action) {
+        None
     } else {
         match gh_cli::own(full_name) {
-            Some(repository) => repository.repository.full_name,
+            Some(repository) => Some(repository),
             None => return failed("El repositorio no está en el listado de tu cuenta."),
         }
     };
-    let plan = match action_plan(&name, action) {
+    let name = repository
+        .as_ref()
+        .map(|repository| repository.repository.full_name.clone())
+        .unwrap_or_default();
+    // El PUT de la protección la sustituye entera: antes se lee la que hay,
+    // para conservar lo que el panel no gestiona. Si no se puede leer, no se
+    // cambia nada.
+    let protection = match action {
+        AdminAction::ProtectionSet { branch, .. } => match read_protection(&name, branch) {
+            Ok(protection) => protection,
+            Err(error) => return failed(error),
+        },
+        _ => None,
+    };
+    let current = Current {
+        personal: repository.as_ref().is_some_and(is_personal),
+        protection: protection.as_ref(),
+    };
+    let plan = match action_plan(&name, action, current) {
         Ok(plan) => plan,
         Err(error) => return failed(error),
     };
@@ -1164,6 +1416,7 @@ mod tests {
                 name: "TOKEN_DE_PRUEBA".into(),
                 value: "s3cr3t-valor".into(),
             },
+            Current::default(),
         )
         .unwrap();
         assert_eq!(
@@ -1192,6 +1445,7 @@ mod tests {
                 git_ref: "main".into(),
                 inputs: vec![("version".into(), "1.2.3".into())],
             },
+            Current::default(),
         )
         .unwrap();
         assert_eq!(
@@ -1214,7 +1468,8 @@ mod tests {
                 workflow: 42,
                 git_ref: "--help".into(),
                 inputs: vec![]
-            }
+            },
+            Current::default()
         )
         .is_err());
         assert!(action_plan(
@@ -1223,7 +1478,8 @@ mod tests {
                 workflow: 42,
                 git_ref: "main".into(),
                 inputs: vec![("-x".into(), "1".into())]
-            }
+            },
+            Current::default()
         )
         .is_err());
     }
@@ -1244,21 +1500,297 @@ mod tests {
             "ana/web",
             &AdminAction::ProtectionSet {
                 branch: "main".into(),
-                reviews: 1,
+                reviews: Some(1),
                 enforce_admins: true,
                 linear_history: false,
             },
+            Current::default(),
         )
         .unwrap();
-        assert!(protect
-            .args
-            .contains(&"repos/ana/web/branches/main/protection".to_string()));
+        assert_eq!(
+            protect.args,
+            strings(&[
+                "api",
+                "-X",
+                "PUT",
+                "-H",
+                "Accept: application/vnd.github+json",
+                "repos/ana/web/branches/main/protection",
+                "--input",
+                "-"
+            ])
+        );
         let body: Value = serde_json::from_str(protect.input.as_deref().unwrap()).unwrap();
         assert_eq!(
             body["required_pull_request_reviews"]["required_approving_review_count"],
             1
         );
         assert_eq!(body["enforce_admins"], true);
+        // Sin protección previa no hay nada que conservar.
+        assert_eq!(body["required_status_checks"], Value::Null);
+        assert_eq!(body["restrictions"], Value::Null);
+        // Más de 6 revisiones no vale.
+        assert!(action_plan(
+            "ana/web",
+            &AdminAction::ProtectionSet {
+                branch: "main".into(),
+                reviews: Some(7),
+                enforce_admins: false,
+                linear_history: false,
+            },
+            Current::default()
+        )
+        .is_err());
+    }
+
+    /// Lo que devuelve `GET …/protection` de una rama con comprobaciones
+    /// obligatorias, CODEOWNERS y restricciones (repositorio de organización).
+    const PROTECTED_MAIN: &str = r#"{
+        "required_status_checks": {"strict": true, "contexts": ["CI", "lint"], "checks": [{"context": "CI", "app_id": 15368}, {"context": "lint", "app_id": null}]},
+        "enforce_admins": {"enabled": true},
+        "required_pull_request_reviews": {
+            "dismiss_stale_reviews": true,
+            "require_code_owner_reviews": true,
+            "required_approving_review_count": 2,
+            "require_last_push_approval": false,
+            "dismissal_restrictions": {"users": [{"login": "ana"}], "teams": [{"slug": "core"}], "apps": []},
+            "bypass_pull_request_allowances": {"users": [], "teams": [{"slug": "release"}], "apps": [{"slug": "bot"}]}
+        },
+        "restrictions": {"users": [{"login": "ana"}], "teams": [], "apps": [{"slug": "deployer"}]},
+        "required_linear_history": {"enabled": false},
+        "allow_force_pushes": {"enabled": false},
+        "allow_deletions": {"enabled": true},
+        "block_creations": {"enabled": false},
+        "required_conversation_resolution": {"enabled": true},
+        "lock_branch": {"enabled": false},
+        "allow_fork_syncing": {"enabled": false},
+        "required_signatures": {"enabled": false}
+    }"#;
+
+    #[test]
+    fn proteger_conserva_lo_que_el_panel_no_gestiona() {
+        let current: Value = serde_json::from_str(PROTECTED_MAIN).unwrap();
+        // Solo se activa el historial lineal, con lo demás del panel como estaba.
+        let plan = action_plan(
+            "ana/web",
+            &AdminAction::ProtectionSet {
+                branch: "main".into(),
+                reviews: Some(2),
+                enforce_admins: true,
+                linear_history: true,
+            },
+            Current {
+                personal: false,
+                protection: Some(&current),
+            },
+        )
+        .unwrap();
+        let body: Value = serde_json::from_str(plan.input.as_deref().unwrap()).unwrap();
+        assert_eq!(body["required_linear_history"], true);
+        assert_eq!(body["enforce_admins"], true);
+        // Las comprobaciones obligatorias siguen, cada una con su app; la que
+        // vale de cualquier app va con -1.
+        assert_eq!(
+            body["required_status_checks"],
+            serde_json::json!({
+                "strict": true,
+                "checks": [{"context": "CI", "app_id": 15368}, {"context": "lint", "app_id": -1}]
+            })
+        );
+        let reviews = &body["required_pull_request_reviews"];
+        assert_eq!(reviews["required_approving_review_count"], 2);
+        assert_eq!(reviews["dismiss_stale_reviews"], true);
+        assert_eq!(reviews["require_code_owner_reviews"], true);
+        assert_eq!(reviews["require_last_push_approval"], false);
+        assert_eq!(
+            reviews["dismissal_restrictions"],
+            serde_json::json!({"users": ["ana"], "teams": ["core"], "apps": []})
+        );
+        assert_eq!(
+            reviews["bypass_pull_request_allowances"],
+            serde_json::json!({"users": [], "teams": ["release"], "apps": ["bot"]})
+        );
+        assert_eq!(
+            body["restrictions"],
+            serde_json::json!({"users": ["ana"], "teams": [], "apps": ["deployer"]})
+        );
+        assert_eq!(body["allow_force_pushes"], false);
+        assert_eq!(body["allow_deletions"], true);
+        assert_eq!(body["required_conversation_resolution"], true);
+        assert_eq!(body["block_creations"], false);
+        assert_eq!(body["lock_branch"], false);
+        assert_eq!(body["allow_fork_syncing"], false);
+        // El PUT no admite `required_signatures`: tiene su propia ruta.
+        assert!(body.get("required_signatures").is_none());
+
+        // Sin pull request obligatoria se quitan las revisiones, pero no lo demás.
+        let without_reviews = protection_body(Some(&current), None, false, false);
+        assert_eq!(
+            without_reviews["required_pull_request_reviews"],
+            Value::Null
+        );
+        assert_eq!(without_reviews["enforce_admins"], false);
+        assert_eq!(
+            without_reviews["required_status_checks"]["checks"][0]["context"],
+            "CI"
+        );
+        // Una pull request sin aprobaciones también es una protección.
+        let zero = protection_body(Some(&current), Some(0), true, false);
+        assert_eq!(
+            zero["required_pull_request_reviews"]["required_approving_review_count"],
+            0
+        );
+        assert_eq!(
+            zero["required_pull_request_reviews"]["require_code_owner_reviews"],
+            true
+        );
+    }
+
+    /// Repositorio personal: GitHub no manda restricciones ni quién puede
+    /// descartar revisiones, y aquí las comprobaciones solo traen `contexts`.
+    const PERSONAL_MAIN: &str = r#"{
+        "required_status_checks": {"strict": false, "contexts": ["build"]},
+        "enforce_admins": {"enabled": false},
+        "required_pull_request_reviews": {"required_approving_review_count": 1, "dismiss_stale_reviews": false, "require_code_owner_reviews": true},
+        "allow_deletions": {"enabled": false}
+    }"#;
+
+    #[test]
+    fn proteger_una_rama_personal_no_inventa_restricciones() {
+        let current: Value = serde_json::from_str(PERSONAL_MAIN).unwrap();
+        let body = protection_body(Some(&current), Some(1), false, true);
+        assert_eq!(body["restrictions"], Value::Null);
+        assert_eq!(
+            body["required_status_checks"],
+            serde_json::json!({"strict": false, "contexts": ["build"]})
+        );
+        let reviews = &body["required_pull_request_reviews"];
+        assert_eq!(reviews["require_code_owner_reviews"], true);
+        assert!(reviews.get("dismissal_restrictions").is_none());
+        assert!(reviews.get("bypass_pull_request_allowances").is_none());
+        assert_eq!(body["allow_deletions"], false);
+        assert!(body.get("allow_force_pushes").is_none());
+        // Sin protección previa, solo lo del panel.
+        let fresh = protection_body(None, None, true, true);
+        assert_eq!(
+            fresh,
+            serde_json::json!({
+                "required_status_checks": null,
+                "enforce_admins": true,
+                "required_pull_request_reviews": null,
+                "restrictions": null,
+                "required_linear_history": true
+            })
+        );
+    }
+
+    #[test]
+    fn la_lista_de_la_proteccion_trae_lo_que_rellena_el_formulario() {
+        let list = parse_list(Area::Protection, PROTECTED_MAIN);
+        let detail = |id: &str| {
+            list.rows
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.detail.clone())
+                .unwrap()
+        };
+        assert_eq!(detail("reviews"), "2");
+        assert_eq!(detail("enforceAdmins"), "true");
+        assert_eq!(detail("linearHistory"), "false");
+        assert_eq!(detail("statusChecks"), "CI, lint");
+        assert_eq!(detail("codeOwners"), "true");
+        // Sin pull request obligatoria, `reviews` va vacío (no «0»).
+        let none = parse_list(Area::Protection, r#"{"enforce_admins":{"enabled":false}}"#);
+        assert_eq!(none.rows[0].id, "reviews");
+        assert_eq!(none.rows[0].detail, "");
+    }
+
+    /// `flag` seguido de `value` en los argumentos.
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
+    #[test]
+    fn en_un_repositorio_personal_el_colaborador_solo_puede_tener_push() {
+        fn invite(permission: &str, current: Current<'_>) -> Result<Plan, String> {
+            action_plan(
+                "ana/web",
+                &AdminAction::CollaboratorAdd {
+                    login: "bob".into(),
+                    permission: permission.into(),
+                },
+                current,
+            )
+        }
+        let personal = Current {
+            personal: true,
+            protection: None,
+        };
+        let error = invite("pull", personal).unwrap_err();
+        assert!(error.contains("lectura y escritura"), "{error}");
+        assert!(invite("admin", personal).is_err());
+        let push = invite("push", personal).unwrap();
+        assert!(push.message.contains("lectura y escritura"));
+        assert!(has_pair(&push.args, "-f", "permission=push"));
+        // En una organización el permiso sí cuenta.
+        let pull = invite("pull", Current::default()).unwrap();
+        assert!(has_pair(&pull.args, "-f", "permission=pull"));
+        assert!(invite("todo", Current::default()).is_err());
+    }
+
+    #[test]
+    fn cada_campo_dice_si_va_como_texto_o_como_booleano() {
+        // Un título o una rama que parecen números siguen siendo texto (-f);
+        // `-F` solo para los booleanos, que gh convierte.
+        let key = action_plan(
+            "ana/web",
+            &AdminAction::DeployKeyAdd {
+                title: "2025".into(),
+                key: "ssh-ed25519 AAAA ci".into(),
+                read_only: false,
+            },
+            Current::default(),
+        )
+        .unwrap();
+        assert!(has_pair(&key.args, "-f", "title=2025"));
+        assert!(has_pair(&key.args, "-F", "read_only=false"));
+        let ssh = action_plan(
+            "",
+            &AdminAction::SshKeyAdd {
+                title: "007".into(),
+                key: "ssh-ed25519 AAAA pc".into(),
+            },
+            Current::default(),
+        )
+        .unwrap();
+        assert!(has_pair(&ssh.args, "-f", "title=007"));
+        assert!(!ssh.args.contains(&"-F".to_string()));
+        let pages = action_plan(
+            "ana/web",
+            &AdminAction::PagesEnable {
+                branch: "2024".into(),
+                path: "/".into(),
+            },
+            Current::default(),
+        )
+        .unwrap();
+        assert!(has_pair(&pages.args, "-f", "source[branch]=2024"));
+        let hook = action_plan(
+            "ana/web",
+            &AdminAction::HookCreate {
+                url: "https://ejemplo.dev/hook".into(), // link-check: ignore
+            },
+            Current::default(),
+        )
+        .unwrap();
+        assert!(has_pair(&hook.args, "-F", "active=true"));
+        assert!(has_pair(&hook.args, "-f", "events[]=push"));
+        assert!(has_pair(
+            &hook.args,
+            "-f",
+            "config[url]=https://ejemplo.dev/hook" // link-check: ignore
+        ));
     }
 
     #[test]
@@ -1268,9 +1800,9 @@ mod tests {
         ));
         assert!(!valid_public_key("-----BEGIN OPENSSH PRIVATE KEY-----"));
         assert!(!valid_public_key("ssh-ed25519 AAAA\nssh-rsa BBBB"));
-        assert!(valid_hook_url("https://ejemplo.dev/hook"));
-        assert!(!valid_hook_url("http://ejemplo.dev/hook"));
-        assert!(!valid_hook_url("https://ejemplo.dev/a b"));
+        assert!(valid_hook_url("https://ejemplo.dev/hook")); // link-check: ignore
+        assert!(!valid_hook_url("http://ejemplo.dev/hook")); // link-check: ignore
+        assert!(!valid_hook_url("https://ejemplo.dev/a b")); // link-check: ignore
         let add = action_plan(
             "ana/web",
             &AdminAction::DeployKeyAdd {
@@ -1278,12 +1810,11 @@ mod tests {
                 key: "ssh-ed25519 AAAA ci".into(),
                 read_only: true,
             },
+            Current::default(),
         )
         .unwrap();
-        assert!(
-            add.args.contains(&"-F".to_string())
-                && add.args.contains(&"read_only=true".to_string())
-        );
+        assert!(has_pair(&add.args, "-F", "read_only=true"));
+        assert!(has_pair(&add.args, "-f", "title=CI"));
     }
 
     #[test]
@@ -1298,6 +1829,7 @@ mod tests {
         assert!(artifacts.rows[0].detail.starts_with("2.0 MB"));
         let community = parse_list(
             Area::Community,
+            // link-check: ignore
             r#"{"health_percentage":71,"files":{"readme":{"html_url":"https://github.com/ana/web/blob/main/README.md"},"license":null,"contributing":null,"code_of_conduct":null,"issue_template":null,"pull_request_template":null}}"#,
         );
         assert_eq!(community.rows[0].detail, "71 %");
@@ -1321,6 +1853,7 @@ mod tests {
         );
         let dependabot = parse_list(
             Area::Dependabot,
+            // link-check: ignore
             r#"[{"number":3,"html_url":"https://github.com/ana/web/security/dependabot/3","security_advisory":{"summary":"ReDoS"},"security_vulnerability":{"severity":"high"},"dependency":{"package":{"name":"lodash"}}}]"#,
         );
         assert_eq!(dependabot.rows.len(), 1);

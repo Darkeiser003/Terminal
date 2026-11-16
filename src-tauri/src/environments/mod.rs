@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod agent_chat;
+pub mod agent_guide;
 pub mod ai;
 pub mod ai_cli_defaults;
+pub mod ai_keys;
 pub mod android;
 pub mod docker;
 pub mod languages;
@@ -483,6 +486,14 @@ pub fn nsudo_launcher(
         .unwrap_or(NsudoLauncher::NeedsAdmin)
 }
 
+/// Si se ofrece instalar gsudo (14-11, Romen): NSudo está instalado y esta
+/// copia no puede abrir sus pestañas (no es administrador, ni hay gsudo ni el
+/// sudo de Windows en línea). Nunca en las pruebas E2E: un aviso que no
+/// esperan movería la terminal.
+pub fn offer_gsudo(nsudo_installed: bool, launcher: &NsudoLauncher, e2e: bool) -> bool {
+    nsudo_installed && *launcher == NsudoLauncher::NeedsAdmin && !e2e
+}
+
 /// El lanzador de este equipo y este proceso.
 pub fn current_nsudo_launcher() -> NsudoLauncher {
     #[cfg(windows)]
@@ -770,26 +781,7 @@ fn detect_environments_with(quick: bool, include_wsl: bool) -> Inventory {
             // pueden estar en el PATH sin que su Python encuentre el módulo
             // (p. ej. con `pip --user` y sin `PYTHONUSERBASE`). Solo se
             // ofrecen si de verdad arrancan. Se prueban en paralelo.
-            let launchers: Vec<String> = detected
-                .iter()
-                .filter(|environment| is_python_launcher(environment))
-                .map(|environment| environment.exe.clone())
-                .collect();
-            let broken: Vec<String> = std::thread::scope(|scope| {
-                let probes: Vec<_> = launchers
-                    .iter()
-                    .map(|exe| {
-                        scope.spawn(move || {
-                            (!python_launcher_keeps(&python_launcher_probe(exe)))
-                                .then(|| exe.clone())
-                        })
-                    })
-                    .collect();
-                probes
-                    .into_iter()
-                    .filter_map(|probe| probe.join().ok().flatten())
-                    .collect()
-            });
+            let broken = broken_python_launchers(&detected);
             if !broken.is_empty() {
                 log_info!(
                     "REPL de Python sin su módulo; no se ofrecen",
@@ -827,7 +819,7 @@ fn detect_environments_with(quick: bool, include_wsl: bool) -> Inventory {
     envs.extend(languages);
     // Asistentes de IA (CLIs) y un chat por cada modelo local de Ollama. Solo
     // consulta el PATH y los manifiestos en disco: no arranca nada.
-    let ai_envs = ai::detect_ai_environments(
+    let mut ai_envs = ai::detect_ai_environments(
         std::env::consts::OS,
         &crate::language_env::Probe {
             is_installed: &crate::path_env::is_tool_installed,
@@ -835,6 +827,18 @@ fn detect_environments_with(quick: bool, include_wsl: bool) -> Inventory {
         },
         &ai::installed_ollama_models(&ai::ollama_models_dir()),
     );
+    // Las IA que instala pip (aider, llm, ShellGPT) son lanzadores como
+    // IPython: sin `PYTHONUSERBASE` su `.exe` sigue en el PATH y la pestaña se
+    // cerraba al abrirse con «ModuleNotFoundError» (13-11, larga 60, tras
+    // devolver la carpeta propia a la de fábrica). Solo se ofrecen si arrancan.
+    let broken_ai = broken_python_launchers(&ai_envs);
+    if !broken_ai.is_empty() {
+        log_info!(
+            "IA instaladas con pip sin su módulo; no se ofrecen",
+            serde_json::json!({ "exes": broken_ai })
+        );
+        ai_envs.retain(|environment| !broken_ai.contains(&environment.exe));
+    }
     let ai_count = ai_envs.len();
     envs.extend(ai_envs);
     // k9s sí es una interfaz interactiva persistente para Kubernetes (kubectl
@@ -902,6 +906,30 @@ fn is_python_launcher(environment: &Environment) -> bool {
         .and_then(|dir| dir.file_name())
         .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Scripts"));
     known || in_scripts
+}
+
+/// Los lanzadores de pip de `environments` que no arrancan (su Python no
+/// encuentra el módulo). Se prueban en paralelo.
+fn broken_python_launchers(environments: &[Environment]) -> Vec<String> {
+    let launchers: Vec<String> = environments
+        .iter()
+        .filter(|environment| is_python_launcher(environment))
+        .map(|environment| environment.exe.clone())
+        .collect();
+    std::thread::scope(|scope| {
+        let probes: Vec<_> = launchers
+            .iter()
+            .map(|exe| {
+                scope.spawn(move || {
+                    (!python_launcher_keeps(&python_launcher_probe(exe))).then(|| exe.clone())
+                })
+            })
+            .collect();
+        probes
+            .into_iter()
+            .filter_map(|probe| probe.join().ok().flatten())
+            .collect()
+    })
 }
 
 /// `--version` importa el módulo del lanzador: falla con
@@ -1016,6 +1044,23 @@ mod tests {
             ..Default::default()
         };
         assert!(!is_python_launcher(&shell), "solo REPL");
+        // Las IA de pip también (13-11: aider y llm se cerraban al abrirse
+        // sin `PYTHONUSERBASE`); las de npm, no.
+        let ai = |id: &str, exe: &str| Environment {
+            id: format!("ai:{id}"),
+            exe: exe.to_string(),
+            repl: true,
+            language: Some(format!("ai:{id}")),
+            ..Default::default()
+        };
+        assert!(is_python_launcher(&ai(
+            "aider",
+            r"E:\WTerminal\entornos\herramientas\python\Python312\Scripts\aider.EXE"
+        )));
+        assert!(!is_python_launcher(&ai(
+            "claude",
+            r"E:\WTerminal\entornos\herramientas\npm\claude.cmd"
+        )));
     }
 
     #[test]
@@ -1064,6 +1109,25 @@ mod tests {
             NsudoLauncher::Through(r"C:\x\sudo.exe".into()).as_str(),
             "windows-sudo"
         );
+    }
+
+    #[test]
+    fn solo_se_ofrece_gsudo_si_hay_nsudo_y_no_hay_forma_de_abrirlo() {
+        let needs = NsudoLauncher::NeedsAdmin;
+        assert!(offer_gsudo(true, &needs, false));
+        assert!(
+            !offer_gsudo(false, &needs, false),
+            "sin NSudo no hace falta"
+        );
+        assert!(
+            !offer_gsudo(true, &NsudoLauncher::Direct, false),
+            "ya es administrador"
+        );
+        assert!(
+            !offer_gsudo(true, &NsudoLauncher::Through("C:/gsudo.exe".into()), false),
+            "ya hay gsudo o sudo en línea"
+        );
+        assert!(!offer_gsudo(true, &needs, true), "nunca en E2E");
     }
 
     #[test]

@@ -24,7 +24,14 @@ export interface CommandRecord {
     exitCode: number | null;
     startedAt: number | null;
     durationMs: number | null;
+    /** La orden, cuando la escribió la app (un botón de un panel): su línea
+     *  en pantalla puede llevar el marco o haberse borrado (cmd). */
+    command?: string;
 }
+
+/** Cuánto espera una orden de la app a que la shell pinte su prompt (cuando
+ *  llega con otra orden en marcha o con una pausa por cerrar). */
+const APP_COMMAND_WAIT_MS = 15_000;
 
 /** Suficiente para saltar por una sesión larga sin retener marcas sin fin. */
 const MAX_RECORDS = 500;
@@ -36,9 +43,26 @@ export function parseExitCode(payload: string | undefined): number | null {
     return Number.isNaN(code) ? null : code;
 }
 
+/** El código que deja cmd cuando la orden no existe. */
+export const CMD_NOT_FOUND_CODE = 9009;
+
+/** cmd no da el código de salida en su marca `D`. Si la salida de la orden
+ *  lleva el texto de Windows para «no se reconoce como un comando…» (leído del
+ *  sistema en su idioma), la orden falló con 9009, como haría `ERRORLEVEL`.
+ *  Se compara sin espacios: la terminal parte las filas largas y, si parte
+ *  justo en un espacio, ese espacio se pierde al leer el búfer. */
+export function inferCmdExitCode(output: string, notFoundText: string | null): number | null {
+    const squeeze = (text: string) => text.replace(/\s+/gu, '');
+    const needle = squeeze(notFoundText ?? '');
+    if (needle.length < 8) return null;
+    return squeeze(output).includes(needle) ? CMD_NOT_FOUND_CODE : null;
+}
+
 export class CommandTracker {
     private records: CommandRecord[] = [];
     private current: CommandRecord | null = null;
+    /** Una orden de la app que llegó sin prompt libre: se ata al siguiente. */
+    private queuedAppCommand: { command: string; at: number } | null = null;
 
     /** `createMark` recibe cuántas filas por debajo del cursor va la marca. */
     constructor(
@@ -65,6 +89,9 @@ export class CommandTracker {
         } else if (kind === 'B' && this.current) {
             this.current.input = this.createMark(0) ?? null;
             this.current.inputColumn = cursorColumn;
+            const queued = this.queuedAppCommand;
+            this.queuedAppCommand = null;
+            if (queued && this.now() - queued.at <= APP_COMMAND_WAIT_MS) this.startAppCommand(queued.command);
         } else if (kind === 'C' && this.current) {
             this.current.output = this.createMark(0) ?? null;
             this.current.startedAt ??= this.now();
@@ -84,6 +111,22 @@ export class CommandTracker {
             return;
         }
         this.current.startedAt = this.now();
+    }
+
+    /** La app escribió una orden por su cuenta (un botón): cuenta como una
+     *  orden igual que si se hubiera tecleado, aunque la pestaña no viera su
+     *  Intro. Sin prompt libre (otra orden en marcha, una pausa por cerrar)
+     *  espera al siguiente. */
+    appCommand(command: string): void {
+        if (!command.trim()) return;
+        if (this.atPrompt) this.startAppCommand(command);
+        else this.queuedAppCommand = { command, at: this.now() };
+    }
+
+    private startAppCommand(command: string): void {
+        if (!this.current) return;
+        this.current.startedAt = this.now();
+        this.current.command = command;
     }
 
     private finish(exitCode: number | null, cursorColumn: number): CommandRecord | null {
@@ -118,6 +161,7 @@ export class CommandTracker {
     clear(): void {
         this.records = [];
         this.current = null;
+        this.queuedAppCommand = null;
     }
 }
 

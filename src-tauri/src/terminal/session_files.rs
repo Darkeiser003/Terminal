@@ -62,6 +62,29 @@ fn write_init_script(
     }
 }
 
+/// En E2E (`LTERMINAL_E2E_TESTING=1`), la línea que lleva el historial de
+/// PSReadLine a la carpeta de datos de la prueba. Fuera de E2E, ninguna: el
+/// usuario conserva su historial de siempre. La usan el arranque de
+/// PowerShell (`powershell::prepare_spawn_args`, antes de leer nada) y el
+/// final del inicializador (para las shells arrancadas con su propio
+/// `-Command`, que no llevan ese arranque).
+pub(crate) fn e2e_powershell_history_line() -> Option<String> {
+    if std::env::var("LTERMINAL_E2E_TESTING").as_deref() != Ok("1") {
+        return None;
+    }
+    Some(powershell_history_line(
+        &crate::paths::user_data_dir().join("e2e-psreadline-history.txt"),
+    ))
+}
+
+fn powershell_history_line(path: &Path) -> String {
+    // Entre comillas simples: en PowerShell solo hay que doblar las simples.
+    let quoted = path.to_string_lossy().replace('\'', "''");
+    format!(
+        "if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) {{ Set-PSReadLineOption -HistorySavePath '{quoted}' }}"
+    )
+}
+
 /// Escribe el banner y el archivo de inicialización de una pestaña.
 pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> SessionFiles {
     // Un REPL (Python, Node, etc.) mantiene un prompt de entrada vivo (`>>>`,
@@ -204,6 +227,17 @@ pub fn write_session_files(request: &SessionRequest<'_>, t: &Translator) -> Sess
     }
     let init_path = dir.join(format!("init-{}.{}", request.tab_id, script.ext));
     let mut content = std::borrow::Cow::Borrowed(script.content.as_str());
+    // Solo en E2E: PowerShell guarda su historial en la carpeta de la prueba,
+    // no en el del usuario. Con el real, cada prueba lo llenaba de órdenes de
+    // test y, ya crecido, PSReadLine de Windows PowerShell no dejaba pasar el
+    // Intro de una línea muy larga (`tab-tools` cayó así en la build 56).
+    if request.env.kind == crate::environments::ShellKind::Powershell {
+        if let Some(line) = e2e_powershell_history_line() {
+            // Al final: no escribe nada, y así sobrevive a un PSReadLine que
+            // las sugerencias vuelvan a cargar al principio del script.
+            content = std::borrow::Cow::Owned(format!("{}\r\n{line}\r\n", content.trim_end()));
+        }
+    }
     if request.env.kind == crate::environments::ShellKind::Cmd {
         let macro_path = dir.join(format!(
             "macros-{}.{}",
@@ -419,6 +453,15 @@ pub fn dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn el_historial_de_powershell_en_e2e_va_a_la_carpeta_de_la_prueba() {
+        let line = powershell_history_line(Path::new(r"E:\temp\o'neil\e2e-psreadline-history.txt"));
+        assert_eq!(
+            line,
+            r"if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) { Set-PSReadLineOption -HistorySavePath 'E:\temp\o''neil\e2e-psreadline-history.txt' }"
+        );
+    }
 
     #[test]
     fn solo_se_borran_las_sesiones_de_procesos_que_ya_no_existen() {

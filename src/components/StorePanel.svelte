@@ -23,6 +23,9 @@
     let searching = $state(false);
     let selected = $state<string[]>([]);
     let confirming = $state('');
+    // Una sola operación a la vez: dos «Deshacer» seguidos de programas se
+    // pisaban el script.
+    let busy = $state('');
     let message = $state('');
     let messageError = $state(false);
     let importResult = $state<StoreImportResult | null>(null);
@@ -135,6 +138,8 @@
                     .replace('{done}', formatBytes(item.copiedBytes)).replace('{total}', formatBytes(item.bytes));
             case 'done':
                 return app.t('store.done', 'Traído: el original sigue en su sitio hasta que confirmes');
+            case 'confirming':
+                return app.t('store.confirmingState', 'Confirmación a medias: ya no se puede deshacer');
             case 'confirmed':
                 return app.t('store.confirmed', 'Traído y original borrado');
             case 'failed':
@@ -156,9 +161,10 @@
         return app.t('store.methodVariable', 'Se copia y la variable apunta a la copia');
     }
 
-    async function search(): Promise<void> {
+    /** `keep`: el mensaje de lo que se acaba de hacer se queda. */
+    async function search(keep = false): Promise<void> {
         searching = true;
-        say(app.t('store.searching', 'Buscando y midiendo lo instalado… la primera vez puede tardar.'));
+        if (!keep) say(app.t('store.searching', 'Buscando y midiendo lo instalado… la primera vez puede tardar.'));
         try {
             const [items, integration] = await Promise.all([
                 api.getStoreAdoptCandidates(),
@@ -167,9 +173,11 @@
             candidates = items;
             pathIntegration = integration;
             selected = selected.filter((id) => items.some((item) => item.id === id && (item.state === 'available' || item.state === 'failed')));
-            say(items.length
-                ? ''
-                : app.t('store.nothing', 'No hay nada instalado fuera de la carpeta propia que se pueda traer.'));
+            if (!keep) {
+                say(items.length
+                    ? ''
+                    : app.t('store.nothing', 'No hay nada instalado fuera de la carpeta propia que se pueda traer.'));
+            }
             schedulePoll();
         } catch (cause) {
             say(String(cause), true);
@@ -201,7 +209,7 @@
             await api.runStoreAdopt(selected);
             selected = [];
             say(app.t('store.started', 'Copiando. Puedes seguir usando WTerminal; el original no se toca hasta que confirmes.'));
-            await search();
+            await search(true);
         } catch (cause) {
             say(String(cause), true);
         }
@@ -213,22 +221,32 @@
             return;
         }
         confirming = '';
+        if (busy) return;
+        busy = item.id;
         try {
             await api.confirmStoreAdopt(item.id);
             say(app.t('store.confirmedMessage', '{name}: original borrado ({size} liberados).').replace('{name}', item.label).replace('{size}', formatBytes(item.bytes)));
-            await search();
+            await search(true);
         } catch (cause) {
             say(String(cause), true);
+            // Si se quedó a medias, la lista pasa a «Volver a confirmar».
+            await search(true);
+        } finally {
+            busy = '';
         }
     }
 
     async function undo(item: StoreAdoptItem): Promise<void> {
+        if (busy) return;
+        busy = item.id;
         try {
             await api.undoStoreAdopt(item.id);
             say(app.t('store.undone', '{name}: vuelve a estar como antes.').replace('{name}', item.label));
-            await search();
+            await search(true);
         } catch (cause) {
             say(String(cause), true);
+        } finally {
+            busy = '';
         }
     }
 
@@ -287,6 +305,16 @@
 
     export async function load(): Promise<void> {
         await reload();
+        // Al cerrar el panel el sondeo se para: si quedó algo copiándose, se
+        // vuelve a leer la lista y se reanuda.
+        if (copying && !pollTimer) {
+            try {
+                candidates = await api.getStoreAdoptCandidates();
+            } catch {
+                // La siguiente vuelta lo vuelve a intentar.
+            }
+            schedulePoll();
+        }
     }
 
     $effect(() => {
@@ -372,14 +400,18 @@
                     {#if item.state === 'copying'}
                         <progress max={Math.max(1, item.bytes)} value={item.copiedBytes}></progress>
                     {/if}
-                    {#if item.state === 'done'}
+                    {#if item.state === 'done' || item.state === 'confirming'}
                         <div class="actions">
-                            <button type="button" class:danger={confirming === item.id} data-testid="store-adopt-confirm" onclick={() => void confirm(item)}>
+                            <button type="button" class:danger={confirming === item.id} data-testid="store-adopt-confirm" disabled={!!busy} onclick={() => void confirm(item)}>
                                 {confirming === item.id
                                     ? app.t('store.confirmSure', '¿Borrar el original ({size})? No se puede deshacer').replace('{size}', formatBytes(item.bytes))
-                                    : app.t('store.confirm', 'Confirmar y borrar el original')}
+                                    : item.state === 'confirming'
+                                        ? app.t('store.confirmRetry', 'Volver a confirmar')
+                                        : app.t('store.confirm', 'Confirmar y borrar el original')}
                             </button>
-                            <button type="button" data-testid="store-adopt-undo" onclick={() => void undo(item)}>{app.t('store.undo', 'Deshacer')}</button>
+                            {#if item.state === 'done'}
+                                <button type="button" data-testid="store-adopt-undo" disabled={!!busy} onclick={() => void undo(item)}>{app.t('store.undo', 'Deshacer')}</button>
+                            {/if}
                         </div>
                     {/if}
                 </div>

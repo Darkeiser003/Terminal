@@ -331,7 +331,14 @@ pub fn hidden_command(program: &str) -> Command {
     sanitize_child_environment(&mut command);
     // Las sondas (por ejemplo `npm root -g` o `pip list`) deben ver las
     // mismas cachés que las terminales; las variables del usuario mandan.
-    for (key, value) in extra_environment() {
+    // También el entorno base: sin `GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, Gemini
+    // y Qwen preguntados desde el chat se autoactualizaban con `npm install
+    // -g` en una consola aparte que abría Windows Terminal (13-11, Romen:
+    // «error 0x800700e8 al iniciar … install -g @google/gemini-cli@0.68.0»).
+    for (key, value) in extra_environment()
+        .into_iter()
+        .chain(BASE_ENVIRONMENT.read().clone())
+    {
         if std::env::var_os(&key).is_none() {
             command.env(key, value);
         }
@@ -643,6 +650,24 @@ fn decode_console_output(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lo que lanza el chat (`hidden_command`) recibe el entorno base, como
+    /// las pestañas: ahí van los ajustes que apagan la autoactualización de
+    /// Gemini y Qwen. Una variable propia del usuario manda.
+    #[test]
+    fn los_procesos_ocultos_reciben_el_entorno_base() {
+        let key = "WTERMINAL_PRUEBA_ENTORNO_BASE_1311";
+        BASE_ENVIRONMENT
+            .write()
+            .push((key.to_string(), "base".to_string()));
+        let command = hidden_command("cmd");
+        let found = command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new(key))
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().to_string()));
+        BASE_ENVIRONMENT.write().retain(|(name, _)| name != key);
+        assert_eq!(found.as_deref(), Some("base"));
+    }
 
     #[test]
     fn las_carpetas_extra_van_delante_del_path_sin_repetirse() {

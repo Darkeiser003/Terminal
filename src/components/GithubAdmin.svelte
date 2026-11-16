@@ -15,10 +15,13 @@
     let {
         fullName,
         group,
+        reload = 0,
         onTerminal,
     }: {
         fullName: string;
         group: Group;
+        /** Lo sube el ⟳ de la cabecera de «Gestionar…»: vuelve a leer el área abierta. */
+        reload?: number;
         onTerminal: (result: GitRunResult) => Promise<void>;
     } = $props();
 
@@ -62,23 +65,32 @@
     let needsScope = $state(false);
     let confirming = $state('');
 
-    // Formularios.
-    let name = $state('');
-    let value = $state('');
+    // Formularios. Secretos y variables tienen los suyos: un valor de secreto
+    // a medio escribir nunca aparece en el campo de texto de Variables.
+    let secretName = $state('');
+    let secretValue = $state('');
+    /** El valor del secreto va tapado mientras no se pida verlo. */
+    let showSecret = $state(false);
+    let variableName = $state('');
+    let variableValue = $state('');
     let title = $state('');
     let key = $state('');
     let readOnly = $state(true);
     let login = $state('');
-    let permission = $state('push');
     let hookUrl = $state('');
     let branch = $state('main');
     let pagesPath = $state('/');
+    // Protección: se rellena con lo que ya tiene la rama al leerla.
+    let requirePullRequest = $state(true);
     let reviews = $state(1);
     let enforceAdmins = $state(false);
     let linearHistory = $state(false);
     let runWorkflow = $state('');
     let runRef = $state('main');
     let runInputs = $state('');
+
+    // `bind:value` de un número da `null` si se vacía el campo.
+    const reviewsValid = $derived(Number.isInteger(reviews) && reviews >= 0 && reviews <= 6);
 
     $effect(() => {
         void group;
@@ -89,49 +101,112 @@
         untrack(() => void open(first));
     });
 
+    // ⟳ de la cabecera: vuelve a leer el área abierta sin cambiar de área. La
+    // primera vez no hace nada: al montarse ya lee el efecto de arriba.
+    let reloadSeen = false;
+    $effect(() => {
+        void reload;
+        if (!reloadSeen) {
+            reloadSeen = true;
+            return;
+        }
+        untrack(() => void open(area));
+    });
+
     function say(text: string, error = false): void {
         message = text;
         messageError = error;
     }
 
-    async function open(next: GhAdminArea): Promise<void> {
+    /** Vacía lo escrito en los formularios (no la rama ni las opciones). */
+    function clearForms(): void {
+        secretName = '';
+        secretValue = '';
+        showSecret = false;
+        variableName = '';
+        variableValue = '';
+        title = '';
+        key = '';
+        login = '';
+        hookUrl = '';
+    }
+
+    /** El formulario de la protección parte de lo que ya tiene la rama: las
+     *  filas `reviews`, `enforceAdmins` y `linearHistory` traen el valor tal
+     *  cual de la API (vacío si no lo tiene). Sin protección, lo propuesto:
+     *  pull request con una aprobación. */
+    function fillProtection(loaded: GhAdminList): void {
+        if (loaded.rows.length === 0) {
+            requirePullRequest = true;
+            reviews = 1;
+            enforceAdmins = false;
+            linearHistory = false;
+            return;
+        }
+        const detail = (id: string) => loaded.rows.find((row) => row.id === id)?.detail ?? '';
+        const count = detail('reviews');
+        requirePullRequest = count !== '';
+        reviews = count === '' ? 1 : Math.min(6, Math.max(0, Math.trunc(Number(count)) || 0));
+        enforceAdmins = detail('enforceAdmins') === 'true';
+        linearHistory = detail('linearHistory') === 'true';
+    }
+
+    /** Cada lectura lleva su número: una respuesta que llega tarde no pisa a
+     *  la de una lectura más nueva (otra área, el ⟳ o la recarga tras una
+     *  acción). */
+    let lastRequest = 0;
+
+    /** Abre un área y lee su lista. `keepMessage`: es la recarga que sigue a
+     *  una acción, y no borra su mensaje ni el aviso de permisos que esa
+     *  acción acaba de poner. */
+    async function open(next: GhAdminArea, keepMessage = false): Promise<void> {
+        const request = ++lastRequest;
+        // Al cambiar de área se vacían los formularios: nada de lo escrito en
+        // una (un secreto a medio escribir) pasa a otra.
+        if (next !== area) clearForms();
         area = next;
         confirming = '';
         runWorkflow = '';
-        say('');
+        if (!keepMessage) {
+            say('');
+            needsScope = false;
+        }
         busy = true;
         try {
-            list = await api.githubAdminList(fullName, next, next === 'protection' ? branch : undefined);
-            needsScope = list.needsAdminScope;
+            const loaded = await api.githubAdminList(fullName, next, next === 'protection' ? branch : undefined);
+            if (request !== lastRequest) return;
+            list = loaded;
+            needsScope = keepMessage ? needsScope || loaded.needsAdminScope : loaded.needsAdminScope;
+            // Si «Proteger» falló, el formulario se queda como lo dejó el
+            // usuario para que pueda corregirlo.
+            if (next === 'protection' && !(keepMessage && messageError)) fillProtection(loaded);
         } catch (cause) {
+            if (request !== lastRequest) return;
             list = null;
-            say(String(cause), true);
+            // Tras una acción, su mensaje sigue delante del error de la recarga.
+            say(keepMessage && message ? `${message} ${String(cause)}` : String(cause), true);
         } finally {
-            busy = false;
+            // Solo la última lectura deja el panel libre.
+            if (request === lastRequest) busy = false;
         }
     }
 
-    async function act(action: GhAdminAction, reload = true): Promise<void> {
+    /** Un cambio. `refresh`: vuelve a leer la lista después, con el mensaje y
+     *  el aviso de permisos de la acción delante. */
+    async function act(action: GhAdminAction, refresh = true): Promise<void> {
         busy = true;
         try {
             const result = await api.githubAdminAction(fullName, action);
             say(result.message, !result.ok);
             needsScope = result.needsAdminScope === true;
-            if (result.ok) {
-                name = '';
-                value = '';
-                title = '';
-                key = '';
-                login = '';
-                hookUrl = '';
-            }
+            if (result.ok) clearForms();
         } catch (cause) {
             say(String(cause), true);
         } finally {
             busy = false;
             confirming = '';
         }
-        if (reload) await open(area);
+        if (refresh) await open(area, true);
     }
 
     /** Borrar pide dos pulsaciones: la primera solo pregunta. */
@@ -190,33 +265,35 @@
 
     <!-- Formularios de cada área -->
     {#if area === 'secrets'}
-        <div class="form">
-            <input data-testid="gh-admin-secret-name" placeholder={app.t('ghm.secretName', 'NOMBRE_DEL_SECRETO')} bind:value={name} />
-            <input data-testid="gh-admin-secret-value" type="password" autocomplete="off" placeholder={app.t('ghm.secretValue', 'Valor (no se vuelve a mostrar)')} bind:value={value} />
-            <button type="button" disabled={busy || !name || !value} onclick={() => void act({ kind: 'secretSet', name, value })}>{app.t('ghm.save', 'Guardar')}</button>
+        <!-- Un textarea conserva los saltos de línea de una clave PEM u OpenSSH
+             (un campo de contraseña los quita al pegar). Va tapado con
+             -webkit-text-security (WebView2 y WebKit) mientras no se pida verlo. -->
+        <div class="form column">
+            <input data-testid="gh-admin-secret-name" placeholder={app.t('ghm.secretName', 'NOMBRE_DEL_SECRETO')} bind:value={secretName} />
+            <textarea data-testid="gh-admin-secret-value" class="secret" class:masked={!showSecret} data-masked={!showSecret} rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder={app.t('ghm.secretValue', 'Valor (no se vuelve a mostrar)')} bind:value={secretValue}></textarea>
+            <label class="check"><input type="checkbox" data-testid="gh-admin-secret-show" bind:checked={showSecret} />{app.t('ghm.secretShow', 'Mostrar el valor')}</label>
+            <button type="button" data-testid="gh-admin-secret-save" disabled={busy || !secretName || !secretValue} onclick={() => void act({ kind: 'secretSet', name: secretName, value: secretValue })}>{app.t('ghm.save', 'Guardar')}</button>
         </div>
     {:else if area === 'variables'}
         <div class="form">
-            <input data-testid="gh-admin-variable-name" placeholder={app.t('ghm.variableName', 'NOMBRE')} bind:value={name} />
-            <input data-testid="gh-admin-variable-value" placeholder={app.t('ghm.variableValue', 'Valor')} bind:value={value} />
-            <button type="button" disabled={busy || !name} onclick={() => void act({ kind: 'variableSet', name, value })}>{app.t('ghm.save', 'Guardar')}</button>
+            <input data-testid="gh-admin-variable-name" placeholder={app.t('ghm.variableName', 'NOMBRE')} bind:value={variableName} />
+            <input data-testid="gh-admin-variable-value" placeholder={app.t('ghm.variableValue', 'Valor')} bind:value={variableValue} />
+            <button type="button" disabled={busy || !variableName} onclick={() => void act({ kind: 'variableSet', name: variableName, value: variableValue })}>{app.t('ghm.save', 'Guardar')}</button>
         </div>
     {:else if area === 'collaborators'}
+        <!-- Los repositorios del panel son de la cuenta personal (`gh repo list`
+             sin propietario), y ahí GitHub no mira el permiso: el colaborador
+             siempre tiene lectura y escritura. Si el listado llega a traer los
+             de una organización, el selector de permisos puede volver para ellos. -->
         <div class="form">
             <input data-testid="gh-admin-collaborator" placeholder={app.t('ghm.collaboratorLogin', 'Usuario de GitHub')} bind:value={login} />
-            <select bind:value={permission}>
-                <option value="pull">{app.t('ghm.permPull', 'Leer')}</option>
-                <option value="triage">{app.t('ghm.permTriage', 'Clasificar')}</option>
-                <option value="push">{app.t('ghm.permPush', 'Escribir')}</option>
-                <option value="maintain">{app.t('ghm.permMaintain', 'Mantener')}</option>
-                <option value="admin">{app.t('ghm.permAdmin', 'Administrar')}</option>
-            </select>
-            <button type="button" disabled={busy || !login} onclick={() => void act({ kind: 'collaboratorAdd', login, permission })}>{app.t('ghm.invite', 'Invitar')}</button>
+            <button type="button" disabled={busy || !login} onclick={() => void act({ kind: 'collaboratorAdd', login, permission: 'push' })}>{app.t('ghm.invite', 'Invitar')}</button>
         </div>
+        <small class="hint" data-testid="gh-admin-collaborator-hint">{app.t('ghm.collaboratorPush', 'En un repositorio de tu cuenta personal, cada colaborador tiene lectura y escritura (push): GitHub no admite permisos más finos.')}</small>
     {:else if area === 'hooks'}
         <div class="form">
             <input data-testid="gh-admin-hook-url" placeholder="https://…" bind:value={hookUrl} />
-            <button type="button" disabled={busy || !hookUrl} onclick={() => void act({ kind: 'hookCreate', url: hookUrl })}>{app.t('ghm.hookCreate', 'Crear webhook (push)')}</button>
+            <button type="button" data-testid="gh-admin-hook-create" disabled={busy || !hookUrl} onclick={() => void act({ kind: 'hookCreate', url: hookUrl })}>{app.t('ghm.hookCreate', 'Crear webhook (push)')}</button>
         </div>
     {:else if area === 'deployKeys' || area === 'sshKeys'}
         <div class="form column">
@@ -245,14 +322,16 @@
             <button type="button" disabled={busy || !branch} onclick={() => void open('protection')}>{app.t('ghm.read', 'Leer')}</button>
         </div>
         <div class="form">
-            <label>{app.t('ghm.reviews', 'Revisiones')} <input type="number" min="0" max="6" bind:value={reviews} /></label>
+            <label class="check"><input type="checkbox" data-testid="gh-admin-protection-pull" bind:checked={requirePullRequest} />{app.t('ghm.requirePullRequest', 'Exigir pull request')}</label>
+            <label>{app.t('ghm.reviews', 'Revisiones')} <input type="number" data-testid="gh-admin-protection-reviews" min="0" max="6" disabled={!requirePullRequest} bind:value={reviews} /></label>
             <label class="check"><input type="checkbox" bind:checked={enforceAdmins} />{app.t('ghm.enforceAdmins', 'También administradores')}</label>
             <label class="check"><input type="checkbox" bind:checked={linearHistory} />{app.t('ghm.linearHistory', 'Historial lineal')}</label>
-            <button type="button" disabled={busy || !branch} onclick={() => void act({ kind: 'protectionSet', branch, reviews: Number(reviews), enforceAdmins, linearHistory })}>{app.t('ghm.protect', 'Proteger')}</button>
+            <button type="button" data-testid="gh-admin-protection-set" disabled={busy || !branch || (requirePullRequest && !reviewsValid)} onclick={() => void act({ kind: 'protectionSet', branch, reviews: requirePullRequest ? reviews : null, enforceAdmins, linearHistory })}>{app.t('ghm.protect', 'Proteger')}</button>
             <button type="button" class:danger={confirming === 'unprotect'} disabled={busy || !branch} onclick={() => twice('unprotect', () => act({ kind: 'protectionRemove', branch }))}>
                 {confirming === 'unprotect' ? app.t('ghm.confirmAgain', '¿Seguro? Pulsa otra vez') : app.t('ghm.unprotect', 'Quitar protección')}
             </button>
         </div>
+        <small class="hint">{app.t('ghm.protectKeeps', 'Proteger cambia solo esto: lo demás que ya tenga la rama (comprobaciones obligatorias, CODEOWNERS, restricciones…) se conserva.')}</small>
     {:else if group === 'security'}
         <div class="form">
             <button type="button" disabled={busy} onclick={() => void act({ kind: 'vulnerabilityAlerts', enable: true })}>{app.t('ghm.alertsOn', 'Activar alertas de vulnerabilidades')}</button>
@@ -350,6 +429,20 @@
 
     .note {
         color: var(--warning, #e0a030);
+    }
+
+    /* El valor del secreto, tapado como un campo de contraseña pero con sus
+       saltos de línea. El texto de ayuda se ve tal cual. */
+    textarea.secret {
+        font-family: var(--terminal-font, monospace);
+    }
+
+    textarea.masked {
+        -webkit-text-security: disc;
+    }
+
+    textarea.masked::placeholder {
+        -webkit-text-security: none;
     }
 
     .message {

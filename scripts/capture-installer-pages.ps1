@@ -14,6 +14,16 @@
     sin elevar pulse botones de una ventana elevada (UIPI). Avanza con «Intro»,
     que en cada página de NSIS es «Siguiente», «Instalar», «Desinstalar» o
     «Terminar». No marca «Borrar los datos de la aplicación» al desinstalar.
+
+    Entre las dos pasadas comprueba la página de componentes de punta a punta:
+    que la instalación deja `first-run.json` junto al ejecutable, que el primer
+    arranque lo aplica (la línea «Primer arranque: componentes del instalador
+    aplicados» en `%APPDATA%\wterminal\logs\main.log`; antes quita la marca
+    `first-run-applied.txt` de una instalación anterior), que el desinstalador
+    enseña sus casillas con los tamaños del informe
+    (`--wterminal-uninstall-report`; la de la carpeta propia, solo si es
+    borrable) y que al desinstalar se va `first-run.json`. Lo que falle queda
+    en `pages.json` y el script termina con error.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Installer,
@@ -58,6 +68,25 @@ public static class InstallerWindows {
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, StringBuilder name, int max);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
+
+    // Las casillas visibles de una página (botones con estilo BS_CHECKBOX o
+    // BS_AUTOCHECKBOX), con su texto entero: la del desinstalador lleva el
+    // tamaño y la ruta, más largos que los 256 caracteres de Title.
+    public static string[] CheckBoxes(IntPtr window) {
+        var found = new System.Collections.Generic.List<string>();
+        EnumChildWindows(window, (hwnd, l) => {
+            var cls = new StringBuilder(64); GetClassName(hwnd, cls, 64);
+            int kind = GetWindowLong(hwnd, -16) & 0xF;
+            if (IsWindowVisible(hwnd) && cls.ToString() == "Button" && (kind == 2 || kind == 3)) {
+                var b = new StringBuilder(2048); GetWindowText(hwnd, b, 2048); found.Add(b.ToString());
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
 
     public static IntPtr TopWindowOf(uint[] pids) {
         IntPtr found = IntPtr.Zero;
@@ -159,6 +188,10 @@ function Invoke-WizardCapture([string]$Exe, [string]$Arguments, [string]$Prefix,
         Start-Sleep -Milliseconds 400
         Save-WindowCapture $window $file
         Write-Host "Captura: $file"
+        foreach ($box in [InstallerWindows]::CheckBoxes($window)) {
+            Write-Host "Casilla: $box"
+            [void]$script:checkBoxes.Add([pscustomobject]@{ wizard = $Prefix; page = $page; text = $box })
+        }
         $deadline = (Get-Date).AddSeconds($PageTimeoutSeconds)
         if ($enabled) {
             [void](Push-NextButton $window)
@@ -189,6 +222,31 @@ function Get-UninstallEntry {
         ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -eq 'WTerminal' } | Select-Object -First 1
 }
 
+# Lee el informe INI que da la app al desinstalador (UTF-16 con BOM).
+function Read-UninstallReport([string]$Path) {
+    $report = @{}
+    $section = ''
+    foreach ($line in (Get-Content -LiteralPath $Path -Encoding Unicode)) {
+        if ($line -match '^\[(.+)\]$') { $section = $Matches[1]; $report[$section] = @{}; continue }
+        if ($section -and $line -match '^([^=]+)=(.*)$') { $report[$section][$Matches[1]] = $Matches[2] }
+    }
+    return $report
+}
+
+$script:checkBoxes = New-Object System.Collections.ArrayList
+$failures = New-Object System.Collections.Generic.List[string]
+
+# El primer arranque aplica first-run.json una vez por usuario: con la marca
+# de una instalación anterior (y las mismas casillas) no lo haría ni dejaría
+# su línea en el registro. Se quita para ver la página nueva aplicada.
+$appliedMarker = Join-Path $env:APPDATA 'wterminal\first-run-applied.txt'
+if (Test-Path -LiteralPath $appliedMarker) {
+    Remove-Item -LiteralPath $appliedMarker -Force
+    Write-Host "Marca anterior del primer arranque quitada: $appliedMarker"
+}
+$mainLog = Join-Path $env:APPDATA 'wterminal\logs\main.log'
+$logStart = if (Test-Path -LiteralPath $mainLog) { (Get-Item -LiteralPath $mainLog).Length } else { 0 }
+
 $installPages = Invoke-WizardCapture $Installer '' 'instalador' {
     $entry = Get-UninstallEntry
     $entry -and (Test-Path -LiteralPath (Join-Path ([string]$entry.InstallLocation).Trim('"') 'wterminal.exe'))
@@ -197,16 +255,109 @@ $uninstallKey = Get-UninstallEntry
 
 if (-not $uninstallKey) { throw 'Tras la instalación visible no aparece WTerminal en Programas.' }
 $uninstaller = ([string]$uninstallKey.UninstallString).Trim('"')
-# Cerrar la app que abre la página final antes de desinstalar.
+$installDir = Split-Path -Parent $uninstaller
+$exe = Join-Path $installDir 'wterminal.exe'
+
+# La página de componentes deja lo elegido junto al ejecutable.
+$firstRunFile = Join-Path $installDir 'first-run.json'
+$firstRun = $null
+if (Test-Path -LiteralPath $firstRunFile) {
+    try {
+        $firstRun = Get-Content -LiteralPath $firstRunFile -Raw | ConvertFrom-Json
+        Write-Host "first-run.json: version=$($firstRun.version) path=$($firstRun.path) explorer=$($firstRun.explorer)"
+        if ($firstRun.version -ne 1 -or $firstRun.path -isnot [bool] -or $firstRun.explorer -isnot [bool]) {
+            $failures.Add("first-run.json no tiene version 1 y las dos casillas: $(Get-Content -LiteralPath $firstRunFile -Raw)")
+        }
+    } catch {
+        $failures.Add("first-run.json no es JSON: $($_.Exception.Message)")
+    }
+} else {
+    $failures.Add("No está $firstRunFile tras instalar con la interfaz.")
+}
+
+# El primer arranque (la página final abre la app) aplica lo elegido y lo
+# apunta en el registro. Si la app no se abrió, se abre aquí.
+$firstRunLine = 'Primer arranque: componentes del instalador aplicados'
+$firstRunSeen = $false
+$deadline = (Get-Date).AddSeconds(90)
+$launched = $false
+while ((Get-Date) -lt $deadline) {
+    if (Test-Path -LiteralPath $mainLog) {
+        $stream = [System.IO.File]::Open($mainLog, 'Open', 'Read', 'ReadWrite')
+        try {
+            $from = if ($stream.Length -ge $logStart) { $logStart } else { 0 }
+            [void]$stream.Seek($from, 'Begin')
+            $text = (New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)).ReadToEnd()
+        } finally { $stream.Dispose() }
+        if ($text.Contains($firstRunLine)) { $firstRunSeen = $true; break }
+    }
+    if (-not $launched -and ((Get-Date) -gt $deadline.AddSeconds(-75)) -and -not (Get-Process wterminal -ErrorAction SilentlyContinue)) {
+        Write-Host "La app no se abrió al terminar: se abre $exe"
+        Start-Process -FilePath $exe | Out-Null
+        $launched = $true
+    }
+    Start-Sleep -Milliseconds 500
+}
+if ($firstRunSeen) { Write-Host "Registro: «$firstRunLine»." }
+else { $failures.Add("En 90 s no apareció «$firstRunLine» en $mainLog.") }
+
+# Cerrar la app antes de desinstalar.
 Get-Process wterminal -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 1
+
+# Lo que el desinstalador va a enseñar: el mismo informe que pide él.
+$reportFile = Join-Path $OutDir 'uninstall-report.ini'
+Remove-Item -LiteralPath $reportFile -Force -ErrorAction SilentlyContinue
+$reportRun = Start-Process -FilePath $exe -ArgumentList @('--wterminal-uninstall-report', "`"$reportFile`"") -Wait -PassThru
+$report = $null
+if ($reportRun.ExitCode -eq 0 -and (Test-Path -LiteralPath $reportFile)) {
+    $report = Read-UninstallReport $reportFile
+    Write-Host "Informe: datos=$($report.data.label) carpeta propia=$($report.store.path) borrable=$($report.store.deletable) ($($report.store.label))"
+} else {
+    $failures.Add("--wterminal-uninstall-report terminó con $($reportRun.ExitCode) y sin informe.")
+}
+
 # _?= hace que el desinstalador corra en su sitio y no se copie a %TEMP%:
 # así su proceso es el que se sigue y no termina antes de tiempo.
-$installDir = Split-Path -Parent $uninstaller
 $uninstallPages = Invoke-WizardCapture $uninstaller "_?=$installDir" 'desinstalador' {
     -not (Test-Path -LiteralPath (Join-Path $installDir 'wterminal.exe'))
 }
+
+# Las dos casillas del desinstalador, con sus tamaños: «Borrar los datos»
+# siempre, y «Borrar la carpeta propia» si el informe la da por borrable.
+$boxes = @($script:checkBoxes | Where-Object { $_.wizard -eq 'desinstalador' } | ForEach-Object { $_.text })
+$sized = '\(\d+(\.\d)? (B|KB|MB|GB|TB)\)'
+if ($report) {
+    $dataBox = @($boxes | Where-Object { $_.Contains("($($report.data.label))") })
+    if (-not $dataBox) { $failures.Add("No sale la casilla de los datos con su tamaño ($($report.data.label)). Casillas: $($boxes -join ' | ')") }
+    $storeBox = @($boxes | Where-Object { $_ -match $sized -and $report.store.path -and $_.Contains($report.store.path) })
+    if ($report.store.deletable -eq '1' -and -not $storeBox) {
+        $failures.Add("El informe da la carpeta propia por borrable y no sale su casilla con tamaño y ruta. Casillas: $($boxes -join ' | ')")
+    }
+    if ($report.store.deletable -ne '1' -and $storeBox) {
+        $failures.Add("Sale la casilla de la carpeta propia y el informe no la da por borrable: $($storeBox -join ' | ')")
+    }
+    if ($report.store.deletable -ne '1') {
+        Write-Host "La carpeta propia ($($report.store.path)) no es borrable en este equipo: el desinstalador enseña solo la casilla de los datos."
+    }
+}
+
 # Con _?= el desinstalador no se borra a sí mismo: se quita la carpeta vacía.
+# first-run.json ya lo tiene que haber quitado el desinstalador.
+if (Test-Path -LiteralPath $firstRunFile) { $failures.Add("El desinstalador dejó $firstRunFile.") }
 Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
-@{ installer = $Installer; installPages = $installPages; uninstallPages = $uninstallPages } |
-    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutDir 'pages.json') -Encoding UTF8
+@{
+    installer = $Installer
+    installPages = $installPages
+    uninstallPages = $uninstallPages
+    firstRun = $firstRun
+    firstRunLogSeen = $firstRunSeen
+    report = $report
+    checkBoxes = $script:checkBoxes
+    failures = $failures
+} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutDir 'pages.json') -Encoding UTF8
 Write-Host "Instalador: $installPages páginas; desinstalador: $uninstallPages páginas."
+if ($failures.Count) {
+    $failures | ForEach-Object { Write-Host "FALLO: $_" }
+    throw "La pasada visible del instalador tiene $($failures.Count) fallos."
+}

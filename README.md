@@ -25,7 +25,7 @@ de seguridad se reciben por el canal privado de [SECURITY.md](SECURITY.md).
 | Versión | 1.0.0 |
 | Plataformas | Windows 10/11 (x64), Linux (x64) |
 | Runtime | Tauri 2 · Rust 1.77+ · Node.js ≥ 22.12.0 (solo para compilar) |
-| Licencia | MIT |
+| Licencia | AGPL-3.0-only, y licencia comercial para empresas ([Licencia](#licencia)) |
 | Idiomas | Español, inglés, francés, alemán, italiano, portugués, rumano, ruso, ucraniano, polaco, chino, japonés, coreano, hindi y árabe |
 
 ## Índice
@@ -37,6 +37,7 @@ de seguridad se reciben por el canal privado de [SECURITY.md](SECURITY.md).
 - [Scripts npm](#scripts-npm)
 - [Compilación y distribución](#compilación-y-distribución)
 - [Arquitectura](#arquitectura)
+- [Tecnologías y por qué se eligieron](#tecnologías-y-por-qué-se-eligieron)
 - [Diagramas de flujo detallados](#diagramas-de-flujo-detallados)
 - [Mapa de archivos, llamadas y mantenimiento](#mapa-de-archivos-llamadas-y-mantenimiento)
 - [Flujos de ejecución y diagnóstico](#flujos-de-ejecución-y-diagnóstico)
@@ -51,6 +52,7 @@ de seguridad se reciben por el canal privado de [SECURITY.md](SECURITY.md).
 - [Pestañas, división y ciclo de vida](#pestañas-división-y-ciclo-de-vida)
 - [Atajos de teclado](#atajos-de-teclado)
 - [Marcas de orden](#marcas-de-orden)
+- [Inteligencia artificial en la terminal](#inteligencia-artificial-en-la-terminal)
 - [Paleta de comandos](#paleta-de-comandos)
 - [Configuración](#configuración)
 - [Internacionalización](#internacionalización)
@@ -60,26 +62,29 @@ de seguridad se reciben por el canal privado de [SECURITY.md](SECURITY.md).
 - [Convenciones del código](#convenciones-del-código)
 - [Comparativa con Alacritty y WezTerm](#comparativa-con-alacritty-y-wezterm)
 - [Problemas conocidos](#problemas-conocidos)
+- [Licencia](#licencia)
 - [Créditos](#créditos)
 
 ---
 
 ## Requisitos
 
-**Para usar la aplicación** no hace falta nada adicional en la distribución
+### 1. Para usar la aplicación
+
+No hace falta nada adicional en la distribución
 instalable. En Windows la interfaz usa el runtime WebView2 de Microsoft, que
 Windows 11 y los Windows 10 al día ya traen. Las releases no llevan su
 instalador dentro (son unos 215 MB de los ~223 de cada paquete): si falta, el
 arranque lo detecta antes de crear la ventana y lo instala desde Microsoft, o
 desde un instalador puesto junto al ejecutable, sin necesitar nada más (ver
-[WebView2: si falta el runtime](#webview2-si-falta-el-runtime)). Para equipos
+[WebView2: si falta el runtime](#8-webview2-si-falta-el-runtime)). Para equipos
 sin Internet existe la variante `-WebView2 Offline` de la build. En Linux,
 el AppImage necesita las bibliotecas de escritorio habituales (WebKitGTK 2.40
 o posterior), que cualquier distribución mantenida ya trae. El JavaScript se
 compila para un único estándar, ES2023, igual en Windows (WebView2) y Linux
 (`vite.config.ts`).
 
-**Para compilarla**:
+### 2. Para compilarla
 
 - **Node.js ≥ 22.12** — solo construye el frontend; la app final no lleva Node.
 - **Rust ≥ 1.77** (`rustup`). Es la MSRV declarada: no se usan APIs más nuevas.
@@ -101,6 +106,8 @@ sesión ya estaba abierta cuando se instaló Rust, buscan también en
 `%USERPROFILE%\\.cargo\\bin` y no exigen reiniciar la terminal para que `cargo
 fmt`, `clippy` o los tests estén disponibles.
 
+### 3. Para las pruebas E2E
+
 Para ejecutar la batería E2E al final del build hace falta además
 `tauri-driver`, un controlador nativo compatible y una sesión gráfica. En
 Windows no hace falta instalar el navegador Microsoft Edge: el builder instala
@@ -114,7 +121,7 @@ instala los controladores cuando sea posible y `--e2e-driver
 no lo incluye. Si una precondición no puede prepararse, el script lo indica y
 no marca la release como verificada.
 
-### Wine para la validación cruzada
+### 4. Wine para la validación cruzada
 
 Para compilar el ejecutable Windows desde Arch/CachyOS e inspeccionarlo bajo
 Wine, instala las herramientas de la cadena cruzada y del entorno gráfico:
@@ -169,7 +176,7 @@ diagnóstico.
 `E2E_WEBVIEW2_USER_DATA_FOLDER` permite fijar una ruta escribible propia cuando
 sea necesario.
 
-### conpty.dll
+### 5. conpty.dll
 
 En Windows la app **necesita** `conpty.dll`, `OpenConsole.exe` y
 `WebView2Loader.dll` junto al ejecutable. Los dos recursos ConPTY se obtienen
@@ -187,7 +194,9 @@ incluye los recursos junto al ejecutable.
 
 ## Instalación para usar la aplicación
 
-**Windows portable.** La release nativa publica la carpeta desempaquetada,
+### 1. Windows portable
+
+La release nativa publica la carpeta desempaquetada,
 su ZIP y un único `WTerminal-<versión>-Portable.exe`. La carpeta y el ZIP
 traen `wterminal.exe`, `conpty.dll`, `OpenConsole.exe` y
 `WebView2Loader.dll`. El
@@ -202,11 +211,13 @@ WebView2 va enlazado en el ejecutable. Se actualiza solo descargando el
 `-Portable.exe` nuevo, que reemplaza al que corre, como un AppImage. En
 cualquiera de las tres formas, si falta el runtime de WebView2, el arranque lo
 resuelve antes de crear la ventana (ver
-[WebView2: si falta el runtime](#webview2-si-falta-el-runtime)). No crea accesos
+[WebView2: si falta el runtime](#8-webview2-si-falta-el-runtime)). No crea accesos
 directos. Las operaciones de sistema se descubren desde
 LTools / WTools.
 
-**Windows instalable.** La release completa (`npm run dist:win`) y su alias
+### 2. Windows instalable
+
+La release completa (`npm run dist:win`) y su alias
 explícito `npm run dist:win:installer` generan un NSIS y lo publican como
 `release/WTerminal-<versión>-x64-setup.exe`. De serie usa el
 `downloadBootstrapper` de Tauri: si al instalar falta WebView2, el asistente
@@ -225,7 +236,9 @@ de Tauri no trae polaco, rumano ni hindi: sus textos van en
 `src-tauri/windows/installer/{Polish,Romanian,Hindi}.nsh`
 (`customLanguageFiles`).
 
-**Instalador modular.** El asistente usa una plantilla propia,
+### 3. Instalador modular
+
+El asistente usa una plantilla propia,
 `src-tauri/windows/installer/installer.nsi`: la de Tauri 2.11.5 con tres
 cambios marcados con «WTerminal:» (al actualizar la CLI de Tauri hay que volver
 a partir de la suya).
@@ -247,9 +260,23 @@ a partir de la suya).
   **Borrar la carpeta propia** (cachés, herramientas y programas instalados
   desde WTerminal).
 - La segunda casilla solo sale si la carpeta propia es la de fábrica o lleva
-  la marca `LEEME-carpeta-propia-WTerminal.txt`, que WTerminal deja al crearla.
+  la marca `LEEME-carpeta-propia-WTerminal.txt`, que WTerminal deja solo en
+  una raíz que crea él (no existía o estaba vacía) y nunca en una raíz de
+  disco (`toolchain_store::prepare_root`).
   Una carpeta elegida a mano que no sea suya (una raíz de disco, una carpeta
   con otras cosas) nunca se ofrece borrar.
+- Lo que ocupa la carpeta propia solo se mide si sale su casilla
+  (`first_run::measure_plan`): en la VM, una carpeta propia de 185 GB que no
+  se podía borrar (llevaba `docker` y `wsl`) dejaba el desinstalador sin
+  enseñar nada durante minutos mientras la medía. Aun saliendo, la medida se
+  corta a los 15 s (`MEASURE_BUDGET`). Entonces la casilla dice lo contado
+  como mínimo, «≥ 120.3 GB», sin palabras para que valga en cualquier idioma,
+  y el informe lleva `partial=1`.
+- `scripts/capture-installer-pages.ps1` recorre de forma visible el
+  instalador y el desinstalador, y comprueba entre medias `first-run.json`,
+  la línea del primer arranque en el registro, las casillas del
+  desinstalador con los tamaños del informe y que al desinstalar se va
+  `first-run.json`.
 
 Al desinstalar, el propio `wterminal.exe`
 (`--wterminal-uninstall-cleanup`, `platform::uninstall_cleanup`) deshace lo que
@@ -265,7 +292,9 @@ deshace nada (`src-tauri/windows/installer/hooks.nsh`).
 `scripts/capture-installer-pages.ps1` recorre el asistente de forma visible y
 captura cada página del instalador y del desinstalador.
 
-**Linux.** Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta. Lleva
+### 4. Linux
+
+Un AppImage: `chmod +x LTerminal-*.AppImage` y se ejecuta. Lleva
 todo dentro, funciona en cualquier distribución con WebKitGTK y se actualiza
 solo, como el portable de Windows. Además están preparados tres formatos más,
 que saldrán en la misma release que Windows cuando `linux/build.sh` los genere
@@ -286,7 +315,8 @@ AppImage es el formato obligatorio de cada release; los demás son opcionales.
 No hay Flatpak ni Snap: su aislamiento impide que una terminal vea las shells,
 toolchains y archivos del sistema. AUR queda para más adelante.
 
-**Carpeta propia: cachés, descargas, modelos, herramientas e historial.**
+### 5. Carpeta propia: cachés, descargas, modelos, herramientas e historial
+
 Lo que descargan y crean desde WTerminal los gestores de paquetes, las
 herramientas y los REPL se guarda en `%LOCALAPPDATA%\WTerminal\entornos` (en
 Linux, bajo `~/.local/share/LTerminal/entornos`), por categorías:
@@ -356,48 +386,99 @@ Documentos:
   encuentra estos programas por WinGet y por la carpeta que registran en
   «Aplicaciones instaladas». Sin la categoría, la orden es la de siempre.
 
-**Gestionar la carpeta propia** (Ajustes → Comportamiento → «Gestionar la
-carpeta propia…», vista propia `StorePanel.svelte`):
+### 6. Gestionar la carpeta propia
 
-- **Carpeta de cada categoría.** De fábrica todas van dentro de la carpeta
-  propia; cualquiera puede ir a otro sitio (por ejemplo los modelos de IA a
-  otro disco). Se guarda en `toolchainStoreCategoryDirs` (`categoría=carpeta`
-  por línea) y lo aplica `toolchain_store::category_base`. Lo que ya estaba en
-  la carpeta anterior no se mueve.
-- **Interruptor por elemento.** Cada entrada de una categoría activa se puede
-  apagar sola (`toolchainStoreDisabled`): las terminales nuevas vuelven a su
-  sitio de siempre.
-- **Traer lo ya instalado** (`config::store_adopt`). Busca lo que tienes fuera
-  de la carpeta propia (cachés, herramientas, toolchains, configuración de los
-  REPL, el perfil de Clink y los programas de «Aplicaciones instaladas» en
-  Program Files o `%LOCALAPPDATA%\Programs`) y enseña su espacio y qué se haría.
-  Al traerlo, primero **copia** sin tocar el original y comprueba que cada
-  archivo está en la copia; después la variable apunta a la copia (la entrada
-  queda «traída» en `store-journal.json` y se reubica aunque ya existiera) o,
-  para un programa, el original pasa a `<carpeta>.wterminal-antes` y en su
-  sitio queda una unión hacia la copia (con permisos de administrador si está
-  en Program Files; si el programa está abierto, no se toca nada).
-  **Confirmar** borra el original; hasta entonces **Deshacer** lo deja todo
-  como estaba. Las cachés y las herramientas se mezclan con lo que ya hubiera
-  en la carpeta propia; lo demás exige que el destino esté vacío. Los
-  programas instalados con **MSI no se traen**: sus actualizaciones fallan si
-  su carpeta es una unión (mongosh dio el error 1603 al poner permisos); para
-  ellos, desinstalar e instalar desde Dependencias, que ya los pone en
-  `programas\<id>`. Con la integración con el PATH activa, las variables de lo
-  traído se publican también en el usuario (`published_variables`), así que
-  rustup, cargo o IPython lo siguen encontrando fuera de WTerminal tras borrar
-  el original; si está apagada, la vista lo avisa.
-- **Exportar e importar la lista** (`wterminal-store-v1`): la configuración
-  de la carpeta propia y las acciones «Instalar» del catálogo que ya están
-  hechas. Al importar se aplican los ajustes y la vista enseña lo que falta,
-  cada cosa con su botón «Instalar» (en una pestaña visible, como desde
-  Dependencias); lo que este catálogo no conoce se lista aparte.
+Se abre en Ajustes → Comportamiento → «Gestionar la carpeta propia…» (vista
+propia `StorePanel.svelte`). Desde ahí se decide dónde va cada categoría, se
+apaga lo que no se quiera centralizar, se trae lo que ya estaba instalado
+fuera y se exporta la lista para repetirla en otro equipo.
+
+#### 6.1 La carpeta de cada categoría
+
+De fábrica todas van dentro de la carpeta
+propia; cualquiera puede ir a otro sitio (por ejemplo los modelos de IA a
+otro disco). Se guarda en `toolchainStoreCategoryDirs` (`categoría=carpeta`
+por línea) y lo aplica `toolchain_store::category_base`. Lo que ya estaba en
+la carpeta anterior no se mueve. No se admiten raíces de disco ni carpetas
+que pisen la de otra categoría (`safe_category_dirs`), y «Vaciar cachés»
+vacía la carpeta de la categoría Cachés solo si no es una raíz de disco, la
+carpeta personal ni la de otra categoría.
+
+#### 6.2 Apagar un elemento suelto
+
+Cada entrada de una categoría activa se puede
+apagar sola (`toolchainStoreDisabled`): las terminales nuevas vuelven a su
+sitio de siempre.
+
+#### 6.3 Traer lo ya instalado
+
+`config::store_adopt` busca lo que tienes fuera
+de la carpeta propia (cachés, herramientas, toolchains, configuración de los
+REPL, el perfil de Clink y los programas de «Aplicaciones instaladas» en
+Program Files o `%LOCALAPPDATA%\Programs`) y enseña su espacio y qué se haría.
+Al traerlo, primero **copia** sin tocar el original y comprueba que cada
+archivo está en la copia; después la variable apunta a la copia (la entrada
+queda «traída» en `store-journal.json` y se reubica aunque ya existiera) o,
+para un programa, el original pasa a `<carpeta>.wterminal-antes` y en su
+sitio queda una unión hacia la copia (si el programa está abierto, no se
+toca nada; si falla algo después de copiar, el original recupera su nombre y
+la copia se borra). Los programas de **Program Files no se traen**: su copia
+quedaría en una carpeta en la que el usuario puede escribir, y un servicio o
+una tarea elevada cargaría de ahí sus EXE y DLL; dos programas que irían a
+la misma carpeta tampoco se traen juntos.
+**Confirmar** borra el original; hasta entonces **Deshacer** lo deja todo
+como estaba. Si Confirmar se queda a medias (un archivo en uso), el elemento
+queda «confirmando»: ya no se puede deshacer, porque la copia es la única
+completa, y se ofrece **Volver a confirmar**. Deshacer tampoco borra la copia
+si el original ya no está.
+Cada archivo se copia con el nombre `<archivo>.wterminal-parcial` y se
+renombra al terminar, y la comprobación mira también el tamaño en lo que no
+se mezcla; los enlaces y uniones del original (`npm link`, `rustup toolchain
+link`) se vuelven a crear en la copia. El diario se apunta antes de copiar:
+una copia cortada (WTerminal cerrado, equipo apagado) sale como fallida y se
+repite desde el principio, y lo que dejó el script de un programa que siguió
+solo se concilia con el disco al abrir la lista. El diario se escribe en un
+temporal que se renombra encima (la versión anterior queda en
+`store-journal.json.bak`); si no se puede leer, la vista lo dice y no se
+cambia nada. Las cachés y las herramientas se mezclan con lo que ya hubiera
+en la carpeta propia; lo demás exige que el destino esté vacío. No se ofrece
+traer lo que se pisa (`AdoptConflict`): un origen que es su propio destino,
+lo contiene o está dentro de él, que está dentro de la carpeta propia o la
+contiene, o que comparte carpeta con otro elemento. «cargo install» no se
+trae por separado (su `bin` lleva los proxies de rustup y su registro vive
+en CARGO_HOME: va con «Rust (cargo)»), y en Linux `pip --user` tampoco
+(su ubicación de siempre es `~/.local`, que es de todo el usuario). Los
+programas instalados con **MSI no se traen**: sus actualizaciones fallan si
+su carpeta es una unión (mongosh dio el error 1603 al poner permisos); para
+ellos, desinstalar e instalar desde Dependencias, que ya los pone en
+`programas\<id>`. Con la integración con el PATH activa, las variables de lo
+traído se publican también en el usuario (`published_variables`), así que
+rustup, cargo o IPython lo siguen encontrando fuera de WTerminal tras borrar
+el original; si está apagada, la vista lo avisa.
+
+#### 6.4 Exportar e importar la lista
+
+(`wterminal-store-v1`): la configuración
+de la carpeta propia y las acciones «Instalar» del catálogo que ya están
+hechas. Lo hecho se saca de la comprobación completa de Dependencias, que
+quita las instalaciones que su sonda da por hechas: son las del catálogo sin
+filtrar (`probed_install_ids`) que no salen en ella. Sin esa comprobación
+(Dependencias sin abrir, justo después de instalar algo, bajo consumo),
+exportar e importar esperan a la de fondo y, si no hay, piden abrir
+Dependencias. Al importar se aplican los ajustes y la vista enseña lo que
+falta, cada cosa con su botón «Instalar» (en una pestaña visible, como desde
+Dependencias); lo que ya está instalado aquí no se cuenta, y lo que este
+catálogo no conoce se lista aparte.
+
+#### 6.5 Los modelos de Ollama
 
 Con Ollama hay un matiz: los modelos los guarda su servidor, que suele
 arrancar la aplicación de Ollama fuera de WTerminal con su propia carpeta. Por
 eso `OLLAMA_MODELS` solo se fija si todavía no tienes modelos; entonces es la
 carpeta que usa «Arrancar el servidor de Ollama» desde el panel, y la detección
 de modelos del selector la lee también. Los modelos que ya tienes no se tocan.
+
+#### 6.6 «Entornos y descargas» en Ajustes
 
 Ajustes → Comportamiento → «Entornos y descargas» tiene el interruptor general,
 uno por categoría (con lo que cambia cada una), la carpeta, el tamaño de cada
@@ -425,6 +506,8 @@ Los tres comandos de esta sección (`toolchain_store_status`,
 y miden en `spawn_blocking`: la primera medición externa pasa del minuto en
 frío y cada apertura de Ajustes pedía otra que esperaba a la anterior dentro
 de un hilo del runtime; con ocho aperturas la app dejaba de responder.
+
+#### 6.7 Todas las carpetas que usa WTerminal
 
 En esa misma sección están **todas las carpetas que usa WTerminal** y las de
 otras herramientas, con su tamaño. Al pasar el ratón (o el foco del teclado)
@@ -459,9 +542,9 @@ o el texto la hacen más alta (`src/lib/floating-tip.ts`).
 | Modelos de Ollama | Modelos de IA locales | Con `ollama rm` o desde el panel |
 | WinGet, Chocolatey, Scoop, Docker, distros WSL | Programas, contenedores o sistemas completos | No a mano: con su propia herramienta (`wsl --unregister`, `docker system prune`…) |
 
-La licencia del código fuente es MIT. Las dependencias y recursos de terceros
-conservan sus licencias originales; el instalador incluye
-`THIRD-PARTY-NOTICES.txt`.
+### 7. Cómo se actualiza cada forma de distribución
+
+#### 7.1 Cuándo busca actualizaciones
 
 La aplicación consulta sus actualizaciones en su repositorio propio, que se
 mantiene separado de los proyectos anclados: no aparece en la biblioteca ni se
@@ -478,10 +561,10 @@ solo informa y abre Entorno y dependencias. No instala aplicaciones en segundo
 plano. El gestor puede refrescar su propia caché durante la consulta, que tiene
 un timeout y nunca bloquea la interfaz. Las dos consultas al arrancar se pueden
 apagar por separado en Ajustes › Privacidad y red (ver
-[Privacidad y red](#privacidad-y-red)); el panel de Dependencias sigue pudiendo
+[Privacidad y red](#11-privacidad-y-red)); el panel de Dependencias sigue pudiendo
 buscar actualizaciones a mano.
 
-### Cómo se actualiza cada forma de distribución
+#### 7.2 Cómo se aplica en cada forma de distribución
 
 Cada copia sabe cómo se instaló (`self_update::PackageKind`) y solo acepta su
 propio adjunto de la release (`asset_for_package`, por el final del nombre y,
@@ -502,7 +585,7 @@ A `dpkg` y `rpm` solo se les pregunta por un binario bajo `/usr` (y no
 contra el `SHA256SUMS.txt` firmado antes de tocar nada. Sin `pkexec` o sin
 gestor, la app dice dónde dejó el paquete verificado para instalarlo a mano.
 
-### WebView2: si falta el runtime
+### 8. WebView2: si falta el runtime
 
 Antes de crear la ventana, `platform/windows/webview2.rs` (`ensure_runtime`)
 comprueba si el runtime está instalado. Si falta:
@@ -545,6 +628,12 @@ y 2 si la firma del instalador no es de Microsoft. Para despliegues automatizado
 `LTERMINAL_WEBVIEW2_NO_DIALOG=1` lo deja sin diálogo (si no se resuelve solo,
 la app sigue y Tauri informa al crear la ventana). Todo queda en el log de
 arranque («WebView2 Runtime ausente», con la opción elegida y cada intento).
+
+### 9. Licencias de lo que se instala
+
+El código fuente es AGPL-3.0-only, con licencia comercial aparte
+([Licencia](#licencia)). Las dependencias y recursos de terceros conservan sus
+licencias originales; el instalador incluye `THIRD-PARTY-NOTICES.txt`.
 
 ## Entorno de desarrollo
 
@@ -676,7 +765,7 @@ catálogo versionado y LTerminal las descubre y ejecuta de forma segura.
 | `npm run dist:win:installer` | Genera el instalador NSIS de Windows (descarga WebView2 solo si falta) y ejecuta la batería ampliada/E2E. |
 | `npm run dist:win:validate` | Release completa con `-ReleaseValidation`: además de la batería, vídeo, descargas reales, auditoría del catálogo e instalación real del NSIS (pide UAC y lo desinstala). |
 | `npm run dist:win:quick` | La misma release con `-QuickValidation`: prueba lo mismo sin repetirlo (un solo recorrido completo con vídeo, y prueba corta del portable y de lo instalado). |
-| `npm run e2e:suite` | Ejecuta suites E2E estandarizadas (`focused`, `full`, `video`, `downloads`, `dependency-audit`, `installer`) contra un binario existente y escribe `summary.json`/`summary.md`. |
+| `npm run e2e:suite` | Ejecuta suites E2E estandarizadas (`focused`, `full`, `video`, `downloads`, `dependency-audit`, `installer` y, desde el 12-11, `components`: eco, entrada larga, reflujo y marcas con Clink y PSReadLine encendidos, como los tiene el usuario; aún fuera de la release) contra un binario existente y escribe `summary.json`/`summary.md`. |
 | `npm run e2e:installer` | Instala de verdad el NSIS indicado (un UAC), lo verifica, ejecuta el E2E sobre lo instalado y lo desinstala. |
 | `npm run dev:test` | Bucle rápido para desarrollo: compila con el perfil de Cargo `fast` (release sin LTO e incremental; `target/fast/`) y ejecuta solo lo pedido: `--only` escenarios del catálogo, `--matrix` la matriz de shells con unos entornos, `--rust` tests filtrados, `--js` scripts sueltos, con `--video`, `--repeat N` y `--env CLAVE=valor`. Apaga WSL al empezar y al terminar la tanda (no entre escenarios: cada arranque de WTerminal sondea las distros y forzaría un arranque en frío) y deja `summary.md` en `artifacts/dev-test/`. `--list` enseña los escenarios. Lo que compila lleva dentro las claves públicas del actualizador, como una release, y deja en `firma/` el manifiesto del binario con sus firmas Ed25519 y SSHSIG verificadas (claves de `--keys-dir` o de la carpeta que recuerda `windows/build.ps1`; sin claves completas avisa y sigue sin firmar, y `--no-sign` lo omite). No sustituye a la build completa. |
 | `npm run test:e2e-suite` | Comprueba sin abrir la app el catálogo de suites, el ejecutor, su resumen y la comparación de binarios del instalador. |
@@ -722,7 +811,20 @@ de bases de datos, contenedores, elevaciones ni dispositivos ADB reales.
 la matriz a esos entornos, en ese orden y con repeticiones, para repetir un
 REPL intermitente. Los REPL de lenguajes tienen 60 s para enseñar su prompt
 tras el arranque: los de JVM, .NET, GHC o Julia no pintan nada hasta su banner
-y, con la máquina cargada, Scala pasó de 30 s.
+y, con la máquina cargada, Scala pasó de 30 s. Un REPL que se cierra solo se
+relanza hasta dos veces (otra shell y vuelta, como haría el usuario) y, si
+sigue cayéndose, se omite con el motivo. Hay dos casos:
+- Elm, con `resource busy (file is locked)` en su caché (antes de abrirlo, la
+  prueba quita su caché del REPL si quedó rota: ver
+  [Problemas conocidos](#9-el-repl-de-elm-no-contesta-y-se-queda-al-100--de-cpu));
+- cualquiera que termine con un código de fallo de Windows: 0xC0000374
+  (corrupción del heap), 0xC0000005, 0xC00000FD o 0xC0000409. En la larga
+  53, `php.exe` 8.5 terminó con 0xC0000374 a mitad de escribir la sonda, con
+  la pestaña mostrando bien el aviso.
+
+La terminal no puede corromper la memoria de otro proceso: es un fallo del
+programa. El informe lo apunta como `environment-probe-relaunch` con su
+`exitCode`.
 `npm run test:e2e-environment-probes` comprueba localmente que los 89 REPL
 declarados entre el código y el catálogo tienen una sonda o una omisión segura.
 
@@ -790,6 +892,8 @@ normal. Los artefactos rápidos quedan en `release/dev/` y llevan el sufijo
 
 ## Compilación y distribución
 
+### 1. El menú de `build-tools/`
+
 Para no tener que recordar las combinaciones de argumentos, el punto de entrada
 recomendado es el menú de `build-tools/`:
 
@@ -821,6 +925,8 @@ en instalaciones Windows sin `npm` global. El comando equivalente para una
 terminal es `node scripts/package-scripts.mjs list` o
 `node scripts/package-scripts.mjs run <script> [argumentos]`.
 
+### 2. Permisos de administrador al arrancar
+
 En Windows, WTerminal arranca **sin** permisos de administrador y no escribe
 por su cuenta la marca de compatibilidad `RUNASADMIN`. Quien los necesite tiene
 en Ajustes → Comportamiento → Permisos de administrador «Reiniciar como
@@ -828,7 +934,9 @@ administrador», «Reiniciar sin permisos de administrador» y una sola elecció
 «Al abrir WTerminal»: sin permisos (de fábrica), «Iniciar siempre como
 administrador» (lo pide WTerminal) o la marca de Windows en WTerminal.exe; el
 detalle, junto con NSudo y gsudo, está en
-[Permisos de administrador y NSudo](#permisos-de-administrador-y-nsudo).
+[Permisos de administrador y NSudo](#9-permisos-de-administrador-y-nsudo).
+
+### 3. WTerminal en el `PATH`
 
 En el primer inicio, WTerminal se añade automáticamente al `PATH` del usuario
 para poder invocarse como `wterminal`. En **Ajustes > Comportamiento** puedes
@@ -839,6 +947,8 @@ lanzador en `~/.local/bin` y administra un bloque reversible en los perfiles de
 Bash, Zsh y Fish. Solo se registra WTerminal; cada tool gestiona las aplicaciones
 que instala.
 
+### 4. Firma de los commits de Git
+
 La firma de commits Git es independiente de la compilación y de la firma
 Ed25519 de las releases. No se solicita al buildear. Para activar la firma SSH
 automática solo en este checkout, ejecuta
@@ -846,6 +956,8 @@ automática solo en este checkout, ejecuta
 opción 5 del menú. El asistente usa una clave SSH existente, configura Git
 localmente y muestra la clave pública que debes añadir en GitHub como
 **Signing key**; nunca sube la clave ni muestra la privada.
+
+### 5. Los builders directos
 
 Los menús llaman a los builders mantenidos que siguen debajo de `linux/` y
 `windows/`; esos puntos directos se conservan para CI y automatización avanzada.
@@ -861,10 +973,12 @@ windows\build.ps1 -NoRun -NonInteractive -QuickValidation    # la misma validaci
 windows\build.ps1 -WebView2 Offline  # variante sin Internet: NSIS, carpeta y portable con el instalador offline de WebView2
 ```
 
+#### 5.1 WebView2: Download u Offline
+
 `-WebView2 Download` (de serie) deja los tres paquetes en unos pocos MB más
 la aplicación: el NSIS usa el `downloadBootstrapper` de Tauri y la carpeta y el
 portable no llevan instalador, porque el arranque lo resuelve si falta (ver
-[WebView2: si falta el runtime](#webview2-si-falta-el-runtime)).
+[WebView2: si falta el runtime](#8-webview2-si-falta-el-runtime)).
 `-WebView2 Offline` escribe una configuración temporal con
 `webviewInstallMode = offlineInstaller`, saca con 7-Zip el instalador offline
 de ese NSIS y lo reutiliza en la carpeta (como `MicrosoftEdgeWebView2Setup.exe`)
@@ -872,10 +986,14 @@ y dentro del portable. La build comprueba el tamaño según el modo: un NSIS
 Offline de menos de 100 MB o uno Download de 100 MB o más la paran, porque
 significa que el modo no se aplicó.
 
+#### 5.2 Linux
+
 ```bash
 linux/build.sh
 linux/build.sh --fast --no-extended-tests --skip-checks  # iteración rápida de desarrollo
 ```
+
+#### 5.3 El selector interactivo
 
 Al ejecutar `windows\build.ps1` o `linux/build.sh` sin argumentos desde una
 consola interactiva aparece un selector previo. Sus valores predeterminados son
@@ -886,6 +1004,8 @@ argumentos explícitos, `-NonInteractive`/`--non-interactive` o entrada
 redirigida no preguntan nada y mantienen igualmente la ruta completa, salvo que
 se solicite una excepción (`-NoInstaller`, `-NoExtendedTests`, `-SkipChecks`,
 `--fast`, etc.).
+
+### 6. Validar Windows desde Linux (Wine)
 
 Para validar la compatibilidad Windows desde Linux:
 
@@ -926,6 +1046,8 @@ Rust compilada como PE Windows y tres arranques aislados bajo Wine:
 linux/build.sh --full-tests --cross-windows
 ```
 
+### 7. Validar Linux desde Windows (WSL)
+
 En Windows, `-CrossLinux` utiliza WSL. Si no existe WSL o no hay una
 distribución instalada, intenta instalar WSL y Ubuntu con `winget`/`wsl.exe`;
 después ejecuta dentro de WSL `linux/build.sh --full-tests
@@ -935,6 +1057,8 @@ debe disponer de WSLg:
 ```powershell
 windows\build.ps1 -NonInteractive -FullTests -CrossLinux
 ```
+
+### 8. Argumentos y combinaciones
 
 Argumentos: `-Clean`/`--clean` borra `node_modules` y `target` antes,
 `-SkipChecks`/`--skip-checks` salta todas las comprobaciones, incluidas las que
@@ -961,6 +1085,8 @@ contradictorias como `-Installer` con `-NoInstaller` o
 `-FullTests`/`-StrictTests` con `-NoExtendedTests`; en Linux,
 `--full-tests`/`--extended-tests` y `--no-extended-tests` siguen la misma regla.
 
+### 9. La batería ampliada, y los fallos que no paran la release
+
 En Windows, la batería ampliada se ejecuta automáticamente tanto en modo
 interactivo como no interactivo; solo `-NoExtendedTests` la omite. Las sondas de shells y herramientas se
 acumulan aunque alguna falle, de modo que el E2E no se pierde por un único
@@ -970,7 +1096,9 @@ proceso termina con código 1 para que CI lo detecte. `-StrictTests` sigue
 convirtiendo también las ausencias opcionales en ese diagnóstico final. El
 informe E2E se conserva en `%TEMP%\wterminal-e2e-<id>.json` cuando falla.
 
-#### Niveles de validación (Windows)
+### 10. Niveles de validación (Windows)
+
+#### 10.1 Los niveles
 
 Todas las pruebas E2E salen de un catálogo único, `tests/e2e/suites.mjs`, y
 pasan por el mismo ejecutor, `scripts/run-e2e-suite.mjs`, que deja un resumen
@@ -983,6 +1111,8 @@ escenario.
 | Por defecto o `-FullTests` | Checks, sondas de shells/herramientas, recorrido E2E completo sobre el ejecutable y sobre el portable de un solo archivo (copiado solo a una carpeta vacía), y la suite `focused` de regresiones (pie de Ajustes, Entornos y descargas, PATH, escribir tras redimensionar, entrada en cola, primera orden en pestañas nuevas ×3 y con la carrera forzada, casilla diminuta que crece, seguimiento del cursor en entradas largas, integridad horizontal, estilos ANSI, parpadeo del cursor, selección con el ratón, anchos Unicode, imágenes Sixel, sugerencias con el color elegido en Ajustes en cada shell, asistentes de IA con Claude Code de la app de escritorio y una acción de cmd en una sola línea, y apariencia: temas sobre la base neutra, recolorear todo, tema propio, paleta ANSI propia y Biblioteca abierta al marcar). |
 | `-ReleaseValidation` | Todo lo anterior más el recorrido completo con vídeo, descargas reales con pip/npm/Deno/Bun/Go (necesita red), la auditoría completa del catálogo de dependencias y una instalación real del NSIS: un único aviso de UAC, comprobación de archivos, registro, accesos directos y binario, E2E sobre lo instalado y desinstalación verificada. Es el nivel que permite dar una release por buena. |
 | `-QuickValidation` | Las mismas comprobaciones sin repetirlas: un solo recorrido completo, con vídeo y sobre la carpeta desempaquetada; la suite `distribution` (shells, un REPL, paneles y PATH) sobre el portable y sobre lo instalado, que llevan los mismos archivos comprobados por hash; `focused`, descargas e instalador igual; y la auditoría solo recorre acción por acción en su segunda pasada, con menos fotogramas por segundo y sin segmentos nativos. Tarda alrededor de un tercio menos. |
+
+#### 10.2 Piezas sueltas y suites sin recompilar
 
 Las piezas de `-ReleaseValidation` también se pueden pedir sueltas con
 `-VideoTest`, `-DownloadTests`, `-DependencyAudit` e `-InstallerTest`, y
@@ -998,6 +1128,8 @@ Sin recompilar: `npm run e2e:suite -- --binary <wterminal.exe> --suite focused,v
 (`--list` muestra el catálogo, `--level release` lo selecciona todo y `--only appearance,shell-assist` repite solo esos escenarios) y
 `npm run e2e:installer -- --installer release\WTerminal-<versión>-x64-setup.exe`.
 
+#### 10.3 La versión y los pasos de cada build
+
 Al comenzar, los scripts de empaquetado preguntan la versión a generar y
 proponen la actual; pulsar Enter la conserva. Se puede evitar el diálogo con
 `-Version 1.0.0 -NonInteractive` en Windows o `--version 1.0.0` en Linux.
@@ -1010,6 +1142,9 @@ otra carpeta; las rutas relativas se resuelven desde la raíz del proyecto. Para
 mantener la estructura estándar, usa `LTERMINAL_RELEASE_DIR="$PWD/release"`:
 Linux y Windows cruzado publicarán en la única carpeta de artefactos del
 proyecto.
+
+#### 10.4 El manifiesto y el volcado a disco
+
 El manifiesto `SHA256SUMS.txt` se actualiza por artefacto y de forma atómica:
 conserva los hashes de las demás arquitecturas, plataformas y perfiles de la
 misma versión, y solo sustituye la entrada del archivo que se acaba de generar.
@@ -1018,6 +1153,9 @@ En Windows, tras firmar, `Sync-PublishedFiles` vuelca a disco cada archivo de
 `release\` (`FlushFileBuffers`): un apagado brusco a los pocos minutos de un
 build dejó el instalador con su final a ceros y `SHA256SUMS.txt`, `.sig` y
 `.sshsig` llenos de ceros porque Windows aún no los había escrito.
+
+#### 10.5 La comprobación de enlaces
+
 La comprobación estricta de enlaces distingue HTTP de repositorios Git: las
 URLs normales usan el timeout corto configurado y `git ls-remote` dispone de
 hasta 30 segundos y reintentos propios, para no rechazar una build porque la
@@ -1062,7 +1200,7 @@ conviene repetir después el ciclo estricto con red disponible. En Windows
 nativo, `windows\build.ps1 -AllowOfflineChecks` aplica este modo a toda la
 build, incluidas las comprobaciones que lanza `prebuild`.
 
-### Resumen al final de la build
+### 11. Resumen al final de la build
 
 `windows/build.ps1` termina con **Resumen de la build** (`Write-BuildSummary`):
 los archivos de `release/` con su tamaño, la carpeta desempaquetada, cada
@@ -1076,7 +1214,14 @@ escenario con su carpeta `<id>-captures`. Con `-VideoTest` las tres formas de
 distribución dejan vídeo: el desempaquetado en la suite `video`, el portable en
 su E2E y lo instalado en la suite `installer`.
 
-### Qué produce cada build
+Si la compilación falla («La compilacion del binario fallo»), la build escribe
+antes las últimas 80 líneas de lo que dijo Tauri o Cargo
+(`Write-NativeOutputTail`). Esa salida se enseña con `Out-Host`, que va a la
+consola y no a los flujos de PowerShell. La build larga por etapas, que
+redirige `*>&1` a su registro con la consola oculta, la perdía: la 59 (13-11)
+cayó ahí sin una sola línea del compilador y, repetida a mano, compiló.
+
+### 12. Qué produce cada build
 
 | Plataforma | Artefacto |
 |---|---|
@@ -1103,7 +1248,7 @@ SHA-256 y sus firmas verificables. Antes de mostrar el aviso autentica el
 manifiesto y comprueba que contiene el hash del artefacto; al instalar vuelve a
 validar las firmas y calcula el SHA-256 del paquete descargado.
 
-### Seguridad de las releases
+### 13. Seguridad de las releases
 
 Las actualizaciones exigen `SHA256SUMS.txt`, la firma Ed25519 detached
 `SHA256SUMS.txt.sig` y una segunda firma OpenSSH/SSHSIG
@@ -1168,7 +1313,7 @@ Linux tiene que empaquetarse con los nombres sin `./` delante (`tar -czf
 raíz de esa carpeta. El bootstrap de perfil
 también exige el checksum del ZIP y limita sus hosts de descarga a GitHub.
 
-### Publicar una release
+### 14. Publicar una release
 
 Windows y Linux salen **juntos**, en una sola release con un solo
 `SHA256SUMS.txt`: el actualizador de cada copia busca en ese manifiesto el hash
@@ -1195,8 +1340,26 @@ larga, sin recompilar. Se prepara así:
    (`--keys-dir <carpeta>`, de serie `Escritorio\Claves SSH`) y nunca se
    imprimen. `--platforms windows` permite, solo si se pide, una release sin
    Linux; `--no-sign` es para las pruebas.
-3. Se crea la release del tag en GitHub y se suben **todos** los archivos de
-   esa carpeta, tal cual:
+3. Se crea y sube la etiqueta firmada (`git tag -s v1.0.0 -m "…"` y
+   `git push origin v1.0.0`), y se sube la carpeta con
+   `scripts/publish-github-release.mjs`:
+
+   ```bash
+   npm run release:github -- --dir <carpeta-vacía>/v1.0.0 --tag v1.0.0 --dry-run
+   npm run release:github -- --dir <carpeta-vacía>/v1.0.0 --tag v1.0.0
+   ```
+
+   Primero `--dry-run`: comprueba todo y enseña las órdenes de `gh` sin
+   ejecutarlas. Sin él vuelve a comprobar la carpeta (sin `NO-PUBLICAR.txt`,
+   cada archivo con su hash, nada fuera del manifiesto, los adjuntos
+   obligatorios de la versión de la etiqueta y las dos firmas, solo con las
+   claves públicas de `--keys-dir`), exige sesión de `gh` (`gh auth login`, la
+   inicia quien publica) y la etiqueta ya subida, crea la release **en
+   borrador** con una tabla de hashes en las notas (o `--notes <archivo>`), sube
+   los archivos y comprueba en GitHub que están todos con su tamaño. Nunca
+   reemplaza adjuntos: si la release ya los tiene, se niega. Se revisa el
+   borrador en GitHub y se publica allí, o se repite con `--publish`. Se suben
+   **todos** los archivos de la carpeta, tal cual:
 
 | Sistema | Archivos | ¿Obligatorio? |
 |---|---|---|
@@ -1227,7 +1390,7 @@ forma fiable. No es una validación gráfica ni una confirmación de un defecto 
 LTerminal: la presentación visual y ConPTY real deben confirmarse en Windows
 nativo.
 
-### Comprobaciones que hacen los scripts, y por qué
+### 15. Comprobaciones que hacen los scripts, y por qué
 
 | Comprobación | Por qué está |
 |---|---|
@@ -1236,6 +1399,7 @@ nativo.
 | WebKitGTK (Linux) | Su ausencia son cientos de líneas de error de enlazado a mitad de la compilación. |
 | Solo el artefacto esperado | Un `.deb` o `.rpm` que se cuele acabaría publicado en una release sin que nadie lo haya probado. Hasta que `linux/build.sh` los valide, `tauri.linux.conf.json` deja `targets: ["appimage"]`, aunque ya lleva la configuración de los dos paquetes (sección `utils`, metadatos AppStream). |
 | Comprobación de humo | Que compile no significa que arranque. |
+| `release\NO-PUBLICAR.txt` mientras corre | Desde que prepara `release\` hasta que termina, la build deja el aviso «Build en curso» y solo lo quita si todo salió en verde (si no, lo cambia por la lista de lo pendiente). Una build cortada a mitad, como la 52 cuando la VM cayó, dejaba binarios firmados sin validar y sin ninguna marca. `assemble-release.mjs` y `publish-github-release.mjs` se niegan a usar una carpeta con el aviso. |
 | Release al día (menú `build-tools/build.ps1`) | Al abrir el menú se compara `release\SHA256SUMS.txt` con los archivos de la app (`src`, `src-tauri`, configuración): si hay alguno más nuevo, avisa de que la release es anterior a los cambios y conviene recompilar antes de probarla o publicarla. |
 | Espacio libre en la unidad del repositorio (Windows) | Por debajo de 5 GB la build se detiene con un mensaje claro; por debajo de 12 GB avisa. Antes se quedaba sin disco a mitad y fallaba con un `os error 112` que no decía la causa. |
 | Pruebas con depuración ligera (Windows) | Durante `npm run check` se compila con `CARGO_PROFILE_DEV_DEBUG=line-tables-only` y `CARGO_INCREMENTAL=0` (salvo que ya vengan definidas): los pánicos siguen dando archivo y línea, y `target\debug` ocupa unos pocos GB en vez de más de 8. |
@@ -1326,6 +1490,379 @@ flowchart TD
   AK --> AL[E2E WebDriver]
   AL --> AM[Capturas, vídeo y revisión visual]
 ```
+
+## Tecnologías y por qué se eligieron
+
+Cada pieza de WTerminal, con cinco preguntas: qué es, por qué la usamos, para qué
+sirve aquí, qué alternativas había y qué permite a futuro. Los detalles técnicos
+de cada una están en su apartado (enlazado al final de cada pieza); aquí va el
+porqué.
+
+### 1. xterm.js: el emulador de terminal
+
+#### 1.1 ¿Qué es?
+
+Una biblioteca que convierte una página web en una terminal: interpreta las
+secuencias de escape VT/ANSI (colores, cursor, borrados, pantalla alternativa),
+guarda la rejilla y el historial, y pinta el resultado. Es la misma que usa el
+terminal integrado de VS Code. WTerminal usa la versión 6 (`@xterm/xterm`) y
+cinco complementos:
+
+| Complemento | Para qué |
+|---|---|
+| `@xterm/addon-fit` | Calcular filas y columnas a partir del tamaño de la casilla |
+| `@xterm/addon-image` | Imágenes Sixel dentro de la terminal |
+| `@xterm/addon-search` | Buscar en el historial (`Ctrl+Shift+F`) |
+| `@xterm/addon-unicode11` | Anchos correctos de emojis y caracteres de Asia oriental |
+| `@xterm/addon-web-links` | Enlaces `http`, `https` y `file://` con Ctrl+clic |
+
+#### 1.2 ¿Por qué la usamos?
+
+La interfaz de WTerminal es web (Tauri con WebView2), y una interfaz web
+necesita un emulador escrito para la web. xterm.js es el estándar de hecho:
+maduro, mantenido y probado a diario por millones de personas a través de VS
+Code. Escribir un emulador propio sería otro producto entero.
+
+#### 1.3 ¿Para qué sirve en WTerminal?
+
+- Pinta lo que entrega ConPTY, con la rejilla del mismo tamaño que la de la
+  PTY. Si no coincidieran, los `ESC[fila;colH` caerían en otro sitio
+  ([Flujo de salida PTY](#2-flujo-de-salida-pty)).
+- Recibe el teclado (`onData`) y lo pasa a la cola de entrada
+  ([Flujo de entrada, cursor y teclado](#3-flujo-de-entrada-cursor-y-teclado)).
+- Sus manejadores OSC dan las [marcas de orden](#marcas-de-orden) (OSC 133),
+  el directorio actual (OSC 7) y los hipervínculos (OSC 8).
+
+#### 1.4 Alternativas, y por qué esta
+
+- **Un renderer propio** (como Alacritty con OpenGL o WezTerm con el suyo): da
+  más control y rendimiento, pero obliga a reescribir la interfaz entera fuera
+  de la web. Está descartado en la
+  [comparativa con Alacritty y WezTerm](#comparativa-con-alacritty-y-wezterm).
+- **Otros emuladores web**, como hterm, el de ChromeOS: menos complementos y
+  mucho menos uso fuera de su proyecto.
+
+#### 1.5 Ventajas, futuro y curiosidades
+
+- **Desplazamiento horizontal:** xterm.js no lo tiene. WTerminal lo hace en el
+  contenedor (`terminal-host`) con una rejilla de al menos 1024 columnas, para
+  que una línea larga no se parta ([Diagrama de entrada, salida y
+  reflow](#diagrama-de-entrada-salida-y-reflow)).
+- **xterm 6 no desplaza su elemento en el DOM:** por eso el E2E lee el texto
+  con `window.__wtTerminalText` en vez de recorrer la pantalla.
+- **A futuro:** hay complementos que aún no se usan, como el renderer WebGL
+  (más rápido con mucha salida) o el que serializa la pantalla (guardar y
+  restaurar una sesión con colores).
+
+### 2. Tauri 2 y WebView2: la aplicación de escritorio
+
+#### 2.1 ¿Qué es?
+
+Tauri es un marco para hacer aplicaciones de escritorio con una interfaz web y
+un backend en Rust. A diferencia de Electron, no lleva un Chromium dentro: usa
+el navegador del sistema. En Windows es WebView2, el motor de Edge; en Linux,
+WebKitGTK.
+
+#### 2.2 ¿Por qué la usamos?
+
+- **Sustituye a Electron:** WTerminal empezó en Electron. La migración a Tauri
+  se cerró y el árbol de Electron sigue en el historial de git
+  ([Convenciones del código](#convenciones-del-código)).
+- **Tamaño:** el portable de un solo archivo de la build 57 ocupa 13,6 MB y el
+  instalador, 5,5 MB.
+- **Separación:** todo lo que toca el sistema está en Rust y el frontend solo
+  pinta ([Arquitectura](#arquitectura)). Tauri hace de frontera con su IPC
+  ([Contrato IPC](#contrato-ipc)).
+
+#### 2.3 ¿Para qué sirve en WTerminal?
+
+- La ventana, el IPC entre Svelte y Rust y los complementos oficiales de
+  diálogos, portapapeles y abrir enlaces o carpetas.
+- El instalador NSIS y el empaquetado ([Compilación y
+  distribución](#compilación-y-distribución)).
+- Si falta WebView2, la app lo detecta antes de abrir la ventana y ofrece
+  instalarlo ([WebView2: si falta el runtime](#8-webview2-si-falta-el-runtime)).
+
+#### 2.4 Alternativas, y por qué esta
+
+- **Electron:** más fácil de empezar, pero cada copia lleva su Chromium (decenas
+  de MB más) y el backend es Node. Fue la primera versión.
+- **Interfaz nativa** (Win32, WinUI, Qt): sin web, pero sin xterm.js; habría que
+  escribir el emulador y repetir la interfaz por sistema.
+
+#### 2.5 Ventajas, futuro y curiosidades
+
+- **Una base, dos sistemas:** la misma interfaz sirve para Windows (WTerminal)
+  y Linux (LTerminal); solo cambian los adaptadores de `platform/`.
+- **Tauri 2 también compila para Android e iOS:** no está en los planes, pero
+  la base lo permitiría.
+- **Curiosidad:** WebView2 puede dejar de pintar una ventana que no se ve, y la
+  app repinta al volver (`refreshAfterWindowResume`). No pasa siempre: en el
+  experimento del 13-11, con la ventana minimizada, siguió pintando.
+
+### 3. ConPTY y portable-pty: hablar con las shells
+
+#### 3.1 ¿Qué es?
+
+- **ConPTY** es la pseudoconsola de Windows, desde Windows 10 1809. Una shell
+  (cmd, PowerShell, WSL…) cree que escribe en una consola de verdad y ConPTY lo
+  traduce a un flujo de texto con secuencias VT, que es lo que entiende
+  xterm.js.
+- **portable-pty** es la biblioteca de Rust, del proyecto WezTerm, que da la
+  misma API sobre ConPTY en Windows y sobre `forkpty` en Unix.
+
+#### 3.2 ¿Por qué la usamos?
+
+Es la única forma moderna de alojar una shell de Windows dentro de otra app sin
+perder colores, cursor ni programas a pantalla completa. portable-pty sustituye
+a `node-pty`, que usaba la versión de Electron.
+
+#### 3.3 ¿Para qué sirve en WTerminal?
+
+- Cada pestaña es un proceso en su ConPTY; `terminal/pty.rs` lee su salida y
+  escribe la entrada ([Arranque, ciclo de una pestaña y
+  PTY/ConPTY](#arranque-ciclo-de-una-pestaña-y-ptyconpty)).
+- **WTerminal lleva su propio ConPTY:** `conpty.dll` y `OpenConsole.exe` del
+  paquete oficial de Microsoft (`Microsoft.Windows.Console.ConPTY`
+  1.24.260710001), verificados por SHA-512. El del sistema falla en algunos
+  Windows recortados con `STATUS_DLL_INIT_FAILED`, y tarda más de dos minutos
+  en dar el error: las pestañas se quedaban en blanco sin decir por qué
+  ([conpty.dll](#5-conptydll)).
+
+#### 3.4 Alternativas, y por qué esta
+
+- **winpty:** la solución de antes de que existiera ConPTY. Hoy está
+  superada.
+- **Un bucle de PTY propio**, como el de Alacritty: más trabajo sin ganar nada
+  en una app local.
+- **El ConPTY del sistema a secas:** es lo más sencillo, pero falla en los
+  Windows recortados, que es justo donde corre la VM de pruebas.
+
+#### 3.5 Ventajas, futuro y curiosidades
+
+- **El portable de un solo archivo** lleva el ConPTY dentro y lo coloca en
+  `%LOCALAPPDATA%\WTerminal\runtime\<huella>` al arrancar ([Portable de un solo
+  archivo](#portable-de-un-solo-archivo)).
+- **Curiosidad medida:** el OpenConsole 1.24 de la app repinta todas las filas
+  de debajo del cursor por las columnas de la PTY. Con Python y pyreadline3
+  eran 84 KB por tecla a 1024 columnas, frente a 279 bytes con el del sistema.
+  De ahí el modo «Python con el ancho visible» ([Problemas
+  conocidos](#problemas-conocidos)).
+
+### 4. Svelte 5, Vite y TypeScript: el frontend
+
+#### 4.1 ¿Qué es?
+
+- **Svelte** es un marco de interfaz que se compila: el navegador recibe
+  JavaScript ya resuelto, sin una biblioteca grande en tiempo de ejecución.
+  La versión 5 usa «runas» (`$state`, `$derived`, `$effect`) para el estado.
+- **Vite** compila y sirve el frontend.
+- **TypeScript** añade tipos al JavaScript.
+
+#### 4.2 ¿Por qué la usamos?
+
+Para una interfaz que «solo pinta», Svelte da componentes pequeños y rápidos
+con muy poco código de pegamento. Los tipos de TypeScript son los mismos que
+devuelve el backend (`src/lib/types.ts`), y `svelte-check` los valida en cada
+build.
+
+#### 4.3 ¿Para qué sirve en WTerminal?
+
+- Los componentes: la terminal (`TerminalPane.svelte`), la barra, los paneles,
+  Ajustes, la paleta y el chat de agentes.
+- El estado compartido: `appState.svelte.ts`.
+- La lógica pura, sin interfaz, en `src/lib/*.ts`, que se prueba en Node con
+  `scripts/test-frontend-logic.mjs`.
+
+#### 4.4 Alternativas, y por qué esta
+
+React y Vue también servirían. Llevan más código en tiempo de ejecución y no
+aportan nada que aquí haga falta.
+
+#### 4.5 Ventajas, futuro y curiosidades
+
+- **El frontend nunca llama a `invoke` directamente:** todo pasa por
+  `src/lib/api.ts`, el único sitio que conoce los nombres de los comandos.
+- **El E2E lee estados internos** por funciones de diagnóstico de solo
+  lectura (`__wtTerminalState`, `__wtInputState`, `__wtPendingIpc`), sin
+  tocar nada ([Datos, logs y diagnóstico](#datos-logs-y-diagnóstico)).
+
+### 5. Rust: el backend
+
+#### 5.1 ¿Qué es?
+
+Un lenguaje compilado, rápido y con memoria segura sin recolector de basura.
+
+#### 5.2 ¿Por qué la usamos?
+
+Tauri lo pide para el backend. Además, es el lado que toca el sistema
+(procesos, Registro, archivos, red y firmas), y ahí conviene un lenguaje que
+evite toda una clase de errores de memoria.
+
+#### 5.3 ¿Para qué sirve en WTerminal?
+
+Algunas piezas, por crate:
+
+| Crate | Para qué |
+|---|---|
+| `portable-pty` | Las pestañas sobre ConPTY o `forkpty` |
+| `tokio` | Un runtime con más hilos que el de fábrica, para que los comandos que esperan no dejen sin hilos al resto |
+| `reqwest` con `rustls` | Descargas (WebView2, actualizaciones) |
+| `ring` | Comprobar las firmas Ed25519 de las releases |
+| `windows` | Win32: firmas Authenticode, DPAPI para las claves de IA, los mensajes de `cmd.exe`, la consola |
+| `winreg` | Leer el Registro sin lanzar `reg.exe` decenas de veces |
+| `sysinfo` | El banner del sistema: CPU, memoria y discos |
+
+#### 5.4 Alternativas, y por qué esta
+
+Con Electron el backend era Node. Tres crates sustituyen lo que Node traía de
+serie (`sysinfo`, `reqwest` y `portable-pty`), y el resto se escribe con lo
+mínimo.
+
+#### 5.5 Ventajas, futuro y curiosidades
+
+- **Las pruebas de Rust** (más de mil) corren en cada build con `cargo test`, y
+  clippy con `-D warnings`.
+- **Cada módulo abre diciendo de dónde viene** (`//! Port de
+  electron/main/…`) y explica el porqué en español.
+
+### 6. NSIS y el portable: cómo se entrega
+
+#### 6.1 ¿Qué es?
+
+- **NSIS** es el sistema de instaladores para Windows que usa Tauri.
+- **El portable** es la app en un solo `.exe` que no se instala.
+
+#### 6.2 ¿Por qué la usamos?
+
+Para que cada cual elija: instalarla (accesos directos, PATH, desinstalador) o
+llevarla en una carpeta o un USB sin tocar el sistema.
+
+#### 6.3 ¿Para qué sirve en WTerminal?
+
+- **El instalador:** `windows/installer/installer.nsi` y `hooks.nsh`, con sus
+  traducciones.
+- **Tres formas de distribución:** el portable de un solo archivo
+  (`create-single-file-portable.mjs`, con su índice y la marca `WTPORT01` al
+  final), la carpeta desempaquetada y su ZIP ([Instalación para usar la
+  aplicación](#instalación-para-usar-la-aplicación)).
+
+#### 6.4 Alternativas, y por qué esta
+
+MSI o MSIX son más corporativos y más rígidos para una app que también se usa
+portable. NSIS es el que trae Tauri y permite ganchos propios.
+
+#### 6.5 Ventajas, futuro y curiosidades
+
+- **El portable se actualiza solo,** reemplazando el `.exe` que corre, como un
+  AppImage de Linux.
+- **La build larga lo prueba todo:** instala con un solo UAC, recorre lo
+  instalado y desinstala comprobando que no queda nada.
+
+### 7. Doble firma: Ed25519 y OpenSSH
+
+#### 7.1 ¿Qué es?
+
+Cada release publica `SHA256SUMS.txt` con la huella de cada archivo, firmado
+dos veces: con Ed25519 (`.sig`) y con OpenSSH/SSHSIG (`.sshsig`).
+
+#### 7.2 ¿Por qué la usamos?
+
+El actualizador solo instala lo firmado con las dos claves. Si alguien
+cambiara un archivo de la release, la huella no coincidiría. Si cambiara
+también la huella, faltarían las firmas.
+
+#### 7.3 ¿Para qué sirve en WTerminal?
+
+- Antes de avisar de una versión nueva y otra vez antes de instalarla.
+- Una build no autorizada con las dos claves no se autoactualiza ([Seguridad de
+  las releases](#13-seguridad-de-las-releases)).
+
+#### 7.4 Alternativas, y por qué esta
+
+La firma de código de Windows (Authenticode) necesita un certificado de pago.
+Una sola firma sería un único punto de fallo. Dos firmas independientes, con
+formatos distintos, cuestan poco.
+
+#### 7.5 Ventajas, futuro y curiosidades
+
+La clave privada nunca está en el repositorio ni en los jobs que compilan. En
+local se pasa la carpeta con `-KeysDir`.
+
+### 8. Pruebas E2E con WebDriver: comprobar lo que se ve
+
+#### 8.1 ¿Qué es?
+
+Pruebas de punta a punta: un programa abre la app de verdad, teclea y hace clic
+como una persona, y comprueba lo que sale en pantalla.
+
+#### 8.2 ¿Por qué la usamos?
+
+Casi todos los fallos de una terminal son de tiempos y de pantalla: un eco que
+llega tarde, una línea partida o un Intro que no llega. Eso solo se ve con la
+app de verdad, una shell de verdad y su ConPTY.
+
+#### 8.3 ¿Para qué sirve en WTerminal?
+
+- WebDriver con el driver de Edge y el protocolo de depuración de WebView2
+  (`scripts/e2e-native-driver.mjs`).
+- Capturas y vídeo de cada escenario.
+- Suites `focused`, `video`, `downloads`, `dependency-audit`, `installer` y
+  `components` ([E2E](#e2e), [Pruebas](#pruebas)).
+
+#### 8.4 Alternativas, y por qué esta
+
+- **Playwright** se usa para algo concreto: la barra montada en un Chromium
+  sin ventana, con 504 combinaciones de ancho, idioma y controles
+  (`npm run test:toolbar-layout`).
+- **La app entera** necesita su ventana real de WebView2 con su ConPTY detrás,
+  y eso lo gobierna el driver de Edge (WebDriver) con el protocolo de
+  depuración de WebView2.
+- **Las pruebas unitarias** no ven ConPTY ni la pantalla.
+
+#### 8.5 Ventajas, futuro y curiosidades
+
+El fallo intermitente de `tab-tools` (builds 56 y 58) se encontró así:
+- un escenario que lo reproduce (`hidden-enter`);
+- un diagnóstico de la cola de entrada (`__wtInputState`);
+- y la cola de entrada arreglada ([Flujo de entrada, cursor y
+  teclado](#3-flujo-de-entrada-cursor-y-teclado)).
+
+### 9. Clink, PSReadLine y ble.sh: la línea de órdenes
+
+#### 9.1 ¿Qué es?
+
+Editores de línea de cada shell, que dan sugerencias del historial en gris,
+colores de sintaxis y mejor completado:
+- Clink para cmd;
+- PSReadLine para PowerShell;
+- ble.sh para bash;
+- los plugins de zsh.
+
+#### 9.2 ¿Por qué la usamos?
+
+Son las herramientas que la gente ya conoce y usa. WTerminal no reinventa la
+línea de órdenes: las integra, las configura desde Ajustes y respeta lo que
+cada cual haya configurado.
+
+#### 9.3 ¿Para qué sirve en WTerminal?
+
+- `terminal/shell_assist.rs` inyecta Clink con un perfil propio y activa las
+  predicciones de PSReadLine si nadie las configuró.
+- Carga ble.sh o los plugins de zsh si existen.
+- Se instalan desde [Entorno y dependencias](#panel-de-entorno-y-dependencias).
+
+#### 9.4 Alternativas, y por qué esta
+
+Escribir un editor de línea propio dentro de la terminal rompería el contrato
+con la shell, porque lo que se teclea dejaría de ser lo que recibe.
+
+#### 9.5 Ventajas, futuro y curiosidades
+
+- **La suite `components`** repite las pruebas de eco con Clink y PSReadLine
+  encendidos, como los tiene la gente.
+- **pyreadline3** hace lo mismo para el REPL de Python 3.12 o anterior, y se
+  instala desde Entorno y dependencias.
 
 ## Diagramas de flujo detallados
 
@@ -1714,6 +2251,26 @@ en la UI. El slug cambia entre Windows (`wterminal`) y Linux
 (`lterminal`). El E2E usa un directorio de datos aislado solo cuando se
 activa `LTERMINAL_E2E_TESTING` con una ruta absoluta.
 
+En ese modo, las pestañas de PowerShell guardan además su historial de
+PSReadLine en `e2e-psreadline-history.txt`, dentro de esa carpeta. La orden la
+da `session_files::e2e_powershell_history_line` y se aplica dos veces:
+
+- **al arrancar PowerShell**, delante del lector de la primera línea
+  (`powershell::prepare_spawn_args`), antes de leer ni teclear nada;
+- **al final del inicializador**, para las shells que arrancan con su propio
+  `-Command` y no llevan ese lector.
+
+- **Por qué:** con el historial real del usuario, cada prueba lo llenaba de
+  órdenes de test. En la build 56 `tab-tools` cayó con la línea muy larga sin
+  ejecutar y pasó en cuanto se apartó el historial, así que se le echó la
+  culpa. **No era toda la causa:** en la build 58 volvió a caer igual con el
+  historial ya aislado (3 líneas). Ver `hidden-enter` y `__wtInputState`.
+- **Por qué también al arrancar:** con el desvío solo al final del
+  inicializador se colaba la línea `. "init-tab-N.ps1"` que lo carga. Normalmente
+  la lee el lector del arranque y no se apunta, pero al cambiar de shell con
+  `:shell` a veces la recibía PSReadLine, que la apunta antes de ejecutarla: la
+  `focused` de la build 57 dejó una en el historial real.
+
 | Ruta lógica | Contenido | Productor / consumidor |
 |---|---|---|
 | `USER_DATA_DIR = appData/<slug>` | Raíz persistente de la instalación del usuario | `paths.rs`, todos los módulos de configuración |
@@ -1791,6 +2348,7 @@ cinco herramientas salían como no instaladas.
 | `src/components/CommandPalette.svelte` | Paleta de comandos (`Ctrl+Shift+P`): diálogo modal con un `combobox` que controla un `listbox` agrupado (`role="group"` por sección) y anuncia la opción activa con `aria-activedescendant`, así el foco no sale del buscador. Flechas, RePág/AvPág, Intro y Escape (que no cierra el panel de detrás); Tab no escapa del diálogo. Pide el catálogo de LTools con una caché de 60 s (`LTOOLS_CACHE_MS`) y resuelve las fijadas con los helpers de `ltools-selection.ts`. Al cerrar devuelve el foco a donde estaba (cancelar) o a la terminal activa (ejecutar), salvo que la acción se lo haya llevado a un panel o al buscador. |
 | `src/components/HistorySearch.svelte` | Búsqueda en las órdenes escritas (`Ctrl+Shift+R`): diálogo como la paleta (`combobox` + `listbox`) sobre `app.commandHistory`; Intro deja la orden escrita sin ejecutarla con `insertLine` y un rechazo (`draft`, `busy`) se enseña sin cerrar. |
 | `src/components/SettingsPanel.svelte` | Edita tema, terminal, atajos, idioma, integración, perfiles y plugins; guarda el borrador por `app.savePreferences`. |
+| `src/components/SettingsResetDialog.svelte` | Diálogo de «Restablecer» (13-11): casillas por pestaña y por apartado, cada una con lo que hace y su riesgo; nada marcado de entrada, el foco en «Cancelar» y un resumen en rojo si se marca algo que borra cosas tuyas. Confirma con las preferencias de esos apartados. |
 | `src/components/StorePanel.svelte` | Vista propia de la carpeta propia (panel `store`, se abre desde Ajustes con «Gestionar la carpeta propia…»): carpeta de cada categoría, interruptor por elemento, «Traer lo ya instalado» con progreso, confirmar y deshacer, y exportar o importar la lista con «Instalar» para lo que falte. |
 | `src/components/DependenciesPanel.svelte` | Muestra secciones y acciones, combina catálogo con estado cacheado, consulta acciones pendientes y solicita refresco o ejecución. |
 | `src/components/ProjectsPanel.svelte` | Busca repositorios, gestiona favoritos, releases y acciones de proyecto. |
@@ -1798,22 +2356,26 @@ cinco herramientas salían como no instaladas.
 | `src/components/GithubAdmin.svelte` | Las áreas de `gh_admin.rs` dentro de «Gestionar…» (Actions: más, Configuración, Seguridad, Comunidad y Cuenta): lista de cada área con sus acciones, formularios, borrar con dos pulsaciones y «Pedir permisos». |
 | `src/components/ScriptsPanel.svelte` | Biblioteca de scripts, filtros, LTools, argumentos y ejecución opcional elevada. La selección, el nombre y la confirmación de las acciones de LTools salen de `ltools-selection.ts`, igual que en la paleta de comandos. La lista de tipos usa `bind:open` (`typesOpen`): con `open={…}` Svelte reescribía `open` en el mismo efecto que el contador del resumen y la lista se cerraba tras cada casilla. |
 | `src/components/ExplorerSidebar.svelte` | Lista y manipula archivos; sigue el cwd del tab activo y descarta respuestas antiguas. |
+| `src/components/AgentChats.svelte` | El panel lateral del chat con varios chats a la vez (14-11): las pestañas de chat (cada una con su agente y un punto que late si trabaja), «+» para otro chat en paralelo (hasta 6), «×» para cerrar uno (corta su pregunta) y el cierre del panel. Lleva el ancho (se arrastra por su borde, 300–900 px, se recuerda). Cada pestaña es un `AgentChat` entero, metido con `embedded`; el que no se ve sigue vivo con su pregunta en curso. |
+| `src/components/AgentChat.svelte` | Un chat con los agentes de IA (`:chat`, paleta, atajo `shortcutToggleAgentChat`, botón ✦ de la fila de pestañas). Va dentro de `AgentChats.svelte`, uno por pestaña de chat (`embedded`: sin borde, ancho ni cierre propios; `active`: el que se ve; `onstatus`: le dice al contenedor si trabaja y con qué agente). Se ve a la derecha si `agentChatVisible` y `agentChat` están activos. **Cada pregunta:** va al backend con `agentChatAsk`, con el modelo, la intensidad, el modo de permisos y el modo rápido elegidos para ese agente (se recuerdan por agente; los modos que editan siguen `agentChatCanEdit` y «Omitir permisos», `agentChatAllowBypass`), los adjuntos de texto (`agentChatReadAttachment`, hasta 5), la conversación anterior si `agentChatRemember` y, si se marca, la última orden y su salida (`TerminalControls.lastCommandContext`); la monta `buildChatPrompt` y el mensaje enseña qué se mandó. **La respuesta:** llega a trozos (`agent-chat-data`/`agent-chat-done`), sin colores ANSI, con Markdown sencillo (títulos, listas, citas, negrita, cursiva y código, sin HTML) y los bloques de código con su lenguaje. **Qué permite:** «Insertar» escribe un bloque de una línea con `insertLine`, SIN Intro, y solo sobre un prompt vacío; «Copiar» lo copia; copiar la respuesta entera, repetir la pregunta, «Nueva conversación» y sugerencias para empezar. Nunca ejecuta nada. |
 | `src/lib/api.ts` | Envoltorios tipados de todos los comandos y eventos; cola y época de entrada por pestaña; APIs de ventana, diálogos y portapapeles. |
 | `src/lib/appState.svelte.ts` | `AppStore`: pestañas, paneles, inventario, preferencias y serialización de operaciones de ciclo de vida. |
 | `src/lib/types.ts` | Tipos compartidos de respuestas IPC, acciones, preferencias, inventarios y eventos. |
 | `src/lib/panels.svelte.ts` | Panel activo y navegación entre superficies. |
 | `src/lib/terminalRegistry.ts` | Relación `tabId → Terminal` que usa el listener único de `App.svelte`, y `tabId → TerminalControls` (`openSearch`, `saveOutput`, `copyLastOutput`, `jumpToCommand`, `submitLine`, `insertLine`) que cada `TerminalPane` registra para la paleta de comandos y la búsqueda en las órdenes escritas. `submitLine` teclea con `term.input` (la ruta de `onData`, nunca escribe en xterm) y rechaza sin tocar nada si la shell no está lista (`not-ready`), hay un programa a pantalla completa o ningún prompt (`busy`) o la línea tiene texto sin enviar (`draft`). |
 | `src/lib/command-palette.ts` | Registro y filtrado de la paleta, puro para probarlo en Node: `PALETTE_APP_ACTIONS` (acciones de `runAppAction` con su atajo y su comando `:` equivalente), `PALETTE_INTERNAL_COMMANDS` (los `:` que informan en la terminal), `buildPaletteEntries` (entradas a partir de preferencias, entornos, temas, fuentes, idiomas y acciones fijadas de LTools, con el motivo si están deshabilitadas), `filterPaletteEntries` (sin tildes, por palabras, comando y sinónimos; subsecuencia como último recurso; deshabilitadas detrás), `paletteResults` (ofrece una línea `:` nueva tal cual), `nextPaletteIndex`, `formatShortcut` y la traducción de grupos de entornos que comparte con `Toolbar.svelte`. |
-| `src/lib/command-marks.ts` | Marcas OSC 133, puro para probarlo en Node: `CommandTracker` (qué es una orden, cómo acabó y cuánto tardó), `outputRange` y `formatDuration`. |
+| `src/lib/agent-chat.ts` | Lógica pura del chat de agentes: `splitAgentAnswer` (texto y bloques ```código```, también un bloque sin cerrar mientras llega) y `stripAnsi`. La prueba `scripts/test-frontend-logic.mjs`. |
+| `src/lib/command-marks.ts` | Marcas OSC 133, puro para probarlo en Node: `CommandTracker` (qué es una orden, cómo acabó y cuánto tardó; `appCommand` apunta la orden que escribe un botón, que la pestaña no ve teclear, y si no hay prompt libre la ata al siguiente, como mucho 15 s después), `outputRange`, `formatDuration` e `inferCmdExitCode` (en cmd, 9009 si la salida lleva el mensaje de Windows de orden que no existe). |
 | `src/lib/command-history.ts` | Órdenes escritas, puro para probarlo en Node: `rememberCommand` (sin vacías, sin duplicados, sin pegados de varias líneas, hasta 1000) y `searchCommands` (palabras en cualquier orden, la más reciente primero). Solo recibe lo escrito sobre un prompt marcado con OSC 133. |
 | `src/lib/terminal-columns.ts` | Cálculo de columnas de reserva, entrada y salida visible. |
 | `src/lib/floating-tip.ts` | Posición de tarjetas flotantes (`position: fixed`) dentro de un panel: `placeFloatingTip` calcula en coordenadas de la ventana junto a la fila (debajo, o encima si no caben unos 170 px) y `fitFloatingTip` devuelve el desplazamiento que mete la tarjeta ya medida dentro del panel por los cuatro lados, sin bucle si es más grande que él. La usa la tarjeta de carpetas de Ajustes. |
 | `src/lib/terminal-links.ts` | Enlaces de la salida: `TERMINAL_LINK_REGEX` (la expresión estricta de `@xterm/addon-web-links` ampliada a `file://`; las rutas sueltas no se detectan para no subrayar cada prompt), `isLinkActivation` (solo Ctrl + botón principal), `checkTerminalLink` (espejo de `validate_link` sin la parte del disco: esquemas `TERMINAL_LINK_SCHEMES`, longitud, caracteres ocultos, credenciales; devuelve la URL normalizada y el host que enseña la confirmación) y `linkRejectionMessageKey` (aviso por código de rechazo). |
 | `src/lib/settings-search.ts` | Buscador de Ajustes: `foldSearchText` (sin mayúsculas ni tildes), `settingsSearchVisibility` (qué títulos de sección, encabezados, filas y notas se ven para una búsqueda) y `visibleSettingsRows` (el recuento). `SettingsPanel` recorre su formulario como bloques y solo esconde lo que esta función diga; también construye el índice de apartados y pone a cada fila su explicación como `title`. |
+| `src/lib/settings-reset.ts` | Reparto de las preferencias en los apartados de «Restablecer» (`RESET_GROUPS`, con su riesgo: `safe`, `caution` o `danger`), `keysForGroups`, `dangerousGroups` y `tabState`. Puro: una prueba exige que cada preferencia de fábrica esté en exactamente un apartado. |
 | `src/lib/input-selection.ts` | Cortar o borrar una selección de la línea que se escribe: `promptInputStart` (dónde acaba el prompt), `columnAtTextIndex`/`contentEndColumn` (texto a celdas, caracteres anchos), `inputSelectionEdit` (flechas hasta el final de la selección y un DEL por carácter, solo dentro de lo escrito o tocando el cursor) y `selectionSearchText` (texto para «Buscar» del menú). |
 | `src/lib/banner-image.ts` | Imagen a la izquierda del banner: `findBannerBlocks` reconoce cada banner por su título tras un margen de 10 a 42 espacios, el que dejó el backend al imprimirlo (`bannerImagePadding`, `BANNER_IMAGE_GAP` igual que en Rust) y `attachBannerImages` coloca una decoración de xterm anclada a ese título (encima del margen y centrada en él con el mismo hueco a cada lado, `bannerImageBox`, y también debajo, `bannerImageHeight`, para que un prompt pegado al banner no toque la imagen; sin pasar por ConPTY), la retira si el texto cambia y sigue a la configuración y a la imagen elegida. |
 | `src/lib/link-cache.ts` | `invalidateLinkCache`: xterm guarda por fila los enlaces bajo el ratón y no los vuelve a pedir mientras el ratón siga en esa fila; tras cada escritura se olvida esa fila para que un enlace (URL u OSC 8) escrito bajo el ratón se detecte y abra con Ctrl+clic. Toca dos campos internos del `Linkifier`; `test:frontend-logic` comprueba que la versión de xterm los mantiene. |
-| `src/lib/full-screen-app.ts` | Modo pantalla completa de una pestaña: `fullScreenTransition` decide, a partir de los DECSET/DECRST que pasan por xterm, cuándo un programa usa la pantalla alternativa (`?1049`: Amp, OpenCode, vim) o la salida sincronizada en línea (`?2026`: Ink, es decir Claude Code o Gemini) y cuándo termina; las pestañas `ai:*` lo están siempre. En ese modo `TerminalPane` da a la PTY el ancho visible exacto (`pty_resize` con `exact`) en vez de la reserva de 1024 columnas de las shells, que hacía dibujar a esas IA fuera de la vista. |
+| `src/lib/full-screen-app.ts` | Modo pantalla completa de una pestaña: `fullScreenTransition` decide, a partir de los DECSET/DECRST que pasan por xterm, cuándo un programa usa la pantalla alternativa (`?1049`: Amp, OpenCode, vim) o la salida sincronizada en línea (`?2026`: Ink, es decir Claude Code o Gemini) y cuándo termina; las pestañas `ai:*` lo están siempre. En ese modo `TerminalPane` da a la PTY el ancho visible exacto (`pty_resize` con `exact`) en vez de la reserva de 1024 columnas de las shells, que hacía dibujar a esas IA fuera de la vista. En Windows también el REPL de Python (`environmentFullScreenReason`: la pestaña `lang:python` es `python-environment`; `isInteractivePythonCommandLine`: `python` o `py` sin script tecleado en el prompt de una shell es `python-command`, que termina al volver el prompt como `ai-command`), salvo que se apague `pythonReplVisibleWidth`; ver [Problemas conocidos](#problemas-conocidos). El backend deja que esos entornos hereden el ancho exacto al sustituir a otro (`tabs.rs` `keeps_exact_width`). |
 | `src/lib/sixel-conpty.ts` | Imágenes Sixel alineadas con ConPTY: ConPTY las mide como un VT340 (celda virtual de 10×20 y píxel 2:1 salvo atributos de trama) y baja `floor(alto·aspecto/20)` filas; antes de que `@xterm/addon-image` coloque la imagen se encaja, sin deformarla, en esa caja de celdas para que el cursor de xterm acabe en la misma fila. Solo en Windows. |
 | `src/lib/terminal-prompt.ts` | Reconocimiento de prompt y señales de disponibilidad de REPL. |
 | `src/lib/terminal-ready.ts` | Reintento acotado del handshake de disponibilidad. |
@@ -1859,7 +2421,7 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/platform/path_integration.rs` | Integración del ejecutable en PATH (HKCU). Ajustes bloquea la casilla mientras se aplica: dos escrituras cruzadas dejaban entradas sueltas. El E2E guarda y repone una copia exacta de `HKCU\Environment\Path` y `HKCU\Software\WTerminal\PathIntegration`, porque el perfil aislado no cubre el registro. |
 | `src-tauri/src/platform/windows_integration.rs` | Estado y activación de integración Windows (menús, App Paths, `wterminal://`) y de los permisos de administrador: `WindowsIntegrationStatus` lleva `elevated`, `nsudoLauncher`, `gsudoPath` y `windowsSudo`; `StartElevation::should_relaunch` decide «Iniciar siempre como administrador»; `relaunch_elevated` y el IPC `app_restart_as_admin` relanzan con `--elevated-relaunch`; `relaunch_unelevated` y el IPC `app_restart_unelevated` vuelven sin permisos (con `unelevated_restart_blocker` como guarda). |
 | `src-tauri/src/platform/windows/mod.rs` | Adaptador Windows. |
-| `src-tauri/src/platform/windows/webview2.rs` | Preflight de WebView2 antes de la ventana: instalador local, embebido (variante Offline) o descargado de Microsoft, siempre tras comprobar con `WinVerifyTrust` que lo firma Microsoft; diálogo nativo (`TaskDialogIndirect`) si nada funciona; `--install-webview2 [ruta]`. Ver [WebView2: si falta el runtime](#webview2-si-falta-el-runtime). |
+| `src-tauri/src/platform/windows/webview2.rs` | Preflight de WebView2 antes de la ventana: instalador local, embebido (variante Offline) o descargado de Microsoft, siempre tras comprobar con `WinVerifyTrust` que lo firma Microsoft; diálogo nativo (`TaskDialogIndirect`) si nada funciona; `--install-webview2 [ruta]`. Ver [WebView2: si falta el runtime](#8-webview2-si-falta-el-runtime). |
 | `src-tauri/src/platform/windows/path.rs` | Rutas y localización de herramientas en Windows. |
 | `src-tauri/src/platform/windows/elevation.rs` | Token efectivo (`is_process_elevated`), modo del sudo de Windows leído del registro (`WindowsSudo`), ruta de gsudo, citado de argumentos con las reglas de `CommandLineToArgvW` y `run_elevated` (ShellExecuteW «runas»; el código 5 es el UAC cancelado). |
 | `src-tauri/src/platform/linux/mod.rs` | Adaptador Linux. |
@@ -1876,27 +2438,32 @@ cinco herramientas salían como no instaladas.
 | Archivo | Responsabilidad y conexiones |
 |---|---|
 | `src-tauri/src/terminal/mod.rs` | Declara los submódulos de terminal. |
-| `src-tauri/src/terminal/tabs.rs` | `TabManager`: ciclo de vida, generación de sesión, orden de eventos, comandos pendientes, banner y resize. |
-| `src-tauri/src/terminal/pty.rs` | Crea `portable-pty`, reader/waiter, fallback de pipes y tamaño físico. |
+| `src-tauri/src/terminal/tabs.rs` | `TabManager`: ciclo de vida, generación de sesión, orden de eventos, comandos pendientes, banner y resize. `write_command_shown` escribe la orden de un panel y, antes, avisa a la pestaña con `pty-command-written` y la orden de verdad (sin el marco), para que cuente como orden. |
+| `src-tauri/src/terminal/pty.rs` | Crea `portable-pty`, reader/waiter, fallback de pipes y tamaño físico. **Orden de la salida y el fin:** el hilo que espera al proceso no avisa del fin hasta que el lector ha entregado todo lo leído y la salida lleva 100 ms callada (como mucho 1,5 s; `OutputActivity::wait_drained`). En ConPTY las últimas líneas llegan después de que el proceso sale: sin esto, «Proceso finalizado» podía salir encima del último mensaje y la pestaña de una IA no veía que pedía su clave (larga 60). |
 | `src-tauri/src/terminal/stream.rs` | Decodificación UTF-8 incremental, separación de clear y eventos PTY. |
 | `src-tauri/src/terminal/semantic_zones.rs` | Separa marcadores semánticos de acciones/progreso de los bytes visibles. |
 | `src-tauri/src/terminal/aliases.rs` | Alias de shell configurados y de scripts. En Windows, `ls`/`ll` entienden opciones de Unix: en cmd con `wt-ls.cmd` (`CMD_LS_SCRIPT`, `CMD_LS_HELPER`), en PowerShell con la función `POWERSHELL_LS_BODY`, tras quitar el alias integrado `ls` (`POWERSHELL_FREE_LS_ALIAS`), que si no ganaba a la función. |
-| `src-tauri/src/terminal/console_ui.rs` | Texto, cabeceras y avisos de acciones imprimibles en terminal. En cmd cada acción es una sola línea (`cmd_framed`/`cmd_one_line`): la cabecera y el cierre se escriben en `ui-N-ini.cmd`/`ui-N-fin.cmd` de la carpeta de sesión (`CMD_FRAME_DIR_VAR` = `WSTERM_UI`, que `terminal/pty.rs` pone en cada pestaña) y se llaman con `call` alrededor de la orden real. |
+| `src-tauri/src/terminal/cmd_failure.rs` | Órdenes fallidas en cmd, que no da código en su marca `D`: `cmd_not_found_text` lee una vez de `cmd.exe` (como datos, `FormatMessageW`) el mensaje 9009, «… no se reconoce como un comando interno o externo» en el idioma de Windows, y devuelve su parte fija. El frontend la busca en la salida (`inferCmdExitCode` de `command-marks.ts`). |
+| `src-tauri/src/terminal/console_ui.rs` | Texto, cabeceras y avisos de acciones imprimibles en terminal. En cmd cada acción es una sola línea (`cmd_framed`/`cmd_one_line`): la cabecera y el cierre se escriben en `ui-N-ini.cmd`/`ui-N-fin.cmd` de la carpeta de sesión (`CMD_FRAME_DIR_VAR` = `WSTERM_UI`, que `terminal/pty.rs` pone en cada pestaña) y se llaman con `call` alrededor de la orden real. **Código de salida:** el cierre lo guarda en `WSTERM_RC` antes que nada, decide bien o mal con «distinto de 0» (con `if errorlevel 1` los códigos negativos de winget pasaban por buenos), escribe la marca `D` con ese código (el prompt de cmd no puede) y lo deja en `ERRORLEVEL` con `exit /b`. En PowerShell y en bash, zsh, sh y fish la acción va entera en `ui-N.ps1`, `ui-N.sh` o `ui-N.fish` (`ps_framed`, `sh_framed`) y solo se teclea su carga, con la ruta traducida para WSL o Git Bash (`path_in_shell`); en Docker, ADB o Wine va encadenada (`uses_session_files`). En PowerShell el marco lo deja en `$global:wtActionCode`, que el prompt con marcas lee una vez; en bash, zsh y sh termina con `(exit $__wsterm_rc)`. Así una acción que falla se pinta en rojo y despierta al consejero. |
 | `src-tauri/src/terminal/internal_commands.rs` | Analiza comandos internos de la aplicación. |
 | `src-tauri/src/terminal/links.rs` | Enlaces de la salida (Ctrl+clic). IPC `terminal_open_link`: comprueba que `terminalLinks` sigue activo y vuelve a validar el texto con `validate_link` (`ALLOWED_SCHEMES` = `http`, `https`, `file`; hasta `MAX_LINK_LENGTH` = 2048 caracteres; rechaza controles, espacios y marcas invisibles como los controles bidireccionales, credenciales `usuario:contraseña@`, `file://` de otro equipo, rutas UNC y rutas que no existen). Las URL salen normalizadas por `tauri::Url` (dominios internacionales en punycode) y se abren con el opener de Tauri; una carpeta `file:` se abre con `platform::open_directory` y un archivo solo se muestra seleccionado en su carpeta (`reveal_item_in_dir`), nunca se ejecuta. El log guarda la acción y el host, nunca la URL entera. Con `LTERMINAL_E2E_TESTING=1` no abre nada y añade `{url, action}` a `LTERMINAL_E2E_OPENED_LINKS`. |
 | `src-tauri/src/terminal/current_dir.rs` | Extrae cwd de OSC 7 y prompts de respaldo. |
 | `src-tauri/src/terminal/powershell.rs` | Adaptación de comandos a PowerShell. |
 | `src-tauri/src/terminal/session_files.rs` | Archivos temporales de inicialización, ayuda y banner, y el `wt-ls.cmd` de las pestañas de cmd (se reescribe solo si cambió). |
-| `src-tauri/src/terminal/shell_assist.rs` | Sugerencias del historial y colores en la línea de órdenes con la herramienta de cada shell: inyecta Clink en cmd con un perfil propio (`default_settings` con sugerencias en línea y colores; las pestañas arrancan con `/d` y no pasan por su AutoRun), activa las predicciones de PSReadLine si nadie las configuró y carga ble.sh o los plugins de zsh si existen. `UNIX_PLUGINS` es la única tabla de rutas y marcadores de ble.sh y los plugins de zsh: de ella salen la línea de bash/zsh, la detección del catálogo en Linux (`packages::commands`, por marcador) y el fragmento que imprime el marcador en la sonda de WSL. Preferencias `shellAssist` y, por shell, `shellAssistCmd`/`shellAssistPowershell`/`shellAssistBash`/`shellAssistZsh`. `AssistStyle` traduce el aspecto elegido en Ajustes a cada herramienta (`clink_default_settings`, `psreadline_style_lines`, `blesh_style_commands`, `zsh_highlight_styles`); sin cambios produce exactamente los valores de fábrica. IPC `shell_assist_status` (estado por shell para Ajustes; con `refresh` hace el inventario detallado de WSL). En E2E se desactiva con `LTERMINAL_E2E_DISABLE_SHELL_ASSIST` salvo en `E2E_SHELL_ASSIST_ONLY`, que además elige en Ajustes un color de sugerencia (#ff00ff) y exige verlo en PSReadLine, Clink y ble.sh, y `LTERMINAL_E2E_BLESH_PATH` (solo con `LTERMINAL_E2E_TESTING=1`, ruta absoluta sin caracteres de shell) carga un ble.sh instalado en el `/tmp` de la distro de pruebas. |
+| `src-tauri/src/terminal/shell_assist.rs` | Sugerencias del historial y colores en la línea de órdenes con la herramienta de cada shell: inyecta Clink en cmd con un perfil propio (`default_settings` con sugerencias en línea y colores; las pestañas arrancan con `/d` y no pasan por su AutoRun), activa las predicciones de PSReadLine si nadie las configuró y carga ble.sh o los plugins de zsh si existen. `UNIX_PLUGINS` es la única tabla de rutas y marcadores de ble.sh y los plugins de zsh: de ella salen la línea de bash/zsh, la detección del catálogo en Linux (`packages::commands`, por marcador) y el fragmento que imprime el marcador en la sonda de WSL. Preferencias `shellAssist` y, por shell, `shellAssistCmd`/`shellAssistPowershell`/`shellAssistBash`/`shellAssistZsh`. `AssistStyle` traduce el aspecto elegido en Ajustes a cada herramienta (`clink_default_settings`, `psreadline_style_lines`, `blesh_style_commands`, `zsh_highlight_styles`); sin cambios produce exactamente los valores de fábrica. IPC `shell_assist_status` (estado por shell para Ajustes; con `refresh` hace el inventario detallado de WSL). En E2E se desactiva con `LTERMINAL_E2E_DISABLE_SHELL_ASSIST` salvo en `E2E_SHELL_ASSIST_ONLY`, que además elige en Ajustes un color de sugerencia (#ff00ff) y exige verlo en PSReadLine, Clink y ble.sh, y `LTERMINAL_E2E_BLESH_PATH` (solo con `LTERMINAL_E2E_TESTING=1`, ruta absoluta sin caracteres de shell) carga un ble.sh instalado en el `/tmp` de la distro de pruebas. En E2E el perfil de Clink lleva además `clink.autoupdate = off` (`with_e2e_clink_settings`): sin él, Clink pintaba al arrancar «Clink vX is available» y ensuciaba capturas y medidas; al usuario no se le cambia. |
 | `src-tauri/src/terminal/shell_paths.rs` | Ubicación de ejecutables de shells. |
 | `src-tauri/src/terminal/spawn_cwd.rs` | Selección segura del cwd de una sesión nueva. |
-| `src-tauri/src/environments/ai_cli_defaults.rs` | Valores por defecto de sistema para Gemini CLI y Qwen Code (`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, `QWEN_CODE_SYSTEM_DEFAULTS_PATH`, `general.enableAutoUpdate: false`): sin ellos, al arrancar lanzaban `npm install -g` en una consola aparte que Windows abría en otra ventana o pestaña de Windows Terminal. Siguen avisando de la versión nueva; los ajustes del usuario y sus variables mandan (`process::set_base_environment`). |
-| `src-tauri/src/environments/mod.rs` | Modelo `Environment`/inventario; detección rápida y completa; selección por defecto. |
+| `src-tauri/src/environments/ai_cli_defaults.rs` | (Llegan también a lo que lanza el chat: `hidden_command` añade el entorno base desde el 13-11.) Valores por defecto de sistema para Gemini CLI y Qwen Code (`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, `QWEN_CODE_SYSTEM_DEFAULTS_PATH`, `general.enableAutoUpdate: false`): sin ellos, al arrancar lanzaban `npm install -g` en una consola aparte que Windows abría en otra ventana o pestaña de Windows Terminal. Siguen avisando de la versión nueva; los ajustes del usuario y sus variables mandan (`process::set_base_environment`). |
+| `src-tauri/src/environments/mod.rs` | Modelo `Environment`/inventario; detección rápida y completa; selección por defecto. **Lanzadores de pip** (`broken_python_launchers`): IPython, Jupyter y cualquier REPL o IA cuyo `.exe` esté en una carpeta `Scripts` (aider, llm, ShellGPT) solo se ofrecen si `--version` arranca; sin `PYTHONUSERBASE` su `.exe` sigue en el PATH pero Python no encuentra el módulo y la pestaña se cerraba al abrirse. |
 | `src-tauri/src/environments/wsl.rs` | Estado de WSL y distribuciones: sonda rápida (`printenv SHELL`, 15 s y un reintento para la VM en frío) y, al abrir Dependencias, inventario detallado con `LISTING_SCRIPT` (sin un `basename` por archivo ni el PATH de Windows en `/mnt/<unidad>`) más los marcadores de `shell_assist::plugin_probe_script`. Todo con `wsl.exe --exec`: con `--` la login shell de la distro expande `$1`/`$HOME` antes que `sh` y el inventario salía con error. Comprueba que cada intérprete ELF se ejecuta (`runnable_probe_script`, marca `wterminal-unrunnable:`; los que dan 126 van a `unrunnable`) y lanza los REPL con `repl_launch_args` (shell de login + `USER_BIN_DIRS`, las mismas carpetas que recorre la sonda). `cached_installed` devuelve la última detección sin arrancar nada. |
 | `src-tauri/src/environments/docker.rs` | Contenedores y disponibilidad de Docker. |
 | `src-tauri/src/environments/android.rs` | Dispositivos y transporte ADB. |
 | `src-tauri/src/environments/languages.rs` | REPL y herramientas de lenguajes. Los de WSL (`detect_wsl_language_environments`) se lanzan con `wsl::repl_launch_args` y solo con las herramientas que se pueden ejecutar (`InstalledDistro::runnable_tools`). |
 | `src-tauri/src/environments/ai.rs` | Entornos de IA: CLIs de asistentes detectadas en el PATH (y Claude Code fuera de él, ver `path_env`), con `cli_args` para abrir en modo chat las que lo necesitan (`llm chat`, `sgpt --repl temp`), y un chat por cada modelo local de Ollama leído de sus manifiestos (sin arrancar `ollama list`); catálogo curado de modelos con tamaños y cálculo de memoria frente a la RAM del equipo; sonda `ollama-model:` del panel. |
+| `src-tauri/src/app/agent_control.rs` | `wterminal --ctl <orden>` (14-11): las IA que lanza WTerminal lo manejan. **`start`:** servidor en 127.0.0.1 con una llave aleatoria por arranque, solo con `agentControl`. **`spawn_env`:** `WTERMINAL_CTL`, `WTERMINAL_CTL_TOKEN` y `WTERMINAL_TAB_ID` para los procesos de las IA (pestañas `ai:*` en `tabs.rs`, preguntas del chat en `agent_chat.rs`). **`classify`:** orden interna, búsqueda (`acciones`, contestada con `packages::commands::search_actions`) o acción (`accion <id>`); `:set` que cambia y las acciones piden permiso; `BLOCKED_SETTINGS` nunca. Lo demás lo hace el frontend (evento `agent-control`, respuesta con `agent_control_reply`). **`run_cli`:** el lado de la IA, atendido en `run` antes de abrir ventana. |
+| `src-tauri/src/environments/agent_guide.rs` | La guía de WTerminal para los agentes de IA (14-11), solo en el código: los principios («primero WTerminal», con su porqué), cómo proponer desde el chat, la tabla de tareas y los límites, más la ayuda interna entera (`build_help_topic_text`) y cada ajuste con su explicación (`default_settings.toml`). **`chat_preamble`:** el resumen oculto que va delante de cada pregunta del chat (`agentChatGuide`). **`guide`:** la guía entera o un tema, para `wterminal --agent-guide [tema]` (`AGENT_GUIDE_ARG`, que `run` atiende antes de abrir ventana). **`tab_args`:** la guía al abrir la pestaña de una IA (`agentTabGuide`): `--append-system-prompt` en Claude Code, `developer_instructions` en Codex, `-i` en Gemini y Qwen. |
+| `src-tauri/src/environments/agent_chat.rs` | Backend del chat lateral con los agentes. **`agent_chat_agents`:** los agentes instalados con modo de una pregunta (`ONE_SHOT`): `claude -p`, `codex exec -`, `gemini`, `qwen`, `copilot -p` (lanzado con node, sin cmd), `crush run`, `llm`, `sgpt`, `mods`, `aichat` y `ollama run <modelo>`, con la opción de modelo de cada uno, sus modelos sugeridos, sus niveles de intensidad, sus modos de permisos (`Mode`) y si tiene modo rápido (`Fast`). Los demás salen con su motivo (`unavailable_reason`): Amp no tiene modo de una pregunta y aider edita archivos. **`one_shot_args_with`:** añade el modelo (`valid_model`: letras, números y `. _ : / @ -`, hasta 80), la intensidad (Claude `--effort`, también `ultracode`; Codex `-c model_reasoning_effort=`), el modo (el de fábrica solo lee; los que editan piden `agentChatCanEdit` y «Omitir permisos», además `agentChatAllowBypass`, con `Allowed`) y el modo rápido (Claude `--settings` con un archivo, Codex `-c service_tier=fast`); lo que ese agente no admite o no está permitido se rechaza, no se ignora. **`agent_chat_models`:** el modelo de fábrica de su configuración y la lista de cada agente (el catálogo de Codex con su intensidad y su «Fast» por modelo, los nombres del paquete de Gemini y Qwen…), sin preguntar nada a la IA. **`agent_chat_read_attachment`:** lee un adjunto de texto (como mucho 5 MB; se mandan los primeros 100 KB, cortados sin partir un carácter; uno binario se rechaza). **`agent_chat_ask`:** abre la CLI una vez, en la carpeta de la pestaña activa, con su clave de `ai_keys` si la hay; la pregunta va por la **entrada estándar** y nunca como argumento (ni cmd ni un `.cmd` la interpretan). Emite `agent-chat-data`/`agent-chat-done`, corta a los 5 min (30 con Ultracode, `answer_timeout`), y el log apunta el agente, el largo, el modelo, la intensidad, el modo y el modo rápido, no el texto. **`agent_chat_cancel`:** mata el árbol (`taskkill /T`). Se apaga con `agentChat`. |
+| `src-tauri/src/environments/ai_keys.rs` | Clave de API de las IA que leen su clave de una variable de entorno: Grok (`GROK_API_KEY`), Codex, mods, ShellGPT, llm y aider (`OPENAI_API_KEY`), Gemini (`GEMINI_API_KEY`) y Claude Code (`ANTHROPIC_API_KEY`). **Cuándo se ofrece:** si la pestaña de una de ellas acaba con un código distinto de 0 y lo último que dijo nombra su variable o una «API key», `ai_key_offer` pide al frontend que ofrezca meterla (`data-testid="ai-key-offer"`). **Cómo se guarda:** `ai_key_save` la cifra con DPAPI (solo la descifra ese usuario de Windows) en `ai-keys.json`, junto a los ajustes. **Cómo se usa:** `spawn_env` la pasa como variable al abrir las pestañas de esa IA, salvo que el usuario ya tenga la variable puesta. **Garantías:** la clave no vuelve al frontend ni va al log (`invokeLogged` no registra argumentos), y fuera de Windows no se ofrece. Se apaga con `aiKeyOffer`. |
 
 #### Paneles y servicios
 
@@ -2231,6 +2798,7 @@ Los eventos tienen dirección inversa; se registran con `listen` en
 |---|---|---|
 | `pty-data`, `pty-clear`, `pty-exit` | `TabManager` | `App.svelte`: cola xterm, invalidación del clear, aviso de salida |
 | `pty-command-resize` | `TabManager` | `TerminalPane`: sincroniza tamaño antes del comando de panel |
+| `pty-command-written` | `TabManager::write_command_shown` | `TerminalPane`: la orden de un panel cuenta como orden (`CommandTracker.appCommand`), con su texto para el chat y el consejero |
 | `tab-closed`, `env-changed`, `envs-updated` | `TabManager` / `AppState` | `AppStore`: actualiza identidad, tab activo e inventario |
 | `terminal-cwd-changed` | Inspector de salida de `TabManager` | `ExplorerSidebar`: seguimiento condicionado al tab y solicitud actual |
 | `command-not-found` | Inspector de salida | `AppStore`: sugerencia contextual |
@@ -2320,7 +2888,9 @@ selección con el ratón y enlaces clicables con Ctrl+clic, `terminal-links`, qu
 comprueba qué se pide abrir sin lanzar el navegador, y la paleta de comandos,
 `command-palette`, que la maneja con el teclado y comprueba el efecto de cada
 acción, las marcas de orden en cmd, PowerShell y Git Bash, `command-marks`,
-renombrar pestañas y guardar la salida, `tab-tools`, y los permisos de administrador, `admin-permissions`, que recorre
+renombrar pestañas y guardar la salida, `tab-tools`, el Intro con la ventana
+minimizada, `hidden-enter` (una orden larga y una corta de PowerShell se tienen
+que ejecutar aunque la ventana no se vea), y los permisos de administrador, `admin-permissions`, que recorre
 también la ruta de NSudo a través de un gsudo simulado sin pedir nunca el
 UAC; además la sugerencia de importar repositorios al hacer `cd`,
 `import-suggestion`; el tamaño de la interfaz escrito a mano (80, 137, 150,
@@ -2332,7 +2902,10 @@ bloqueo, y la shell intacta al salir, `ai-tui`; las IA reales que haya
 instaladas (Claude Code, Gemini, Codex, OpenCode, Qwen, Amp) sin teclear
 nada que inicie sesión, escribiendo sin enviar en las que ya enseñan su caja,
 `ai-real`; la sugerencia del modo de bajo consumo en un equipo de 2 hilos
-simulado, `low-power`; y el banner con fastfetch en cmd, PowerShell y Git Bash
+simulado, `low-power`; `python` tecleado en cmd, que pasa al ancho visible
+mientras corre, vuelve a la reserva al salir y respeta la opción de Ajustes,
+con el tiempo de una línea en cada modo registrado en el informe,
+`python-width`; y el banner con fastfetch en cmd, PowerShell y Git Bash
 a varios tamaños, `fastfetch-matrix`), `full`, `video`, `downloads` (descarga real,
 necesita red), `dependency-audit`, `distribution` (prueba corta de una forma de
 distribución) e `installer`. Un escenario puede llevar un bloque `quick` con las
@@ -2394,7 +2967,7 @@ instalador.
 | `linux/validate-release.sh`, `linux/exercise-host.sh` | Integridad de release y ejercicio del host Linux. |
 | `scripts/prebuild.mjs`, `build-frontend.mjs`, `build-fast.mjs` | Precondiciones, bundle UI y ruta rápida de desarrollo. |
 | `scripts/create-single-file-portable.mjs`, `finalize-offline-webview2.ps1`, `prepare-conpty.mjs` | Portable EXE único y recursos Windows necesarios. |
-| `scripts/create-release-manifest.mjs`, `assemble-release.mjs`, `sign-release-manifest.mjs`, `sign-release-ssh.mjs`, `update-release-hash.mjs`, `verify-release-artifacts.mjs` | Manifiesto, ensamblado de la release conjunta, hash, firmas y verificación de artefactos. |
+| `scripts/create-release-manifest.mjs`, `assemble-release.mjs`, `publish-github-release.mjs`, `sign-release-manifest.mjs`, `sign-release-ssh.mjs`, `update-release-hash.mjs`, `verify-release-artifacts.mjs` | Manifiesto, ensamblado de la release conjunta, subida a GitHub, hash, firmas y verificación de artefactos. |
 | `scripts/e2e-native-driver.mjs`, `e2e-environment-probes.mjs`, `run-dependency-audit.mjs` | Driver, sondeos seguros y variante de dependencias. |
 | `scripts/audit-video-frames.py`, `extract-video-frames.py`, `create-e2e-contact-sheet.py` | Decodificación de todos los frames, extracción precisa e índice visual de capturas. |
 | `tests/e2e/smoke.mjs` | Escenarios E2E, acciones UI, vídeo, capturas e informe estructurado. |
@@ -2431,7 +3004,8 @@ entrada en `package.json`.
 | `scripts/create-single-file-portable.mjs` | Crea el portable de un solo `.exe` (`wterminal.exe` + `conpty.dll`, `OpenConsole.exe`, los avisos y, solo en la variante `-WebView2 Offline`, el instalador de WebView2, tras la imagen PE, con índice JSON y cola `WTPORT01`); `--verify` lo compara con la carpeta unpacked. No es un autoextraíble: arranca con doble clic. La build lo copia solo a una carpeta vacía, pasa el E2E completo con `E2E_EXPECT_SINGLE_FILE=1` (ConPTY desde la caché de runtime) y exige que no deje nada a su lado. |
 | `scripts/finalize-offline-webview2.ps1` | Completa recursos offline WebView2 en un artefacto Windows. |
 | `scripts/create-release-manifest.mjs` | Inventario de artefactos y hashes de release. `--platforms windows,linux` (de serie los dos) decide qué es obligatorio: zip, setup y Portable de Windows y el AppImage de Linux; `.deb`, `.rpm` y `.tar.gz` entran si están. |
-| `scripts/assemble-release.mjs` | Prepara la carpeta que se sube a GitHub a partir de builds ya validadas: comprueba hashes y firmas de cada origen, rechaza `NO-PUBLICAR.txt`, copia a una carpeta vacía, crea el manifiesto común y lo firma. Ver [Publicar una release](#publicar-una-release). |
+| `scripts/assemble-release.mjs` | Prepara la carpeta que se sube a GitHub a partir de builds ya validadas: comprueba hashes y firmas de cada origen, rechaza `NO-PUBLICAR.txt`, copia a una carpeta vacía, crea el manifiesto común y lo firma. Ver [Publicar una release](#14-publicar-una-release). |
+| `scripts/publish-github-release.mjs` (`npm run release:github`) | Sube a GitHub la carpeta ensamblada: vuelve a comprobar hashes, extras, adjuntos obligatorios de la versión de la etiqueta y las dos firmas (solo con las claves públicas); exige sesión de `gh` y la etiqueta en GitHub; crea la release en borrador, sube y comprueba en GitHub nombres y tamaños; nunca reemplaza adjuntos. `--dry-run` no llama a `gh`; `--publish` la publica. |
 | `scripts/sign-release-manifest.mjs` | Firma Ed25519 del manifiesto. |
 | `scripts/sign-release-ssh.mjs` | Firma OpenSSH del manifiesto. |
 | `scripts/lib/ssh-signing.mjs` | Funciones compartidas del formato de firma SSH. |
@@ -2485,6 +3059,7 @@ entrada en `package.json`.
 | `scripts/test-release-hash.mjs` | Hashes de artefactos. |
 | `scripts/test-release-manifest.mjs` | Construcción de manifiesto: los dos sistemas, los paquetes Linux opcionales y los obligatorios que faltan. |
 | `scripts/test-assemble-release.mjs` | Ensamblado de la release conjunta con builds de prueba: carpeta limpia, hashes de origen, salida no vacía, `NO-PUBLICAR.txt` y sistemas obligatorios. |
+| `scripts/test-publish-github-release.mjs` | Subida a GitHub con un `gh` falso (estado en un JSON, sin red): `--dry-run` sin llamadas, borrador con los 7 adjuntos comprobados, release con adjuntos intacta, `--publish`, sin sesión, sin etiqueta, versión equivocada, hash cambiado, archivo de más, `NO-PUBLICAR.txt` y solo Windows. |
 | `scripts/test-release-publish.mjs` | Publicación local de artefactos. |
 | `scripts/test-release-signature.mjs` | Firma Ed25519. |
 | `scripts/test-release-ssh-signature.mjs` | Firma OpenSSH. |
@@ -2590,7 +3165,8 @@ La salida de una pestaña sigue este recorrido, en este orden:
 
 ```text
 shell / proceso hijo
-  → portable-pty (lector por bloques de hasta 64 KiB)
+  → portable-pty (hilo pty-read-raw, lecturas de hasta 64 KiB)
+  → a pantalla completa, agrupación de lo que llega seguido (huecos < 3 ms, como mucho 16 ms)
   → Utf8Decoder + ClearSplitter
   → Outbound::{Data, Clear, Exit}
   → outbound_lock de TabManager
@@ -2600,6 +3176,19 @@ shell / proceso hijo
   → xterm.write(data, callback)
   → scroll, idle, fit y repintado
 ```
+
+En una shell, cada lectura es un evento: la lógica de la reserva horizontal
+mide la salida trozo a trozo (`estimateOutputChunkColumns`, la reserva
+temprana), y agruparla para todas las pestañas rompió la suite `horizontal`
+(10-11: «El extremo horizontal perdió números»). Con el ancho exacto (una IA,
+Python en Windows, vim) no hay reserva que proteger, y ahí sí se agrupa
+(`PtySession::set_coalesce`, que `tabs.rs` enciende con `pty_resize` exacto y al
+crear una sesión que lo hereda). Un hilo `pty-read-raw` solo lee y pasa los
+trozos por un canal acotado (64 trozos: si la pestaña va lenta, la PTY espera).
+El lector de la pestaña entrega cada trozo por separado o, en ese modo, junta lo
+que sigue llegando con huecos de menos de 3 ms, hasta 16 ms o 256 KiB. Con
+pyreadline3 cada tecla son 63-127 lecturas en 13-26 ms. Ver «El REPL de Python
+con `pyreadline3`» en [Problemas conocidos](#problemas-conocidos).
 
 `Utf8Decoder` es incremental: una secuencia UTF-8 partida entre dos lecturas
 no se convierte en caracteres corruptos. `ClearSplitter` reconoce el marcador
@@ -2656,6 +3245,36 @@ visual de la línea (`mirroredLine`) solo sirve para selección contextual y
 acciones de cortar/borrar; no es una segunda terminal ni una fuente de verdad
 para el cursor. Los espacios son ASCII ordinario (`0x20`) y se preservan en
 `sendInput`.
+
+Las pulsaciones se agrupan en lotes de 12 ms (`TERMINAL_INPUT_BATCH_MS`) y cada
+lote espera sus barreras antes de llegar a la shell: la reserva de columnas, que
+la salida anterior haya quedado en reposo (`outputInputReady`) y asentada
+(`outputGeometryReady`), la geometría de una casilla recién activada y la cola
+de resizes. **Mientras un lote espera, lo que se teclea se junta en el
+siguiente** (`terminalInputInFlight`, `scheduleTerminalInputFlush`) y sale de una
+vez cuando aquel se entrega.
+
+- **Por qué (13-11):** cada lote espera un ciclo de salida entero (eco y
+  asentado). PowerShell repinta la línea completa a cada tecla, y con una línea
+  larga ese ciclo es de 50-700 ms.
+  - Antes, lo tecleado rápido (WebDriver, un pegado de letras sueltas o
+    alguien que escribe deprisa) hacía cola de 12 en 12 ms y salía a unos
+    5 lotes por segundo. Al pulsar Intro aún quedaban 34-56 lotes de la línea
+    y el Intro iba detrás.
+  - `tab-tools` agotaba así sus 15 s en las builds 56 y 58. En la captura de la
+    56 el cursor está a mitad de la línea: aún se estaba escribiendo.
+  - Lo midió el escenario `hidden-enter` con `__wtInputState`:
+    - **antes:** la línea larga se ejecutó a los 5,0 s o no se ejecutó en 6 s;
+    - **con el arreglo** (5 pasadas): 1,1-4,9 s, con 0-1 lotes pendientes al
+      pulsar Intro.
+- **Lo que no cambia:**
+  - el orden de las teclas y las barreras de geometría;
+  - cambiar de shell descarta lo pendiente (`terminalInputEpoch`);
+  - un comando interno (`:…`) vacía también lo que se estuviera juntando
+    (`flushTerminalInputBeforeInternal`).
+- **Lo que queda:** el Intro sigue esperando a que termine el eco del lote
+  anterior. Con una línea muy larga, ese último ciclo puede llevar unos
+  segundos.
 
 Durante el arranque o un cambio de shell, `queuedInput` retiene temporalmente
 las pulsaciones hasta que el banner y el prompt están completos. Toda salida de
@@ -2724,6 +3343,38 @@ limpieza en la capa de UI: dos clears en sitios distintos producen parpadeo,
 pueden borrar el prompt nuevo o reabrir una carrera de orden. La cola de
 `pending_commands` retiene acciones de panel que llegaron durante la
 inicialización y las libera tras el marcador de limpieza.
+
+`TabManager::write_command` escribe la orden de una acción (instalar,
+actualizar, Proyectos, LTools…) entera y de una vez en la PTY. Aun así, se
+ve escribirse letra a letra: Clink, PSReadLine y ble.sh procesan cada tecla
+y repintan la línea, y cada repintado llega como una lectura aparte.
+
+- **Opción `actionCommandsAtOnce`** (encendida de fábrica desde el 15-11): pide a la sesión
+  `PtySession::hold_echo`. Si la shell empieza a repintar en menos de 5 s, el
+  hilo lector junta todo lo que llegue hasta ver tantos saltos de línea como
+  Intro se escribieron (el de una pausa anterior y el de la orden), mientras
+  siga llegando eco (huecos de menos de 1,5 s, como mucho 8 s), y lo entrega
+  en una sola escritura. La orden aparece entera. El plazo cuenta desde el
+  primer repintado: eran 2 s desde que se pedía, y con el equipo cargado
+  Clink tardaba más en empezar y se veía letra a letra (15-11).
+- **Pestaña recién abierta** (un `.ps1` de la Biblioteca lanzado desde cmd
+  abre una de PowerShell): la orden espera en `pending_commands` al marcador
+  del inicializador y, con la opción encendida, no se escribe justo ahí, sino
+  desde otro hilo cuando la shell lleva 250 ms callada (como mucho 3 s,
+  `PtySession::wait_output_quiet`). Justo tras el marcador la shell aún pinta
+  su prompt: ese salto de línea soltaba la retención antes de tiempo y
+  PSReadLine, que aún no leía, repintaba la orden tecla a tecla. Lo que escriba
+  un panel mientras tanto se pone detrás (`flushing_commands`). Al salir de la
+  cola, la orden avisa a la pestaña (`pty-command-written`) como las demás.
+- **La línea tiene que ser corta:** en PowerShell la acción va en un archivo
+  (ver [Cómo se escribe cada acción en la terminal](#8-cómo-se-escribe-cada-acción-en-la-terminal));
+  encadenada, PSReadLine repintaba mil caracteres a cada tecla y la retención
+  se rendía. La suite `components` lo comprueba con un `.bat` y un `.ps1` de
+  la Biblioteca (`components-library-at-once`).
+- **Seguridad:** no se pierde nada. Si la shell tarda más del plazo, se ve
+  como siempre.
+- **Qué no cambia:** la pestaña, el foco y el scroll del usuario son los de
+  siempre.
 
 Orden del inicializador de cada pestaña: primero las sugerencias de la línea
 de órdenes (Clink, PSReadLine, ble.sh o los plugins de zsh), después el
@@ -2970,76 +3621,147 @@ fallo no se vería hasta escribir el panel que lo necesitaba.
 
 ## Seguridad
 
+WTerminal ejecuta lo que escribes en tus shells, así que lo que protege no es
+la shell: es que **nada que llegue de fuera** (la salida de un programa, una
+página de GitHub, la respuesta de una IA, un archivo arrastrado) pueda hacer
+algo por su cuenta, y que tus claves no salgan de donde las pusiste.
+
+### 1. El puente entre la ventana y Rust
+
 - **Sin `withGlobalTauri`.** El frontend no tiene acceso global al puente: solo
   a los comandos que `api.ts` importa explícitamente.
-- **CSP estricta**: `default-src 'none'`, sin `connect-src` a nada que no sea el
-  propio IPC. El frontend no puede hacer peticiones de red por su cuenta. Los
-  scripts solo pueden venir de la propia app; `'wasm-unsafe-eval'` permite
-  compilar el WebAssembly del decodificador de imágenes Sixel de xterm, sin
-  admitir `eval` de JavaScript ni scripts en línea. Los estilos en línea sí se
-  permiten (`style-src 'unsafe-inline'`) y Tauri no añade nonces a `style-src`
-  (`dangerousDisableAssetCspModification: ["style-src"]`): con un nonce el
-  navegador ignora `'unsafe-inline'` y bloqueaba las hojas que xterm crea al
-  arrancar, con lo que los 16 colores ANSI, la negrita y la cursiva salían en
-  gris normal.
-- **`dragDropEnabled: false`**: arrastrar un archivo sobre la ventana no
-  reemplaza la interfaz por él.
 - **`freezePrototype` desactivado a propósito.** Congelar `Object.prototype`
   deja la ventana en negro: el frontend no llega a montarse.
+- **`dragDropEnabled: false`**: arrastrar un archivo sobre la ventana no
+  reemplaza la interfaz por él.
+
+### 2. Lo que puede cargar la ventana (CSP)
+
+#### 2.1 Qué se permite
+
+**CSP estricta**: `default-src 'none'`, sin `connect-src` a nada que no sea el
+propio IPC. El frontend no puede hacer peticiones de red por su cuenta. Los
+scripts solo pueden venir de la propia app.
+
+#### 2.2 Las dos excepciones, y por qué
+
+- `'wasm-unsafe-eval'` permite compilar el WebAssembly del decodificador de
+  imágenes Sixel de xterm, sin admitir `eval` de JavaScript ni scripts en línea.
+- Los estilos en línea sí se permiten (`style-src 'unsafe-inline'`) y Tauri no
+  añade nonces a `style-src` (`dangerousDisableAssetCspModification: ["style-src"]`):
+  con un nonce el navegador ignora `'unsafe-inline'` y bloqueaba las hojas que
+  xterm crea al arrancar, con lo que los 16 colores ANSI, la negrita y la
+  cursiva salían en gris normal.
+
+### 3. Red y descargas
+
 - **Descargas acotadas.** Solo se descargan adjuntos de una release que se acaba
   de consultar, comprobando cada redirección contra los hosts de GitHub, con
   tope de tamaño aplicado mientras se escribe.
 - **Sin tokens.** La integración con GitHub usa solo la API pública.
-- **Enlaces de la terminal validados en Rust.** Cualquier programa puede
-  escribir texto o un hipervínculo OSC 8 en la salida, así que nada de eso se
-  abre por sí solo: hace falta Ctrl+clic, de fábrica una confirmación que
-  enseña la URL completa y su host (en punycode si el dominio es
-  internacional), y que `terminal::links::validate_link` lo acepte. Solo
-  `http`, `https` y `file`; se rechazan `javascript:`, `data:`, protocolos de
-  aplicaciones como `ms-settings:`, credenciales `usuario:contraseña@`,
-  caracteres de control o invisibles (controles bidireccionales, anchos cero)
-  y los `file://` de otro equipo, que en Windows se convertirían en una ruta
-  UNC y una conexión SMB. Un `file:` a un archivo solo lo muestra en su
-  carpeta; nunca lo ejecuta. El WebView no tiene `opener:allow-open-url`, y
-  sin `linkHandler` xterm abriría los OSC 8 con `window.open`: WTerminal
-  siempre instala el suyo, también con los enlaces desactivados (no hace nada).
 
-### Escaneos del repositorio
+### 4. Enlaces de la salida de la terminal
+
+#### 4.1 El riesgo
+
+Cualquier programa puede escribir texto o un hipervínculo OSC 8 en la salida,
+así que nada de eso se abre por sí solo.
+
+#### 4.2 Qué hace falta para abrir uno
+
+Ctrl+clic, de fábrica una confirmación que enseña la URL completa y su host (en
+punycode si el dominio es internacional), y que
+`terminal::links::validate_link` lo acepte.
+
+#### 4.3 Qué se rechaza
+
+- Solo `http`, `https` y `file`; se rechazan `javascript:`, `data:` y
+  protocolos de aplicaciones como `ms-settings:`.
+- Credenciales `usuario:contraseña@`, caracteres de control o invisibles
+  (controles bidireccionales, anchos cero).
+- Los `file://` de otro equipo, que en Windows se convertirían en una ruta UNC
+  y una conexión SMB. Un `file:` a un archivo solo lo muestra en su carpeta;
+  nunca lo ejecuta.
+
+#### 4.4 Por qué siempre hay un manejador propio
+
+El WebView no tiene `opener:allow-open-url`, y sin `linkHandler` xterm abriría
+los OSC 8 con `window.open`: WTerminal siempre instala el suyo, también con los
+enlaces desactivados (no hace nada).
+
+### 5. Claves, secretos y la IA
+
+- **Claves de API:** cifradas con DPAPI para tu usuario de Windows
+  (`ai-keys.json`); no vuelven al frontend ni van al log. Ver
+  [Clave de API cuando falta](#clave-de-api-cuando-falta-aikeyoffer-solo-windows).
+- **Lo que se manda a un agente:** antes de mandar la salida de la terminal al
+  chat se ocultan los secretos que se reconocen (`redactSecrets`), y el mensaje
+  enseña qué se mandó. La pregunta va por la entrada estándar, nunca como
+  argumento, y el modelo elegido solo admite letras, números y `. _ : / @ -`:
+  nada de eso lo interpreta un `.cmd`.
+- **Nada se ejecuta solo:** ni el chat ni el consejero escriben un Intro.
+  «Insertar» deja la orden escrita, sin ejecutar.
+
+### 6. Escaneos del repositorio
+
+#### 6.1 Código y workflows
 
 Los workflows de GitHub Actions separan las comprobaciones por superficie:
 CodeQL analiza el código Rust, TypeScript/JavaScript y los workflows; Gitleaks
-busca secretos; `actionlint` y zizmor revisan sintaxis y seguridad de Actions;
-el preflight local también comprueba que cada acción esté fijada a un SHA,
-que checkout no conserve credenciales, que los permisos de publicación sean
-mínimos y que no se restaure caché en la publicación. `npm run check:github-security`
-ejecuta estas reglas y vuelve a lanzar `actionlint`/zizmor si están instalados;
-las builds rápidas mantienen esta comprobación aunque se omita el resto de tests.
-El verificador local es de solo lectura: no reescribe workflows ni cierra avisos
-remotos. Tras corregirlos, la ejecución de CI vuelve a analizar y subir SARIF, y
-GitHub actualiza el estado de Code Scanning. Define
-`LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS=1` para hacer fallar también el control
-local si falta alguno de esos dos escáneres.
-CI ejecuta `npm audit`, `cargo audit` y `cargo deny`; Dependency Review compara
-los cambios de dependencias de cada PR con el aviso de vulnerabilidades y la
-política de licencias; OpenSSF Scorecard revisa semanalmente las prácticas de
-seguridad del repositorio. El workflow da al análisis permisos de lectura para
-consultar commits, issues, pull requests y checks; conserva el SARIF cinco días
-para diagnosticar fallos y publica los resultados en Code Scanning. Los avisos
-de `Code-Review`, `Branch-Protection` y `Maintained` dependen también de la
-actividad y de reglas configuradas en GitHub, no solo del workflow. Los
-binarios ConPTY ya no se versionan: las builds obtienen la pareja desde el
-paquete de Microsoft fijado y verifican su SHA-512 de NuGet, los miembros ZIP y
-los CRC antes de instalarlos. `License` se publica como MIT y los notices de
-Microsoft se incluyen en los paquetes.
-Dependabot agrupa actualizaciones minor/patch por ecosistema y aplica un
-periodo explícito de siete días antes de las actualizaciones de versión; las
-versiones major quedan separadas para poder revisarlas antes de integrarlas.
+busca secretos; `actionlint` y zizmor revisan sintaxis y seguridad de Actions.
 
-El proyecto publica ahora la licencia MIT en `LICENSE` y en los metadatos de
-paquete. La evaluación OpenSSF Best Practices es una autoevaluación externa:
-no se marcará como aprobada ni se añadirá un distintivo hasta completar sus
-preguntas con evidencia. `Maintained` depende de actividad real sostenida y no
-se puede corregir con un cambio de configuración.
+#### 6.2 El preflight local
+
+Comprueba que cada acción esté fijada a un SHA, que checkout no conserve
+credenciales, que los permisos de publicación sean mínimos y que no se restaure
+caché en la publicación.
+
+- `npm run check:github-security` ejecuta estas reglas y vuelve a lanzar
+  `actionlint`/zizmor si están instalados; las builds rápidas mantienen esta
+  comprobación aunque se omita el resto de tests.
+- Es de solo lectura: no reescribe workflows ni cierra avisos remotos. Tras
+  corregirlos, la ejecución de CI vuelve a analizar y subir SARIF, y GitHub
+  actualiza el estado de Code Scanning.
+- Define `LTERMINAL_REQUIRE_GITHUB_SECURITY_TOOLS=1` para hacer fallar también
+  el control local si falta alguno de esos dos escáneres.
+
+#### 6.3 Dependencias
+
+- CI ejecuta `npm audit`, `cargo audit` y `cargo deny`.
+- Dependency Review compara los cambios de dependencias de cada PR con el aviso
+  de vulnerabilidades y la política de licencias.
+- Dependabot agrupa actualizaciones minor/patch por ecosistema y aplica un
+  periodo explícito de siete días antes de las actualizaciones de versión; las
+  versiones major quedan separadas para poder revisarlas antes de integrarlas.
+- Los binarios ConPTY ya no se versionan: las builds obtienen la pareja desde el
+  paquete de Microsoft fijado y verifican su SHA-512 de NuGet, los miembros ZIP
+  y los CRC antes de instalarlos.
+
+#### 6.4 OpenSSF
+
+OpenSSF Scorecard revisa semanalmente las prácticas de seguridad del
+repositorio. El workflow da al análisis permisos de lectura para consultar
+commits, issues, pull requests y checks; conserva el SARIF cinco días para
+diagnosticar fallos y publica los resultados en Code Scanning.
+
+- Los avisos de `Code-Review`, `Branch-Protection` y `Maintained` dependen
+  también de la actividad y de reglas configuradas en GitHub, no solo del
+  workflow. `Maintained` depende de actividad real sostenida y no se puede
+  corregir con un cambio de configuración.
+- La evaluación OpenSSF Best Practices es una autoevaluación externa: no se
+  marcará como aprobada ni se añadirá un distintivo hasta completar sus
+  preguntas con evidencia.
+
+#### 6.5 Licencia
+
+El proyecto publica la licencia AGPL-3.0-only en `LICENSE` y en los metadatos
+de paquete (`check:metadata` y `check:github-security` comprueban que el texto
+y los manifiestos coinciden). `License` se publica como AGPL-3.0-only y los
+notices de Microsoft se incluyen en los paquetes.
+
+### 7. Riesgos conocidos y lo descartado
+
+#### 7.1 `glib`
 
 El aviso de vulnerabilidad de `glib` requiere una actualización compatible de
 la pila GTK3/WebKit/Tauri: la versión usada por `webkit2gtk` aún pertenece al
@@ -3048,12 +3770,16 @@ el ecosistema no publique una ruta compatible corregida, CI debe seguir
 mostrando ese riesgo. El parser de destinos GitHub ya tiene tests y fuzzing
 continuo de ClusterFuzzLite.
 
+#### 7.2 APIsec
+
 No se conserva el workflow de ejemplo de APIsec: apuntaba al proyecto de
 prueba `VAmPI`, mientras que LTerminal es una aplicación de escritorio y no
 expone la API HTTP que ese escáner necesita. Si se incorpora una API real en el
 futuro, se podrá añadir un escaneo DAST específico para ese servicio.
 
 ## Entornos y shells
+
+### 1. Cómo se agrupan los entornos
 
 El selector agrupa los entornos por familia:
 
@@ -3066,6 +3792,8 @@ El selector agrupa los entornos por familia:
 | Android (ADB) | Un entorno por dispositivo conectado |
 | Inteligencia artificial | Claude Code, Gemini CLI, Codex CLI, GitHub Copilot CLI, Qwen Code, opencode, aider, Amp, Crush, Continue CLI (`cn`), Grok CLI, AIChat, mods, llm (en modo `chat`) y ShellGPT (`sgpt --repl`) si están instalados, y un chat por cada modelo local de Ollama. Claude Code se detecta también fuera del PATH: instalador nativo (`~/.local/bin`), npm y la CLI que trae la app de escritorio de Claude (`%APPDATA%\Claude\claude-code\<versión>\<hash>\claude.exe`, la versión más alta) |
 
+### 2. El inventario detallado
+
 Al abrir Entorno y dependencias se hace además el inventario detallado de cada
 distro (shells, gestor de paquetes, herramientas, lenguajes y complementos de
 la línea de órdenes): tarda menos de un segundo por distro porque no lanza un
@@ -3073,6 +3801,8 @@ proceso por archivo ni recorre el PATH de Windows que WSL añade (`/mnt/c/...`).
 Las órdenes que la app ejecuta dentro de una distro usan `wsl.exe --exec`, que
 entrega los argumentos tal cual; con `--` pasarían por la shell de login de la
 distro, que expandiría `$variables` antes de tiempo.
+
+### 3. Los REPL de cada distro
 
 Los REPL de una distro se abren con el mismo PATH con el que se detectaron:
 `wsl.exe --exec sh -lc '<PATH de login + carpetas de usuario>; exec "$0" "$@"'
@@ -3088,11 +3818,15 @@ ELF presente (`timeout 3 sh -c 'exec <ruta> --version'`; solo el código 126,
 «no se puede ejecutar», cuenta como roto) y los que no arrancan quedan en
 `unrunnable` y no se ofrecen como REPL.
 
+### 4. Cómo se comprueba cada distro WSL
+
 Las distribuciones WSL se comprueban entrando en cada una. La primera orden
 arranca la máquina virtual de WSL si estaba parada, así que esa sonda espera
 hasta 15 s (y reintenta) antes de marcar una distro «sin comprobar». Si aun así
 queda marcada y su pestaña arranca bien, la app vuelve a detectar en segundo
 plano y la etiqueta se corrige sola.
+
+### 5. Cambiar de entorno conserva la carpeta
 
 Cambiar de entorno **conserva la carpeta**: si en cmd estás en `C:\proyecto` y
 abres WSL, la sesión empieza en `/mnt/c/proyecto`; en Git Bash, en
@@ -3102,13 +3836,17 @@ funcionar: contenedores Docker (montan una carpeta fija en `/workspace`),
 dispositivos ADB, y rutas UNC como `\\wsl$\...`, que cmd.exe no admite como
 directorio actual.
 
+### 6. Kotlin
+
 Kotlin sigue disponible como herramienta instalable y se puede iniciar desde
 una shell, pero por ahora no aparece como REPL dedicado: algunos paquetes de
 `kotlinc` no cargan el plugin de scripting que necesita `-Xrepl`. Se volverá a
 ofrecer en el selector cuando la detección pueda confirmar que ese plugin está
 realmente disponible.
 
-**Imágenes, iconos y emoji.** La terminal pinta imágenes **Sixel** en línea
+### 7. Imágenes, iconos y emoji
+
+La terminal pinta imágenes **Sixel** en línea
 (el logo de `fastfetch --logo-type sixel`, `chafa -f sixel`, `img2sixel`…). En
 Windows, ConPTY las mide como un VT340 (celda virtual de 10×20 píxeles); cada
 imagen se encaja, sin deformarse, en las filas que ha contado ConPTY para que
@@ -3122,6 +3860,8 @@ emoji usan la fuente de color del sistema y los anchos de Unicode 11, los
 mismos que ConPTY, para que una línea con emoji o caracteres CJK se edite sin
 descolocarse.
 
+### 8. Un REPL no es una shell
+
 Un **REPL no es una shell**: no recibe alias, y las acciones que escriben
 comandos se enrutan a una pestaña con una shell real, abriéndola si hace falta.
 Gforth no muestra un prompt inicial por diseño. La terminal conserva su banner y
@@ -3130,7 +3870,7 @@ añade justo debajo una ayuda visible: escribe `1 2 + . cr` y debe mostrar `3`, 
 tanto que esa ayuda aparece antes de escribir como el resultado calculado, no
 solo que el proceso haya arrancado.
 
-### Permisos de administrador y NSudo
+### 9. Permisos de administrador y NSudo
 
 WTerminal no necesita ser administrador. Las shells **TrustedInstaller de
 NSudo** («CMD · TrustedInstaller (NSudo)» y «PowerShell · TrustedInstaller
@@ -3145,6 +3885,8 @@ y la app usa sola la que haya:
 | gsudo + NSudo | Solo esa pestaña pide el UAC (`gsudo NSudoLC.exe -U:T …`) | Sí | gsudo (Entorno y dependencias → Shells → gsudo, `winget install gerardog.gsudo`) |
 | sudo de Windows + NSudo | Lo mismo que gsudo, con el sudo de Windows 11 24H2 | Solo en modo «En línea» | Activarlo en Configuración → Sistema → Para programadores |
 
+#### 9.1 Orden de elección
+
 Orden de elección (`environments::nsudo_launcher`): si WTerminal ya es
 administrador, NSudo directo; si no, gsudo si está instalado; si no, el sudo de
 Windows en modo «En línea» (los modos «ventana nueva» y «entrada deshabilitada»
@@ -3154,6 +3896,8 @@ no sirven para una pestaña); si no hay ninguno, las entradas de NSudo salen
 en una ventana aparte, fuera de WTerminal; gsudo y el sudo «En línea» lo dejan
 en la misma consola.
 
+#### 9.2 En Ajustes
+
 En **Ajustes → Comportamiento → Permisos de administrador** se ve el estado
 (si WTerminal es administrador, por dónde se abre NSudo y qué hay de NSudo,
 gsudo y el sudo de Windows), con:
@@ -3162,6 +3906,13 @@ gsudo y el sudo de Windows), con:
   otra copia elevada con los mismos argumentos más `--elevated-relaunch`; si
   se acepta, esta copia se cierra; si se cancela, todo sigue igual.
 - **Instalar gsudo**: abre Entorno y dependencias ya filtrado por gsudo.
+- **Ofrecer gsudo** (`offerGsudo`, encendido; 14-11, Romen): si NSudo está
+  instalado y esta copia no puede abrirlo (no es administrador, ni hay gsudo ni
+  el sudo de Windows en línea, `offer_gsudo`), sale un aviso abajo, como la
+  guía del modo limpio, con **«Instalar gsudo»** (lanza la acción
+  `winget-gsudo` de WTerminal en una pestaña, a la vista), **«Cerrar esta
+  vez»** y **«No volver a ofrecer»** (apaga el ajuste). Nunca sale en las
+  pruebas E2E, donde un aviso que no esperan movería la terminal.
 - **Reiniciar sin permisos de administrador** (solo siendo administrador): un
   proceso elevado no puede soltar sus permisos y todo lo que lanza los hereda,
   así que `run_unelevated` copia el token del Explorador (la shell del
@@ -3171,6 +3922,8 @@ gsudo y el sudo de Windows), con:
   (`unelevated_restart_blocker`): con las otras formas la copia nueva se
   volvería a elevar. Si el Explorador también está elevado, lo explica y no
   cierra nada.
+
+#### 9.3 Al abrir WTerminal
 
 **Al abrir WTerminal** es una sola elección con tres formas, excluyentes entre
 sí (elegir una quita la otra):
@@ -3195,6 +3948,8 @@ cambia quién pide el UAC y qué pasa si se cancela. Volver a «Sin permisos» l
 quita las dos, pero la copia en marcha sigue elevada hasta reiniciarla: para
 eso está «Reiniciar sin permisos de administrador».
 
+#### 9.4 Cómo se ve que es administrador
+
 Cuando WTerminal se ejecuta como administrador, la barra superior muestra un
 escudo pequeño junto al botón de volver a detectar entornos (fuera de los
 botones de paneles, que antes desplazaba) y el título de la ventana empieza
@@ -3208,6 +3963,8 @@ elevar solo una pestaña. WTerminal solo escribe la marca `RUNASADMIN` de
 compatibilidad si se marca su casilla. NSudo se busca en `C:\WSCore\Components\Hooks\NSudo`, en
 Program Files, en `C:\Tools\NSudo` y subiendo desde la carpeta de la propia
 copia (`platform::windows::nsudo_path`).
+
+#### 9.5 Pruebas
 
 Pruebas: unidad de la elección del lanzador, de los argumentos del
 relanzamiento, de la decisión de arranque, del modo del sudo y del citado de
@@ -3224,6 +3981,8 @@ e2e:admin` repite el escenario con un token administrativo.
 
 ## Alias y comandos integrados
 
+### 1. Alias que se inyectan
+
 Se inyectan al crear una pestaña, solo en shells reales.
 
 | Alias | Qué hace |
@@ -3235,6 +3994,8 @@ Se inyectan al crear una pestaña, solo en shells reales.
 | `nsudo` | Solo si el ejecutable existe en la máquina. |
 | `install`, `update`, `upgrade`, `uninstall`, `remove`, `search` | Se traducen al gestor de paquetes real del entorno. |
 | `:ltools` / `:tools` | Abre la Biblioteca y su catálogo de LTools para descubrir y configurar las acciones fijadas. Las acciones se ejecutan mediante el CLI validado, no como scripts copiados por LTerminal. |
+
+### 2. `ls` y `ll` en Windows
 
 En Windows, `ls` y `ll` entienden las opciones de Unix más habituales, en
 cualquier combinación (`ls -la`, `ls -ltr`, `ls -1`): `-a` enseña los ocultos,
@@ -3255,12 +4016,14 @@ nada porque el listado ya es largo. `ll` es `ls -la`.
   de WTerminal nunca llegaba a ejecutarse (`ls -la` fallaba con «No se
   encuentra ningún parámetro que coincida con 'la'»).
 
+### 3. Los scripts personales
+
 Los scripts personales detectados siguen apareciendo con sus nombres concretos
 en la ayuda de cada sesión; las operaciones de sistema de LTerminal se
 mantienen en LTools para evitar duplicados y permitir que el catálogo crezca
 sin modificar este proyecto.
 
-### Comandos internos de la aplicación (`:`)
+### 4. Comandos internos de la aplicación (`:`)
 
 Una línea que empieza por `:` no se entrega a la shell: la interpreta WinSlim
 Terminal para consultar o cambiar su propia configuración. Se pueden escribir
@@ -3287,12 +4050,15 @@ responden en la terminal se teclean en la pestaña activa como si se escribieran
 | `:language list` / `:language <id>` | Enumera o cambia el idioma (`es`, `en`, `auto`, etc.). También acepta `:lang` y `:idioma`. |
 | `:terminal list` | Muestra todos los parámetros editables de xterm y sus valores actuales. |
 | `:terminal <parámetro> <valor>` | Cambia tamaño/familia/peso de fuente, interlineado, espaciado, padding, scrollback, sensibilidad, cursor, parpadeo, selección, densidad y colores. Ejemplos: `:terminal font-size 14`, `:terminal cursor beam`, `:terminal cursor-blink off`, `:terminal background #080808`. `:term` es equivalente. |
+| `:chat` | Muestra u oculta el **chat lateral con los agentes de IA**, una barra a la derecha. `:agentes` es equivalente; también está en la paleta y en su atajo `shortcutToggleAgentChat`. **Cómo funciona:** eliges un agente instalado (Claude Code, Codex, Gemini, Qwen, Copilot, Crush, llm, ShellGPT, mods, AIChat o un modelo de Ollama) y, si quieres, su modelo de una lista que empieza por el que usa de verdad, su intensidad, sus permisos (de fábrica, solo leer) y el modo rápido; escribes y pulsas Intro. Puedes adjuntar archivos de texto y el chat recuerda la conversación (`agentChatRemember`). La CLI se abre una vez, en la carpeta de la pestaña, y recibe la pregunta por su entrada estándar. **Contexto:** con «Incluir la última orden y su salida», el mensaje lleva lo último que pasó en la pestaña (si su shell marca las órdenes con OSC 133) y enseña lo que se mandó. **Respuestas:** cada bloque de código de una línea se puede insertar en la terminal **sin Intro**; los de varias líneas solo se copian. Nada se ejecuta solo. **Cortar:** con el botón, y a los 5 min (30 con Ultracode) se corta solo. **Apagarlo:** `agentChat` en Ajustes. Con las CLI reales está sin probar: las pruebas usan un agente simulado, porque no se mandan mensajes a IA reales. |
+| `:set [list [texto]]` | Lista **todos** los ajustes sencillos (sí/no, números y textos) con su valor actual. Con un texto, solo los que lo contienen: `:set list python`. `:ajuste` y `:pref` son equivalentes. |
+| `:set <ajuste> [valor]` | Sin valor, enseña el ajuste; con valor, lo cambia. El nombre vale en camelCase o con guiones: `:set actionCommandsAtOnce on` o `:set action-commands-at-once on`. Valores: `on`/`off` (o `sí`/`no`), números y textos. El backend lo valida igual que Ajustes: si no lo acepta, el ajuste se queda como estaba y se dice. Las listas y los objetos (temas, perfiles…) se cambian en Ajustes. Así, cada ajuste, también los nuevos, se puede usar sin ratón. |
 | `:panes 1\|2\|3\|4` / `:panes cycle` | Fija o rota el número de terminales visibles en la rejilla, sin cerrar pestañas; `:panes <n>` va directo y solo abre las que falten para llegar a `n`. Con la vista dividida, el botón «Separar» de la tira de pestañas hace lo mismo que `:panes 1`. `:layout` y `:grid` son equivalentes. |
 | `:explorer-here` | Abre el gestor de archivos del sistema en la ruta actual de la terminal en Windows o Linux. `:open-here` y `:reveal-here` son equivalentes. |
 | `:banner list` / `:banner hide|show|toggle <campo>` / `:banner preset compact\|full` | Consulta o cambia los campos del fastfetch. Los campos son `system`, `host`, `kernel`, `environment`, `motherboard`, `cpu`, `gpu`, `memory`, `storage`, `uptime` y `datetime`. El campo `storage` resume cada unidad en una línea: `Disco  2 unidades - (C:) 250 GB (99%) / (D:) 450 GB (70%)` (letra o ruta de montaje, tamaño y porcentaje de uso; una ruta de más de 20 caracteres se acorta a `…/<carpeta final>`; `system_info::storage_rows`). |
 | `:quick-actions list` | Comando heredado: informa de que las acciones fijadas se gestionan desde el catálogo de LTools. `on`, `off` y `toggle` ya no cambian la interfaz. |
 
-### Modo de terminal limpia
+### 5. Modo de terminal limpia
 
 `terminalOnlyMode` oculta la barra superior, las pestañas, el explorador visible
 y el marco nativo de la ventana. El área de xterm ocupa entonces todo el
@@ -3315,7 +4081,7 @@ valores numéricos se validan y acotan igual que en Ajustes; `settings.json`
 sigue siendo la fuente persistente. `:terminal list` y `:help internos` son la
 forma más rápida de consultar el estado sin abrir un panel.
 
-### Qué va a la shell y qué no
+### 6. Qué va a la shell y qué no
 
 Todo lo que **no** empieza por `:` sigue siendo una orden de la shell actual.
 Ahí entran los alias `clear`, `cls`, `sysinfo`, `edit`, `ll`, `install`, los
@@ -3325,13 +4091,17 @@ decide cómo ejecutarlos y devuelve su salida y código de salida. Por eso
 `install git` ejecuta el gestor real del entorno, mientras que `:panel deps`
 abre un panel de la aplicación sin escribir nada en cmd o PowerShell.
 
+#### 6.1 El banner inicial
+
 El banner inicial usa **Solo esencial** (5–8 líneas) y se imprime como salida
 normal del terminal. `clear/cls` vuelve a mostrar ese fastfetch por defecto; la
 preferencia `clearReprintBanner` permite dejar la pantalla limpia sin banner.
 Para solicitar todos los campos usa Ajustes o `:banner preset full`; el cambio
 se añade al scrollback sin mover la selección ni superponerse al código.
 
-**Imagen a la izquierda del banner** (Ajustes → Terminal, activada de fábrica):
+#### 6.2 Imagen a la izquierda del banner
+
+En Ajustes → Terminal, activada de fábrica:
 como el logo de fastfetch, a la izquierda del resumen aparece el logo de la app
 o una imagen propia (PNG, JPEG, GIF, WebP, BMP, ICO o SVG de hasta 8 MB),
 elegida con «Elegir imagen…» o escribiendo su ruta; «Usar el logo de la app» la
@@ -3365,6 +4135,8 @@ desalinear ConPTY:
   banner (`clear`, `sysinfo`, una pestaña nueva o **Mostrar el banner ahora**,
   que lo reimprime en la pestaña activa), como el resto de ajustes del banner.
 
+#### 6.3 Los alias de gestor de paquetes
+
 Los alias de gestor de paquetes se resuelven según el entorno: Windows elige
 entre winget, Chocolatey o Scoop al crear la pestaña; las shells Unix eligen
 entre apt, dnf, pacman, zypper, apk y brew **en el momento de invocar el
@@ -3382,7 +4154,7 @@ lo explica en la propia sesión, diciendo además cuál le ha tocado.
 
 ---
 
-### Créditos y easter-eggs
+### 7. Créditos y easter-eggs
 
 En una línea propia de la terminal, `Darkeiser003`, `darkeiser003`,
 `@darkeiser003` y `@Darkeiser003` muestran una presentación del desarrollo,
@@ -3396,6 +4168,8 @@ contengan nombres de personas como parte de otra línea.
 
 ## Panel de entorno y dependencias
 
+### 1. Cómo se organiza
+
 Dos niveles: grupos temáticos y, dentro, un subgrupo plegable por herramienta.
 De cada herramienta se ve **o** «instalar» (si falta) **o**
 actualizar/desinstalar/ver versión (si está), nunca las dos mitades a la vez.
@@ -3408,6 +4182,8 @@ La instalación y la desinstalación se seleccionan componente a componente: la
 build no genera ni ejecuta un script masivo de entorno. Los scripts de desarrollo
 para preparar el proyecto siguen en `scripts/` y se usan desde el código fuente.
 
+### 2. Carga por partes y caché de estados
+
 La navegación es modular y no bloquea la ventana: al abrir el panel se carga
 únicamente el catálogo de menús y opciones. Cada herramienta se comprueba al
 desplegarla; la sonda cubre su familia de acciones y actualiza instalar,
@@ -3417,6 +4193,8 @@ datos de usuario para que la siguiente sesión pueda pintar el estado conocido
 de inmediato. **Repetir detección** invalida esa caché y ejecuta la pasada
 completa de verificación.
 
+### 3. Solo caminos que existen de verdad
+
 El panel solo ofrece caminos que existen de verdad en ese sistema. El caso
 representativo es PowerShell en Linux: Microsoft no lo publica en los
 repositorios oficiales de ninguna distribución grande, así que se instala desde
@@ -3425,14 +4203,19 @@ ninguna de las dos vías se ofrece antes su requisito en lugar de un comando que
 se sabe que va a responder «no se ha encontrado el paquete». Wine en Arch avisa
 de que vive en el repositorio `multilib`, desactivado de fábrica.
 
+### 4. gsudo en Windows
+
 En Windows, **gsudo** (Shells → gsudo, `gerardog.gsudo`) es opcional: sirve
 de puente para abrir las shells de NSudo sin reiniciar WTerminal como
 administrador y para `gsudo <orden>` en cualquier shell. Su nota explica que
 hace lo mismo que el sudo de Windows en modo «En línea»; ver
-[Permisos de administrador y NSudo](#permisos-de-administrador-y-nsudo).
+[Permisos de administrador y NSudo](#9-permisos-de-administrador-y-nsudo).
 
-**Sugerencias y colores en la línea de órdenes** (Ajustes → Terminal, activado
-de fábrica): como fish o los plugins de zsh en Konsole, la terminal sugiere en
+### 5. Sugerencias y colores en la línea de órdenes
+
+#### 5.1 Qué herramienta carga cada shell
+
+Se activa en Ajustes → Terminal (activado de fábrica). Como fish o los plugins de zsh en Konsole, la terminal sugiere en
 gris lo que ya escribiste (→ para aceptarlo) y colorea órdenes y argumentos.
 No lo reimplementa encima de xterm, que chocaría con lo que redibuja la shell:
 carga la herramienta de cada una si está instalada. En cmd es **Clink**
@@ -3448,8 +4231,25 @@ zsh-syntax-highlighting. fish lo trae de serie. Antes de instalar ble.sh en
 una distro WSL se comprueban, además del descargador y del extractor, las 18
 órdenes que ble.sh exige al cargarse (`BLESH_REQUIRED_COMMANDS`): sin `awk`,
 que falta en FedoraLinux-44 recién instalada, `ble.sh --install` no termina
-nunca; la acción se detiene antes con la orden que lo añade. Desactivado, no se añade nada
+nunca. Si falta algo, la acción lo instala antes con el gestor de la distro
+(`apt-get`, `dnf`, `zypper --non-interactive`, `pacman -Syu --needed` o `apk`),
+como root o con `sudo`, que pide la contraseña en la propia pestaña, y vuelve a
+comprobar (`blesh_prerequisites`). Antes se detenía diciendo qué instalar, y en
+Debian, Fedora y openSUSE de WSL recién instaladas no se llegaba a instalar
+(13-11). Sin gestor conocido, sigue deteniéndose con lo que falta. Desactivado, no se añade nada
 y cada shell conserva su configuración.
+
+**Si falta, se ofrece** (`offerShellAssist`, encendido; 14-11, Romen): cuando la
+pestaña activa es de cmd, PowerShell, bash o zsh y a su shell (en WSL, a su
+distro) le falta su ayudante según `shell_assist_status`, sale abajo un aviso
+como la guía del modo limpio: «Esta pestaña de … no tiene sugerencias ni
+colores al escribir: falta …», con **«Instalar …»** (abre Entorno y
+dependencias ya filtrado, como en Ajustes, para ver y confirmar lo que se
+instala), **«Cerrar esta vez»** (por shell y distro) y **«No volver a
+ofrecer»** (apaga el ajuste). Sale uno a la vez, después del de gsudo, y nunca
+en las pruebas E2E (`e2eTesting` en la información de la app).
+
+#### 5.2 El `PSModulePath` de Windows PowerShell 5.1
 
 Todo Windows PowerShell 5.1 que lanza WTerminal (pestañas y sondas) recibe un
 `PSModulePath` depurado (`process::windows_powershell_module_path`): sin las
@@ -3462,7 +4262,9 @@ pulsar una acción ya no está en la última lista del panel (otra comprobación
 la dio por instalada), se busca en el catálogo y se ejecuta igual en vez de
 responder «La acción seleccionada ya no existe».
 
-**Aspecto de las sugerencias** (bajo los interruptores): color del texto
+#### 5.3 Aspecto de las sugerencias
+
+Bajo los interruptores: color del texto
 sugerido, cursiva, colorear o no órdenes y argumentos, colores de órdenes, de
 opciones y argumentos y de una orden que no existe, y predicciones en lista
 (solo PowerShell, PSReadLine 2.2+; activadas de fábrica: sin esa versión no
@@ -3473,6 +4275,8 @@ llamada, porque PSReadLine 2.0 de Windows PowerShell 5.1 no conoce las de
 predicción), `ble-face`/`bleopt` de ble.sh, `ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE` y
 `ZSH_HIGHLIGHT_STYLES`. Sin coloreado, zsh-syntax-highlighting no se carga y en
 las demás los tokens usan el color normal. Se aplica a las pestañas nuevas.
+
+#### 5.4 Un interruptor por shell, e instalar lo que falta
 
 Bajo esa opción hay un interruptor por shell (cmd, PowerShell, bash y zsh) con
 el estado de su herramienta: instalada, no instalada o sin comprobar, en este
@@ -3500,7 +4304,9 @@ Ubuntu, Fedora y openSUSE; las de Arch y Alpine; Homebrew; y `~/.zsh` si los
 clonaste a mano), así que lo que se instala es lo que se detecta y lo que se
 carga.
 
-**Inteligencia artificial** tiene su propia sección:
+### 6. Inteligencia artificial
+
+Tiene su propia sección en el panel:
 
 - **Asistentes en la terminal**: Claude Code (instalador nativo en Windows, npm en
   Linux), Gemini CLI, Codex CLI, GitHub Copilot CLI, Qwen Code, opencode, Amp,
@@ -3508,8 +4314,10 @@ carga.
   mods, AIChat y llama.cpp (WinGet), y aider, llm con su complemento de Ollama
   y ShellGPT (pip). Los paquetes se comprobaron en npm, PyPI y en los
   manifiestos de winget-pkgs. Cada uno se abre como una pestaña y usa la sesión
-  o los tokens de quien lo ejecuta; la app no guarda claves ni llama a ninguna
-  API. Las vías gratuitas reales son Gemini CLI y Qwen Code (nivel gratuito con
+  o los tokens de quien lo ejecuta; la app no llama a ninguna API. Si una IA
+  acaba al abrirse pidiendo su clave, la pestaña ofrece guardarla cifrada y
+  solo para ella ([Inteligencia artificial en la
+  terminal](#inteligencia-artificial-en-la-terminal)). Las vías gratuitas reales son Gemini CLI y Qwen Code (nivel gratuito con
   límites al iniciar sesión), Amp (modo gratuito con anuncios) y los modelos
   locales; Claude no tiene nivel gratuito por API.
 - **Modelos locales**: Ollama y LM Studio, y una selección de modelos (Qwen 3.8
@@ -3528,15 +4336,55 @@ carga.
   los descargados (`ollama list`) y los cargados en memoria (`ollama ps`),
   actualizar todos los descargados y arrancar el servidor (`ollama serve`).
 
-Cada acción se escribe como **una sola línea** en la terminal. En PowerShell,
-bash, zsh y fish la cabecera y el cierre van encadenados en esa línea; en cmd,
-donde un `echo` por mensaje dejaba varias órdenes en pantalla, la línea es
+### 7. Python: pyreadline3
+
+En Windows, Lenguajes → Python ofrece `pyreadline3 (Python 3.12 o anterior)`:
+Tab, historial con Ctrl+R y edición de línea en el REPL. Solo se instala en
+Python 3.12 o anterior (pip lo salta en 3.13 o posterior, que ya trae su propio
+REPL) y su texto avisa del coste en WTerminal. Los detalles, en [Problemas
+conocidos](#problemas-conocidos).
+
+### 8. Cómo se escribe cada acción en la terminal
+
+Cada acción se escribe como **una sola línea** en la terminal. De fábrica aparece
+entera de golpe («Escribir de una vez las órdenes de las acciones»,
+`actionCommandsAtOnce`, encendido de fábrica desde el 15-11); apagado, se ve
+escribir como la repinta la shell. En PowerShell
+(desde el 14-11) toda la acción va en `ui-N.ps1` de la carpeta de sesión, en
+UTF-8 con BOM, y solo se teclea `. '<carpeta de sesión>\ui-N.ps1'`: el archivo
+borra esa línea, pinta la cabecera, ejecuta la orden en la misma sesión (lo que
+cambie se queda, como si se hubiera tecleado) y cierra con el veredicto de `$?`
+y `$LASTEXITCODE`. Encadenada medía unos mil caracteres y PSReadLine la
+repintaba entera a cada tecla: se veía escribir letra a letra aunque la opción
+de escribir de una vez estuviera encendida, también al lanzar un `.ps1` de la
+Biblioteca, que siempre va a una pestaña de PowerShell. La ruta va entera (no
+`$env:WSTERM_UI`) porque una pestaña elevada con NSudo puede no heredar la
+variable. En bash, zsh, sh y fish (desde el 16-11) es igual: la acción va en
+`ui-N.sh` (`ui-N.fish` en fish), con fin de línea LF y sin BOM, y solo se
+teclea `. '<ruta>'` (`source '<ruta>'` en fish), con la ruta como la ve esa
+shell: `/mnt/c/…` dentro de WSL y `/c/…` en Git Bash, la misma con la que cargó
+su inicializador (`console_ui::sh_framed`, `path_in_shell`). Encadenada, la
+línea medía cientos de caracteres y la shell la repetía entera. En bash, zsh y
+sh el archivo acaba en `(exit $__wsterm_rc)`, así que el prompt lee el código
+de la orden y no el del cierre. En Docker, ADB o Wine la shell no ve la carpeta
+de sesión del equipo (`Transport::loads_host_files`) y la acción se sigue
+tecleando encadenada. En cmd, donde un `echo` por mensaje dejaba varias órdenes en pantalla, la línea es
 `call "%WSTERM_UI%\ui-N-ini.cmd" & <orden real> & call "%WSTERM_UI%\ui-N-fin.cmd"`:
 la cabecera y el cierre están en dos archivos de la carpeta de sesión
-(`console_ui::cmd_framed`) y el cierre lee `if errorlevel` del código real de
-la orden. `&&` y `||` atan más que `&`, así que una orden compuesta sigue
-siendo un solo bloque. Si esos archivos no se pueden escribir se vuelve al
-formato de varias líneas.
+(`console_ui::cmd_framed`) y el cierre guarda el código real de la orden en
+`WSTERM_RC` (también los negativos de WinGet). `&&` y `||` atan más que `&`,
+así que una orden compuesta sigue siendo un solo bloque. Si esos archivos no se
+pueden escribir, cmd vuelve al formato de varias líneas y las demás shells a la
+línea encadenada (`console_ui::ps_framed`, `sh_framed`).
+
+El marco es el mismo en todas: `┌─ VERBO ────…`, el asunto, la orden y
+`└────…`, a 60 columnas. En cmd la orden y el asunto van enteros, sin recortar,
+porque la línea tecleada se borra y la cabecera es el único sitio donde se lee
+la orden; desde el 16-11 lleva también las dos reglas (antes solo «┌─ VER» y
+«└»). La forma de reserva de cmd, la tecleada, conserva el marco corto para no
+alargar la línea que repite cmd.
+
+### 9. Los scripts de PowerShell lanzados desde cmd
 
 Las acciones que son scripts de PowerShell (las instalaciones con WinGet, por
 ejemplo) no viajan dentro de la línea de cmd: cmd no sabe escapar comillas
@@ -3549,13 +4397,20 @@ pestaña PowerShell (`$?` y `$LASTEXITCODE` a 0) y sale con un código positivo
 si falla, para que `if errorlevel 1` vea también los códigos negativos de
 WinGet. Sin carpeta de sesión, el script va en `-EncodedCommand`.
 
+### 10. La pausa al terminar
+
 Al terminar, cada acción espera a que se pulse Enter para que su salida se
-pueda leer. El siguiente comando que escriba un panel cierra esa pausa antes de
+pueda leer. «Pulsa Enter…» sale una sola vez: en el pie, y la espera es muda
+(`pause >nul` en cmd, `$null = Read-Host` en PowerShell, `read` en bash, zsh y
+sh); en fish lo dice su propio `read -P`. Hasta el 16-11 salía dos veces en
+todas menos en cmd. El siguiente comando que escriba un panel cierra esa pausa antes de
 ejecutarse, para que no se consuma como respuesta.
 
 ---
 
 ## Proyectos y GitHub
+
+### 1. Anclados
 
 **Anclados** incluye únicamente el perfil fijo
 [`Darkeiser003`](https://github.com/Darkeiser003), como referencia del proyecto.
@@ -3565,15 +4420,21 @@ propios perfiles y repositorios, y quitarlos después sin restricciones. Los
 créditos de **Ajustes › Información** se configuran por separado del listado de
 proyectos.
 
+### 2. El buscador de cada panel
+
 Cada panel tiene un **buscador con lupa** que filtra sin volver a consultar
 nada: en **Anclados** acota perfiles y repositorios, y en **Explorar GitHub**
 acota el resultado ya descargado, para no gastar peticiones de la API pública
 por teclear una letra. Ignora mayúsculas y tildes y admite varios términos en
 cualquier orden. `Esc` vacía el filtro sin cerrar el panel.
 
+### 3. Explorar GitHub
+
 **Explorar GitHub** acepta un usuario, `propietario/repositorio` o una URL
 HTTPS exacta de `github.com`. Se rechazan SSH, `git://`, hosts alternativos,
 credenciales embebidas, puertos y segmentos adicionales.
+
+#### 3.1 El límite de consultas de la API
 
 Las consultas son las públicas de la API (60 por hora). Cuando se agotan
 (GitHub responde 403 con el contador a cero, o 429) y `gh` tiene sesión,
@@ -3584,6 +4445,8 @@ minuto). WTerminal nunca lee ni guarda el token: la consulta la hace `gh`
 Consultas de Explorar GitHub** elige *al agotarse* (de fábrica), *siempre* o
 *nunca* (`githubSessionMode`). En los E2E, que apuntan a una API local, nunca
 se usa `gh`.
+
+### 4. Descargados
 
 **Descargados** lista lo clonado en la carpeta de proyectos y, además, los
 repositorios **importados**: **Importar…** acepta la carpeta de un repositorio
@@ -3600,12 +4463,16 @@ otro aviso abajo y se apaga en **Ajustes › Comportamiento › Sugerir importar
 repositorios** (`suggestRepositoryImport`). Hoy solo se importan repositorios
 con un `origin` de GitHub.
 
+#### 4.1 Estado de Git
+
 **Estado de Git** (en Descargados) enseña bajo cada repositorio su rama, los
 cambios sin confirmar y los commits por delante (↑) o por detrás (↓) según el
 último `fetch`. Solo lee (`git status` y la lista de ramas), no consulta la red
 y va de tres en tres repositorios. Como las demás acciones, el panel manda el
 nombre y el backend saca la carpeta de la misma lista de Descargados
 (`git_downloaded_status`).
+
+#### 4.2 Release de cada repositorio
 
 **Release** (en «⋯» de cada repositorio) abre la última release y sus adjuntos
 bajo la fila de ese repositorio. Se cierra con «✕», pulsando **Release** otra
@@ -3616,10 +4483,12 @@ de GitHub simulada en `127.0.0.1`, a la que la app solo apunta en pruebas
 (`LTERMINAL_E2E_GITHUB_API` con `LTERMINAL_E2E_TESTING=1`;
 `projects::github::e2e_api_origin` rechaza cualquier otro host).
 
-### Mi GitHub (con GitHub CLI)
+### 5. Mi GitHub (con GitHub CLI)
 
 La cuarta pestaña del panel trabaja con tu cuenta a través de **GitHub CLI**
 (`gh`). WTerminal no guarda tokens ni contraseñas: la sesión es la de `gh`.
+
+#### 5.1 La cuenta, sesión y repositorios nuevos
 
 - **Sin `gh`**, ofrece instalarlo (Entorno y dependencias → GitHub CLI).
 - **Iniciar sesión** escribe `gh auth login --hostname github.com
@@ -3639,78 +4508,133 @@ La cuarta pestaña del panel trabaja con tu cuenta a través de **GitHub CLI**
   (`gh auth refresh --scopes delete_repo`, en la terminal).
 - **Nuevo repositorio**: nombre, descripción, privado o público, README
   inicial y, si se quiere, clonarlo en la carpeta de proyectos.
-- **Gestionar…** (en «⋯» de cada repositorio de la cuenta) abre bajo su fila
-  una ficha con doce secciones (`GithubRepoManager.svelte`):
-  - **Detalles**: descripción, web, temas, rama por defecto, issues y wiki
-    (`gh repo view` para leerlos, `gh repo edit` para guardarlos; solo se
-    añaden y quitan los temas que cambian).
-  - **Código** (`projects/gh_code.rs`, con `gh api`): **Archivos** de
-    cualquier rama o etiqueta (carpetas primero, abrir un archivo de texto;
-    los binarios se abren en GitHub y los grandes se recortan a 512 KB),
-    **Commits** de la rama con los cambios de cada uno y **Comparar** dos
-    ramas o etiquetas, **Ramas** (crear desde la actual u otra, borrar
-    escribiendo su nombre; nunca la rama por defecto) y **Etiquetas**. Las
-    rutas del repositorio se validan y se codifican segmento a segmento
-    (`encode_repo_path`: sin `..`, sin segmentos vacíos ni caracteres de
-    control).
-  - **Releases**: la lista (`gh release list`), **Nueva release** con
-    etiqueta, título, notas o notas automáticas, borrador, prerelease, rama de
-    destino y **adjuntos** elegidos con el selector o pegando su ruta (`gh
-    release create … archivos`); **Subir adjuntos…** a una existente (`gh
-    release upload --clobber`), ver y quitar adjuntos, **Publicar** un
-    borrador y **Borrar…** escribiendo la etiqueta (con la opción de borrar
-    también la etiqueta).
-  - **Git** (si está clonado): rama, seguimiento (↑ por subir, ↓ por traer),
-    archivos cambiados, **commit de todo** con mensaje, ramas locales (crear,
-    cambiar, borrar solo si está fusionada: `git branch -d`). **Subir (push)**,
-    **Traer (pull)** y **Publicar rama** (`push -u origin <rama>`) van a una
-    pestaña visible porque pueden pedir credenciales
-    (`commands::github_git_terminal`).
-  - **Pull requests**: las abiertas, **Fusionar** (squash, merge o rebase, y
-    borrar la rama) y **Nueva pull request** hacia la rama por defecto.
-    **Ver** despliega la descripción, las etiquetas, los comentarios y los
-    archivos que cambia; desde ahí se comenta, se cierra o reabre, se pasa
-    de borrador a **lista para revisar** y se **aprueba** o se **piden
-    cambios** (con texto obligatorio) (`projects/gh_work.rs`).
-  - **Issues**: abiertas, cerradas o todas; crear, cerrar y, con **Ver**,
-    leer los comentarios, comentar y reabrir.
-  - **Actions**: las últimas ejecuciones, **Relanzar lo que falló** (`gh run
-    rerun --failed`), **Ver log** de los pasos que fallaron (sin colores y
-    recortado a los últimos 60 000 caracteres, que es donde está el error) y
-    **Cancelar** las que siguen en cola o en marcha.
-  - **Actions: más** (`projects/gh_admin.rs` y `GithubAdmin.svelte`):
-    **Workflows** (lanzar en una rama con entradas `nombre=valor`, que es `gh
-    workflow run -f`, y activar o desactivar), **Artefactos** (descargar a
-    una carpeta con `gh run download` y borrar), **Secretos** (el valor va por
-    la entrada estándar de `gh secret set`: nunca en los argumentos, la lista
-    de procesos ni el registro, y no se vuelve a mostrar), **Variables** y
-    **Entornos**.
-  - **Configuración**: **Colaboradores** (invitar con su permiso y quitar),
-    **Webhooks** (crear uno https para push, ping y borrar), **Claves de
-    despliegue** (solo claves públicas SSH, de solo lectura o no), **Pages**
-    (activar desde una rama y `/` o `/docs`, desactivar; sin activar se
-    explica en vez de fallar) y **Protección de ramas** (revisiones
-    obligatorias, también para administradores, historial lineal; quitarla).
-  - **Seguridad**: alertas abiertas de Dependabot, code scanning y secret
-    scanning, y activar o desactivar las alertas de vulnerabilidades. Si un
-    tipo de alerta no está activado, se dice en vez de fallar.
-  - **Comunidad**: el perfil de comunidad (porcentaje de salud, README,
-    licencia, CONTRIBUTING, código de conducta y plantillas).
-  - **Cuenta**: el perfil, las claves SSH (añadir y borrar) y las GPG de la
-    cuenta.
-  - **Vista grande** (⤢): la ficha deja el panel estrecho y ocupa la ventana
-    bajo la barra, con cualquier tamaño de interfaz.
-
-  Lo que pide un permiso que `gh auth login` no concede (claves de la cuenta,
-  webhooks, lanzar workflows) avisa con «Pedir permisos», que abre `gh auth
-  refresh --scopes admin:public_key,admin:gpg_key,admin:repo_hook,workflow` en
-  una pestaña visible (`TerminalAction::GrantAdmin`). Cada operación es una
-  orden `gh` con método y ruta fijos (`list_args` y `action_plan`), con el
-  repositorio del listado de la cuenta y cada campo validado: nombres de
-  secretos sin `GITHUB_`, usuarios de GitHub, webhooks solo https, claves
-  públicas en una línea (nunca una privada), ramas con las reglas de git.
 - **Cerrar sesión** (`gh auth logout`) también va a la terminal, porque `gh`
   pide confirmación.
+
+#### 5.2 La ficha «Gestionar…»
+
+**Gestionar…** (en «⋯» de cada repositorio de la cuenta) abre bajo su fila
+una ficha con doce secciones (`GithubRepoManager.svelte`):
+
+##### 5.2.1 Detalles
+
+Descripción, web, temas, rama por defecto, issues y wiki
+(`gh repo view` para leerlos, `gh repo edit` para guardarlos; solo se
+añaden y quitan los temas que cambian).
+
+##### 5.2.2 Código
+
+Con `gh api` (`projects/gh_code.rs`): **Archivos** de
+cualquier rama o etiqueta (carpetas primero, abrir un archivo de texto;
+los binarios se abren en GitHub y los grandes se recortan a 512 KB),
+**Commits** de la rama con los cambios de cada uno y **Comparar** dos
+ramas o etiquetas, **Ramas** (crear desde la actual u otra, borrar
+escribiendo su nombre; nunca la rama por defecto) y **Etiquetas**. Las
+rutas del repositorio se validan y se codifican segmento a segmento
+(`encode_repo_path`: sin `..`, sin segmentos vacíos ni caracteres de
+control).
+
+##### 5.2.3 Releases
+
+La lista (`gh release list`), **Nueva release** con
+etiqueta, título, notas o notas automáticas, borrador, prerelease, rama de
+destino y **adjuntos** elegidos con el selector o pegando su ruta (`gh
+release create … archivos`); **Subir adjuntos…** a una existente (`gh
+release upload --clobber`), ver y quitar adjuntos, **Publicar** un
+borrador y **Borrar…** escribiendo la etiqueta (con la opción de borrar
+también la etiqueta).
+
+##### 5.2.4 Git
+
+(si está clonado): rama, seguimiento (↑ por subir, ↓ por traer),
+archivos cambiados, **commit de todo** con mensaje, ramas locales (crear,
+cambiar, borrar solo si está fusionada: `git branch -d`). **Subir (push)**,
+**Traer (pull)** y **Publicar rama** (`push -u origin <rama>`) van a una
+pestaña visible porque pueden pedir credenciales
+(`commands::github_git_terminal`).
+
+##### 5.2.5 Pull requests
+
+Las abiertas, **Fusionar** (squash, merge o rebase, y
+borrar la rama) y **Nueva pull request** hacia la rama por defecto.
+**Ver** despliega la descripción, las etiquetas, los comentarios y los
+archivos que cambia; desde ahí se comenta, se cierra o reabre, se pasa
+de borrador a **lista para revisar** y se **aprueba** o se **piden
+cambios** (con texto obligatorio) (`projects/gh_work.rs`).
+
+##### 5.2.6 Issues
+
+Abiertas, cerradas o todas; crear, cerrar y, con **Ver**,
+leer los comentarios, comentar y reabrir.
+
+##### 5.2.7 Actions
+
+Las últimas ejecuciones, **Relanzar lo que falló** (`gh run
+rerun --failed`), **Ver log** de los pasos que fallaron (sin colores y
+recortado a los últimos 60 000 caracteres, que es donde está el error) y
+**Cancelar** las que siguen en cola o en marcha.
+
+##### 5.2.8 Actions: más
+
+En `projects/gh_admin.rs` y `GithubAdmin.svelte`:
+**Workflows** (lanzar en una rama con entradas `nombre=valor`, que es `gh
+workflow run -f`, y activar o desactivar), **Artefactos** (descargar a
+una carpeta con `gh run download` y borrar), **Secretos** (el valor va por
+la entrada estándar de `gh secret set`: nunca en los argumentos, la lista
+de procesos ni el registro, y no se vuelve a mostrar; se escribe en un
+cuadro de varias líneas, tapado salvo con «Mostrar el valor», para que una
+clave PEM u OpenSSH conserve sus saltos de línea), **Variables** (con
+campos propios: lo escrito en Secretos nunca pasa a Variables) y
+**Entornos**.
+
+##### 5.2.9 Configuración
+
+**Colaboradores** (invitar y quitar; en un repositorio
+de la cuenta personal GitHub da siempre lectura y escritura, así que no se
+ofrecen permisos más finos y el panel lo dice),
+**Webhooks** (crear uno https para push, ping y borrar), **Claves de
+despliegue** (solo claves públicas SSH, de solo lectura o no), **Pages**
+(activar desde una rama y `/` o `/docs`, desactivar; sin activar se
+explica en vez de fallar) y **Protección de ramas** (exigir pull request
+con N revisiones, también para administradores, historial lineal;
+quitarla). Al leer una rama el formulario se rellena con lo que tiene, y
+«Proteger» lee antes la protección actual y conserva lo que el panel no
+gestiona (comprobaciones obligatorias, CODEOWNERS, restricciones, force
+push, borrado…): el PUT de GitHub sustituye la protección entera.
+
+##### 5.2.10 Seguridad
+
+Alertas abiertas de Dependabot, code scanning y secret
+scanning, y activar o desactivar las alertas de vulnerabilidades. Si un
+tipo de alerta no está activado, se dice en vez de fallar.
+
+##### 5.2.11 Comunidad
+
+El perfil de comunidad (porcentaje de salud, README,
+licencia, CONTRIBUTING, código de conducta y plantillas).
+
+##### 5.2.12 Cuenta
+
+El perfil, las claves SSH (añadir y borrar) y las GPG de la
+cuenta.
+
+##### 5.2.13 Vista grande
+
+Con el botón ⤢, la ficha deja el panel estrecho y ocupa la ventana
+bajo la barra, con cualquier tamaño de interfaz.
+
+##### 5.2.14 Permisos que pide y lo que se valida
+
+Lo que pide un permiso que `gh auth login` no concede (claves de la cuenta,
+webhooks, lanzar workflows) avisa con «Pedir permisos», que abre `gh auth
+refresh --scopes admin:public_key,admin:gpg_key,admin:repo_hook,workflow` en
+una pestaña visible (`TerminalAction::GrantAdmin`). Cada operación es una
+orden `gh` con método y ruta fijos (`list_args` y `action_plan`), con el
+repositorio del listado de la cuenta y cada campo validado: nombres de
+secretos sin `GITHUB_`, usuarios de GitHub, webhooks solo https, claves
+públicas en una línea (nunca una privada), ramas con las reglas de git.
+
+#### 5.3 Reglas comunes de «Gestionar…»
 
 En «Gestionar…» rigen las mismas reglas (`projects/gh_manage.rs`,
 `projects/git_local.rs`): argumentos fijos y validados (ramas y etiquetas con
@@ -3720,6 +4644,8 @@ sanea (una URL que no es de github.com no llega al panel) y solo se actúa sobre
 repositorios del listado de la cuenta. La carpeta de la copia local la calcula
 el backend (`<proyectos>/<propietario>/<nombre>`), nunca el panel. Crear una
 release con adjuntos o subirlos tiene 30 minutos de margen; lo demás, 45 s.
+
+#### 5.4 Seguridad
 
 Seguridad (`projects/gh_cli.rs`): las órdenes son `gh` con argumentos fijos,
 sin shell de por medio; los nombres nuevos siguen las reglas de GitHub y no
@@ -3733,7 +4659,7 @@ y el E2E `github-account` con un `gh` simulado que anota cada llamada; las de
 «Gestionar…» se comparan argumento a argumento, porque Rust cita a su manera
 los argumentos de un `.cmd`.
 
-### Dos formas de actualizar un repositorio
+### 6. Dos formas de actualizar un repositorio
 
 Cada tarjeta de repositorio ofrece las dos, y cada botón dice en su título
 exactamente qué va a hacer:
@@ -3751,7 +4677,7 @@ descarta de entrada los que llevan el nombre de otro sistema: un `.zip` que
 diga `linux` no se ofrece en Windows. Si nada encaja **no se descarga nada a
 ciegas**: se avisa de que hay que elegir a mano en **Release**.
 
-### Clonar y actualizar el código
+### 7. Clonar y actualizar el código
 
 La primera acción ejecuta `git clone`; si el destino ya contiene el mismo
 repositorio, las siguientes usan `git pull --ff-only`. Ambos comandos se
@@ -3759,7 +4685,7 @@ escriben y ejecutan en una pestaña visible. La estructura local es
 `<carpeta>/<propietario>/<repositorio>`. Un directorio existente que no sea un
 repositorio se trata como conflicto y **nunca** se sobrescribe.
 
-### Releases
+### 8. Releases
 
 El botón **Release** consulta la última versión publicada y lista sus archivos
 con tamaño, para elegir uno a mano. Descargar uno no requiere clonar ni
@@ -3780,6 +4706,8 @@ compilar nada.
 
 ## Panel de scripts
 
+### 1. Dos ámbitos
+
 Dos ámbitos:
 
 - **Biblioteca**: carpeta persistente elegida por el usuario. Las acciones de
@@ -3789,9 +4717,13 @@ Dos ámbitos:
   subdirectorios por defecto, configurable entre 0 y 10. **No** crea alias ni
   modifica la shell.
 
+### 2. Topes del escáner
+
 El escáner mantiene topes de tiempo, carpetas y resultados (máximo 500) para no
 bloquear la terminal, y omite dependencias, VCS, cachés y artefactos
 (`node_modules`, `dist`, `build`, virtualenvs…).
+
+### 3. Qué tipos de script reconoce
 
 Reconoce `.cmd`, `.bat`, `.ps1`, `.vbs`, `.sh`, `.bash`, `.zsh`, `.ksh`,
 `.fish` y scripts sin extensión con shebang. Los runtimes (`.py`, `.js`,
@@ -3799,9 +4731,13 @@ Reconoce `.cmd`, `.bat`, `.ps1`, `.vbs`, `.sh`, `.bash`, `.zsh`, `.ksh`,
 declaran intención de ejecución: shebang, `package.json#bin`, bit ejecutable o
 carpeta `scripts`/`bin`/`tools`/`cli`.
 
+### 4. El buscador
+
 El panel tiene el mismo **buscador con lupa** que Proyectos, y actúa sobre el
 último escaneo: filtra por nombre, subcarpeta o extensión sin volver a recorrer
 el disco, que en **Aquí** puede costar segundos.
+
+### 5. Acceso rápido
 
 La sección **Acceso rápido** aparece encima de los resultados de la Biblioteca
 y de **Aquí**. La estrella conserva hasta 50 scripts, aunque estén en otra
@@ -3809,12 +4745,14 @@ carpeta o el filtro de tipos actual no los incluya; los que ya no existen se
 retiran automáticamente. Así las herramientas de uso diario siguen a un clic
 sin convertir la Biblioteca en un segundo explorador.
 
+#### 5.1 Lo que pasó con las Operaciones rápidas
+
 Las antiguas **Operaciones rápidas** basadas en nombres de scripts ya no se
 muestran como un segundo menú. Los scripts siguen disponibles individualmente
 en la Biblioteca y el comando heredado `:quick-actions` solo muestra una ayuda
 de migración; no modifica preferencias ni oculta controles.
 
-### Acciones de LTools
+### 6. Acciones de LTools
 
 Si encuentra `ltools-cli`, `ltools`, `winslim-tools`, una AppImage/EXE versionada
 de Tools o su variante Windows en el `PATH`, en las carpetas de instalación
@@ -3832,6 +4770,8 @@ Si hay varias copias, manda `LTOOLS_PATH`, después el `PATH` y, entre las
 encontradas en carpetas conocidas (incluido el `Tools-main` que deja el
 «Download ZIP» de GitHub), la más reciente: al actualizar Tools la Biblioteca
 no se queda con una release antigua descargada antes.
+
+#### 6.1 Preparada para que Tools cambie
 
 La terminal está preparada para que Tools cambie sin tocarla: los campos
 nuevos del catálogo se ignoran, una acción que esta versión no entiende se
@@ -3862,9 +4802,17 @@ que la selección sobrevive a cerrar y reabrir la Biblioteca. También puedes
 abrir esta misma configuración desde **Ajustes → Comportamiento** o escribiendo
 `:ltools` / `:tools`; ambos accesos llevan al único selector compartido.
 
+#### 6.2 Al pulsar una acción
+
 Al pulsar una acción, LTerminal vuelve a consultar el catálogo, valida el ID y
 escribe `ltools actions run <id>` con argumentos separados en una shell visible.
 No ejecuta comandos arbitrarios recibidos desde la interfaz ni oculta la salida.
+La orden lleva el mismo marco que el resto de acciones (cabecera «Ejecutar ·
+LTools · …» y cierre con cómo acabó, ver [Cómo se escribe cada acción en la
+terminal](#8-cómo-se-escribe-cada-acción-en-la-terminal)) y respeta «Escribir de
+una vez las órdenes de las acciones». En PowerShell la ruta va con el operador
+de llamada (`& 'C:\…\ltools.exe' actions run <id>`): entre comillas y sin él,
+PowerShell la tomaba por un texto y daba «token inesperado».
 Si LTools no está instalado, **Obtener LTools** consulta la última release
 estable de `Darkeiser003/Tools`, elige el paquete CLI de la plataforma, lo
 descarga mediante los hosts permitidos y deja la AppImage ejecutable cuando
@@ -3874,12 +4822,21 @@ para que la instalación manual sea explícita; mientras tanto, la Biblioteca
 mantiene visible el estado y el botón de obtención para que el usuario sepa qué
 falta, sin ejecutar descargas silenciosas.
 
+### 7. El filtro de tipos
+
 El filtro de tipos se adapta al sistema. En Linux aparecen primero
 SH/Bash/Zsh, Fish y paquetes Linux, que son los tres valores de fábrica; en
 Windows, CMD/BAT, PowerShell y VBScript ocupan esas posiciones. Python,
 Node.js, otros runtimes, programas, HTML, imágenes, audio y vídeo siguen
 siendo opt-in, así que activar la vista nunca convierte **Aquí** en un
 explorador de todos los archivos.
+
+En el panel, la sección se titula **Archivos** (el buscador por nombre, el
+filtro y la lista) y el filtro es el desplegable **Tipos de archivo** de
+debajo. Hasta el 16-11 el título de la sección también decía «Tipos de
+archivo» y salía dos veces seguidas.
+
+### 8. Dónde se ejecuta un script
 
 Al ejecutar un script, la aplicación reutiliza una pestaña compatible o abre
 una nueva (PowerShell para `.ps1`, cmd/PowerShell para `.cmd`, la shell
@@ -3891,14 +4848,20 @@ predeterminada y nunca dentro de la ventana de la aplicación.
 
 ## Explorador de archivos
 
+### 1. Qué es
+
 `🗀` en la barra de pestañas (o `Ctrl+Shift+E`) abre un panel lateral con el
 contenido del directorio actual de la pestaña, que sigue al `cd` de la terminal
 hasta que se navega a mano.
+
+### 2. Qué permite
 
 Permite subir de directorio, entrar en subcarpetas, crear carpetas y archivos
 vacíos, renombrar, copiar, cortar, pegar, enviar a la papelera, copiar la ruta,
 abrir un archivo con la aplicación predeterminada y llevar la terminal a la
 carpeta que se está viendo.
+
+### 3. Calcular tamaño
 
 **Calcular tamaño** (menú de una carpeta) suma lo que hay dentro, subcarpetas
 incluidas, y lo enseña en su fila y con el número de archivos. No sigue enlaces
@@ -3906,9 +4869,13 @@ ni uniones (apuntan a otra parte del disco y una unión puede formar un ciclo),
 salta lo que no se puede leer y se para a los 15 s o a las 300 000 entradas:
 entonces sale «≥», porque es un mínimo.
 
+### 4. Crear, con límites
+
 Crear algo solo se admite dentro de la carpeta mostrada: el nombre no puede
 contener separadores, `..`, caracteres de control ni los nombres reservados de
 Windows, y nunca se sobrescribe nada existente.
+
+### 5. Abrir en el explorador del sistema
 
 **Abrir en el explorador del sistema** (menú contextual de la terminal o
 `:explorer-here`) lanza el explorador del sistema en la ruta actual, que es
@@ -3920,12 +4887,14 @@ escritorios a un emulador de terminal, y pedir «abrir carpeta» acababa abriend
 una terminal. Si no se puede deducir el escritorio y hay varios gestores, se
 pregunta; si no hay ninguno, se ofrece instalar uno.
 
+### 6. Sigue a la pestaña activa
+
 El panel sigue automáticamente a la pestaña activa y a los cambios de carpeta
 detectados en su prompt (`cd`, `Set-Location`, etc.). Si se navega manualmente
 por otra carpeta, esa vista se conserva hasta volver a enfocar la terminal o
 pulsar «Seguir»; al cambiar de pestaña siempre se carga su directorio real.
 
-### Visores de archivos
+### 7. Visores de archivos
 
 Si al abrir un archivo el sistema no tiene ninguna aplicación asociada, la
 aplicación propone instalar un visor adecuado al tipo de contenido y **espera
@@ -3937,16 +4906,22 @@ panel de dependencias para instalarlos sin esperar a que algo falle.
 
 ## Pestañas, división y ciclo de vida
 
+### 1. Pestañas nuevas y división
+
 `+` crea otra sesión del entorno activo. `▥` (o `Ctrl+Shift+\`) va añadiendo
 sesiones a la vista: dos en columnas, tres con la tercera ocupando la fila
 inferior, cuatro en cuadrantes. Al llegar a cuatro, el botón vuelve a dejar
 una sola. Cada panel sigue siendo una pestaña normal; la que tiene el foco se
 distingue por un borde de acento.
 
+### 2. Renombrar una pestaña
+
 Para **renombrar una pestaña**: doble clic sobre ella, `F2` con la pestaña
 enfocada o la paleta de comandos. Intro guarda, `Esc` cancela y un nombre vacío
 devuelve el del entorno. El nombre sigue ahí al cambiar de shell, pero solo dura
 mientras la pestaña está abierta.
+
+### 3. El menú de la pestaña
 
 El **menú de la pestaña** (clic derecho, tecla de menú o `Mayús+F10` con la
 pestaña enfocada) reúne renombrar, un **color** que marca su borde izquierdo
@@ -3954,6 +4929,13 @@ pestaña enfocada) reúne renombrar, un **color** que marca su borde izquierdo
 las demás, o **verla junto a la pestaña activa** si no se ve, y cerrarla. Las
 flechas recorren el menú y `Esc` lo cierra sin cambiar nada. Como el nombre, el
 color dura mientras la pestaña está abierta.
+
+Cada opción lee qué pestaña es **antes** de cerrar el menú: «Renombrar» y
+«Cerrar pestaña» lo hacían después, cuando la pestaña del menú ya no existía, y
+no hacían nada (14-11, Romen: «la función de renombrar pestañas no funciona»).
+La prueba `tab-tools` renombra también desde el menú.
+
+### 4. Órdenes escritas (buscar en lo tecleado)
 
 **Órdenes escritas** (`Ctrl+Shift+R`, se cambia en Ajustes, o la paleta): un
 buscador con lo que se ha escrito en todas las pestañas, la última primero, que
@@ -3966,22 +4948,39 @@ contraseña de `sudo` o un `Read-Host`, no llega con prompt y nunca entra. Vive
 en memoria y se pierde al cerrar WTerminal; cada shell sigue guardando su
 propio historial.
 
+### 5. Cambiar de entorno
+
 Cambiar de entorno no es instantáneo (una distro WSL en frío o una imagen
 Docker tardan segundos), así que el panel muestra un aviso **Cargando a:
 _entorno_** con un indicador en movimiento, y lo retira en cuanto la sesión
 nueva da señales de vida. Si el sistema pide reducir el movimiento, el aviso
 late en vez de desplazarse.
 
+### 6. Al terminar la shell
+
 Al terminar la shell (`exit`, Ctrl+D) **la pestaña se cierra sola**, y con la
-última se cierra la aplicación. La excepción es una sesión que muere en los
-primeros 3 segundos con código distinto de cero: eso no es haber terminado sino
-no haber podido arrancar, así que la pestaña se queda con el motivo a la vista.
+última se cierra la aplicación. Las excepciones son las sesiones que acaban con
+un código distinto de cero sin haber llegado a arrancar; ahí la pestaña se queda
+con el motivo a la vista:
+
+- una shell que muere en los primeros 3 segundos;
+- un REPL (Python, Node, Elm…) que muere en los primeros 15 segundos (dentro de
+  WSL, en el primer minuto, lo que tarda WSL en rendirse);
+- una IA de terminal (`ai:*`), tarde lo que tarde. Casi siempre sale así porque
+  le falta la clave o la sesión, y antes de decirlo puede tardar mucho mirando
+  actualizaciones o la red (Grok tardó 16 s con el equipo cargado). Con la
+  pestaña abierta se ve su mensaje y el aviso para meter la clave
+  (`aiKeyOffer`).
+
+### 7. Desplazarse: vertical y horizontal
 
 La rueda del ratón desplaza verticalmente el scrollback de xterm. Para recorrer
 una línea larga sin partirla, mantener pulsado `Shift` mientras se gira la rueda
 desplaza horizontalmente el panel; el indicador `›` avisa cuando todavía hay
 contenido hacia la derecha. Al escribir o recibir salida, el cursor vuelve a
 mantenerse visible automáticamente.
+
+### 8. El menú contextual de la terminal
 
 El menú contextual de la terminal (clic derecho) ofrece copiar, cortar
 entrada, borrar entrada, pegar, **buscar**, **guardar la salida**, **copiar la
@@ -4018,12 +5017,16 @@ que nadie tenga que sabérselos:
 
 ## Atajos de teclado
 
+### 1. Cómo se resuelven
+
 Los atajos se resuelven en una única captura global, antes de que el textarea
-oculto de xterm reciba la tecla. Hay veintidós acciones configurables en
+oculto de xterm reciba la tecla. Hay treinta y cinco acciones configurables en
 Ajustes (`Ajustes › Comportamiento › Atajos de teclado`); las acciones sin valor
 se muestran como disponibles pero no secuestran ninguna tecla. Los valores se
 guardan normalizados y se comparan por `KeyboardEvent.code` cuando la tecla
 tiene una representación física ambigua.
+
+### 2. Cambiar o quitar un atajo
 
 Para desasignar un atajo, también uno de fábrica como `Ctrl+Shift+T` o
 `Ctrl+Shift+P`, pulsa «×» junto a su campo (o `Retroceso`/`Supr` con el campo
@@ -4050,18 +5053,33 @@ como salida en lugar de anunciar un atajo que ya no existe.
 | `Ctrl+Shift+V` | Pegar |
 | `Ctrl+Shift+X` | Cortar la entrada seleccionada |
 
+### 3. Moverse entre paneles
+
 Los defaults de navegación de panel son `Ctrl izquierdo+A` (izquierda),
 `Ctrl izquierdo+D` (derecha), `Ctrl izquierdo+W` (arriba) y `Ctrl izquierdo+S`
 (abajo). También se pueden asignar acciones
 sin default: abrir un panel concreto, cerrar panel, refrescar entornos, seguir
 la ruta de la terminal, llevar la terminal a la carpeta del explorador, limpiar
-terminal y abrir el explorador del sistema. «Limpiar terminal» escribe `clear`
+terminal y abrir el explorador del sistema.
+
+### 4. Los atajos sin tecla de fábrica
+
+Desde el 12-11 también se pueden asignar, sin tecla de fábrica para no chocar
+con las shells:
+- cerrar la pestaña;
+- renombrarla;
+- copiar la salida de la última orden;
+- guardar la salida en un archivo;
+- agrandar, achicar o devolver a su tamaño de fábrica la letra de la terminal.
+  Va de 10 a 24 px, igual que `:terminal font-size +|-`.
+
+Todas están también en la paleta. «Limpiar terminal» escribe `clear`
 en la shell activa, como si se tecleara, solo si el prompt está vacío; no actúa
 en un REPL ni en un asistente. Un cambio de atajos debe probarse
 con foco en terminal, input de ajustes y panel lateral: cada contexto tiene que
 conservar su propia edición.
 
-### Enlaces en la salida
+### 5. Enlaces en la salida
 
 Las direcciones `http://`, `https://` y `file://` que aparecen en la salida, y
 los hipervínculos OSC 8 que escriben programas como `ls --hyperlink`, `gcc` o
@@ -4089,6 +5107,8 @@ esquina de la terminal.
 
 ## Marcas de orden
 
+### 1. Qué son y qué permiten
+
 cmd, PowerShell y bash (Git Bash y WSL) marcan en su prompt dónde empieza y
 acaba cada orden con las secuencias OSC 133. Las marcas no ocupan columnas ni se
 ven; con ellas la terminal puede:
@@ -4096,17 +5116,517 @@ ven; con ellas la terminal puede:
 - **Saltar entre órdenes** con `Ctrl+Shift+Up` y `Ctrl+Shift+Down`.
 - **Señalar las que fallan** con una barra roja junto a su prompt. Al pasar el
   ratón por encima enseña el código de salida y lo que tardó. cmd no da el código
-  de salida en su prompt, así que ahí no hay barra roja.
+  de salida en su prompt. Solo se reconoce una orden que no existe: su salida
+  lleva el mensaje 9009 de `cmd.exe` («… no se reconoce como un comando interno
+  o externo»), que `terminal/cmd_failure.rs` lee del propio Windows en su idioma
+  (`cmd_not_found_text`). Esa orden cuenta como fallida con 9009, su
+  `ERRORLEVEL`: barra roja y, con el modo consejero, el aviso. Los demás fallos
+  de cmd no se ven.
 - **Copiar la salida de la última orden** desde el menú contextual o la paleta.
 - **Avisar al acabar una orden de 10 segundos o más**: enseña lo que tardó y, si
   la ventana no tiene el foco, parpadea en la barra de tareas.
+
+### 2. Cómo se apagan
 
 Se apagan en `Ajustes › Terminal` con «Marcar dónde empieza y acaba cada orden»,
 y el cambio vale para las pestañas nuevas. El prompt propio de la persona se
 respeta: las marcas lo envuelven sin cambiarlo. En zsh, fish y las demás shells
 no se añaden, pero si la shell las emite por su cuenta, la terminal las aprovecha.
 
+### 3. Dónde funcionan
+
+Las órdenes que lanza un botón de un panel (instalar, Git, Biblioteca…) cuentan
+igual que las tecleadas: la pestaña recibe la orden de verdad
+(`pty-command-written`) y el marco de la acción deja su código real para la
+marca de fin. Antes no contaban, y el chat hablaba de la orden tecleada antes.
+
+Por eso la barra roja y el modo consejero (`agentChatAdvisor`) no valen en todas
+partes:
+
+| Dónde | Órdenes fallidas |
+|---|---|
+| PowerShell (Windows PowerShell y pwsh) | Todas, con su código |
+| bash: Git Bash, MSYS2, WSL con bash | Todas, con su código |
+| cmd | La orden que no existe (9009) y las acciones de los botones, con su código |
+| zsh, fish, sh (por ejemplo WSL con zsh, como Kali) | Ninguna, salvo que la shell emita las marcas |
+| Dentro de un REPL (Python, Node…) o de una IA de terminal | Ninguna: no hay prompt de shell que marcar |
+
+## Inteligencia artificial en la terminal
+
+Las IA de terminal (Claude Code, Gemini, Codex, Qwen, Amp, Grok…) se abren como
+cualquier otro entorno (`ai:*`), en su propia pestaña y al ancho visible. Además
+de eso, WTerminal tiene tres ayudas. Cada una con su opción en Ajustes (el
+buscador de Ajustes las encuentra por su nombre).
+
+### Clave de API cuando falta (`aiKeyOffer`, solo Windows)
+
+Si una IA acaba al abrirse pidiendo su clave (Grok: «API key required.
+Set GROK_API_KEY…»), la pestaña ofrece «Introducir la clave…». Da igual lo que
+tarde en decirlo: la pestaña de una IA que acaba con error no se cierra sola.
+
+- **Dónde se guarda:** cifrada con DPAPI para tu usuario de Windows, en
+  `ai-keys.json` junto a los ajustes (`environments/ai_keys.rs`). Ni la app ni
+  los registros la guardan en claro.
+- **A quién llega:** solo a esa IA, como variable de entorno al abrirla, y solo
+  si esa variable no está ya puesta:
+
+  | IA | Variable |
+  |---|---|
+  | Grok | `GROK_API_KEY` |
+  | Codex, mods, ShellGPT, llm, aider | `OPENAI_API_KEY` |
+  | Gemini | `GEMINI_API_KEY` |
+  | Claude Code | `ANTHROPIC_API_KEY` |
+
+- **Borrarla:** en Ajustes, bajo la opción, sale la lista de claves guardadas
+  con su botón «Borrar».
+
+### Chat con los agentes (`agentChat`)
+
+Una barra a la derecha para preguntar a un agente sin entrar en su CLI. Se
+apaga entera con `agentChat` en Ajustes.
+
+#### 1. Cómo se abre
+
+- el botón **✦** al final de la fila de pestañas, justo encima de donde se abre
+  el chat, con el mismo aspecto que los de carpetas y vista dividida (14-11,
+  Romen: «en vez de palabras, un símbolo fácil de identificar con una IA»;
+  antes era «Chat IA» en la barra de arriba). Se queda a la derecha aunque haya
+  muchas pestañas, y se oculta con `showAgentChatButton`;
+- `:chat` en la terminal o la paleta;
+- su atajo, `shortcutToggleAgentChat`, vacío de fábrica.
+
+El ancho se cambia arrastrando su borde izquierdo y se recuerda.
+
+#### 1.1 Varios chats a la vez
+
+Arriba del panel van las **pestañas de chat** (`AgentChats.svelte`, 14-11,
+Romen: «varios chats con IA, en paralelo, en la barra lateral»):
+
+- «+» abre otro chat **en paralelo**, con su propio agente, modelo, permisos y
+  conversación. Hasta 6.
+- Cada pestaña dice el agente de ese chat, y un punto que late marca los que
+  están trabajando, aunque no se vean: un chat escondido sigue con su
+  pregunta.
+- «×» cierra ese chat y corta su pregunta si la tiene; cerrar el panel las
+  corta todas.
+- La pregunta que prepara el consejero va al chat que se ve.
+- En cada chat, el botón de volver a empezar (junto a ↗) borra solo su
+  conversación.
+
+El backend ya admitía varias preguntas a la vez (cada una con su id), así que
+cada chat lanza la suya sin esperar a los demás.
+
+#### 2. Qué agentes y qué se puede elegir
+
+##### 2.1 El desplegable, y los que no entran
+
+En el desplegable salen arriba los instalados que admiten una pregunta suelta.
+Al final, separadas bajo «Solo en su pestaña (se abre aparte)», las que algo
+puede dejar entrar en el chat, con el motivo al pasar el ratón: un ajuste de
+WTerminal (Amp con «Dejar editar», Grok con «Omitir permisos») o su propia
+configuración (Continue sin `~/.continue/config.yaml`, `needs-config`). Elegir
+una la abre en una pestaña y el chat sigue con el agente que tenía (14-11,
+Romen: el renglón «En su pestaña:» de antes no se entendía). Las que nunca
+contestan en el chat (aider, que edita archivos por su cuenta, o las que no
+tienen modo de una pregunta) no se ofrecen ahí: se abren desde el selector de
+entornos (15-11, Romen: «no vale de nada en la barra»). Tampoco se ofrece una
+que no se pueda lanzar sin cmd (`needs-cmd`): antes salía y luego fallaba. El botón ↗ junto al desplegable abre el agente elegido
+en una pestaña, para iniciar sesión o configurarlo. Para cada agente se recuerda
+lo último que elegiste.
+
+La lista sale de la detección de entornos. Si el chat se abre antes de que
+acabe, dice «Buscando agentes…» y se rellena sola al llegar (14-11: antes se
+quedaba vacía hasta cerrarlo y abrirlo).
+
+##### 2.2 Cómo se le pregunta a cada agente
+
+| Agente | Cómo se le pregunta | Modelo | Intensidad |
+|---|---|---|---|
+| Claude Code | `claude -p` | `--model` (sugiere fable, opus y sonnet) | `--effort`: baja, media, alta, muy alta, máxima y Ultracode |
+| Codex | `codex exec --skip-git-repo-check -s read-only -` | `-m` (de su catálogo) | `-c model_reasoning_effort=`: la que admita cada modelo, de baja a extrema |
+| Gemini CLI | `gemini --skip-trust --approval-mode plan` | `-m` | no tiene |
+| Qwen Code | `qwen --approval-mode plan` | `-m` | no tiene |
+| GitHub Copilot CLI | `copilot --allow-all-tools --deny-tool shell --deny-tool write -p …` | `--model` | `--reasoning-effort` |
+| Crush | `crush run --quiet` | `-m` (14-11: `crush run` ya lo tiene) | `--reasoning-effort` |
+| llm, mods, AIChat | tal cual | `-m` | no tiene |
+| ShellGPT | tal cual | `--model` | no tiene |
+| Grok CLI | `grok -p …` (node directo, sin cmd), solo con «Omitir permisos» (apartado 9) | `-m` (sugiere grok-code-fast-1 y grok-4-latest) | no tiene |
+| Continue CLI | `cn --silent --readonly -p …` (node directo, sin cmd) | `--model` | no tiene |
+| opencode | `opencode run --agent plan …` (la pregunta detrás, con el `.exe` del paquete directamente, sin cmd) | `-m proveedor/modelo` | no tiene |
+| Amp | `amp -x`, pregunta por la entrada estándar; solo con «Dejar editar» (apartado 9) | no tiene (`-m` es su modo de agente) | no tiene |
+| Modelos de Ollama | `ollama run <modelo>` | es el de la pestaña | no tiene |
+
+##### 2.3 El modelo
+
+- **Modelo:** se elige de una lista. La primera opción dice **el que usa el
+  agente de verdad**, leído de su configuración (`agent_chat_models`):
+  - Claude Code: `~/.claude/settings.json`;
+  - Codex: `~/.codex/config.toml`;
+  - Gemini y Qwen: `~/.gemini` y `~/.qwen`, `settings.json`;
+  - Copilot: `~/.copilot/config.json`;
+  - ShellGPT: `.sgptrc`;
+  - mods y AIChat: su YAML;
+  - llm: `llm models default`.
+
+  Si no lo dice en ningún sitio, la opción es «El que decida <agente>» (su valor
+  de fábrica o el de tu cuenta). Los demás modelos salen de lo que trae el
+  propio agente instalado, así que la lista es la de esa versión (14-11, Romen:
+  «solo Claude muestra la lista de modelos»):
+
+  | Agente | De dónde sale la lista |
+  |---|---|
+  | Codex | su catálogo, `codex debug models`: los visibles, en su orden, y con la intensidad que admite cada uno (de `low` a `ultra`; el panel enseña solo esos) |
+  | Gemini CLI, Qwen Code | los nombres de modelo de su paquete instalado (`gemini-3-pro-preview`, `qwen3.8-max`…), con un filtro estricto y del más nuevo al más viejo (`installed_models`, guardados por versión) |
+  | llm, AIChat | `llm models list`, `aichat --list-models` |
+  | Claude Code, Copilot | sus alias conocidos (`fable`, `opus`, `sonnet`; `auto`) |
+
+  «Otro…» abre un campo para escribir uno exacto, y **solo sale donde la
+  lista puede estar incompleta** (`custom_model_allowed`): Copilot, Crush, mods y
+  ShellGPT, que no saben listar los suyos (`crush models` da los 1779 de todos
+  los proveedores conocidos, tengas o no alguno), o cuando la lista sale vacía.
+  Con Codex, Gemini, Qwen, llm, AIChat y Claude Code no hace falta (14-11, Romen:
+  «¿por qué muestran Otro… y te pide escribirlo a mano?»); un modelo guardado
+  que ya no está en su lista vuelve al de fábrica. Solo se aceptan letras,
+  números y `. _ : / @ -`, también los leídos de un archivo o de un paquete,
+  para que nada lo interprete un `.cmd`. Para listar nunca se le pregunta nada a
+  la IA.
+
+##### 2.4 Intensidad, Ultracode y modo rápido
+
+- **Intensidad:** «Por defecto» no manda nada. Si un agente no admite lo
+  elegido, el chat lo dice; no lo ignora en silencio.
+- **Ultracode** (Claude Code, `--effort ultracode`; 14-11, Romen: «claude
+  tiene ultracode»): Claude Code reparte el trabajo en varios agentes. Tarda y
+  gasta más, así que con él el plazo de la pregunta sube de 5 a 30 minutos
+  (`answer_timeout`). Codex no lo tiene: su nivel más alto es `ultra`
+  («Extrema»), y solo en los modelos que lo admiten.
+- **Modo rápido** (casilla «Modo rápido · gasta más»): responde antes a cambio
+  de gastar más de tu cuenta. Sale solo donde existe:
+
+  | Agente | Cómo se pide | Cuándo sale |
+  |---|---|---|
+  | Claude Code | `--settings` con un archivo `{"fastMode": true}` (`wterminal-claude-fast.json` en la carpeta temporal: así ninguna comilla pasa por un `.cmd`) | siempre; en las cuentas que lo piden, gasta créditos de uso |
+  | Codex | `-c service_tier=fast` | solo con los modelos que traen `service_tiers` en su catálogo («Fast», «2x speed, increased usage») |
+
+##### 2.5 Lo particular de cada agente
+
+- **Fuera del chat, en su pestaña:**
+  - Grok, mientras «Omitir permisos» no esté habilitado, y Amp, mientras no
+    esté «Dejar editar» (apartado 9);
+  - aider: la primera vez abre un asistente que pregunta (en el chat se
+    quedaría colgado) y deja sus archivos de historial en la carpeta; su modo
+    que solo contesta (`--chat-mode ask`) queda para más adelante.
+- **Continue y opencode, dentro** (14-11, Romen: «faltan otras IA en el
+  lateral»): antes no se podían dejar en solo lectura y solo aceptaban la
+  pregunta como argumento. Ahora van con node directo (sin cmd) y en su modo
+  de solo leer: Continue con `--readonly` (su modo plan), opencode con su
+  agente `plan`.
+- **Gemini, de vuelta (13-11):** con la pregunta por la entrada estándar
+  funciona, como Qwen, que es el mismo código. Con una cuenta personal de Google
+  contesta `UNSUPPORTED_CLIENT`; con `GEMINI_API_KEY` sí contesta, y el chat
+  ofrece meterla (apartado 8).
+- **Gemini confía en la carpeta de la pestaña** (`--skip-trust`, 14-11): en una
+  carpeta que no conoce pasaba a «default» y, sin pantalla, se negaba («Gemini
+  CLI is not running in a trusted directory»), aunque tuviera clave. Confiar
+  solo vale para esa pregunta, y es lo mismo que hace Claude Code con `-p`:
+  lee también la configuración propia de la carpeta (`.gemini`).
+
+#### 3. Cómo pregunta
+
+- Cada pregunta abre la CLI una vez, en la carpeta de la pestaña, y le pasa el
+  texto **por la entrada estándar**, no por la línea de órdenes: ni cmd ni un
+  `.cmd` lo interpretan.
+- **Copilot**, que solo la acepta como argumento (`-p`), se lanza con
+  **node directamente**, con el script que nombra su `.cmd`, nunca con el
+  `.cmd` (`direct_launcher`, `npm_shim`). Así tampoco pasa por cmd.
+  Para él la pregunta tiene que caber en una orden de Windows: unos 30 000
+  caracteres con adjuntos y conversación. **opencode** (y Amp o pnpm) trae su
+  programa ya compilado y su `.cmd` lanza ese `.exe` sin node: se lanza el
+  `.exe` directamente (15-11: se ofrecía y luego decía «no se pudo lanzar sin
+  pasar por cmd»).
+- Tiene un tope de 400 000 caracteres y de 5 minutos (30 con Ultracode);
+  «Cortar» la corta.
+- **Reintentos silenciosos:** Gemini CLI y Qwen Code, con el modelo saturado
+  (503) o sin cupo (429), reintentan hasta 10 veces con esperas de hasta 30 s
+  sin escribir nada por la salida normal. El chat lee su salida de error
+  («Attempt N failed with status 503…», `RetryWatch`) y al tercero la corta y
+  lo dice: «El modelo está saturado ahora mismo… elige otro modelo» (15-11:
+  Gemini se quedaba 5 minutos callado con su modelo por defecto saturado).
+  Desde el 16-11 cada reintento se ve en cuanto pasa, en lugar de
+  «Pensando…»: «Modelo saturado (error 503). Reintentando… (1 de 3)»
+  (evento `agent-chat-status`).
+- **Qué modelo contestó:** la cabecera de cada respuesta lo dice. Si la CLI lo
+  escribe (Codex pone `model: …` al empezar), ese; si no, el elegido en el
+  panel; sin elegir, «modelo por defecto» (`answerModel`). Ollama ya lleva el
+  modelo en el nombre del agente.
+- **La caja de escribir** dice solo «Pregunta a {agente}…»: las teclas (Intro
+  envía, Mayús+Intro salta de línea) van en su ayuda al pasar el ratón. Con el
+  texto largo no cabía en su fila y salía cortado (16-11).
+- **Sin respuesta:** si acaba bien sin escribir nada (Amp con su conexión a
+  ChatGPT caducada, 15-11), el chat dice «El agente terminó sin contestar
+  nada», enseña lo que dijo por la salida de error y ofrece su pestaña. Al
+  cortarse por tiempo también se puede ver lo que dijo.
+- **La respuesta acaba cuando sale la CLI** (`wait_for_answer`), aunque su
+  salida siga abierta: `ollama run` arranca el programa de Ollama si no estaba
+  abierto, y ese programa hereda la salida y no la cierra. La respuesta salía
+  entera y el chat seguía en «Pensando…» hasta el plazo (14-11, Romen). Ahora,
+  en cuanto sale la CLI y no llega nada más en 300 ms (como mucho 1,5 s), está
+  entera; lo que escriba después ese proceso ya no se añade.
+- **ShellGPT sin clave no se lanza:** la primera vez, sin su `.sgptrc` y sin
+  `OPENAI_API_KEY` (ni en el entorno ni guardada), pide la clave por consola
+  (`getpass`, que en Windows lee la consola y no la entrada estándar) y el chat
+  se quedaba colgado (14-11, Romen). Ahora lo comprueba antes
+  (`asks_key_on_console`), no lo lanza y ofrece meter la clave.
+- Gemini y Qwen reciben, como en sus pestañas, los ajustes de sistema que
+  apagan su autoactualización (`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`). Antes no les
+  llegaban desde el chat: se autoactualizaban con `npm install -g` en una
+  consola aparte que abría Windows Terminal («error 0x800700e8 al iniciar … npm
+  install -g @google/gemini-cli», 13-11).
+
+#### 4. Adjuntos
+
+Con el clip (abajo, junto a «contexto») se añaden hasta 5 archivos de texto por
+pregunta. Cada uno va en su propio bloque, con su nombre.
+
+- Un archivo de más de 100 KB se manda cortado (se avisa: «solo el principio»).
+- Uno de más de 5 MB o que no sea texto no se adjunta.
+
+#### 5. Memoria de la conversación (`agentChatRemember`)
+
+Encendida de fábrica. Con cada pregunta se mandan las últimas 6 vueltas de la
+conversación (como mucho 24 000 caracteres; se quitan antes las más viejas), y
+el agente la recuerda aunque su CLI no guarde nada entre preguntas. «Nueva
+conversación» la borra. Apagada, cada pregunta va sola.
+
+#### 6. Contexto de la terminal (opcional)
+
+Con la casilla marcada, la pregunta lleva la última orden y su salida, también
+si la lanzó un botón de un panel (ver [Marcas de orden](#marcas-de-orden)).
+Antes se ocultan los secretos que se reconocen (`redactSecrets` en
+`src/lib/agent-chat.ts`), que pasan a «oculto»:
+
+- claves `sk-`, `xai-`, `ghp_`, `AKIA` y `AIza`, JWT, `Bearer …` y bloques de
+  clave privada;
+- el valor de cualquier `nombre = valor` o `nombre: valor` cuyo nombre lleve
+  `api_key`, `token`, `secret`, `password` o `pwd`.
+
+El mensaje enseña qué se mandó.
+
+#### 7. Lo que hace con la respuesta
+
+- Se pinta con Markdown sencillo: títulos, listas, citas, negrita, cursiva y
+  código. Sin HTML: nada de lo que conteste un agente se interpreta como marcado.
+- Cada bloque de código lleva su lenguaje, «Copiar» e «Insertar». «Insertar»
+  escribe un bloque de una línea **sin Intro**, y solo sobre un prompt vacío.
+- Encima de cada respuesta: el agente, el modelo y la intensidad usados, el
+  modo si es uno que edita, «Modo rápido» si se pidió y lo que tardó; debajo,
+  copiar la respuesta entera y «Repetir» (con lo mismo).
+- El panel tiene el aspecto de la terminal: su letra y sus colores, la
+  pregunta con `›` y la respuesta con un filete a la izquierda (rojo si
+  falló), sin burbujas ni avatares (13-11, Romen: «muy plástica, muy hecha por
+  una IA»).
+- Está ordenado de arriba abajo (14-11): el agente en su fila, con ↗ para
+  abrirlo en su pestaña; debajo, modelo, intensidad y permisos juntos; después
+  el modo rápido y el aviso de «Omitir permisos» si toca. Abajo, el campo de la
+  pregunta y, en su barra, el clip, «contexto», «memoria» y «Enviar».
+- **Nunca ejecuta nada por su cuenta.**
+- Los avisos (no se pudo insertar, contexto, adjuntos, copiado) salen abajo con
+  el color de aviso y un filete, para que se vean (14-11: en gris pasaban
+  desapercibidos).
+
+#### 8. Cuando un agente falla
+
+El error se dice en **una línea**: el código y la frase que lo explica, sacada de
+lo que escribió el agente (`errorHeadline` en `src/lib/agent-chat.ts`: la
+primera que suena a error, sin pilas de llamadas ni avisos). Lo demás va plegado
+en «Ver lo que dijo el agente» (14-11, Romen: el muro rojo de Gemini o de Codex
+no se entendía). Debajo, el chat ofrece lo que lo arregla
+(`agent_chat_failure_help`, `classify_failure`, probado con los mensajes reales
+que vio Romen el 13-11 y el 14-11):
+
+| Lo que dice el agente | Lo que ofrece el chat |
+|---|---|
+| `ModuleNotFoundError: No module named …` (llm, ShellGPT) | Explica que a su Python le falta `PYTHONUSERBASE` y abre Ajustes |
+| Una clave que falta o no vale (mods: «OpenAI authentication failed … api-keys»; Gemini: `UNSUPPORTED_CLIENT`) | Un campo para la clave, que se guarda cifrada (como en las pestañas, `aiKeyOffer`), y «Guardar y repetir» |
+| Que hay que iniciar sesión (Qwen: «No auth type is selected»; Claude Code: «Please run /login»; Codex: «401 Unauthorized»; Copilot: «No authentication information found») | «Abrir <agente> en una pestaña», para iniciar sesión en su pantalla |
+| Que falta su configuración (AIChat: «Failed to load config … config.yaml»; Crush: «No providers configured») | «Abrir <agente> en una pestaña», que la crea la primera vez |
+| ShellGPT sin clave (antes de lanzarlo, ver el apartado 3) | El campo para la clave, sin lanzarlo |
+
+La clave de OpenAI (`OPENAI_API_KEY`) se guarda una vez y la usan llm, mods,
+ShellGPT, Codex y aider.
+
+**Gemini con su clave** (14-11, Romen: «no acepta mi clave y sigue diciendo que
+el cliente no está soportado»): Gemini CLI se autentica como diga su
+`~/.gemini/settings.json`, y quien entró alguna vez con Google tiene ahí
+`oauth-personal`: la clave se ignoraba y seguía con la cuenta gratuita. Con la
+clave guardada en WTerminal, al lanzarlo (chat y pestaña) se le pasa
+`GEMINI_CLI_AUTH_OVERRIDE=gemini-api-key`, que la usa solo en esa ejecución sin
+tocar su archivo (`use_stored_key_env` en `ai_keys.rs`). Con la clave solo en el
+entorno de Windows no se fuerza.
+
+**Un agente que escribe su error en la salida normal** (Grok): si la salida de
+errores llega vacía, el error es el final de lo que escribió, y con él se
+decide la ayuda (`keep_tail`).
+
+Codex daba «Not inside a trusted directory» fuera de un repositorio git: no era
+de sesión, y ahora se le pasa `--skip-git-repo-check`.
+
+#### 9. Lo que pueden tocar: los permisos
+
+##### 9.1 Los modos
+
+El selector «Permisos» ofrece los modos de cada agente, como el menú de Claude
+(14-11, Romen: «los permisos tmb»). Cada uno va con la opción que entiende su
+CLI (`Mode` en `agent_chat.rs`):
+
+| Modo | Qué hace | Claude Code | Codex | Gemini | Qwen | Copilot |
+|---|---|---|---|---|---|---|
+| Manual | lo que pida permiso se le niega (el chat no puede preguntarte): lee, no cambia nada | de serie con `-p` | `-s read-only` | — | — | `--deny-tool shell --deny-tool write` |
+| Plan | solo lee y propone | `--permission-mode plan` | — | `--approval-mode plan` | `--approval-mode plan` | — |
+| Aceptar ediciones | cambia archivos de la carpeta de la pestaña sin preguntarte | `--permission-mode acceptEdits` | `-s workspace-write` | `--approval-mode auto_edit` | `--approval-mode auto-edit` | `--deny-tool shell` |
+| Auto | el propio agente decide qué es seguro y lo hace; lo arriesgado lo frena | `--permission-mode auto` | `--approve-for-me` | — | `--approval-mode auto` | — |
+| Omitir permisos | hace todo sin preguntarte, también ejecutar órdenes y borrar archivos | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `--approval-mode yolo` | `--approval-mode yolo` | sin denegar nada |
+
+- El de fábrica de cada agente es el primero de su fila (Manual o Plan): **solo
+  lee**.
+- Crush (`crush run` no tiene `--yolo`) y los que solo contestan texto (llm,
+  ShellGPT, mods, AIChat, Ollama) no tienen modos: el selector no sale.
+- **Continue y opencode:** Plan (de fábrica: `--readonly` y `--agent plan`) y
+  Omitir permisos (`--auto` en los dos).
+- **Amp solo tiene «Aceptar ediciones»** (14-11): en `-x` edita archivos sin
+  preguntar y deniega las órdenes que no tenga permitidas; no tiene modo de
+  solo leer. Sin `agentChatCanEdit` no se lanza y sale en «Solo en su
+  pestaña» con ese motivo.
+- **Grok solo tiene «Omitir permisos»** (14-11): con `-p` aprueba él solo todas
+  sus operaciones (`allOperations`: órdenes y cambios de archivos) y no puede
+  quedarse en solo leer (`--max-tool-rounds 0` vale 400 en su código). Sin los
+  dos ajustes no se lanza aunque no se elija nada, y sale en «Solo en su
+  pestaña» con ese motivo. Contesta con un mensaje JSON por línea; el chat
+  enseña su respuesta y, de sus herramientas, solo cuáles usó
+  (`grok_answer_line`).
+- En Copilot, denegar manda siempre, también sobre `--allow-all-tools`.
+- Las órdenes que Codex ejecuta en su sandbox con «Aceptar ediciones» también
+  pueden escribir en la carpeta.
+
+##### 9.2 Lo que piden los ajustes
+
+| Ajuste | Apagado (de fábrica) | Encendido |
+|---|---|---|
+| `agentChatCanEdit`, «Dejar que los agentes del chat editen archivos» | solo Manual y Plan; los demás salen en gris con «actívalo en Ajustes» | también «Aceptar ediciones» (pasa a ser el de fábrica) y «Auto» |
+| `agentChatAllowBypass`, «Dejar elegir «Omitir permisos» en el chat» | «Omitir permisos» en gris | se puede elegir a mano; pide también el de arriba |
+
+- **Lo comprueba también el backend:** un modo que edita sin el ajuste da
+  `mode-needs-edit`, y «Omitir permisos» sin los dos, `mode-needs-bypass`.
+  Nunca se cambia por otro en silencio.
+- «Omitir permisos» **nunca es el de fábrica**, con ningún ajuste; una prueba
+  comprueba que `yolo`, `bypass` y `dangerously…` solo están en ese modo.
+- La cabecera del chat enseña el modo cuando edita (en rojo si es «Omitir
+  permisos»), y con «Omitir permisos» sale además un aviso debajo de los
+  selectores.
+- Si apagas un ajuste, el modo elegido que ya no vale vuelve al de fábrica.
+
+#### 10. La guía de WTerminal para los agentes (`agentChatGuide`, encendido)
+
+Para que las IA, sin que el usuario se lo diga, propongan **las funciones de
+WTerminal antes que órdenes del sistema**: instalar, actualizar y desinstalar
+con Entorno y dependencias y no con winget, apt o pip a pelo; cambiar de shell,
+abrir un REPL o una pestaña, ajustar la terminal o cambiar un ajuste con las
+órdenes internas (14-11, Romen: «una especie de SKILL.md… que no sea visible
+para el usuario ni un archivo en su PC: solo en el código»).
+
+##### 10.1 Qué lleva y de dónde sale
+
+`src-tauri/src/environments/agent_guide.rs`, sin archivos en disco:
+
+| Parte | De dónde sale |
+|---|---|
+| Dónde está el agente y el principio «primero WTerminal», con su porqué (carpeta propia y variables, comprobaciones previas, progreso y log, desinstalar sin restos) | escrito en el módulo |
+| Cómo proponer desde el chat (bloques de una línea para «Insertar», órdenes `:`, caminos exactos de los paneles) | escrito en el módulo |
+| Cada tarea habitual → cómo se hace en WTerminal → por qué | escrito en el módulo |
+| Lo que no debe hacer (no encender por su cuenta los permisos del chat, no tocar a mano configuración, registro ni PATH, no pedir claves) | escrito en el módulo |
+| La ayuda interna entera: órdenes `:`, paquetes, sesión, alias, Biblioteca, menús y soporte | generada con `build_help_topic_text`, la misma que `ayuda`, sin colores |
+| Cada ajuste con su valor de fábrica y su explicación | generada de `default_settings.toml` y sus comentarios |
+
+Como la mitad se genera del código, no se queda vieja: una prueba exige que
+salga cada ajuste de fábrica.
+
+##### 10.2 Cómo llega a los agentes
+
+- **En el chat:** delante de cada pregunta va, oculto, un resumen corto
+  (`chat_preamble`, menos de 2 400 caracteres: lo paga cada pregunta). No sale
+  en el mensaje ni en el log. Los modelos locales de Ollama no lo reciben: son
+  pequeños y la pregunta se les perdería.
+- **Entera, a demanda:** `wterminal --agent-guide [tema]` la imprime y sale,
+  sin abrir ventana ni tocar ajustes (`run` en `lib.rs`). El resumen le dice al
+  agente la ruta exacta del ejecutable. Temas: `temas` los lista; `todo` (de
+  fábrica), `principios`, `chat`, `tareas`, `limites`, `internos`,
+  `paquetes`, `sesion`, `alias`, `biblioteca`, `menus`, `soporte` y `ajustes`.
+- Apagado (`agentChatGuide = false`), la pregunta va sola.
+- **En las pestañas de las IA** (`agentTabGuide`, encendido; 14-11, Romen: «al
+  abrir la sesión con la IA… que le mande esa ayuda»): una vez, al abrir su
+  pestaña (`tab_args`, añadido en `tabs.rs` después del log). Claude Code la
+  recibe con `--append-system-prompt` y Codex con
+  `-c developer_instructions='…'`: instrucciones de arranque que no salen en la
+  conversación. Gemini y Qwen solo leen instrucciones de archivos: va como su
+  primer mensaje con `-i` («Ahora contesta solo con la palabra Listo»), que se
+  ve en su pantalla. Es una sola línea sin `"`, `'`, `%`, `&`, `|`, `<`, `>`,
+  `^` ni `!` (`tab_preamble`): si la CLI es un `.cmd` de npm, pasa por cmd.
+
+##### 10.3 Que la IA maneje WTerminal: `wterminal --ctl` (`agentControl`, encendido)
+
+Con esto la IA no solo propone: lo hace (14-11, Romen: «que permita que
+gestione la terminal lo máximo posible»). `src-tauri/src/app/agent_control.rs`.
+
+| Orden | Qué hace | ¿Pide permiso? |
+|---|---|---|
+| `wterminal --ctl :panes 2`, `:panel deps`, `:theme …`, `:terminal font-size 14` | cualquier orden interna | no |
+| `wterminal --ctl :shell pwsh`, `:repl python` | cambia la shell de una pestaña o abre un REPL | no |
+| `wterminal --ctl :set list`, `:set <ajuste>` | enseña ajustes | no |
+| `wterminal --ctl :set <ajuste> <valor>` | cambia un ajuste | sí |
+| `wterminal --ctl acciones <texto>` | busca en el catálogo de Entorno y dependencias (id y nombre, sin tildes) | no, solo lee |
+| `wterminal --ctl accion <id>` | lanza esa acción (instalar, actualizar, desinstalar) | sí |
+
+- **Quién puede:** al arrancar, WTerminal abre un servidor en `127.0.0.1`
+  (puerto libre) con una llave aleatoria de 24 bytes (`BCryptGenRandom`). Solo
+  los procesos que lanza para una IA (sus pestañas `ai:*` y las preguntas del
+  chat) reciben `WTERMINAL_CTL`, `WTERMINAL_CTL_TOKEN` y, en una pestaña,
+  `WTERMINAL_TAB_ID`. Sin la llave no se atiende nada; la llave se compara
+  entera, sin atajos. Con `agentControl` apagado ni se abre ni se publica.
+- **Cómo:** `wterminal --ctl …` (`run_cli`, atendido en `run` antes de abrir
+  ventana) manda la orden y escribe la respuesta: código 0 si se hizo, 1 si no,
+  con el motivo. El frontend la hace en una pestaña de shell libre (la activa
+  si lo es; si no, la última), escribiéndola como si la tecleara el usuario
+  (`submitLine`): se ve lo que hizo la IA. Nunca en la pestaña de la propia IA
+  ni en un REPL.
+- **Permiso:** las acciones y `:set` que cambia salen en un aviso con
+  «Permitir», «Permitir en esta sesión» y «Denegar»; la IA espera la respuesta
+  hasta 3 minutos.
+- **Nunca** (`BLOCKED_SETTINGS`): `agentChat`, `agentChatCanEdit`,
+  `agentChatAllowBypass`, `agentChatGuide`, `agentTabGuide`, `agentControl`,
+  `aiKeyOffer`, `startAsAdmin`, `terminalAdminByDefault`,
+  `terminalLinksConfirm` y `offerGsudo`: una IA no puede darse más permisos ni
+  bajar la seguridad.
+- La guía lo explica (`--agent-guide control`), y el resumen del chat y el de
+  las pestañas se lo dicen a la IA cuando está encendido.
+
+### Modo consejero (`agentChatAdvisor`, encendido de fábrica)
+
+Cuando una orden acaba con error, la pestaña enseña «La orden falló (código N).
+¿Preguntas al agente?».
+
+- «Preguntar» abre el chat con la pregunta escrita y la orden con su salida como
+  contexto. **No manda nada hasta que pulsas enviar.**
+- El aviso se va solo a los 15 s o con la siguiente orden que salga bien.
+- Solo sale si hay algún agente instalado al que preguntar.
+- También vale para las acciones de los botones (instalar, Git, scripts…): su
+  orden cuenta como una orden más y lleva su código real.
+- Depende de las marcas de orden, así que **no vale en todas las shells**: ver la
+  tabla de [Marcas de orden](#marcas-de-orden). En cmd solo avisa cuando la orden
+  no existe.
+
 ## Paleta de comandos
+
+### 1. Qué es
 
 `Ctrl+Shift+P` (se cambia en `Ajustes › Comportamiento › Atajos de teclado`,
 «Abrir la paleta de comandos») abre un buscador con todo lo que la aplicación
@@ -4124,6 +5644,8 @@ entrada ejecuta exactamente lo mismo que su atajo, botón, selector o comando
 | Comandos internos (`:`) | `:help`, `:help internos`, `:alias`, `:shell list`, `:shell current`, `:theme list`, `:font list`, `:language list`, `:terminal list`, `:banner list` y `:banner preset compact\|full`: los que responden dentro de la terminal. |
 | Acciones fijadas de LTools | Las que se han elegido en la Biblioteca, solo si LTools está activado y encontrado; las que modifican el sistema piden confirmación igual que allí. |
 
+### 2. Buscar
+
 Se escribe para filtrar: no distingue mayúsculas ni tildes («pestana» encuentra
 «Nueva pestaña»), busca también por el comando `:` equivalente (`:config`
 encuentra «Abrir Ajustes»), por el nombre del grupo y por identificadores
@@ -4134,11 +5656,15 @@ lo tiene. Si lo escrito es una línea `:` que no está en la lista (por ejemplo
 teclearla, el parser de comandos internos confirma que lo es, así que una
 línea que la shell ejecutaría nunca se envía.
 
+### 3. Con el teclado
+
 Con el teclado: `↑`/`↓` (dan la vuelta), `RePág`/`AvPág`, `Intro` ejecuta y
 `Esc` cierra y devuelve el foco a donde estaba. Tab no sale del diálogo. Es un
 `combobox` que controla un `listbox` con `aria-activedescendant`, de modo que
 el lector de pantalla anuncia la opción activa sin que el foco salga del
 buscador.
+
+### 4. Lo que va a la terminal
 
 Los comandos `:` y «Limpiar» se teclean en la pestaña activa por la misma ruta
 que el teclado (`term.input`): el interceptor de `:` y la shell los reciben como
@@ -4153,10 +5679,34 @@ terminal.
 
 ## Configuración
 
+### 1. Dónde se guarda
+
 Todo se edita desde **Ajustes** y persiste validado en `settings.json`; el
 propio panel muestra su ruta. También se puede distribuir preconfigurado
 modificando ese JSON: cualquier valor fuera de rango se recorta o se sustituye
 por el predeterminado, nunca rompe la aplicación.
+
+### 2. Restablecer
+
+«Restablecer», al pie de Ajustes, abre un diálogo; antes, un clic lo devolvía
+todo a fábrica sin preguntar. El 13-11 eso devolvió la carpeta propia a la de
+fábrica y dejó sin `PYTHONUSERBASE` a aider, llm e IPython.
+
+- **Qué se elige:** casillas por pestaña (Apariencia, Terminal, Comportamiento)
+  y por apartado, 18 en total. Cada apartado dice qué hace y su riesgo:
+  - «Solo el aspecto»;
+  - «Cambia cómo funciona»;
+  - «Borra cosas tuyas»: los temas propios, los atajos, los alias y la
+    carpeta propia.
+- **Nada viene marcado**, el foco va a «Cancelar», y si se marca algo de lo que
+  borra cosas tuyas, el diálogo lo resume en rojo antes de confirmar.
+- **Qué hace:** `settings_reset` recibe las preferencias de esos apartados y
+  solo devuelve a fábrica esas (`reset_patch`).
+- **El reparto** está en `src/lib/settings-reset.ts`, y una prueba exige que
+  cada preferencia de `default_settings.toml` esté en exactamente un apartado:
+  una preferencia nueva no puede quedarse fuera.
+
+### 3. Buscar un ajuste
 
 Para encontrar un ajuste sin recorrer las pestañas:
 
@@ -4179,15 +5729,21 @@ Para encontrar un ajuste sin recorrer las pestañas:
   (el control está en la ventana pero tapado), `click` centra el control en su
   scroll y pulsa una vez más; el evento `driver-click-scrolled` lo registra.
 
+### 4. El orden de Comportamiento
+
 **Comportamiento** va ordenado por frecuencia de uso: inicio y paneles,
 secciones visibles e interfaz, atajos de teclado, alias, entornos habilitados,
 entornos y descargas, PATH, integración de Windows y permisos de
 administrador, perfiles, plugins y, al final, LTools (experimental).
 
+### 5. Valores de fábrica
+
 Los valores de fábrica viven en `src-tauri/default_settings.toml`; Cargo los
 incluye en el binario y los valida al iniciar. La versión se sincroniza entre
 `package.json`, `package-lock.json`, `Cargo.toml` y `Cargo.lock`; los scripts
 de empaquetado la solicitan y `npm run check:version` evita divergencias.
+
+### 6. Metadatos del paquete
 
 Los metadatos editables del paquete viven en
 `src-tauri/config/package-metadata.json`: nombre, binario, identificador,
@@ -4196,6 +5752,8 @@ soporte y créditos. La web puede quedar vacía si no se usa. Los créditos que
 deban aparecer dentro de la app se indican como usuarios de GitHub. Tras
 editarlos, ejecutar
 `npm run metadata:sync`.
+
+### 7. Todos los ajustes, con su tipo y su valor de fábrica
 
 | Clave | Tipo · rango | Por defecto |
 |---|---|---|
@@ -4218,6 +5776,20 @@ editarlos, ejecutar
 | `terminalCursorBlink` | booleano | `true` |
 | `terminalLinks` | booleano: URL y OSC 8 clicables con Ctrl+clic | `true` |
 | `terminalLinksConfirm` | booleano: confirmar con el destino a la vista antes de abrir | `true` |
+| `pythonReplVisibleWidth` | booleano, solo Windows: el REPL de Python (su pestaña o `python`/`py` tecleado en la shell) usa el ancho visible y no la reserva de 1024 columnas. Se nota siempre: sus líneas largas (`print`, `help()`) se parten en el borde en vez de seguir hacia la derecha. Con `pyreadline3` además evita que teclear vaya a 2-3 letras por segundo ([Problemas conocidos](#problemas-conocidos)) | `true` |
+| `actionCommandsAtOnce` | booleano: la orden de una acción (instalar, actualizar…) aparece entera de una vez, en vez de verse escribir como la repinta la shell | `true` |
+| `aiKeyOffer` | booleano, solo Windows: si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de API, la pestaña ofrece meterla y la guarda cifrada (`environments/ai_keys.rs`) | `true` |
+| `agentChat` | booleano: el chat lateral con los agentes de IA (`:chat`, paleta, atajo) | `true` |
+| `agentChatAdvisor` | booleano, modo consejero: al fallar una orden, la pestaña ofrece preguntar al agente con la orden y su salida; solo deja la pregunta escrita en el chat, nunca la manda sola. No vale en todas las shells, porque depende de las marcas OSC 133 (`terminalCommandMarks`): sí en PowerShell y bash (Git Bash, WSL con bash); en cmd solo cuando la orden no existe (mensaje 9009 de Windows, `terminal/cmd_failure.rs`); no en zsh, fish ni sh (WSL con zsh, como Kali) salvo que la shell emita las marcas por su cuenta, ni dentro de un REPL (Python, Node…) o una IA de terminal | `true` |
+| `agentChatCanEdit` | booleano: el chat deja elegir los modos que editan («Aceptar ediciones», que pasa a ser el de fábrica, y «Auto»). Apagado, solo leen (Manual y Plan) | `false` |
+| `agentTabGuide` | booleano: al abrir la pestaña de una IA, su guía de WTerminal, una vez (Claude Code y Codex como instrucciones de arranque; Gemini y Qwen como primer mensaje) | `true` |
+| `agentControl` | booleano: las IA que lanza WTerminal pueden manejarlo con `wterminal --ctl` (órdenes internas y acciones del catálogo; lo que cambia el equipo o los ajustes pide permiso; nunca los permisos del chat ni la seguridad). Se aplica al reiniciar | `true` |
+| `offerGsudo` | booleano: si hay NSudo y WTerminal no puede abrirlo, un aviso ofrece instalar gsudo | `true` |
+| `offerShellAssist` | booleano: si a la pestaña activa le falta su ayudante de sugerencias (Clink, PSReadLine, ble.sh), un aviso ofrece instalarlo | `true` |
+| `agentChatGuide` | booleano: con cada pregunta del chat va, oculta, la guía corta de WTerminal para el agente (que proponga sus funciones antes que winget, apt o pip a pelo, y cómo pedir la guía entera con `wterminal --agent-guide`). Ollama no la recibe | `true` |
+| `agentChatAllowBypass` | booleano: el chat deja elegir «Omitir permisos» (el agente hace todo sin preguntar, órdenes incluidas). Pide también `agentChatCanEdit`; nunca es el modo de fábrica | `false` |
+| `agentChatRemember` | booleano: el chat manda con cada pregunta las últimas 6 vueltas de la conversación, para que el agente la recuerde; «Nueva conversación» la borra | `true` |
+| `showAgentChatButton` | booleano: el botón ✦ al final de la fila de pestañas, que abre y cierra el chat de agentes (sin él, `:chat`, la paleta o su atajo) | `true` |
 | `terminalScrollSensitivity` | 1–10 | `3` |
 | `copyOnSelect` | booleano | `false` |
 | `terminalPadding` | 4–24 | `10` |
@@ -4225,12 +5797,12 @@ editarlos, ejecutar
 | `fastfetchColor` | `#rrggbb` | color del banner de información del sistema |
 | `terminalCursorColor` | `#rrggbb` | color del cursor |
 | `uiDensity` | `comfortable`, `compact`: separaciones y margen mínimo de cada control respecto al borde de su panel (`--space-min`: 8 px en cómoda, 4 px en compacta, nunca 0) | `comfortable` |
-| `uiScale` | 80–500 (%), escrito en un cuadro numérico (se aplica con Intro o al salir de él): tamaño de barra, pestañas, explorador, avisos, paleta y contenido de los paneles; las casillas de terminal no se escalan. Por encima del 200 % se aplica como mucho lo que deja la interfaz en 480 px de ancho (`effectiveUiScale`) y Ajustes lo avisa. Atajos `Ctrl+Alt+=`, `Ctrl+Alt+-` (pasos de 10), `Ctrl+Alt+0` y paleta | `100` |
+| `uiScale` | 80–500 (%), escrito en un cuadro numérico (se aplica con Intro o al salir de él): tamaño de barra, pestañas, explorador, avisos, paleta y contenido de los paneles; las casillas de terminal no se escalan. Por encima del 200 % se aplica como mucho lo que deja la interfaz en 480 px de ancho (`effectiveUiScale`) y Ajustes lo avisa. Con la barra estrecha (640 px de CSS o menos: una ventana pequeña o el 137 % en una de 800), Proyectos, Biblioteca, Dependencias y Ajustes pasan a icono, con su nombre en un aviso propio que sale enseguida bajo el botón al pasar el ratón o llegar con el teclado (`data-tip`; el `title` nativo de WebView2 tardaba, a veces no salía y se perdía entre botones pegados, 14-11; lo llevan también ⟳ y el de idioma), y el selector de entorno recupera el sitio (antes se quedaba en «(»). Lo comprueba `test:toolbar-layout`. Atajos `Ctrl+Alt+=`, `Ctrl+Alt+-` (pasos de 10), `Ctrl+Alt+0` y paleta | `100` |
 | `githubSessionMode` | `onExhausted`, `always`, `never`: cuándo usar la sesión de `gh` en Explorar GitHub | `onExhausted` |
 | `suggestRepositoryImport` | booleano: sugerir importar el repositorio de GitHub de la carpeta de una pestaña | `true` |
 | `lowPowerMode` | booleano: modo de bajo consumo. La precarga del catálogo de Dependencias no se hace al arrancar (se construye al abrir el panel), la comprobación de actualizaciones de WinGet espera dos minutos y las sondas de ecosistema van de una en una. Se aplica en el siguiente arranque | `false` |
 | `lowPowerSuggest` | booleano: sugerir abajo el modo de bajo consumo cuando el equipo tiene 2 hilos de CPU o menos, menos de 8 GB de memoria, o la primera pestaña tarda más de 8 s en dar el prompt (una vez por sesión; «No volver a sugerir» lo apaga) | `true` |
-| `checkUpdatesOnStartup` | booleano: buscar una versión nueva de WTerminal en GitHub al arrancar ([Privacidad y red](#privacidad-y-red)) | `true` |
+| `checkUpdatesOnStartup` | booleano: buscar una versión nueva de WTerminal en GitHub al arrancar ([Privacidad y red](#11-privacidad-y-red)) | `true` |
 | `checkPackageUpdatesOnStartup` | booleano: preguntar al gestor de paquetes por actualizaciones al arrancar | `true` |
 | `webview2Missing` | `ask`, `download`, `never`: qué hace el arranque de Windows si falta WebView2 | `ask` |
 | `showSystemBanner` | booleano | `true` |
@@ -4256,7 +5828,9 @@ editarlos, ejecutar
 | `toolchainStoreTools`, `toolchainStoreReplHistory` | booleanos: herramientas nuevas (con sus `bin` en el PATH) e historial de los REPL en la carpeta propia | `true` |
 | `toolchainStoreToolchains` | booleano: toolchains completas (rustup, cargo, GOPATH, Gradle, .NET, Android) en la carpeta propia, solo si no estaban instaladas | `true` |
 
-**Temas.** Hay 15, agrupados por color y con al menos dos variantes cada uno
+### 8. Temas
+
+Hay 15, agrupados por color y con al menos dos variantes cada uno
 (`THEME_FAMILIES` en `config/preferences.rs`, que un test mantiene: cada tema
 en una sola familia, cada familia con dos o más y un total múltiplo de cinco):
 
@@ -4283,14 +5857,18 @@ temas propios aparecen junto a los de fábrica, se borran con su ×, la orden
 muestra) y en Terminal la fuente escrita a mano (`terminalFontCustom`), que va
 delante de la familia elegida y de los respaldos de símbolos.
 
+### 9. Ajustes que no se editan desde la interfaz
+
 `fileManagerId`, `viewportCols` y `viewportRows` no se editan desde la interfaz:
 los escribe la aplicación. Los dos últimos guardan el tamaño medido de la
 terminal para que la primera sesión de la próxima ejecución nazca ya con él.
 
+### 10. Si el entorno inicial ya no existe
+
 Si el entorno inicial guardado deja de existir, se usa el entorno automático
 del sistema.
 
-### Privacidad y red
+### 11. Privacidad y red
 
 WTerminal no envía telemetría. Lo único que hace por su cuenta contra la red
 o contra el sistema al arrancar tiene su propia opción en Ajustes ›
@@ -4301,7 +5879,7 @@ porque cada comportamiento automático de la app se tiene que poder apagar:
 |---|---|---|---|
 | Buscar actualizaciones de WTerminal al arrancar | `checkUpdatesOnStartup` | `true` | `update_check_on_startup` no consulta GitHub: no hay aviso de versión nueva. Ajustes y el panel de Dependencias pueden seguir buscándola a mano |
 | Buscar actualizaciones de programas al arrancar | `checkPackageUpdatesOnStartup` | `true` | `package_updates_check` no pregunta a WinGet ni al gestor de la distribución (lo deja en el log); en Dependencias se sigue pudiendo actualizar |
-| Si falta WebView2 (solo Windows) | `webview2Missing` | `ask` | `ask` pregunta antes de descargar nada, `download` lo descarga de Microsoft sin preguntar y `never` solo usa un instalador local (ver [WebView2: si falta el runtime](#webview2-si-falta-el-runtime)) |
+| Si falta WebView2 (solo Windows) | `webview2Missing` | `ask` | `ask` pregunta antes de descargar nada, `download` lo descarga de Microsoft sin preguntar y `never` solo usa un instalador local (ver [WebView2: si falta el runtime](#8-webview2-si-falta-el-runtime)) |
 
 Lo demás que toca la red lo pide siempre el usuario: clonar o explorar en
 GitHub, instalar desde Dependencias, descargar modelos o abrir enlaces. El
@@ -4312,20 +5890,26 @@ actualizaciones de programas.
 
 ## Internacionalización
 
+### 1. Idiomas
+
 La interfaz está disponible en 15 idiomas. Por defecto sigue al idioma del sistema
 (`auto`); el desplegable de Ajustes permite fijar uno, y el cambio se aplica al
 instante sin reiniciar. Alcanza a los paneles, el menú contextual, el
 explorador, los mensajes de error y el banner de cada sesión.
 
-**No se traduce, a propósito:** nombres propios (Docker, PowerShell, Nautilus),
+### 2. Lo que no se traduce, a propósito
+
+Nombres propios (Docker, PowerShell, Nautilus),
 rutas, comandos y su salida. Traducir un comando lo rompería, y la salida es de
 los programas que ejecuta el usuario.
+
+### 3. Los catálogos
 
 Los catálogos viven en `src-tauri/locales/*.json`. El español es el idioma de
 referencia y sirve de respaldo, de modo que una clave sin traducir se ve en
 español y nunca como un identificador.
 
-### Añadir un idioma
+### 4. Añadir un idioma
 
 1. Añadir un catálogo JSON a `src-tauri/locales/` con las mismas claves.
 2. Añadir el idioma a `LANGUAGES` en `src-tauri/src/config/i18n.rs` para que
@@ -4354,17 +5938,23 @@ visible; el mecanismo y el validador ya las contemplan.
 | Logs | `logs\main.log` (rota a `main.log.1` al superar 2 MB) | ídem |
 | Variable de depuración | `WINSLIM_LOG_LEVEL=debug` | `LTERMINAL_LOG_LEVEL=debug` |
 
+### 1. Dónde están los registros
+
 La interfaz no muestra un botón **Logs**: fue retirado para que la barra no
 acumule superficies fijas. Los logs siguen disponibles en la ruta real indicada
 arriba. Los archivos de inicialización y banner de cada sesión van a una carpeta
 temporal por PID, de modo que dos instancias abiertas a la vez no se pisan ni se
 borran los archivos al salir.
 
+### 2. Qué lleva cada línea
+
 Los registros llevan hora UTC con milisegundos, identificador de sesión y
 metadatos JSON. Se anotan la migración, el arranque, cada PTY, duración de
 procesos y cierre. Para investigar una sesión concreta se puede usar
 `LTERMINAL_LOG_LEVEL=debug` en Linux o `WINSLIM_LOG_LEVEL=debug` en Windows
 (en ese nivel `settings_save` anota también cada fase del guardado).
+
+### 3. Diagnóstico desde la página: `__wtPendingIpc`, `__wtTerminalState` y `__wtInputState`
 
 Una llamada IPC que no vuelve no deja rastro en el log, porque su métrica se
 escribe al terminar. `window.__wtPendingIpc()` (desde las herramientas de
@@ -4380,6 +5970,16 @@ pausa si el aviso de visibilidad de xterm tardaba más que el plazo de reserva
 de 200 ms: el Viewport recortaba el scroll con el alto viejo y la vista dejaba
 de seguir la salida. `fitAndReport` reanuda antes el renderer si la casilla ya
 tiene tamaño (`resumeRendererIfVisible`).
+`window.__wtInputState(tabId)` devuelve el estado de la cola de entrada de una
+pestaña: la barrera en la que espera el lote de teclas que va primero
+(`inputBarrier`, `outputInputReady`, `outputGeometryReady`,
+`activationGeometryReady`, `resizeQueue` o `sendInput`) y desde cuándo, cuántos
+lotes con Intro se encolaron y cuántos se enviaron, y si la ventana se ve y
+tiene el foco. Lo usan `tab-tools` (al fallar la línea larga) y `hidden-enter`
+para separar un Intro que no llegó a la terminal, uno retenido en la app y una
+shell que no lo procesa.
+
+### 4. Métricas de rendimiento
 
 También se registran métricas segmentadas del WebView: `sinceStartMs` es el
 tiempo desde que cargó el frontend y `durationMs` la operación concreta.
@@ -4388,6 +5988,8 @@ escribir, `fastfetch.banner-visible`, montaje y resize de cada terminal,
 impresión explícita del banner, `ui.panel.visible` para cada menú/panel e `ipc.*` para
 cada llamada relevante al backend. Las entradas de teclado, parseo de cada
 tecla y cada píxel de resize se agrupan para no inundar el archivo.
+
+### 5. El informe del smoke
 
 El smoke guarda además un informe JSON en `/tmp/lterminal-smoke-<token>.json`
 con las métricas agrupadas por operación: repeticiones, mínimo, máximo y
@@ -4412,6 +6014,8 @@ diagnosticar máquinas especialmente lentas.
 
 ## Perfiles portables y plugins
 
+### 1. Perfiles portables
+
 Desde Ajustes se puede exportar un perfil `.lterminal-profile` en Linux,
 `.winslim-profile` en Windows o un instalador
 reproducible `.sh`/`.ps1`. El script explica lo que guarda, no incluye
@@ -4419,6 +6023,8 @@ contraseñas, tokens, claves privadas ni binarios, comprueba el sistema y la
 arquitectura, verifica la descarga cuando GitHub publica `SHA256SUMS.txt` y
 busca una instalación existente antes de instalar la aplicación. Después
 importa la configuración y los manifests de plugins declarativos.
+
+### 2. Plugins
 
 Los plugins actuales son una base segura para ampliar la terminal: solo
 declaran intérpretes y tecnologías, no cargan código nativo. El formato se
@@ -4430,84 +6036,10 @@ Comportamiento.
 
 ## Pruebas
 
-### Idioma de los scripts
+Qué se prueba, con qué y qué no demuestra cada prueba. Las órdenes y los
+scripts concretos están en [Mapa de scripts y pruebas](#mapa-de-scripts-y-pruebas).
 
-Cuando la Biblioteca escribe un script en la pestaña activa, WinSlim conserva
-su intérprete y argumentos originales, pero añade la variable de entorno
-`LTERMINAL_LANGUAGE` (`es`, `en`, etc.) al proceso. Así, los scripts propios o
-integrados pueden seleccionar sus textos según el idioma elegido en Ajustes;
-la aplicación no traduce código arbitrario ni cambia la sintaxis de PowerShell,
-CMD, Bash, Python o Node.
-
-### Auditoría de release y comportamiento observable
-
-Una build correcta no basta: hay que abrir el artefacto que se va a entregar y
-comprobar la ruta que recorrerá el usuario. La batería oficial hace lo siguiente:
-
-1. Arranca el ejecutable desempaquetado de Windows y espera la confirmación de
-   ventana, frontend, IPC, xterm y primera PTY; si falla `app.load()`, la ventana
-   se revela para mostrar el error en vez de quedarse oculta.
-2. Ejecuta el AppImage con su runtime normal y con extracción controlada, valida
-   ELF/AppDir, y comprueba que termina sin procesos residuales.
-3. Recorre comandos internos (`:help`, `:panel`, `:shell`, `:terminal`,
-   `:language`, `:banner`, `:panes`), alias de shell, cambio de entorno,
-   preferencias, paneles, acordeones, explorador, menús contextuales,
-   pestañas, división, redimensionado y fastfetch.
-4. Conserva capturas y un informe JSON fuera del repositorio. Los logs y
-   capturas temporales se ignoran mediante `.gitignore`; la documentación
-   mantenida se concentra en este README.
-
-Cada informe explicita sus límites de confianza: una prueba headless no acredita
-la presentación gráfica y Wine no acredita Windows nativo. Si una plataforma o
-una fase no se pudo ejecutar, no se declara aprobado ese alcance.
-
-Al cambiar el idioma desde Ajustes o `:language`, la interfaz se actualiza y el
-backend regenera en ese mismo momento los archivos `help-<pestaña>.txt`, sus
-secciones y el runner de cada pestaña existente. No hace falta cerrar ni volver
-a crear la shell. Si el arranque falla antes de montar xterm, el error se
-presenta en la ventana mediante la ruta de recuperación `frontend_reveal`.
-
-```bash
-npm run check
-```
-
-Pasa la verificación de versión, recursos, arquitectura, scripts de build,
-enlaces locales de documentación, traducciones, contratos cruzados,
-lógica ejecutable del frontend, superficie de tests y superficie lógica,
-`svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y los tests de
-Rust. Es lo que tiene que estar en verde antes de compilar.
-
-La build Linux ejecuta por defecto la batería ampliada. Además del smoke test
-de ventana/frontend/PTY, comprueba shells y herramientas instaladas y ejecuta
-E2E con `tauri-driver`; si falta una precondición, el AppImage se publica y el
-build informa el diagnóstico al final con código 1. Se puede omitir con `linux/build.sh --no-extended-tests` o
-`windows/build.ps1 -NoExtendedTests`; en Windows `-FullTests` la selecciona
-explícitamente. La falta del driver E2E se registra como diagnóstico y no
-oculta el artefacto ya generado. El smoke recorre
-Ajustes, Biblioteca, Proyectos, Entorno y dependencias, acordeones, explorador
-y menú contextual, comandos internos, respuesta de la shell, división y
-varios tamaños de ventana. También ejecuta los atajos globales de nueva pestaña,
-navegación entre pestañas, división y explorador, conservando capturas antes y
-después. Repite refrescos de entornos, clics de
-división y aperturas de paneles para detectar carreras y estados residuales.
-El informe JSON se vuelve a validar al terminar y debe contener catorce fases,
-incluido el arrastre real de ratón y la matriz de shells con comandos en PTY y
-restauración de la shell inicial, las salidas simuladas de actualización y evidencias de menú contextual,
-grupos/submenús de dependencias y la matriz responsive con dos paneles y el
-explorador visible y oculto. Una ventana que solo arranca y se cierra ya no
-puede contarse como E2E superado.
-En Windows, el evento `wsl-distro-selector-coverage` exige que cada distro
-instalada (`wsl:<distro>`) se haya probado; su `testedIds` lleva solo las
-distros, en su orden, y las variantes de shell de cada una (`wsl:Ubuntu:sh`) van
-aparte en `shellVariantIds`, para que probarlas no descuadre la cobertura.
-La ruta Linux→Windows repite el arranque Wine con prefijos independientes; la
-ruta Windows→Linux repite el mismo build y E2E dentro de WSLg.
-Si la distribución instalada es WSL1, no hay WSLg ni un compositor Linux: se
-pueden ejecutar la build, los scripts y la matriz de shells, pero la fase
-gráfica completa del AppImage queda condicionada al driver WebKitGTK/X11 y a
-que el empaquetador `linuxdeploy` termine sobre `/mnt/c`. El informe conserva
-esa limitación como diagnóstico y no la cuenta como una E2E gráfica Linux
-aprobada.
+### 1. Los tests de Rust
 
 Los tests viven junto al módulo que prueban, en su `mod tests`. Están escritos
 en español y sus nombres son frases que dicen qué garantiza cada uno, no qué
@@ -4522,6 +6054,125 @@ fn con_hipervisor_en_marcha_no_se_manda_a_nadie_a_la_bios()
 Varios documentan un fallo real que se encontró probando contra el sistema, para
 que no vuelva. No dependen de lo que haya instalado en la máquina: lo que
 consulta al sistema se inyecta para poder simularlo.
+
+### 2. Lo que tiene que pasar antes de compilar
+
+```bash
+npm run check
+```
+
+Pasa la verificación de versión, recursos, arquitectura, scripts de build,
+enlaces locales de documentación, traducciones, contratos cruzados,
+lógica ejecutable del frontend, superficie de tests y superficie lógica,
+`svelte-check`, `cargo fmt --check`, `cargo clippy -D warnings` y los tests de
+Rust. Es lo que tiene que estar en verde antes de compilar.
+
+### 3. Auditoría de release y comportamiento observable
+
+Una build correcta no basta: hay que abrir el artefacto que se va a entregar y
+comprobar la ruta que recorrerá el usuario. La batería oficial hace lo siguiente:
+
+#### 3.1 Qué recorre
+
+1. Arranca el ejecutable desempaquetado de Windows y espera la confirmación de
+   ventana, frontend, IPC, xterm y primera PTY; si falla `app.load()`, la ventana
+   se revela para mostrar el error en vez de quedarse oculta.
+2. Ejecuta el AppImage con su runtime normal y con extracción controlada, valida
+   ELF/AppDir, y comprueba que termina sin procesos residuales.
+3. Recorre comandos internos (`:help`, `:panel`, `:shell`, `:terminal`,
+   `:language`, `:banner`, `:panes`), alias de shell, cambio de entorno,
+   preferencias, paneles, acordeones, explorador, menús contextuales,
+   pestañas, división, redimensionado y fastfetch.
+4. Conserva capturas y un informe JSON fuera del repositorio. Los logs y
+   capturas temporales se ignoran mediante `.gitignore`; la documentación
+   mantenida se concentra en este README.
+
+#### 3.2 Límites de confianza
+
+Cada informe explicita sus límites de confianza: una prueba headless no acredita
+la presentación gráfica y Wine no acredita Windows nativo. Si una plataforma o
+una fase no se pudo ejecutar, no se declara aprobado ese alcance.
+
+### 4. La batería ampliada de las builds
+
+#### 4.1 Cuándo corre y cómo se omite
+
+La build Linux ejecuta por defecto la batería ampliada. Además del smoke test
+de ventana/frontend/PTY, comprueba shells y herramientas instaladas y ejecuta
+E2E con `tauri-driver`; si falta una precondición, el AppImage se publica y el
+build informa el diagnóstico al final con código 1. Se puede omitir con `linux/build.sh --no-extended-tests` o
+`windows/build.ps1 -NoExtendedTests`; en Windows `-FullTests` la selecciona
+explícitamente. La falta del driver E2E se registra como diagnóstico y no
+oculta el artefacto ya generado.
+
+#### 4.2 Qué recorre el smoke
+
+El smoke recorre
+Ajustes, Biblioteca, Proyectos, Entorno y dependencias, acordeones, explorador
+y menú contextual, comandos internos, respuesta de la shell, división y
+varios tamaños de ventana. También ejecuta los atajos globales de nueva pestaña,
+navegación entre pestañas, división y explorador, conservando capturas antes y
+después. Repite refrescos de entornos, clics de
+división y aperturas de paneles para detectar carreras y estados residuales.
+
+#### 4.3 El informe y sus fases
+
+El informe JSON se vuelve a validar al terminar y debe contener catorce fases,
+incluido el arrastre real de ratón y la matriz de shells con comandos en PTY y
+restauración de la shell inicial, las salidas simuladas de actualización y evidencias de menú contextual,
+grupos/submenús de dependencias y la matriz responsive con dos paneles y el
+explorador visible y oculto. Una ventana que solo arranca y se cierra ya no
+puede contarse como E2E superado.
+
+#### 4.4 Cobertura de WSL
+
+En Windows, el evento `wsl-distro-selector-coverage` exige que cada distro
+instalada (`wsl:<distro>`) se haya probado; su `testedIds` lleva solo las
+distros, en su orden, y las variantes de shell de cada una (`wsl:Ubuntu:sh`) van
+aparte en `shellVariantIds`, para que probarlas no descuadre la cobertura.
+
+#### 4.5 Validación cruzada: Wine, WSLg y WSL1
+
+La ruta Linux→Windows repite el arranque Wine con prefijos independientes; la
+ruta Windows→Linux repite el mismo build y E2E dentro de WSLg.
+Si la distribución instalada es WSL1, no hay WSLg ni un compositor Linux: se
+pueden ejecutar la build, los scripts y la matriz de shells, pero la fase
+gráfica completa del AppImage queda condicionada al driver WebKitGTK/X11 y a
+que el empaquetador `linuxdeploy` termine sobre `/mnt/c`. El informe conserva
+esa limitación como diagnóstico y no la cuenta como una E2E gráfica Linux
+aprobada.
+
+### 5. La IA en las pruebas
+
+No se mandan mensajes a IA reales. El chat lateral se prueba con un agente
+simulado (`llm.cmd`, en `tests/e2e/smoke.mjs`) que contesta con lo que recibió:
+
+- la pregunta llega entera por la entrada estándar, aunque lleve `& | %`,
+  comillas y `<`;
+- el modelo elegido llega como opción (`-m`);
+- la segunda pregunta lleva la conversación anterior (memoria);
+- «Insertar» escribe la orden en el prompt sin ejecutarla.
+
+Con las CLI reales (Claude Code, Codex…) está sin probar por esa misma razón.
+
+### 6. Idioma
+
+#### 6.1 Idioma de los scripts
+
+Cuando la Biblioteca escribe un script en la pestaña activa, WinSlim conserva
+su intérprete y argumentos originales, pero añade la variable de entorno
+`LTERMINAL_LANGUAGE` (`es`, `en`, etc.) al proceso. Así, los scripts propios o
+integrados pueden seleccionar sus textos según el idioma elegido en Ajustes;
+la aplicación no traduce código arbitrario ni cambia la sintaxis de PowerShell,
+CMD, Bash, Python o Node.
+
+#### 6.2 Cambiar de idioma con las pestañas abiertas
+
+Al cambiar el idioma desde Ajustes o `:language`, la interfaz se actualiza y el
+backend regenera en ese mismo momento los archivos `help-<pestaña>.txt`, sus
+secciones y el runner de cada pestaña existente. No hace falta cerrar ni volver
+a crear la shell. Si el arranque falla antes de montar xterm, el error se
+presenta en la ventana mediante la ruta de recuperación `frontend_reveal`.
 
 ## Convenciones del código
 
@@ -4605,12 +6256,71 @@ recién generado (ver [Compilación y distribución](#compilación-y-distribuci�
 
 ## Problemas conocidos
 
-**Las pestañas se quedan en blanco en Windows.** Falta `conpty.dll` o
+### 1. Las pestañas se quedan en blanco en Windows
+
+Falta `conpty.dll` o
 `WebView2Loader.dll` junto al ejecutable. El ConPTY del sistema falla en algunos
 Windows recortados y tarda más de dos minutos en devolver el error. Los cuatro
 archivos de la carpeta desempaquetada tienen que ir juntos.
 
-**El inventario de WSL sale incompleto.** La sonda rápida solo identifica la
+### 2. El REPL de Python con `pyreadline3` en Windows, y por qué va con el ancho visible
+
+`pyreadline3` llega como dependencia de muchos paquetes en Windows
+(humanfriendly, coloredlogs…) y, si está, el REPL de Python lo carga solo. Edita
+la línea con la API de consola y a cada tecla borra el resto de la ventana; el
+OpenConsole 1.24 que va junto a la app lo convierte en un repintado de todas las
+filas de abajo por las columnas de la PTY. Medido en la VM con la `conpty.dll`
+de la release (arnés propio con `CreatePseudoConsole`), por cada letra:
+
+| ConPTY | 1024 columnas | 120 columnas |
+|---|---|---|
+| OpenConsole 1.24 de la app | 84 KB | 16 KB |
+| El del sistema | 279 bytes | 279 bytes |
+
+Sin `pyreadline3` (Python 3.9 o 3.10 de la misma VM), cmd sin Clink, Lua o
+sqlite3 son 17-19 bytes. Con la reserva de 1024 columnas el eco iba a 2-3 letras
+por segundo (build 51: la sonda de `lang:python` no acababa de escribirse en 15 s
+y lo pendiente se coló en el REPL siguiente). Lo medido el 10-11, uno a uno:
+
+1. **El ancho visible (se queda).** En Windows, el REPL de Python, en su
+   pestaña o tecleado en una shell, usa el ancho visible
+   ([`full-screen-app.ts`](#mapa-de-archivos-llamadas-y-mantenimiento)): menos
+   bytes por tecla. La sonda bajó de 15-21 s a 10-14 s. El E2E comprueba ese
+   modo antes de escribir (`lang:python` y `python-width`). Si se apaga
+   `pythonReplVisibleWidth`, vuelve la reserva.
+2. **Lo que sigue pesando.** No son los bytes, sino el número de trozos: con
+   pyreadline3 cada tecla llega en 63-127 lecturas de ConPTY en 13-26 ms
+   (huecos de 0,2 ms de media), frente a 1-3 de Node y 1 de Python sin
+   pyreadline3. Cada lectura es un evento para el frontend, con su escritura
+   en xterm y su repintado. En el E2E eso son unos 250 ms por letra: la sonda
+   de `lang:python` de Windows tiene 45 s de plazo, y lo tecleado no se pierde.
+3. **Probado y retirado:**
+   - que las teclas no esperasen a la ráfaga anterior a pantalla completa no
+     cambió nada (13,3/9,5/9,4 s frente a 14,1/11,4/9,6 s);
+   - agrupar la salida para todas las pestañas rompió la suite `horizontal`.
+4. **La agrupación solo a pantalla completa (11-11).** La salida se agrupa
+   solo con el ancho exacto, donde no hay reserva horizontal
+   ([Flujo de salida PTY](#2-flujo-de-salida-pty)): un bloque por tecla en vez
+   de 63-127. Los 250 ms por letra del punto 2 son de antes de este cambio y
+   no se han vuelto a medir.
+5. **Instalarlo a propósito (12-11).** «Entorno y dependencias › Lenguajes ›
+   Python» ofrece `pyreadline3 (Python 3.12 o anterior)` (`tool-pyreadline3`,
+   solo en Windows; en Linux y macOS Python ya usa GNU readline). Da Tab,
+   historial con Ctrl+R y edición de línea en el REPL. La orden es
+   `python -m pip install --user "pyreadline3; python_version < '3.13'"`:
+   - el marcador hace que pip no lo instale en Python 3.13 o posterior, que ya
+     trae su propio REPL con todo eso (pip avisa de que no aplica);
+   - con `--user` va a la carpeta de paquetes de esa versión de Python
+     (`%APPDATA%\Python\Python312\site-packages`, por ejemplo), así que las
+     demás versiones ni lo ven;
+   - su texto lo recomienda solo hasta 3.12 y avisa del coste: el repintado a
+     cada tecla, peor con `pythonReplVisibleWidth` apagado;
+   - comprobar si está instalado, actualizarlo y desinstalarlo salen de la orden
+     simple, como cualquier librería de Python (`ecosystem_lifecycle_actions`).
+
+### 3. El inventario de WSL sale incompleto
+
+La sonda rápida solo identifica la
 distro; al abrir Dependencias se enumeran también `/usr/local/bin`, las rutas de
 usuario, `~/.cargo/bin`, `~/.local/bin`, npm global, nvm, asdf/mise, Volta, Bun y
 Deno. Así los lenguajes instalados con gestores de versiones no vuelven a
@@ -4625,7 +6335,9 @@ vaciarse hasta el siguiente refresco (en la auditoría, las 79 de Alpine). El
 selector sigue avisando «(sin comprobar)» y se reintenta pronto; refrescar no
 borra esa última detección.
 
-**Virtualización en Windows.** KVM, libvirt y virt-manager son componentes de
+### 4. Virtualización en Windows
+
+KVM, libvirt y virt-manager son componentes de
 Linux y, cuando procede, se ofrecen dentro de WSL. Windows nativo dispone de
 acciones separadas para Hyper-V, Virtual Machine Platform y Windows Sandbox,
 además de QEMU, VirtualBox y VMware Workstation Pro. No se presentan como si
@@ -4637,7 +6349,9 @@ del sistema es obligatorio antes de abrir Windows Sandbox. La acción elevada
 de WTerminal conserva ese estado, muestra el requisito de reinicio y no vuelve
 a ejecutar la instalación como si estuviera ausente.
 
-**Catálogo WinGet.** En Windows `npm run check:winget` consulta todos los
+### 5. Catálogo WinGet
+
+En Windows `npm run check:winget` consulta todos los
 identificadores del catálogo con `winget show --exact` antes de compilar. Esto
 detecta IDs retirados o mal escritos; la descarga real sigue dependiendo de que
 el manifiesto del editor esté vigente, por lo que un error HTTP del proveedor
@@ -4680,8 +6394,9 @@ Windows también minikube, kind y Kustomize. Linux solo presenta una entrada
 cuando el gestor detectado tiene un nombre de paquete conocido; no se fuerza un
 paquete de otra distribución para igualar contadores.
 
-**El panel de dependencias abre con el catálogo estructural sin esperar a las
-sondas.** Tras preparar la primera terminal, la detección completa se calienta
+### 6. El panel de dependencias abre con el catálogo estructural sin esperar a las sondas
+
+Tras preparar la primera terminal, la detección completa se calienta
 en segundo plano; al desplegar una herramienta se reutiliza el estado confirmado
 o se comprueba solo su familia si todavía no está en caché. **Repetir detección**
 fuerza una pasada nueva de PATH, WinGet, WSL y gestores de paquetes; su duración
@@ -4695,20 +6410,191 @@ las comprobaciones de una herramienta concreta y **Repetir detección** actualiz
 esa base cuando el sistema ha cambiado. El archivo solo contiene estados por
 identificador de acción, nunca comandos ejecutables.
 
-**El primer arranque tras compilar puede tardar.** El antivirus inspecciona un
+### 7. El primer arranque tras compilar puede tardar
+
+El antivirus inspecciona un
 ejecutable recién creado. Si el primer prompt tarda varios segundos con la
 interfaz ya visible, hay que revisar el log de rendimiento y distinguir la
 inicialización de la shell de la creación de la PTY. `PTY creado` registra el
 PID y la duración de esa creación; si el proceso tarda más de 30 segundos, el
 log marca el límite alcanzado y la pestaña muestra el error de arranque.
 
-**Wine puede ejecutar el frontend y aun así mostrar una ventana negra.** En la
+### 8. Wine puede ejecutar el frontend y aun así mostrar una ventana negra
+
+En la
 auditoría, WebView2 llegó a `frontend.mounted` y `app.ready-for-input`, creó
 `cmd.exe` y respondió al handshake, pero la superficie visible siguió negra,
 también con Wine-Staging 11.17 y un prefijo limpio. Es un límite de presentación
 de WebView2/DirectComposition en Wine, no una prueba de que Windows nativo falle.
 El smoke headless valida entrada/salida de comandos mediante pipes. La ventana
 visible y ConPTY real deben validarse en Windows nativo.
+
+### 9. El REPL de Elm no contesta y se queda al 100 % de CPU
+
+#### 9.1 Qué se ve
+
+Escribes una expresión en el REPL de Elm (`lang:elm`), pulsas Intro y no sale
+nada: ni el resultado ni un prompt nuevo. `elm.exe` gasta un núcleo entero sin
+parar y nunca lanza `node` para evaluar.
+
+#### 9.2 Por qué pasa
+
+Elm guarda el borrador de su REPL en
+`%APPDATA%\elm\<versión>\repl\tmp\elm-stuff` y no lo escribe de forma atómica.
+Si el REPL se cierra justo mientras lo escribe (por ejemplo, al cambiar de
+entorno en la pestaña), `d.dat` queda con 0 bytes y, desde entonces, Elm se
+atasca al leerlo. Es un fallo de Elm, no de la terminal: el 13-11 le pasó igual
+al binario de la 58, que el día antes había pasado la prueba.
+
+#### 9.3 Cómo se arregla
+
+Borra esa carpeta `elm-stuff` (solo el borrador del REPL; tus paquetes y tus
+proyectos no están ahí). Elm la rehace en menos de un segundo. Las pruebas E2E
+lo hacen solas antes de abrir Elm si encuentran `d.dat` vacío, y lo apuntan en
+el informe (`elm-repl-cache-repaired`).
+
+### 10. Un agente del chat no contesta, tarda o contesta vacío
+
+El chat lateral solo lanza la CLI del agente y enseña lo que escribe: casi
+siempre la causa está en el agente (su versión, su cuenta o su configuración),
+no en WTerminal. Debajo de cada respuesta fallida, «Ver lo que dijo el agente»
+enseña su salida de error. Estos son los casos vistos el 15-11.
+
+#### 10.1 «El modelo está saturado ahora mismo» (Gemini, Qwen)
+
+- **Qué se ve:** tras unos 30-60 s, «El modelo está saturado ahora mismo
+  (error 503 del servicio)…» o «Sin cupo para ese modelo (error 429)…».
+- **Por qué:** Gemini CLI y Qwen Code reintentan solos hasta 10 veces, con
+  esperas de hasta 30 s, sin escribir nada por la salida normal. El chat lee
+  esos «Attempt N failed with status 503», enseña cada reintento según pasa
+  («Reintentando… (1 de 3)») y lo corta al tercero. Antes se quedaba 5 minutos
+  callado y acababa en «tardó demasiado».
+- **Qué hacer:** probar más tarde (Google dice que los picos de demanda son
+  pasajeros) o elegir otro modelo en el desplegable del chat.
+
+#### 10.2 Gemini con la CLI antigua
+
+- **Qué se ve:** el modelo por defecto da 503, uno conocido da 404 («This
+  model … is no longer available to new users») o no contesta nada.
+- **Por qué:** cada versión de Gemini CLI trae su lista de modelos, y Google
+  retira o renombra los suyos. El 15-11, Gemini CLI 0.65 pedía modelos ya
+  retirados o saturados; la clave de API era válida.
+- **Qué hacer:** actualizar Gemini CLI desde Entorno y dependencias →
+  Inteligencia artificial → Gemini CLI («Actualizar»), o con
+  `npm install --global @google/gemini-cli` en una pestaña de WTerminal (se
+  instala en la carpeta propia, `entornos\herramientas\npm`). La clave que
+  guardaste en WTerminal se le pasa con `GEMINI_API_KEY` y
+  `GEMINI_CLI_AUTH_OVERRIDE=gemini-api-key`, así que no hace falta tocar su
+  `settings.json`.
+
+#### 10.3 «El agente terminó sin contestar nada» (Amp)
+
+- **Qué se ve:** la respuesta llega vacía en unos segundos.
+- **Por qué:** el agente acabó «bien» (código 0) sin escribir nada. En Amp, su
+  propio registro (`%LOCALAPPDATA%\amp\logs\cli.log`) decía «Reconnect
+  ChatGPT before using OpenAI models»: estaba configurado con modelos de
+  OpenAI a través de una cuenta de ChatGPT cuya conexión había caducado.
+- **Qué hacer:** abrir Amp en su pestaña (el chat ofrece el botón) y volver a
+  conectar la cuenta, o elegir allí otro modelo. «Couldn't connect to the Amp
+  server» suelto es un corte de red pasajero.
+
+#### 10.4 Continue no sale en el chat
+
+- **Qué se ve:** Continue CLI aparece en «Solo en su pestaña», con el motivo
+  «Le falta su config.yaml con algún modelo».
+- **Por qué:** sin `~/.continue/config.yaml` (o la carpeta de
+  `CONTINUE_GLOBAL_DIR`), Continue intenta bajarse la configuración de su
+  servicio, que ya no existe («Hub integration has been removed»), y falla con
+  «The request failed and the interceptors did not return an alternative
+  response».
+- **Qué hacer:** crear `~/.continue/config.yaml` con al menos un modelo. Por
+  ejemplo, con un modelo local de Ollama:
+
+  ```yaml
+  name: Local
+  version: 1.0.0
+  schema: v1
+  models:
+    - name: Qwen local
+      provider: ollama
+      model: qwen3:8b
+      roles:
+        - chat
+  ```
+
+  Al volver a abrir el chat, Continue ya sale arriba, con los demás.
+
+#### 10.5 Un agente que no sale en el desplegable
+
+El grupo «Solo en su pestaña» solo enseña los que algo puede dejar entrar en el
+chat (un ajuste o su configuración). Los que nunca contestan ahí, como aider,
+que edita archivos por su cuenta, no se ofrecen: se abren desde el selector de
+entornos de arriba. Ver [Chat con los agentes](#chat-con-los-agentes-agentchat).
+
+## Licencia
+
+WTerminal / LTerminal es software libre. Se distribuye con la **GNU Affero
+General Public License, versión 3 únicamente** (`AGPL-3.0-only`, texto completo
+en `LICENSE`). Copyright © 2026 Darkeiser003.
+
+En la práctica:
+
+- **Uso:** cualquiera puede usarlo, estudiarlo, modificarlo y redistribuirlo, también
+  dentro de una empresa, sin pagar nada.
+- **Obligación:** quien distribuya una versión modificada, o la ofrezca a otros a
+  través de la red, tiene que publicar todo su código con la misma AGPL-3.0.
+- **Garantía:** no la hay (secciones 15 y 16 de la licencia).
+
+**Licencia comercial, soporte y servicios.** El titular de los derechos ofrece
+la misma aplicación con licencia comercial, para quien quiera usarla o
+integrarla sin las obligaciones de la AGPL: por ejemplo, dentro de un producto
+cerrado o en un servicio sin publicar sus cambios. También ofrece soporte,
+servicio, builds a medida y garantías por contrato. Contacto:
+<tebarcascallarromen@gmail.com> (el `supportEmail` de
+`src-tauri/config/package-metadata.json`); las condiciones se fijan en un
+contrato aparte.
+
+**Contribuciones.** Para poder ofrecer las dos licencias, cada contribución
+externa necesita el CLA de [CONTRIBUTING.md](CONTRIBUTING.md). Las
+actualizaciones automáticas de versiones (Dependabot) no lo necesitan. Para que
+GitHub lo exija, se instala en el repositorio la app CLA Assistant
+(cla-assistant.io) con el texto del CLA en un gist; el bot pide aceptarlo en el
+primer pull request de cada persona. No se usa un workflow propio: necesitaría
+`pull_request_target` con permisos de escritura, que el análisis de zizmor de
+`workflow-security.yml` marca como peligroso.
+
+**Permiso adicional (sección 7 de la AGPL-3.0).** En Windows la aplicación se
+distribuye con `WebView2Loader.dll`, un redistribuible de Microsoft que no es
+software libre, y usa el runtime de WebView2 del sistema. Como permiso
+adicional, el titular permite combinar WTerminal con esas bibliotecas de
+Microsoft y distribuirlo junto a ellas sin que ellas queden sujetas a la AGPL.
+Todo lo demás sigue con la AGPL. ConPTY y OpenConsole son MIT y no lo
+necesitan.
+
+**Marca.** «WTerminal», «LTerminal», «WTerminal Project» y su logotipo
+identifican al proyecto de Darkeiser003. La AGPL no da permiso para usarlos
+(sección 7 e).
+
+- **Referirse al proyecto:** se pueden usar para eso («basado en WTerminal»,
+  «compatible con LTerminal»).
+- **Versiones modificadas:** una versión modificada o redistribuida por otros
+  cambia el nombre y el icono, y no se presenta como oficial ni insinúa el
+  respaldo del proyecto.
+- **Productos y servicios:** un producto o servicio no lleva el nombre ni el
+  logotipo sin permiso escrito.
+- **Builds oficiales:** son las de las releases de `Darkeiser003/Terminal`,
+  con el manifiesto firmado con Ed25519 y SSH ([Seguridad de las
+  releases](#13-seguridad-de-las-releases)).
+
+**Código anterior.** Lo que se publicó con licencia MIT antes de este cambio
+(10-11-2026) sigue siendo MIT para quien lo obtuvo; lo nuevo es AGPL-3.0-only.
+Las dependencias y los recursos de terceros conservan sus licencias
+(`THIRD-PARTY-NOTICES.txt`). Las de producción del frontend (Tauri y xterm.js)
+son MIT o MIT/Apache-2.0. Las de Rust las limita `deny.toml` a licencias
+permisivas, MPL-2.0 y LGPL-2.1, todas compatibles con la AGPL-3.0.
+
+Este apartado y el CLA son borradores del titular, sin revisión legal; el
+contrato de la licencia comercial conviene redactarlo con un abogado.
 
 ## Créditos
 

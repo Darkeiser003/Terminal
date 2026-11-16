@@ -39,6 +39,17 @@ const WSL_STARTUP_RETRY_WINDOW: Duration = Duration::from_secs(120);
 /// Solo una sesión que muere poco después de abrirse es un arranque fallido;
 /// medido: `wsl.exe` se rinde a los ~20 s.
 const WSL_STARTUP_RETRY_MAX_SESSION: Duration = Duration::from_secs(60);
+/// `actionCommandsAtOnce`: lo más que se espera a que la shell empiece a
+/// repintar la orden de una acción para retenerla. Desde ahí se junta
+/// mientras siga llegando eco (`pty::ECHO_HOLD_GAP`, como mucho 8 s). Eran 2 s
+/// contados desde que se pedía: con el equipo cargado, Clink tardaba más en
+/// empezar y se veía letra a letra (15-11).
+const ACTION_ECHO_HOLD_MAX: Duration = Duration::from_secs(5);
+/// Cuánto tiene que llevar callada una shell recién abierta (ya con su prompt
+/// pintado) para escribirle las órdenes que esperaban en cola, y lo más que se
+/// espera aunque no se calle. Ver `flush_pending_commands`.
+const QUEUED_COMMAND_QUIET: Duration = Duration::from_millis(250);
+const QUEUED_COMMAND_QUIET_MAX: Duration = Duration::from_secs(3);
 
 /// Salida de `wsl.exe` que indica que la VM o el contenedor de la distro se
 /// cerró por la fuerza mientras la sesión arrancaba (`0x80370107`), o que el
@@ -49,6 +60,27 @@ fn is_transient_wsl_exit(code: Option<i32>, startup_output: &str) -> bool {
     let output = startup_output.to_ascii_lowercase();
     code.unwrap_or(-1) != 0
         && (output.contains("0x80370107") || output.contains("wsl/service/e_unexpected"))
+}
+
+/// Un programa que no es una shell (un REPL o una IA de terminal) y que ha
+/// terminado con error: ¿se queda su pestaña con la salida y el código?
+///
+/// Un REPL, si salió poco después de abrirse (no llegó a arrancar). Una IA,
+/// tarde lo que tarde: casi siempre sale porque le falta la clave o la sesión,
+/// y antes de decirlo mira actualizaciones, red o credenciales. Grok tardó
+/// 9,5 s en la build 65 y 16 s en la 66 (equipo cargado): con el límite de los
+/// REPL, la pestaña se cerraba llevándose el mensaje y el aviso de configurar
+/// la clave (`aiKeyOffer`), y si era la última, la ventana entera.
+fn failed_program_start(env: &Environment, elapsed: Duration) -> bool {
+    if env.id.starts_with("ai:") {
+        return true;
+    }
+    let limit = if env.transport == crate::environments::Transport::Wsl {
+        WSL_STARTUP_RETRY_MAX_SESSION
+    } else {
+        FAILED_REPL_SESSION
+    };
+    (env.repl || env.kind == crate::environments::ShellKind::Repl) && elapsed < limit
 }
 
 #[cfg(test)]
@@ -702,8 +734,13 @@ struct Tab {
     /// Comandos solicitados por paneles mientras una shell nueva todavía está
     /// ejecutando su inicializador. Se liberan después del marcador de
     /// limpieza, cuando ya acepta entrada; sin esta cola el primer script
-    /// podía perderse al cambiar de cmd a PowerShell (o a otra shell).
-    pending_commands: VecDeque<String>,
+    /// podía perderse al cambiar de cmd a PowerShell (o a otra shell). Cada
+    /// una con lo que se teclea y la orden de verdad (para la pestaña).
+    pending_commands: VecDeque<(String, String)>,
+    /// La cola se está escribiendo desde otro hilo, a la espera de que la
+    /// shell recién abierta se calle: lo que escriba un panel mientras tanto
+    /// se pone detrás, para no adelantarse.
+    flushing_commands: bool,
 }
 
 impl Tab {
@@ -745,6 +782,7 @@ impl Tab {
             explorer_dir: None,
             awaiting_pause: false,
             pending_commands: VecDeque::new(),
+            flushing_commands: false,
         }
     }
 
@@ -791,6 +829,11 @@ pub struct TabManager {
     /// panel. Los comandos escritos por el usuario ya pasan por el frontend;
     /// las acciones de Biblioteca/Proyectos llegan directamente aquí.
     app_handle: Mutex<Option<AppHandle>>,
+    /// El propio gestor, para escribir desde otro hilo la cola de una pestaña
+    /// recién abierta cuando su shell ya se ha callado (ver
+    /// [`flush_pending_commands`](Self::flush_pending_commands)). Vacío en los
+    /// tests de unidad, que no lo envuelven en un `Arc`.
+    self_ref: Mutex<std::sync::Weak<TabManager>>,
 }
 
 impl TabManager {
@@ -801,14 +844,16 @@ impl TabManager {
             viewport_saver: ViewportSaver::default(),
             outbound_lock: Mutex::new(()),
             app_handle: Mutex::new(None),
+            self_ref: Mutex::new(std::sync::Weak::new()),
         }
     }
 
     /// Conecta el emisor de eventos una vez que Tauri ha creado el estado.
     /// Mantenerlo opcional conserva los tests unitarios del gestor sin una
     /// ventana real.
-    pub fn attach_app(&self, app: &AppHandle) {
+    pub fn attach_app(self: &Arc<Self>, app: &AppHandle) {
         *self.app_handle.lock() = Some(app.clone());
+        *self.self_ref.lock() = Arc::downgrade(self);
     }
 
     pub fn viewport(&self) -> Viewport {
@@ -1100,22 +1145,23 @@ impl TabManager {
         }
 
         let spawn_dir = spawn_cwd::resolve_spawn_cwd(initial_cwd, env, &paths::home_cwd());
-        let viewport = {
+        let (viewport, spawn_exact_width) = {
             let mut registry = self.registry.lock();
             match registry.find_mut(tab_id) {
                 Some(tab) => {
-                    // Solo una IA hereda el ancho exacto de la anterior: una
-                    // shell que sustituye a una IA a pantalla completa vuelve
-                    // a la reserva. Si naciera con el ancho estrecho, al
-                    // ensancharla después su prompt quedaba descolocado.
-                    tab.exact_width = tab.exact_width && env.id.starts_with("ai:");
+                    // Solo una IA (o Python en Windows) hereda el ancho exacto
+                    // de la anterior: una shell que sustituye a una IA a
+                    // pantalla completa vuelve a la reserva. Si naciera con el
+                    // ancho estrecho, al ensancharla después su prompt quedaba
+                    // descolocado.
+                    tab.exact_width = tab.exact_width && keeps_exact_width(&env.id);
                     tab.viewport = Viewport {
                         cols: interactive_cols(tab.viewport.cols, tab.exact_width),
                         rows: tab.viewport.rows,
                     };
-                    tab.viewport
+                    (tab.viewport, tab.exact_width)
                 }
-                None => self.viewport(),
+                None => (self.viewport(), false),
             }
         };
 
@@ -1144,6 +1190,18 @@ impl TabManager {
                 "sideloadedConpty": crate::pty::sideloaded_conpty().map(|path| path.to_string_lossy().to_string()),
             })
         );
+        // La guía de WTerminal para la IA de esta pestaña, al abrir su sesión
+        // (`agentTabGuide`, 14-11). Después del log: es larga y no aporta.
+        let mut args = args;
+        args.extend(crate::environments::agent_guide::tab_args(&env.id));
+        // La clave guardada de una IA (Grok, Codex…), si la hay: se pasa como
+        // su variable de entorno. No se registra en el log.
+        let mut extra_env = crate::environments::ai_keys::spawn_env(&env.id);
+        // Una IA puede manejar WTerminal con `wterminal --ctl` (14-11): la
+        // dirección, la llave y su pestaña, solo para las IA.
+        if env.id.starts_with("ai:") {
+            extra_env.extend(crate::app::agent_control::spawn_env(Some(tab_id)));
+        }
         let (spawn_tx, spawn_rx) = std::sync::mpsc::sync_channel(1);
         let spawn_thread = std::thread::Builder::new()
             .name(format!("pty-spawn-{tab_id}"))
@@ -1155,6 +1213,10 @@ impl TabManager {
                         args: &args,
                         cwd: &cwd,
                         viewport,
+                        // Una IA o Python que hereda el ancho exacto agrupa su
+                        // salida desde el primer byte (`PtySession::set_coalesce`).
+                        coalesce: spawn_exact_width,
+                        extra_env: &extra_env,
                     },
                     move |event| {
                         manager.on_pty_event(&app_for_data, &tab_for_data, generation, event)
@@ -1318,8 +1380,10 @@ impl TabManager {
                 // Una IA pudo recibir su ancho exacto mientras arrancaba (el
                 // aviso del frontend llegó a la sesión anterior): se aplica
                 // ahora a la nueva. Con el mismo tamaño ConPTY no hace nada.
-                if exact_width {
-                    if let Some(session) = new_session {
+                // La agrupación de la salida sigue al mismo modo.
+                if let Some(session) = new_session {
+                    session.set_coalesce(exact_width);
+                    if exact_width {
                         let _ = session.resize(viewport);
                     }
                 }
@@ -2045,14 +2109,9 @@ impl TabManager {
         // era 3 s) y la pestaña se cerró llevándose el mensaje. Dentro de WSL
         // el plazo es el del arranque de WSL: `wsl.exe` se rinde a los ~20 s y
         // la pestaña del REPL desaparecía sin decir por qué.
-        let failed_repl_start = startup_env.as_ref().is_some_and(|env| {
-            let limit = if env.transport == crate::environments::Transport::Wsl {
-                WSL_STARTUP_RETRY_MAX_SESSION
-            } else {
-                FAILED_REPL_SESSION
-            };
-            (env.repl || env.kind == crate::environments::ShellKind::Repl) && elapsed < limit
-        });
+        let failed_repl_start = startup_env
+            .as_ref()
+            .is_some_and(|env| failed_program_start(env, elapsed));
         if code.unwrap_or(-1) != 0
             && (elapsed < FAILED_SESSION || !startup_output.trim().is_empty() || failed_repl_start)
         {
@@ -2182,16 +2241,28 @@ impl TabManager {
     /// terminal wine cmd /c ver". Un Enter previo cierra la pausa pendiente
     /// antes de escribir nada.
     pub fn write_command(&self, tab_id: &str, command: &str) -> bool {
+        self.write_command_shown(tab_id, command, command)
+    }
+
+    /// Como [`write_command`](Self::write_command), con `shown` como la orden
+    /// que la pestaña apunta (la de verdad, sin el marco de cabecera y pie).
+    ///
+    /// La pestaña no ve el Intro de lo que escribe un panel: sin este aviso
+    /// (`pty-command-written`) la orden no contaba como orden, y el chat y el
+    /// consejero hablaban de la que el usuario tecleó antes (13-11, «epo n»).
+    /// Una orden encolada mientras arranca la shell avisa al salir de la cola
+    /// (la pestaña la ata al prompt siguiente, que es donde se teclea).
+    pub fn write_command_shown(&self, tab_id: &str, command: &str, shown: &str) -> bool {
         let (pending, queued) = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
                 return false;
             };
             let pending = std::mem::replace(&mut tab.awaiting_pause, false);
-            if tab.initializing {
+            if tab.initializing || tab.flushing_commands {
                 let prefix = if pending { "\r" } else { "" };
                 tab.pending_commands
-                    .push_back(format!("{prefix}{command}\r"));
+                    .push_back((format!("{prefix}{command}\r"), shown.to_string()));
                 (pending, true)
             } else {
                 (pending, false)
@@ -2206,7 +2277,35 @@ impl TabManager {
         }
         self.prepare_command_resize(tab_id, command);
         let prefix = if pending { "\r" } else { "" };
-        self.write(tab_id, &format!("{prefix}{command}\r"))
+        let data = format!("{prefix}{command}\r");
+        self.hold_action_echo(tab_id, &data);
+        // Antes de escribir: el aviso llega a la pestaña antes que el eco y
+        // que la marca de fin de la orden (mismo canal de eventos, en orden).
+        self.emit_command_written(tab_id, shown);
+        self.write(tab_id, &data)
+    }
+
+    fn emit_command_written(&self, tab_id: &str, shown: &str) {
+        if let Some(app) = self.app_handle.lock().clone() {
+            let _ = app.emit(
+                "pty-command-written",
+                serde_json::json!({ "tabId": tab_id, "command": shown.trim() }),
+            );
+        }
+    }
+
+    /// Con `actionCommandsAtOnce`, la pestaña retiene lo que repinta la shell
+    /// mientras recibe la orden y lo entrega junto al llegar su Intro (uno por
+    /// cada `\r` escrito: el de la pausa anterior y el de la orden). Ver
+    /// [`PtySession::hold_echo`]. Encendido de fábrica desde el 15-11; apagado,
+    /// nada cambia.
+    fn hold_action_echo(&self, tab_id: &str, data: &str) {
+        if !crate::preferences::current().action_commands_at_once {
+            return;
+        }
+        if let Some(session) = self.session_of(tab_id) {
+            session.hold_echo(ACTION_ECHO_HOLD_MAX, data.matches('\r').count());
+        }
     }
 
     /// Amplía la ConPTY antes de que una acción de panel entre en la shell.
@@ -2276,27 +2375,109 @@ impl TabManager {
     /// su inicializador. Se llama justo después de emitir el marcador de
     /// limpieza/banner; `write` conserva el orden de la cola y evita que el
     /// primer script se pierda en la transición de entorno.
+    ///
+    /// Con `actionCommandsAtOnce` no se escriben aquí, sino desde otro hilo
+    /// cuando la shell se calla: justo tras el marcador aún está pintando su
+    /// prompt, y ese salto de línea soltaba la retención del eco antes de
+    /// tiempo; además PSReadLine, que aún no leía, repintaba la orden tecla a
+    /// tecla. Un `.ps1` de la Biblioteca lanzado desde cmd abre una pestaña
+    /// de PowerShell y se veía escribir letra a letra (14-11).
     fn flush_pending_commands(&self, tab_id: &str) {
+        let deferred = crate::preferences::current().action_commands_at_once;
+        let manager = self.self_ref.lock().upgrade();
         let commands = {
             let mut registry = self.registry.lock();
             let Some(tab) = registry.find_mut(tab_id) else {
                 return;
             };
-            if tab.initializing {
+            if tab.initializing || tab.flushing_commands || tab.pending_commands.is_empty() {
                 return;
             }
-            tab.pending_commands.drain(..).collect::<Vec<_>>()
+            if deferred && manager.is_some() {
+                tab.flushing_commands = true;
+                Vec::new()
+            } else {
+                tab.pending_commands.drain(..).collect::<Vec<_>>()
+            }
         };
-        for command in commands {
-            self.prepare_command_resize(tab_id, &command);
-            if !self.write(tab_id, &command) {
-                log_warn!(
-                    "No se pudo liberar un comando de panel encolado",
-                    serde_json::json!({ "tabId": tab_id })
-                );
+        if let (true, Some(manager)) = (deferred, manager) {
+            let tab = tab_id.to_string();
+            let spawned = std::thread::Builder::new()
+                .name(format!("pty-queue-{tab_id}"))
+                .spawn(move || manager.flush_when_quiet(&tab));
+            if spawned.is_err() {
+                // Sin hilo, como siempre: ahora mismo y en orden.
+                if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                    tab.flushing_commands = false;
+                }
+                self.flush_pending_commands_now(tab_id);
+            }
+            return;
+        }
+        for (command, shown) in commands {
+            if !self.write_queued_command(tab_id, &command, &shown) {
                 break;
             }
         }
+    }
+
+    /// Vacía la cola ahora mismo, en orden.
+    fn flush_pending_commands_now(&self, tab_id: &str) {
+        let commands = match self.registry.lock().find_mut(tab_id) {
+            Some(tab) => tab.pending_commands.drain(..).collect::<Vec<_>>(),
+            None => return,
+        };
+        for (command, shown) in commands {
+            if !self.write_queued_command(tab_id, &command, &shown) {
+                break;
+            }
+        }
+    }
+
+    /// Espera a que la shell recién abierta deje de escribir (su prompt ya
+    /// está pintado y lee teclas) y entonces escribe la cola, una a una. Lo
+    /// que llegue mientras se pone detrás (`flushing_commands`).
+    fn flush_when_quiet(&self, tab_id: &str) {
+        if let Some(session) = self.session_of(tab_id) {
+            session.wait_output_quiet(QUEUED_COMMAND_QUIET, QUEUED_COMMAND_QUIET_MAX);
+        }
+        loop {
+            let next = {
+                let mut registry = self.registry.lock();
+                let Some(tab) = registry.find_mut(tab_id) else {
+                    return;
+                };
+                let next = tab.pending_commands.pop_front();
+                if next.is_none() {
+                    tab.flushing_commands = false;
+                }
+                next
+            };
+            let Some((command, shown)) = next else {
+                return;
+            };
+            if !self.write_queued_command(tab_id, &command, &shown) {
+                if let Some(tab) = self.registry.lock().find_mut(tab_id) {
+                    tab.flushing_commands = false;
+                    tab.pending_commands.clear();
+                }
+                return;
+            }
+        }
+    }
+
+    fn write_queued_command(&self, tab_id: &str, command: &str, shown: &str) -> bool {
+        self.prepare_command_resize(tab_id, command);
+        self.hold_action_echo(tab_id, command);
+        self.emit_command_written(tab_id, shown);
+        if self.write(tab_id, command) {
+            return true;
+        }
+        log_warn!(
+            "No se pudo liberar un comando de panel encolado",
+            serde_json::json!({ "tabId": tab_id })
+        );
+        false
     }
 
     /// Marca (o desmarca) que la pestaña se ha quedado esperando el Enter de
@@ -2331,6 +2512,11 @@ impl TabManager {
         if let Some(tab) = self.registry.lock().find_mut(tab_id) {
             tab.viewport_confirmed = true;
             tab.exact_width = exact;
+            // A pantalla completa (IA, Python, vim) la salida se agrupa; con
+            // la reserva horizontal de una shell, no (`PtySession::set_coalesce`).
+            if let Some(session) = &tab.session {
+                session.set_coalesce(exact);
+            }
         }
         self.resize(app, tab_id, cols, rows);
     }
@@ -2698,6 +2884,16 @@ fn interactive_cols(cols: u16, exact: bool) -> u16 {
     }
 }
 
+/// Entornos que, al sustituir a otro con el ancho visible, nacen ya con él:
+/// las IA y, en Windows, el REPL de Python (con `pyreadline3` repinta toda la
+/// ventana a cada tecla y con 1024 columnas el eco iba a 2-3 letras por
+/// segundo). El frontend decide si lo pide (`pythonReplVisibleWidth`,
+/// `full-screen-app.ts`); si su aviso de ancho exacto llega antes que el
+/// cambio de entorno, aquí no se pierde.
+fn keeps_exact_width(env_id: &str) -> bool {
+    env_id.starts_with("ai:") || (cfg!(windows) && env_id == "lang:python")
+}
+
 pub fn valid_viewport(cols: i64, rows: i64) -> Option<Viewport> {
     if (1..=MAX_TERMINAL_COLS).contains(&cols) && (1..=500).contains(&rows) {
         Some(Viewport {
@@ -2712,6 +2908,32 @@ pub fn valid_viewport(cols: i64, rows: i64) -> Option<Viewport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn una_ia_que_falla_conserva_su_pestaña_tarde_lo_que_tarde() {
+        let ia = Environment {
+            id: "ai:grok".into(),
+            repl: true,
+            ..Environment::default()
+        };
+        let repl = Environment {
+            id: "lang:elm".into(),
+            repl: true,
+            ..Environment::default()
+        };
+        let shell = Environment {
+            id: "cmd".into(),
+            ..Environment::default()
+        };
+        // Grok en la build 66: pidió la clave a los 16 s.
+        assert!(failed_program_start(&ia, Duration::from_secs(16)));
+        assert!(failed_program_start(&ia, Duration::from_secs(3600)));
+        // Un REPL sigue con su límite de arranque.
+        assert!(failed_program_start(&repl, Duration::from_secs(3)));
+        assert!(!failed_program_start(&repl, Duration::from_secs(16)));
+        // Una shell no entra aquí (tiene su propio límite, `FAILED_SESSION`).
+        assert!(!failed_program_start(&shell, Duration::from_secs(1)));
+    }
 
     #[test]
     fn la_pista_de_cursor_sigue_el_repintado_de_conpty() {
@@ -2858,6 +3080,22 @@ mod tests {
     }
 
     #[test]
+    fn las_ia_y_python_en_windows_heredan_el_ancho_visible() {
+        assert!(keeps_exact_width("ai:claude"));
+        assert_eq!(keeps_exact_width("lang:python"), cfg!(windows));
+        // Las shells y el resto de REPL vuelven a la reserva.
+        for id in [
+            "cmd",
+            "pwsh",
+            "lang:node",
+            "lang:ipython",
+            "wsl:Ubuntu:lang:python",
+        ] {
+            assert!(!keeps_exact_width(id), "{id}");
+        }
+    }
+
+    #[test]
     fn la_sonda_de_cursor_inicial_se_consume_sin_borrar_el_resto() {
         let mut data = format!("{STARTUP_CURSOR_QUERY}C:\\Users\\Admin>");
         assert!(remove_startup_query(&mut data, STARTUP_CURSOR_QUERY));
@@ -2964,6 +3202,7 @@ mod tests {
             explorer_dir: None,
             awaiting_pause: false,
             pending_commands: VecDeque::new(),
+            flushing_commands: false,
         });
         assert!(!registry.find("tab-1").unwrap().ready);
         assert!(registry.find("tab-2").is_none());
@@ -3007,16 +3246,42 @@ mod tests {
             explorer_dir: None,
             awaiting_pause: false,
             pending_commands: VecDeque::new(),
+            flushing_commands: false,
         });
         drop(registry);
 
-        assert!(manager.write_command("tab-queue", "echo script.ps1"));
+        assert!(manager.write_command_shown(
+            "tab-queue",
+            "marco echo script.ps1",
+            "echo script.ps1"
+        ));
+        {
+            let registry = manager.registry.lock();
+            let tab = registry.find("tab-queue").expect("pestaña encolada");
+            assert_eq!(tab.pending_commands.len(), 1);
+            // Lo que se teclea y la orden de verdad, para avisar a la pestaña.
+            assert_eq!(
+                tab.pending_commands
+                    .front()
+                    .map(|(data, shown)| (data.as_str(), shown.as_str())),
+                Some(("marco echo script.ps1\r", "echo script.ps1"))
+            );
+        }
+        // Mientras otro hilo vacía la cola de una shell recién abierta, lo que
+        // escriba un panel se pone detrás en vez de adelantarse.
+        {
+            let mut registry = manager.registry.lock();
+            let tab = registry.find_mut("tab-queue").expect("pestaña encolada");
+            tab.initializing = false;
+            tab.flushing_commands = true;
+        }
+        assert!(manager.write_command("tab-queue", "echo segundo"));
         let registry = manager.registry.lock();
         let tab = registry.find("tab-queue").expect("pestaña encolada");
-        assert_eq!(tab.pending_commands.len(), 1);
+        assert_eq!(tab.pending_commands.len(), 2);
         assert_eq!(
-            tab.pending_commands.front().map(String::as_str),
-            Some("echo script.ps1\r")
+            tab.pending_commands.back().map(|(data, _)| data.as_str()),
+            Some("echo segundo\r")
         );
     }
 
@@ -3072,6 +3337,7 @@ mod tests {
             explorer_dir: None,
             awaiting_pause: false,
             pending_commands: VecDeque::new(),
+            flushing_commands: false,
         };
         let value = serde_json::to_value(tab.summary()).unwrap();
         assert_eq!(value["id"], serde_json::json!("tab-3"));

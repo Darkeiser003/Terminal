@@ -80,6 +80,11 @@ class AppStore {
 
     /** El explorador lateral está a la vista. */
     explorerVisible = $state(false);
+    /** El chat lateral con los agentes de IA está a la vista (a la derecha). */
+    agentChatVisible = $state(false);
+    /** Pregunta que el modo consejero deja preparada en el chat (sin
+     *  mandarla): el chat la recoge al abrirse y la vacía. */
+    agentChatDraft = $state<{ text: string; withContext: boolean } | null>(null);
 
     /** Nombres puestos a mano. Viven en la interfaz porque el backend reescribe
      *  la etiqueta al cambiar de shell, y ese cambio no debe borrar el nombre. */
@@ -626,10 +631,10 @@ class AppStore {
 
     /** Vuelve a los valores de fábrica. El backend es quien decide cuáles son:
      *  aquí no hay una segunda copia que se pudiera desincronizar. */
-    async resetPreferences(): Promise<void> {
+    async resetPreferences(keys?: string[]): Promise<void> {
         const operation = this.preferencesSaveQueue.then(async () => {
             const before = this.preferences;
-            const payload = await api.resetPreferences();
+            const payload = await api.resetPreferences(keys);
             await this.syncWindowDecorations(payload.preferences, before);
             this.applyPayload(payload);
             if (typeof window !== 'undefined') {

@@ -19,13 +19,15 @@
     import { settingsSearchVisibility, showSettingsIndex, visibleSettingsRows, type SettingsBlock } from "../lib/settings-search";
     import {
         normalizeShortcut,
+        shortcutConflicts,
         shortcutFromEvent,
         SHORTCUT_DEFINITIONS,
         SHORTCUT_PREFERENCE_KEYS,
         type ShortcutPreferenceKey,
     } from "../lib/shortcuts";
-    import type { CustomTheme, ToolchainStoreCategory, PathIntegrationStatus, PluginInfo, Preferences, ShellAssistComponent, ShellAssistStatus, StorageLocationInfo, ThemePreset, ToolchainStoreLocation, ToolchainStoreStatus, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
+    import type { AiKeyStored, CustomTheme, ToolchainStoreCategory, PathIntegrationStatus, PluginInfo, Preferences, ShellAssistComponent, ShellAssistStatus, StorageLocationInfo, ThemePreset, ToolchainStoreLocation, ToolchainStoreStatus, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
     import Panel from "./Panel.svelte";
+    import SettingsResetDialog from "./SettingsResetDialog.svelte";
     import { ANSI_COLOR_KEYS, clampUiScale, DEFAULT_ANSI_COLORS, effectivePalette, effectiveUiScale, themePreferencePatch, UI_SCALE_MAX, UI_SCALE_MIN } from "../lib/theme";
 
     type Section = "appearance" | "terminal" | "behavior" | "about";
@@ -57,6 +59,20 @@
      *  segundo clic lanzaba otra escritura cruzada con la primera y dejaba
      *  entradas de WTerminal sueltas en el PATH del usuario. */
     let pathIntegrationBusy = $state(false);
+    /** Las claves de IA guardadas (solo el nombre de su variable): se leen al
+     *  abrir la sección de Terminal y se pueden borrar desde aquí. */
+    let savedAiKeys = $state<AiKeyStored[]>([]);
+    let savedAiKeysLoaded = false;
+    $effect(() => {
+        if (section !== "terminal" || savedAiKeysLoaded || app.appInfo?.platform !== "windows") return;
+        savedAiKeysLoaded = true;
+        void api.aiKeyList().then((items) => { savedAiKeys = items; }).catch(() => undefined);
+    });
+    async function clearAiKey(item: AiKeyStored): Promise<void> {
+        if (!item.envIds[0]) return;
+        await api.aiKeyClear(item.envIds[0]);
+        savedAiKeys = await api.aiKeyList();
+    }
     /** Carpeta propia de cachés. Medir tamaños recorre carpetas grandes, así
      *  que se consulta al entrar en Comportamiento, no al abrir el panel. */
     let toolchainStore = $state<ToolchainStoreStatus | null>(null);
@@ -548,8 +564,11 @@
         }, 360);
     }
 
-    async function reset(): Promise<void> {
-        if (saving) return;
+    /** «Restablecer» abre su diálogo: se elige qué apartados (13-11). */
+    let resetDialogOpen = $state(false);
+
+    async function reset(keys: string[], groups: number): Promise<void> {
+        if (saving || !keys.length) return;
         if (autoSaveTimer !== undefined) {
             clearTimeout(autoSaveTimer);
             autoSaveTimer = undefined;
@@ -558,11 +577,12 @@
         saving = true;
         autoSaveState = 'saving';
         try {
-            await app.resetPreferences();
+            await app.resetPreferences(keys);
             draft = app.preferences ? { ...app.preferences } : null;
             statusError = false;
-            status = app.t("settings.resetDone", "Preferencias restablecidas.");
+            status = app.t("settings.resetDoneCount", "Restablecidos {count} apartados.").replace("{count}", String(groups));
             autoSaveState = 'saved';
+            resetDialogOpen = false;
         } catch (cause) {
             statusError = true;
             autoSaveState = 'error';
@@ -1669,6 +1689,253 @@
                             >
                         </span>
                     </label>
+                    {#if app.appInfo?.platform === "windows"}
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-python-visible-width"
+                                bind:checked={draft.pythonReplVisibleWidth}
+                            />
+                            <span>
+                                <strong
+                                    >{app.t(
+                                        "settings.pythonReplVisibleWidth",
+                                        "Python con el ancho visible",
+                                    )}</strong
+                                >
+                                <small
+                                    >{app.t(
+                                        "settings.pythonReplVisibleWidthHint",
+                                        "Python usa el ancho de la ventana y sus líneas largas (un print, la ayuda de help()) se parten en el borde. Apagado, Python cree que tiene 1024 columnas: esas líneas siguen hacia la derecha y hay que desplazarse en horizontal para leerlas, y si tu Python tiene pyreadline3 (llega solo con algunos paquetes) escribir va muy lento. Se aplica al abrir Python.",
+                                    )}</small
+                                >
+                            </span>
+                        </label>
+                    {/if}
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-action-commands-at-once"
+                            bind:checked={draft.actionCommandsAtOnce}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.actionCommandsAtOnce",
+                                    "Escribir de una vez las órdenes de las acciones",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.actionCommandsAtOnceHint",
+                                    "Al instalar, actualizar o lanzar una acción, su orden aparece entera de golpe en vez de verse escribir letra a letra. Apagado, se ve como la repinta la shell.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    {#if app.appInfo?.platform === "windows"}
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-ai-key-offer"
+                                bind:checked={draft.aiKeyOffer}
+                            />
+                            <span>
+                                <strong
+                                    >{app.t(
+                                        "settings.aiKeyOffer",
+                                        "Ofrecer la clave de API cuando una IA la pida",
+                                    )}</strong
+                                >
+                                <small
+                                    >{app.t(
+                                        "settings.aiKeyOfferHint",
+                                        "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda cifrada para tu usuario de Windows y solo se pasa a esa IA.",
+                                    )}</small
+                                >
+                            </span>
+                        </label>
+                        {#if savedAiKeys.length > 0}
+                            <div class="saved-ai-keys" data-testid="settings-ai-keys">
+                                <small>{app.t("settings.aiKeysSaved", "Claves guardadas (cifradas):")}</small>
+                                {#each savedAiKeys as item (item.envVar)}
+                                    <span class="saved-ai-key">
+                                        <code>{item.envVar}</code>
+                                        <button type="button" data-testid="settings-ai-key-clear" data-env-var={item.envVar} onclick={() => void clearAiKey(item)}>
+                                            {app.t("settings.aiKeyClear", "Borrar")}
+                                        </button>
+                                    </span>
+                                {/each}
+                            </div>
+                        {/if}
+                    {/if}
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat"
+                            bind:checked={draft.agentChat}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChat",
+                                    "Chat lateral con los agentes de IA",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatHint",
+                                    "Una barra a la derecha para preguntar a Claude Code, Gemini, Codex, Ollama… sin entrar en su CLI. Se abre con el botón «Chat IA» de arriba, :chat, la paleta o su atajo. Nunca ejecuta nada por su cuenta.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-advisor"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatAdvisor}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatAdvisor",
+                                    "Modo consejero: ofrecer ayuda cuando falla una orden",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatAdvisorHint",
+                                    "Si una orden acaba con error, la pestaña ofrece preguntar al agente con la orden y su salida. Solo lo ofrece: no pregunta ni manda nada sin que pulses. No vale en todas las shells: sí en PowerShell y bash (Git Bash, WSL con bash); en cmd, solo si la orden no existe; no en zsh, fish ni sh (como WSL con zsh), ni dentro de Python, Node u otros REPL. Necesita «Marcar dónde empieza y acaba cada orden».",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-show-agent-chat-button"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.showAgentChatButton}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.showAgentChatButton",
+                                    "Botón «Chat IA» en la barra",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.showAgentChatButtonHint",
+                                    "Muestra arriba el botón que abre y cierra el chat de agentes. Sin él, el chat se abre con :chat, la paleta o su atajo.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-remember"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatRemember}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatRemember",
+                                    "Recordar la conversación del chat",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatRememberHint",
+                                    "Con cada pregunta se manda lo hablado antes en esa conversación (las últimas 6 vueltas), para que el agente lo recuerde. «Nueva conversación» lo borra.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-can-edit"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatCanEdit}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatCanEdit",
+                                    "Dejar que los agentes del chat editen archivos",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatCanEditHint",
+                                    "Apagado, el chat solo ofrece los modos que leen (Manual y Plan): Codex va en solo lectura, Qwen y Gemini en plan, a Copilot se le niegan la shell y escribir, y a Claude Code lo que pide permiso. Encendido, también «Aceptar ediciones» (el de fábrica) y «Auto»: pueden cambiar archivos de la carpeta de la pestaña sin preguntarte; las órdenes que Codex ejecuta en su sandbox también pueden escribir en ella.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-allow-bypass"
+                            disabled={!draft.agentChat || !draft.agentChatCanEdit}
+                            bind:checked={draft.agentChatAllowBypass}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatAllowBypass",
+                                    "Dejar elegir «Omitir permisos» en el chat",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatAllowBypassHint",
+                                    "Peligroso: con ese modo el agente hace todo sin preguntarte, también ejecutar órdenes y borrar archivos (Claude Code con --dangerously-skip-permissions, Codex sin sandbox, Gemini y Qwen en yolo, Copilot con la shell). Nunca es el de fábrica: se elige a mano en el chat, y pide también el ajuste de arriba.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-guide"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatGuide}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatGuide",
+                                    "Dar a los agentes la guía de WTerminal",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatGuideHint",
+                                    "Con cada pregunta del chat va, sin que la veas, una guía corta: que te propongan Entorno y dependencias, las órdenes internas (:shell, :panel, :set…) y los ajustes antes que winget, apt o pip a pelo, y cómo pedir la guía entera. Los modelos locales de Ollama no la reciben. Apagado, la pregunta va sola.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input type="checkbox" data-testid="settings-agent-tab-guide" bind:checked={draft.agentTabGuide} />
+                        <span>
+                            <strong>{app.t("settings.agentTabGuide", "Dar la guía también al abrir la pestaña de una IA")}</strong>
+                            <small>{app.t("settings.agentTabGuideHint", "Una vez, al empezar su sesión: Claude Code y Codex la reciben como instrucciones de arranque (no sale en la conversación); Gemini y Qwen, como su primer mensaje (lo verás y contestarán «Listo»).")}</small>
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input type="checkbox" data-testid="settings-agent-control" bind:checked={draft.agentControl} />
+                        <span>
+                            <strong>{app.t("settings.agentControl", "Dejar que las IA manejen WTerminal")}</strong>
+                            <small>{app.t("settings.agentControlHint", "Las IA que lanza WTerminal (su chat y sus pestañas) pueden usar wterminal --ctl: órdenes internas (:panes, :shell, :panel, :theme…) y acciones de Entorno y dependencias, en una pestaña de shell a la vista. Instalar, desinstalar o cambiar un ajuste te pide permiso; los permisos del chat y la seguridad nunca se pueden tocar así. Se aplica al reiniciar WTerminal.")}</small>
+                        </span>
+                    </label>
                     <label class="check">
                         <input
                             type="checkbox"
@@ -1810,6 +2077,13 @@
                         </span>
                     </label>
                     {#if draft.shellAssist}
+                        <label class="check">
+                            <input type="checkbox" data-testid="settings-offer-shell-assist" bind:checked={draft.offerShellAssist} />
+                            <span>
+                                <strong>{app.t("settings.offerShellAssist", "Ofrecer instalarlo si falta")}</strong>
+                                <small>{app.t("settings.offerShellAssistHint", "Si a la pestaña activa le falta su ayudante (Clink en cmd, PSReadLine en PowerShell, ble.sh en bash de WSL), sale un aviso abajo con «Instalar», «Cerrar esta vez» y «No volver a ofrecer».")}</small>
+                            </span>
+                        </label>
                         <div class="shell-assist-settings" data-testid="settings-shell-assist-shells">
                             {#each shellAssistRows as row (row.key)}
                                 {@const components = shellAssistComponents(row.key)}
@@ -2190,6 +2464,14 @@
                                         }}
                                     >×</button>
                                 </div>
+                                {#if draft[shortcut.key]}
+                                    {@const conflict = shortcutConflicts(shortcut.key, draft)}
+                                    {#if conflict.duplicateOf}
+                                        <small class="shortcut-warning" data-testid={`shortcut-duplicate-${shortcut.key}`}>{app.t("settings.shortcutDuplicate", "También es el atajo de «{other}»: solo funcionará uno.").replace("{other}", app.t(SHORTCUT_DEFINITIONS.find((item) => item.key === conflict.duplicateOf)?.labelKey ?? "", SHORTCUT_DEFINITIONS.find((item) => item.key === conflict.duplicateOf)?.fallback ?? ""))}</small>
+                                    {:else if conflict.shell}
+                                        <small class="shortcut-warning" data-testid={`shortcut-shell-${shortcut.key}`}>{app.t("settings.shortcutShellConflict", "Las shells también usan esta tecla para editar la línea (bash, zsh, PowerShell): dentro de la terminal ganará el atajo.")}</small>
+                                    {/if}
+                                {/if}
                             </label>
                         {/each}
                     </div>
@@ -2411,6 +2693,13 @@
                             <span>{app.t("settings.adminHint", "WTerminal no necesita ser administrador. Las shells TrustedInstaller de NSudo sí: o se reinicia toda la app como administrador, o gsudo o el sudo de Windows piden el UAC solo para esa pestaña.")}</span>
                         </div>
                         <div class="field-hint" data-testid="settings-admin-status" data-launcher={windowsIntegration.nsudoLauncher}>{adminStatus}</div>
+                        <label class="check">
+                            <input type="checkbox" data-testid="settings-offer-gsudo" bind:checked={draft.offerGsudo} />
+                            <span>
+                                <strong>{app.t("settings.offerGsudo", "Ofrecer gsudo si hay NSudo y WTerminal no es administrador")}</strong>
+                                <small>{app.t("settings.offerGsudoHint", "Sale un aviso abajo con «Instalar gsudo», «Cerrar esta vez» y «No volver a ofrecer»: con gsudo, cada pestaña de NSudo pide el UAC solo para ella. No sale si ya hay gsudo o el sudo de Windows en modo «En línea».")}</small>
+                            </span>
+                        </label>
                         {#if !windowsIntegration.elevated}
                             <div class="update-row">
                                 <button data-testid="settings-restart-admin" type="button" class="secondary" disabled={adminRestarting} onclick={restartAsAdmin}>{app.t("settings.restartAsAdmin", "Reiniciar como administrador")}</button>
@@ -2692,7 +2981,7 @@
                     type="button"
                     class="secondary"
                     disabled={saving}
-                    onclick={reset}
+                    onclick={() => { resetDialogOpen = true; }}
                 >
                     <span data-testid="settings-reset-label">{app.t("settings.reset", "Restablecer")}</span>
                 </button>
@@ -2700,6 +2989,14 @@
         </form>
     {/if}
 </Panel>
+
+{#if resetDialogOpen}
+    <SettingsResetDialog
+        busy={saving}
+        onCancel={() => { resetDialogOpen = false; }}
+        onConfirm={(keys, groups) => void reset(keys, groups)}
+    />
+{/if}
 
 <style>
     .ui-scale-value {
@@ -2807,9 +3104,13 @@
     /* Las pestañas se compactan por el ancho real del panel. En una ventana
        estrecha se muestran en dos o una columna y el texto puede partirse sin
        invadir la pestaña vecina ni provocar scroll horizontal. */
+    /* Ninguna columna baja de su palabra más larga: con `minmax(0, 1fr)` y
+       `overflow-wrap: anywhere`, al 150 % o más «Comportamiento» se partía en
+       «Comportamien» / «to» aunque a las otras pestañas les sobrara sitio.
+       `break-word` solo parte una palabra que no cabe ni sola en su fila. */
     .tabs {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(min-content, 1fr));
         gap: 4px;
         padding: 7px var(--space-min, 6px);
         border-bottom: 1px solid var(--border);
@@ -2820,7 +3121,7 @@
         min-width: 0;
         padding: 7px 5px;
         line-height: 1.15;
-        overflow-wrap: anywhere;
+        overflow-wrap: break-word;
         white-space: normal;
         border: 1px solid transparent;
         border-radius: 4px;
@@ -2833,13 +3134,13 @@
 
     @container (max-width: 480px) {
         .tabs {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-columns: repeat(2, minmax(min-content, 1fr));
         }
     }
 
     @container (max-width: 300px) {
         .tabs {
-            grid-template-columns: 1fr;
+            grid-template-columns: minmax(0, 1fr);
         }
     }
 
@@ -3180,6 +3481,22 @@
         cursor: pointer;
     }
 
+    /* Las claves de IA guardadas, bajo su casilla: solo el nombre de la
+       variable y un botón para borrarla. */
+    .saved-ai-keys {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 12px;
+        margin: -2px 0 4px 26px;
+    }
+
+    .saved-ai-key {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+
     .check span {
         display: flex;
         flex-direction: column;
@@ -3239,6 +3556,13 @@
         display: flex;
         align-items: center;
         gap: 4px;
+    }
+
+    /* Un atajo que choca con la shell o con otro atajo: se avisa, no se
+       impide. */
+    .shortcut-warning {
+        color: var(--warning, #f5a524);
+        font-size: 11px;
     }
 
     .shortcut-control :global(input) {

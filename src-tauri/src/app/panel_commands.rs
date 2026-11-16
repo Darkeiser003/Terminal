@@ -806,9 +806,13 @@ pub fn scripts_run(
                 )
             }),
         );
-    let decorated = crate::console_ui::decorate(&command, &notice, env.kind, false, &t);
+    let decorated =
+        crate::console_ui::decorate(&command, &notice, env.kind, env.transport, false, &t);
 
-    if !write_command(&state, &target_tab, &decorated) {
+    if !state
+        .tabs
+        .write_command_shown(&target_tab, &decorated, &command)
+    {
         return ActionResult::failed_t("error.writeFailed", "No se pudo escribir en la terminal.");
     }
     ActionResult {

@@ -360,6 +360,19 @@ function Write-Step ($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
 function Write-Ok   ($Message) { Write-Host "    OK: $Message" -ForegroundColor Green }
+# Las últimas líneas de la última orden nativa capturada (Invoke-Native
+# -CaptureOutput). Esa salida se enseña con Out-Host, que va a la consola y no
+# a los flujos de PowerShell: la build larga por etapas, que redirige `*>&1` a
+# su registro con la consola oculta, la perdía. La 59 (13-11) cayó en «Compilando
+# el binario» sin una sola línea del compilador; repetida a mano, compiló.
+function Write-NativeOutputTail([int]$Lines = 80) {
+    $text = [string]$script:LastNativeOutput
+    if ([string]::IsNullOrWhiteSpace($text)) { return }
+    $all = $text -split "`r?`n"
+    $tail = $all | Select-Object -Last $Lines
+    Write-Host "    --- últimas $($tail.Count) líneas de la salida ($($all.Count) en total) ---"
+    foreach ($line in $tail) { Write-Host "    | $line" }
+}
 function Write-Warn ($Message) { Write-Host "    AVISO: $Message" -ForegroundColor Yellow }
 function Write-Err  ($Message) { Write-Host "    ERROR: $Message" -ForegroundColor Red }
 
@@ -1993,7 +2006,10 @@ if ($Installer) {
     # entregar una aplicación sin su loader nativo.
     Write-Step 'Compilando el binario Windows antes del instalador'
     $code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--no-bundle')
-    if ($code -ne 0) { throw "La compilacion del binario fallo (codigo $code)." }
+    if ($code -ne 0) {
+        Write-NativeOutputTail
+        throw "La compilacion del binario fallo (codigo $code)."
+    }
     Ensure-WebView2Loader | Out-Null
 
     Write-Step "Empaquetando (Tauri + instalador NSIS, WebView2 $WebView2)"
@@ -2017,7 +2033,10 @@ if ($Installer) {
     # pero se pasa igualmente para que la intención se lea aquí.
     $code = Invoke-TauriBuild @('run', 'tauri', '--', 'build', '--no-bundle')
 }
-if ($code -ne 0) { throw "La compilacion fallo (codigo $code)." }
+if ($code -ne 0) {
+    Write-NativeOutputTail
+    throw "La compilacion fallo (codigo $code)."
+}
 
 $installerPath = $null
 if ($Installer) {
@@ -2742,6 +2761,19 @@ if (-not $Fast) {
         Write-Ok "Contenido anterior de release\ apartado en $staleArchive ($($stale.Count) elementos)"
     }
 }
+# Mientras la build no termine bien, release\ no es publicable. Si se corta a
+# mitad de la validación (la VM cayó con 0x124 en las largas 45 y 52), el aviso
+# se queda y assemble-release.mjs y publish-github-release.mjs se niegan a
+# usarla; antes quedaban binarios firmados sin validar y sin ninguna marca. Se
+# quita al final si no hubo validaciones pendientes.
+$script:InProgressNote = $null
+if (-not $Fast) {
+    $script:InProgressNote = Join-Path $releaseOut 'NO-PUBLICAR.txt'
+    Set-Content -LiteralPath $script:InProgressNote -Encoding UTF8 -Value @(
+        "WTerminal $version · $(Get-Date -Format 'yyyy-MM-dd HH:mm')",
+        'Build en curso: sus validaciones no han terminado. Si la build ya no corre, se cortó a mitad: no la publiques ni la repartas.'
+    )
+}
 $zipSuffix = if ($Fast) { '-dev' } else { '' }
 $zipPath = Join-Path $releaseOut "WTerminal-Unpacked-$version$zipSuffix.zip"
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
@@ -3058,6 +3090,10 @@ if ($script:PostBuildIssues.Count -gt 0) {
     }
     Write-Host 'El código de salida es 1 para que CI no ignore estos diagnósticos.' -ForegroundColor Yellow
     exit 1
+}
+# Todo en verde: fuera el aviso de build en curso.
+if ($script:InProgressNote -and (Test-Path -LiteralPath $script:InProgressNote -PathType Leaf)) {
+    Remove-Item -LiteralPath $script:InProgressNote -Force
 }
 } finally {
     try {

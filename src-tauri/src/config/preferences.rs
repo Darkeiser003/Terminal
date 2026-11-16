@@ -10,6 +10,12 @@ use serde_json::{Map, Value};
 
 const DEFAULT_SETTINGS: &str = include_str!("../../default_settings.toml");
 
+/// El texto de `default_settings.toml`, con sus comentarios: la guía de los
+/// agentes de IA explica cada ajuste con ellos (`agent_guide`).
+pub fn default_settings_text() -> &'static str {
+    DEFAULT_SETTINGS
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Palette {
     pub background: &'static str,
@@ -480,6 +486,9 @@ pub struct Preferences {
     /// No toca la compatibilidad del ejecutable; si se cancela el aviso, la
     /// app sigue abierta sin elevar.
     pub start_as_admin: bool,
+    /// Ofrecer instalar gsudo cuando hay NSudo y WTerminal no es
+    /// administrador (14-11). Encendido; «No volver a ofrecer» lo apaga.
+    pub offer_gsudo: bool,
     pub manual_aliases_text: String,
     pub favorite_repl_ids: String,
     pub hidden_environment_ids: String,
@@ -511,6 +520,15 @@ pub struct Preferences {
     pub shortcut_ui_scale_up: String,
     pub shortcut_ui_scale_down: String,
     pub shortcut_ui_scale_reset: String,
+    /// Atajos sin tecla de fábrica (12-11): los asigna el usuario en Ajustes.
+    pub shortcut_close_tab: String,
+    pub shortcut_rename_tab: String,
+    pub shortcut_copy_last_output: String,
+    pub shortcut_save_terminal_output: String,
+    pub shortcut_terminal_font_up: String,
+    pub shortcut_terminal_font_down: String,
+    pub shortcut_terminal_font_reset: String,
+    pub shortcut_toggle_agent_chat: String,
     pub theme_id: String,
     pub accent_color: String,
     pub ui_background_color: String,
@@ -553,6 +571,49 @@ pub struct Preferences {
     pub terminal_links: bool,
     /// Pedir confirmación, con el destino a la vista, antes de abrir uno.
     pub terminal_links_confirm: bool,
+    /// Windows: el REPL de Python usa el ancho visible y no la reserva de
+    /// 1024 columnas. Con `pyreadline3` repinta toda la ventana a cada tecla
+    /// y con la reserva el eco iba a 2-3 letras por segundo.
+    pub python_repl_visible_width: bool,
+    /// Las órdenes que escriben las acciones (instalar, actualizar…) salen de
+    /// una vez en vez de verse escribir poco a poco. La shell (Clink,
+    /// PSReadLine, ble.sh) repinta la línea a cada tecla; con esto la pestaña
+    /// retiene esa salida hasta el Intro y la pinta junta. De fábrica, no.
+    pub action_commands_at_once: bool,
+    /// Cuando una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de
+    /// API, la pestaña ofrece meterla (`environments::ai_keys`).
+    pub ai_key_offer: bool,
+    /// El chat lateral con los agentes de IA (`environments::agent_chat`).
+    pub agent_chat: bool,
+    /// Al fallar una orden, la pestaña ofrece preguntar al agente con su
+    /// contexto (nunca pregunta sola). De fábrica, encendido (13-11).
+    pub agent_chat_advisor: bool,
+    /// El botón «Chat» de la barra superior, que abre y cierra el chat de
+    /// agentes. Sin él, el chat se abre con `:chat`, la paleta o su atajo.
+    pub show_agent_chat_button: bool,
+    /// El chat manda con cada pregunta lo hablado antes en esa conversación
+    /// (las últimas vueltas), para que el agente lo recuerde (13-11).
+    pub agent_chat_remember: bool,
+    /// Los agentes del chat pueden editar la carpeta de la pestaña (Codex con
+    /// `workspace-write`, Qwen con `auto-edit`, Claude Code con
+    /// `acceptEdits`). De fábrica, apagado: solo leen (13-11, Romen). Desde
+    /// el 14-11 deja elegir en el chat los modos que editan.
+    pub agent_chat_can_edit: bool,
+    /// Deja elegir «Omitir permisos» en el chat (14-11): el agente hace todo
+    /// sin preguntar, órdenes incluidas. Apagado; pide también
+    /// `agent_chat_can_edit`.
+    pub agent_chat_allow_bypass: bool,
+    /// Con cada pregunta del chat va, oculta, la guía corta de WTerminal para
+    /// el agente (`environments::agent_guide`): que proponga las funciones de
+    /// WTerminal antes que órdenes del sistema (14-11). Encendido.
+    pub agent_chat_guide: bool,
+    /// Al abrir la pestaña de una IA, su guía de WTerminal (14-11): Claude
+    /// Code y Codex como instrucciones de arranque; Gemini y Qwen como primer
+    /// mensaje. Encendido.
+    pub agent_tab_guide: bool,
+    /// Las IA que WTerminal lanza pueden manejarlo con `wterminal --ctl`
+    /// (14-11); lo que cambie el equipo o los ajustes pide permiso. Encendido.
+    pub agent_control: bool,
     /// Cuántas líneas avanza una muesca de la rueda. xterm usa 1 de fábrica,
     /// que en un historial largo obliga a girar sin parar.
     pub terminal_scroll_sensitivity: i64,
@@ -628,6 +689,9 @@ pub struct Preferences {
     /// de zsh). Solo actúa si esa herramienta está instalada. Ver
     /// `terminal::shell_assist`.
     pub shell_assist: bool,
+    /// Ofrecer instalar el ayudante de la shell (Clink, PSReadLine, ble.sh…)
+    /// cuando a la pestaña activa le falta (14-11). Encendido.
+    pub offer_shell_assist: bool,
     /// Lo mismo, shell por shell: con `shell_assist` activo, cada una se
     /// puede desactivar sin tocar las demás.
     pub shell_assist_cmd: bool,
@@ -887,23 +951,59 @@ fn bool_or_default(value: Option<&Value>, fallback: bool) -> bool {
 
 /// `categoría=carpeta` por línea, solo con categorías conocidas y carpetas
 /// absolutas válidas (las mismas reglas que [`safe_absolute_dir`]). Una
-/// categoría repetida se queda con la primera.
+/// categoría repetida se queda con la primera. Tampoco vale una raíz de
+/// disco (`E:\`) ni una carpeta que coincide con la de otra categoría, está
+/// dentro de ella o la contiene: sus subcarpetas se pisarían (la caché de npm
+/// y npm global acabarían en la misma `npm`) y «Vaciar cachés» borraría lo de
+/// la otra. Se queda la primera.
 fn safe_category_dirs(value: Option<&Value>) -> String {
     let Some(text) = value.and_then(Value::as_str) else {
         return String::new();
     };
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut taken: Vec<String> = Vec::new();
     text.lines()
         .take(32)
         .filter_map(|line| {
             let (id, dir) = line.split_once('=')?;
             let category = crate::toolchain_store::Category::from_id(id.trim())?;
+            if seen.contains(category.id()) {
+                return None;
+            }
             let dir = safe_absolute_dir(Some(&Value::String(dir.trim().to_string())));
-            (!dir.is_empty() && seen.insert(category.id()))
-                .then(|| format!("{}={dir}", category.id()))
+            if dir.is_empty() || std::path::Path::new(&dir).parent().is_none() {
+                return None;
+            }
+            let key = dir_key(&dir);
+            if taken
+                .iter()
+                .any(|other| dir_within(&key, other) || dir_within(other, &key))
+            {
+                return None;
+            }
+            seen.insert(category.id());
+            taken.push(key);
+            Some(format!("{}={dir}", category.id()))
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Clave para comparar carpetas: barras normales, sin la del final y, en
+/// Windows, sin mayúsculas.
+fn dir_key(dir: &str) -> String {
+    let text = dir.replace('\\', "/");
+    let text = text.trim_end_matches('/');
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.to_string()
+    }
+}
+
+/// `inner` es `outer` o está dentro de ella (claves de [`dir_key`]).
+fn dir_within(inner: &str, outer: &str) -> bool {
+    inner == outer || inner.starts_with(&format!("{outer}/"))
 }
 
 /// Carpeta absoluta elegida por el usuario. Cualquier otra cosa (relativa,
@@ -1215,6 +1315,7 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
         ),
         start_maximized: bool_or_default(get("startMaximized"), defaults.start_maximized),
         start_as_admin: bool_or_default(get("startAsAdmin"), defaults.start_as_admin),
+        offer_gsudo: bool_or_default(get("offerGsudo"), defaults.offer_gsudo),
         manual_aliases_text: get("manualAliasesText")
             .and_then(Value::as_str)
             .map(|text| text.chars().take(16_384).collect())
@@ -1336,6 +1437,32 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("shortcutUiScaleReset"),
             &defaults.shortcut_ui_scale_reset,
         ),
+        shortcut_close_tab: safe_shortcut(get("shortcutCloseTab"), &defaults.shortcut_close_tab),
+        shortcut_rename_tab: safe_shortcut(get("shortcutRenameTab"), &defaults.shortcut_rename_tab),
+        shortcut_copy_last_output: safe_shortcut(
+            get("shortcutCopyLastOutput"),
+            &defaults.shortcut_copy_last_output,
+        ),
+        shortcut_save_terminal_output: safe_shortcut(
+            get("shortcutSaveTerminalOutput"),
+            &defaults.shortcut_save_terminal_output,
+        ),
+        shortcut_terminal_font_up: safe_shortcut(
+            get("shortcutTerminalFontUp"),
+            &defaults.shortcut_terminal_font_up,
+        ),
+        shortcut_terminal_font_down: safe_shortcut(
+            get("shortcutTerminalFontDown"),
+            &defaults.shortcut_terminal_font_down,
+        ),
+        shortcut_toggle_agent_chat: safe_shortcut(
+            get("shortcutToggleAgentChat"),
+            &defaults.shortcut_toggle_agent_chat,
+        ),
+        shortcut_terminal_font_reset: safe_shortcut(
+            get("shortcutTerminalFontReset"),
+            &defaults.shortcut_terminal_font_reset,
+        ),
         accent_color: safe_hex_color(get("accentColor"), &palette.accent),
         ui_background_color: safe_hex_color(get("uiBackgroundColor"), &palette.background),
         ui_surface_color: safe_hex_color(get("uiSurfaceColor"), &palette.surface),
@@ -1419,6 +1546,33 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("terminalLinksConfirm"),
             defaults.terminal_links_confirm,
         ),
+        python_repl_visible_width: bool_or_default(
+            get("pythonReplVisibleWidth"),
+            defaults.python_repl_visible_width,
+        ),
+        action_commands_at_once: bool_or_default(
+            get("actionCommandsAtOnce"),
+            defaults.action_commands_at_once,
+        ),
+        ai_key_offer: bool_or_default(get("aiKeyOffer"), defaults.ai_key_offer),
+        agent_chat: bool_or_default(get("agentChat"), defaults.agent_chat),
+        agent_chat_advisor: bool_or_default(get("agentChatAdvisor"), defaults.agent_chat_advisor),
+        show_agent_chat_button: bool_or_default(
+            get("showAgentChatButton"),
+            defaults.show_agent_chat_button,
+        ),
+        agent_chat_remember: bool_or_default(
+            get("agentChatRemember"),
+            defaults.agent_chat_remember,
+        ),
+        agent_chat_can_edit: bool_or_default(get("agentChatCanEdit"), defaults.agent_chat_can_edit),
+        agent_chat_guide: bool_or_default(get("agentChatGuide"), defaults.agent_chat_guide),
+        agent_tab_guide: bool_or_default(get("agentTabGuide"), defaults.agent_tab_guide),
+        agent_control: bool_or_default(get("agentControl"), defaults.agent_control),
+        agent_chat_allow_bypass: bool_or_default(
+            get("agentChatAllowBypass"),
+            defaults.agent_chat_allow_bypass,
+        ),
         terminal_scroll_sensitivity: integer_in_range(
             get("terminalScrollSensitivity"),
             1,
@@ -1490,6 +1644,7 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             defaults.toolchain_store_projects,
         ),
         shell_assist: bool_or_default(get("shellAssist"), defaults.shell_assist),
+        offer_shell_assist: bool_or_default(get("offerShellAssist"), defaults.offer_shell_assist),
         shell_assist_cmd: bool_or_default(get("shellAssistCmd"), defaults.shell_assist_cmd),
         shell_assist_powershell: bool_or_default(
             get("shellAssistPowershell"),
@@ -1598,6 +1753,48 @@ mod tests {
         assert!(!Preferences::default().terminal_admin_by_default);
         let enabled = sanitize_preferences(&json!({ "terminalAdminByDefault": true }));
         assert!(enabled.terminal_admin_by_default);
+    }
+
+    #[test]
+    fn la_carpeta_de_una_categoria_no_es_una_raiz_de_disco_ni_pisa_la_de_otra() {
+        let (disco, caches, dentro, madre, ia, herramientas) = if cfg!(windows) {
+            (
+                r"E:\",
+                r"E:\WT\caches",
+                r"E:\wt\Caches\npm",
+                r"E:\WT",
+                r"E:\ia",
+                r"D:\herramientas",
+            )
+        } else {
+            (
+                "/",
+                "/datos/caches",
+                "/datos/caches/npm",
+                "/datos",
+                "/datos/ia",
+                "/otro/herramientas",
+            )
+        };
+        let texto = [
+            format!("caches={disco}"),
+            format!("caches={caches}"),
+            // Dentro de la de cachés (en Windows, sin mayúsculas), la misma o
+            // conteniéndola: npm global y la caché de npm serían la misma
+            // `npm`, y «Vaciar cachés» borraría lo de la otra.
+            format!("tools={dentro}"),
+            format!("plugins={caches}/"),
+            format!("config={madre}"),
+            format!("aiModels={ia}"),
+            // Rechazada la primera, vale la siguiente de la misma categoría.
+            format!("tools={herramientas}"),
+        ]
+        .join("\n");
+        let prefs = sanitize_preferences(&json!({ "toolchainStoreCategoryDirs": texto }));
+        assert_eq!(
+            prefs.toolchain_store_category_dirs,
+            format!("caches={caches}\naiModels={ia}\ntools={herramientas}")
+        );
     }
 
     #[test]
@@ -1800,6 +1997,85 @@ mod tests {
             "un valor no booleano conserva el de fábrica"
         );
         assert!(!prefs.terminal_links_confirm);
+    }
+
+    #[test]
+    fn python_usa_el_ancho_visible_de_fabrica_y_se_puede_apagar() {
+        assert!(Preferences::default().python_repl_visible_width);
+        let off = sanitize_preferences(&json!({ "pythonReplVisibleWidth": false }));
+        assert!(!off.python_repl_visible_width);
+        let invalid = sanitize_preferences(&json!({ "pythonReplVisibleWidth": "no" }));
+        assert!(
+            invalid.python_repl_visible_width,
+            "un valor no booleano conserva el de fábrica"
+        );
+    }
+
+    #[test]
+    fn las_ordenes_de_las_acciones_salen_de_una_vez_de_fabrica() {
+        // Encendido de fábrica desde el 15-11 (Romen: «ponlo activado por
+        // defecto»); apagado, se ven escribir como las repinta la shell.
+        assert!(Preferences::default().action_commands_at_once);
+        let off = sanitize_preferences(&json!({ "actionCommandsAtOnce": false }));
+        assert!(!off.action_commands_at_once);
+        let invalid = sanitize_preferences(&json!({ "actionCommandsAtOnce": "no" }));
+        assert!(
+            invalid.action_commands_at_once,
+            "un valor no booleano conserva el de fábrica"
+        );
+    }
+
+    #[test]
+    fn el_chat_de_agentes_y_el_consejero_vienen_activados() {
+        let defaults = Preferences::default();
+        assert!(defaults.agent_chat);
+        // Encendido de fábrica desde el 13-11 (Romen): solo ofrece preguntar.
+        assert!(defaults.agent_chat_advisor);
+        // El botón de la barra se ve de fábrica: sin él, Romen no encontraba
+        // cómo abrir el chat.
+        assert!(defaults.show_agent_chat_button);
+        // Recordar la conversación, de fábrica (13-11).
+        assert!(defaults.agent_chat_remember);
+        // Editar la carpeta, apagado de fábrica: los agentes solo leen.
+        assert!(!defaults.agent_chat_can_edit);
+        // Omitir permisos, apagado de fábrica (14-11).
+        assert!(!defaults.agent_chat_allow_bypass);
+        // Ofrecer el ayudante de la shell, encendido de fábrica (14-11).
+        assert!(defaults.offer_shell_assist);
+        assert!(!sanitize_preferences(&json!({ "offerShellAssist": false })).offer_shell_assist);
+        // Ofrecer gsudo, encendido de fábrica (14-11).
+        assert!(defaults.offer_gsudo);
+        assert!(!sanitize_preferences(&json!({ "offerGsudo": false })).offer_gsudo);
+        // La guía en las pestañas de las IA y el control, encendidos (14-11).
+        assert!(defaults.agent_tab_guide && defaults.agent_control);
+        assert!(!sanitize_preferences(&json!({ "agentControl": false })).agent_control);
+        // La guía para los agentes, encendida de fábrica (14-11).
+        assert!(defaults.agent_chat_guide);
+        assert!(!sanitize_preferences(&json!({ "agentChatGuide": false })).agent_chat_guide);
+        let changed = sanitize_preferences(&json!({
+            "agentChat": false,
+            "agentChatAdvisor": false,
+            "showAgentChatButton": false,
+            "agentChatRemember": false,
+            "agentChatCanEdit": true,
+            "agentChatAllowBypass": true
+        }));
+        assert!(!changed.agent_chat);
+        assert!(!changed.agent_chat_advisor);
+        assert!(!changed.show_agent_chat_button);
+        assert!(!changed.agent_chat_remember);
+        assert!(changed.agent_chat_can_edit);
+        assert!(changed.agent_chat_allow_bypass);
+        // Un valor que no es booleano no lo enciende.
+        assert!(
+            !sanitize_preferences(&json!({ "agentChatAllowBypass": "sí" })).agent_chat_allow_bypass
+        );
+    }
+
+    #[test]
+    fn ofrecer_la_clave_de_una_ia_viene_activado_y_se_puede_apagar() {
+        assert!(Preferences::default().ai_key_offer);
+        assert!(!sanitize_preferences(&json!({ "aiKeyOffer": false })).ai_key_offer);
     }
 
     #[test]

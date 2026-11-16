@@ -101,10 +101,15 @@ check(
         && !/^ {6}default-days:\s*7\s*\n {6}groups:/m.test(dependabot),
 );
 check(
-    'La decisión MIT coincide en la licencia raíz y los manifiestos JavaScript y Rust',
-    license.startsWith('MIT License\n')
-        && packageManifest.license === 'MIT'
-        && /^(?:license\s*=\s*"MIT")$/m.test(cargoManifest),
+    'La decisión AGPL-3.0-only (con licencia comercial aparte) coincide en la licencia raíz y los manifiestos JavaScript y Rust',
+    /^\s*GNU AFFERO GENERAL PUBLIC LICENSE\n\s*Version 3, 19 November 2007\n/u.test(license)
+        && packageManifest.license === 'AGPL-3.0-only'
+        && /^(?:license\s*=\s*"AGPL-3\.0-only")$/m.test(cargoManifest),
+);
+check(
+    'CONTRIBUTING exige el CLA que permite ofrecer también la licencia comercial',
+    contributing.includes('Contributor License Agreement')
+        && contributing.includes('AGPL-3.0-only'),
 );
 check(
     'La contribución, los reportes públicos y el canal privado de vulnerabilidades están documentados',

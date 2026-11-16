@@ -89,8 +89,14 @@ for (const [key, value] of Object.entries(expectedPackage)) {
 if (packageLock.packages?.[""]?.license !== metadata.license) {
   mismatches.push("package-lock.json:license");
 }
-if (metadata.license === "MIT" && !readFileSync(resolve(root, "LICENSE"), "utf8").startsWith("MIT License\n")) {
-  mismatches.push("LICENSE:SPDX MIT");
+// El texto de LICENSE tiene que ser el de la licencia declarada.
+const licenseHeadings = {
+  MIT: /^MIT License\n/u,
+  "AGPL-3.0-only": /^\s*GNU AFFERO GENERAL PUBLIC LICENSE\n\s*Version 3, 19 November 2007\n/u,
+};
+const licenseHeading = licenseHeadings[metadata.license];
+if (licenseHeading && !licenseHeading.test(readFileSync(resolve(root, "LICENSE"), "utf8"))) {
+  mismatches.push(`LICENSE:SPDX ${metadata.license}`);
 }
 const appstream = readFileSync(resolve(root, "src-tauri/resources/com.lterminal.terminal.metainfo.xml"), "utf8");
 if (!appstream.includes(`<project_license>${metadata.license}</project_license>`)) {

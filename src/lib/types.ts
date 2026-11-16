@@ -173,6 +173,14 @@ export interface Preferences {
     shortcutUiScaleUp: string;
     shortcutUiScaleDown: string;
     shortcutUiScaleReset: string;
+    shortcutCloseTab: string;
+    shortcutRenameTab: string;
+    shortcutCopyLastOutput: string;
+    shortcutSaveTerminalOutput: string;
+    shortcutTerminalFontUp: string;
+    shortcutTerminalFontDown: string;
+    shortcutTerminalFontReset: string;
+    shortcutToggleAgentChat: string;
     themeId: string;
     accentColor: string;
     uiBackgroundColor: string;
@@ -207,6 +215,37 @@ export interface Preferences {
     terminalLinks: boolean;
     /** Confirmar con el destino a la vista antes de abrir un enlace. */
     terminalLinksConfirm: boolean;
+    /** Windows: el REPL de Python con el ancho visible, sin la reserva. */
+    pythonReplVisibleWidth: boolean;
+    /** Las órdenes de las acciones salen de una vez (de fábrica, poco a poco). */
+    actionCommandsAtOnce: boolean;
+    /** Ofrecer meter la clave de API cuando una IA acaba pidiéndola. */
+    aiKeyOffer: boolean;
+    /** El chat lateral con los agentes de IA. */
+    agentChat: boolean;
+    /** Modo consejero: al fallar una orden, ofrecer preguntar al agente. */
+    agentChatAdvisor: boolean;
+    /** El botón «Chat» de la barra superior. */
+    showAgentChatButton: boolean;
+    /** El chat manda lo hablado antes para que el agente lo recuerde. */
+    agentChatRemember: boolean;
+    /** Los agentes del chat pueden editar la carpeta de la pestaña (deja
+     *  elegir «Aceptar ediciones» y «Auto»). */
+    agentChatCanEdit: boolean;
+    /** Deja elegir «Omitir permisos» en el chat (pide también
+     *  `agentChatCanEdit`). */
+    agentChatAllowBypass: boolean;
+    /** Con cada pregunta del chat va, oculta, la guía corta de WTerminal para
+     *  el agente. */
+    agentChatGuide: boolean;
+    /** Al abrir la pestaña de una IA, su guía de WTerminal. */
+    agentTabGuide: boolean;
+    /** Las IA que lanza WTerminal pueden manejarlo con `wterminal --ctl`. */
+    agentControl: boolean;
+    /** Ofrecer instalar gsudo si hay NSudo y WTerminal no es administrador. */
+    offerGsudo: boolean;
+    /** Ofrecer el ayudante de la shell que le falta a la pestaña activa. */
+    offerShellAssist: boolean;
     terminalScrollSensitivity: number;
     copyOnSelect: boolean;
     uiDensity: 'compact' | 'comfortable';
@@ -339,8 +378,94 @@ export interface ShellAssistShell {
     components: ShellAssistComponent[];
 }
 
+/** Una orden de una IA con `wterminal --ctl` (`app::agent_control`). */
+export interface AgentControlRequest {
+    id: number;
+    /** La pestaña de la propia IA: ahí no se escribe. */
+    agentTab: string | null;
+    /** `internal`: una orden `:…`; `action`: una acción del catálogo. */
+    kind: 'internal' | 'action';
+    value: string;
+    /** Pide permiso al usuario antes (acciones y `:set` que cambia). */
+    confirm: boolean;
+}
+
 export interface ShellAssistStatus {
     shells: ShellAssistShell[];
+}
+
+/** Respuesta de `ai_key_offer` (`environments::ai_keys::AiKeyOffer`). */
+export interface AiKeyOffer {
+    /** La variable de entorno que lee la CLI (`GROK_API_KEY`…). */
+    envVar: string;
+    /** Ya había una guardada: la IA la rechazó. */
+    stored: boolean;
+}
+
+/** Una clave de IA guardada (`ai_key_list`): la variable y quién la usa. */
+export interface AiKeyStored {
+    envVar: string;
+    envIds: string[];
+}
+
+/** Un agente del chat lateral (`environments::agent_chat::ChatAgent`). */
+export interface AgentChatAgent {
+    id: string;
+    label: string;
+    /** Se le puede preguntar desde el chat; si no, `unavailable` dice por qué
+     *  (`args-only`, `edits-files`, `needs-permissions`, `no-one-shot`). */
+    chat: boolean;
+    unavailable: string | null;
+    /** Se le puede elegir modelo; `models` son los alias que se sugieren. */
+    modelChoice: boolean;
+    models: string[];
+    /** Niveles de intensidad que admite (vacío: no tiene). */
+    efforts: string[];
+    /** Modos de permisos que admite, en orden; el primero solo lee (vacío:
+     *  solo contesta texto). `plan`, `manual`, `acceptEdits`, `auto`,
+     *  `bypass`. */
+    modes: string[];
+    /** Tiene modo rápido (Claude Code y Codex). */
+    fast: boolean;
+}
+
+/** Qué ofrecer tras un fallo (`agent_chat::FailureHelp`). */
+export interface AgentChatFailureHelp {
+    apiKey: AiKeyOffer | null;
+    /** `login` (iniciar sesión) o `setup` (su primera configuración). */
+    openTab: 'login' | 'setup' | null;
+    pythonModule: boolean;
+}
+
+/** Los modelos de un agente (`agent_chat::ChatModels`). */
+export interface AgentChatModels {
+    /** El que usa si no se elige ninguno, leído de su configuración. */
+    defaultModel: string | null;
+    source: string | null;
+    models: string[];
+    /** La intensidad que admite cada modelo, si el agente lo dice (Codex). */
+    efforts: Record<string, string[]>;
+    /** Los modelos con modo rápido, si el agente lo dice por modelo (Codex);
+     *  `null`: no lo dice. */
+    fast: string[] | null;
+    /** Se ofrece «Otro…» para escribir uno a mano: solo si la lista puede
+     *  estar incompleta (Copilot, Crush, mods, ShellGPT o una lista vacía). */
+    custom: boolean;
+}
+
+/** Un adjunto de texto leído para el chat (`agent_chat_read_attachment`). */
+export interface AgentChatAttachment {
+    name: string;
+    bytes: number;
+    text: string;
+    truncated: boolean;
+}
+
+/** Respuesta de `ai_key_save`. */
+export interface AiKeySaveResult {
+    ok: boolean;
+    /** `empty`, `too-long`, `invalid-characters`, `unknown-ai`, `unsupported` o `store`. */
+    error?: string | null;
 }
 
 /** Respuesta de `terminal_open_link` (`terminal::links::LinkOpenResult`). */
@@ -391,7 +516,8 @@ export type ToolchainStoreCategory = 'caches' | 'downloads' | 'aiModels' | 'tool
 export type StoreAdoptMethod = 'variable' | 'junction' | 'profile';
 
 /** En qué punto está cada elemento de «Traer lo ya instalado». */
-export type StoreAdoptState = 'available' | 'blocked' | 'copying' | 'done' | 'confirmed' | 'failed';
+/** `confirming`: «Confirmar» se quedó a medias; ya no se puede deshacer. */
+export type StoreAdoptState = 'available' | 'blocked' | 'copying' | 'done' | 'confirming' | 'confirmed' | 'failed';
 
 export interface StoreAdoptItem {
     id: string;
@@ -440,7 +566,7 @@ export interface ToolchainStoreStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'ltools' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'panes' | 'openDirectory' | 'darkeiser003' | 'christianlg97';
+    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'ltools' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'set' | 'chat' | 'panes' | 'openDirectory' | 'darkeiser003' | 'christianlg97';
     argument?: string;
 }
 
@@ -448,6 +574,10 @@ export interface AppInfo {
     /** Hilos de CPU y memoria total (GB), para sugerir el modo de bajo consumo. */
     cpuThreads?: number;
     memoryGb?: number | null;
+    /** NSudo está instalado y esta copia no puede abrirlo: se ofrece gsudo. */
+    nsudoNeedsGsudo?: boolean;
+    /** Corren las pruebas E2E: no salen los avisos que ofrecen instalar. */
+    e2eTesting?: boolean;
     name: string;
     slug: string;
     version: string;
@@ -935,7 +1065,10 @@ export type GhAdminAction =
     | { kind: 'deployKeyDelete'; id: number }
     | { kind: 'pagesEnable'; branch: string; path: string }
     | { kind: 'pagesDisable' }
-    | { kind: 'protectionSet'; branch: string; reviews: number; enforceAdmins: boolean; linearHistory: boolean }
+    /** `reviews`: aprobaciones de cada pull request (0 a 6), o `null` si la rama
+     *  no exige pull request. El backend lee antes la protección que hay y
+     *  conserva lo que el panel no gestiona. */
+    | { kind: 'protectionSet'; branch: string; reviews: number | null; enforceAdmins: boolean; linearHistory: boolean }
     | { kind: 'protectionRemove'; branch: string }
     | { kind: 'vulnerabilityAlerts'; enable: boolean }
     | { kind: 'sshKeyAdd'; title: string; key: string }

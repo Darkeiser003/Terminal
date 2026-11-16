@@ -1,8 +1,9 @@
 ; Plantilla NSIS de WTerminal: la de Tauri 2.11.5 (@tauri-apps/cli) con tres
 ; cambios marcados con «WTerminal:»:
 ; 1. página de componentes tras elegir la carpeta (hooks.nsh, WtComponentsPage);
-; 2. el desinstalador ofrece borrar la carpeta propia con su tamaño, además de
-;    los datos (`--wterminal-uninstall-report`);
+; 2. el desinstalador ofrece borrar la carpeta propia con su tamaño y lo que
+;    se queda de ella, además de los datos (`--wterminal-uninstall-report`,
+;    que se queda en $PLUGINSDIR para la sección Uninstall);
 ; 3. hooks.nsh se incluye otra vez tras los idiomas (WTERMINAL_LATE) para sus
 ;    variables, funciones y textos en los 15 idiomas.
 ; Al actualizar la CLI de Tauri hay que volver a partir de su plantilla.
@@ -437,11 +438,19 @@ FunctionEnd
 Var DeleteAppDataCheckbox
 Var DeleteAppDataCheckboxState
 ; WTerminal: la carpeta propia, con su tamaño (`--wterminal-uninstall-report`).
+; El informe se queda en $PLUGINSDIR hasta la sección Uninstall: de él lee
+; hooks.nsh (NSIS_HOOK_POSTUNINSTALL) qué subcarpetas se borran. Las variables
+; van aquí, antes de un.ConfirmShow y de la sección, que las usan.
+!define WT_REPORT "$PLUGINSDIR\wterminal-uninstall-report.ini"
 Var DeleteStoreCheckbox
 Var DeleteStoreCheckboxState
 Var WtStorePath
 Var WtDataLabel
 Var WtStoreLabel
+; WTerminal: lo que se queda de la carpeta propia (para la casilla) y la
+; subcarpeta de %LOCALAPPDATA%\WTerminal que «Borrar los datos» respeta.
+Var WtStoreKept
+Var WtDataKeep
 !define /ifndef WS_EX_LAYOUTRTL         0x00400000
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
 Function un.ConfirmShow ; Add add a `Delete app data` check box
@@ -456,15 +465,20 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
   StrCpy $WtStorePath ""
   StrCpy $WtDataLabel ""
   StrCpy $WtStoreLabel ""
+  StrCpy $WtStoreKept ""
+  StrCpy $WtDataKeep ""
+  InitPluginsDir
+  Delete "${WT_REPORT}"
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
-    ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --wterminal-uninstall-report "$TEMP\wterminal-uninstall-report.ini"'
-    ReadINIStr $WtDataLabel "$TEMP\wterminal-uninstall-report.ini" "data" "label"
-    ReadINIStr $0 "$TEMP\wterminal-uninstall-report.ini" "store" "deletable"
+    ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --wterminal-uninstall-report "${WT_REPORT}"'
+    ReadINIStr $WtDataLabel "${WT_REPORT}" "data" "label"
+    ReadINIStr $WtDataKeep "${WT_REPORT}" "data" "keep"
+    ReadINIStr $0 "${WT_REPORT}" "store" "deletable"
     ${If} $0 == "1"
-      ReadINIStr $WtStorePath "$TEMP\wterminal-uninstall-report.ini" "store" "path"
-      ReadINIStr $WtStoreLabel "$TEMP\wterminal-uninstall-report.ini" "store" "label"
+      ReadINIStr $WtStorePath "${WT_REPORT}" "store" "path"
+      ReadINIStr $WtStoreLabel "${WT_REPORT}" "store" "label"
+      ReadINIStr $WtStoreKept "${WT_REPORT}" "store" "kept"
     ${EndIf}
-    Delete "$TEMP\wterminal-uninstall-report.ini"
   ${EndIf}
   FindWindow $1 "#32770" "" $HWNDPARENT ; Find inner dialog
   System::Call "user32::GetDpiForWindow(p r1) i .r2"
@@ -497,8 +511,14 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
     IntOp $5 130 * $2
     IntOp $5 $5 / 96
     IntOp $7 40 * $2
-    IntOp $7 $7 / 96
     StrCpy $0 "$(wtDeleteStore) ($WtStoreLabel): $WtStorePath"
+    ; WTerminal: lo que se queda (toolchains, proyectos…), dicho en la propia
+    ; casilla y con dos líneas más para ello.
+    ${If} $WtStoreKept != ""
+      StrCpy $0 "$0. $(wtStoreKept): $WtStoreKept"
+      IntOp $7 72 * $2
+    ${EndIf}
+    IntOp $7 $7 / 96
     System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w r0, i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
     Pop $DeleteStoreCheckbox
     SendMessage $DeleteStoreCheckbox ${WM_SETFONT} $8 1

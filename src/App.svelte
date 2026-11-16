@@ -4,7 +4,7 @@
 
     import { onMount, tick } from "svelte";
     import type { UnlistenFn } from "@tauri-apps/api/event";
-    import type { ImportableRepository, PackageUpdateStatus, UpdateStatus } from "./lib/types";
+    import type { AgentControlRequest, ImportableRepository, PackageUpdateStatus, ShellAssistStatus, UpdateStatus } from "./lib/types";
 
     import * as api from "./lib/api";
     import { app } from "./lib/appState.svelte";
@@ -13,11 +13,19 @@
     import * as perf from "./lib/performance";
     import { matchesPaneShortcut, matchesShortcut } from "./lib/shortcuts";
     import { createTerminalRefreshScheduler } from "./lib/terminal-render";
-    import { clampUiScale, themePreferencePatch, UI_SCALE_STEP } from "./lib/theme";
+    import {
+        clampUiScale,
+        TERMINAL_FONT_DEFAULT,
+        TERMINAL_FONT_MAX,
+        TERMINAL_FONT_MIN,
+        themePreferencePatch,
+        UI_SCALE_STEP,
+    } from "./lib/theme";
     import { getTerminal, getTerminalControls, type TerminalLineRejection } from "./lib/terminalRegistry";
     import CommandPalette from "./components/CommandPalette.svelte";
     import DependenciesPanel from "./components/DependenciesPanel.svelte";
     import ExplorerSidebar from "./components/ExplorerSidebar.svelte";
+    import AgentChats from "./components/AgentChats.svelte";
     import HistorySearch from "./components/HistorySearch.svelte";
     import ProjectsPanel from "./components/ProjectsPanel.svelte";
     import ScriptsPanel from "./components/ScriptsPanel.svelte";
@@ -63,6 +71,125 @@
     // preferencias persistentes. Al volver a entrar en modo limpio se vuelve
     // a mostrar, salvo que el usuario haya elegido ocultarla definitivamente.
     let hideTerminalOnlyGuideForSession = $state(false);
+    // La oferta de gsudo (14-11): cerrada esta vez, instalando, o el error.
+    let hideGsudoOfferForSession = $state(false);
+    let gsudoInstalling = $state(false);
+    let gsudoError = $state('');
+    // Lo que piden las IA con `wterminal --ctl` (14-11): lo que necesita
+    // permiso espera aquí, de uno en uno; «Permitir en esta sesión» deja pasar
+    // el resto hasta cerrar WTerminal.
+    let controlQueue = $state<AgentControlRequest[]>([]);
+    let controlAllowedForSession = $state(false);
+
+    /** Dónde se hace: la pestaña activa si es una shell que no es la de la
+     *  IA; si no, la última de esas. Nunca la de la IA ni un REPL. */
+    function controlTab(agentTab: string | null): { id: string; label: string } | null {
+        const isShell = (tab: { id: string; envId: string | null }) => {
+            if (tab.id === agentTab) return false;
+            const environment = app.environments.find((item) => item.id === tab.envId);
+            return Boolean(environment && !environment.id.startsWith('ai:') && !environment.repl
+                && ['cmd', 'powershell', 'bash', 'zsh', 'fish', 'sh'].includes(environment.kind));
+        };
+        const active = app.tabs.find((tab) => tab.id === app.activeTabId);
+        const tab = active && isShell(active) ? active : [...app.tabs].reverse().find(isShell);
+        return tab ? { id: tab.id, label: app.tabTitle(tab) } : null;
+    }
+
+    function describeControl(request: AgentControlRequest): string {
+        return request.kind === 'action'
+            ? app.t('agentControl.action', 'lanzar «{id}» de Entorno y dependencias').replace('{id}', request.value)
+            : app.t('agentControl.internal', 'hacer {command}').replace('{command}', request.value);
+    }
+
+    async function runControl(request: AgentControlRequest): Promise<void> {
+        const reply = (ok: boolean, text: string) => void api.agentControlReply(request.id, ok, text).catch(() => {});
+        const target = controlTab(request.agentTab);
+        if (!target) {
+            reply(false, 'No hay una pestaña de shell libre (cmd, PowerShell o bash) donde hacerlo: pide al usuario que abra una.');
+            return;
+        }
+        if (request.kind === 'action') {
+            try {
+                const result = await api.runInstallAction(target.id, request.value);
+                if (!result.ok) {
+                    reply(false, result.error ?? 'No se pudo lanzar la acción.');
+                    return;
+                }
+                if (result.tabId) await app.adoptTab(result.tabId, result.created);
+                reply(true, `Lanzada «${request.value}» en la pestaña «${target.label}»: el usuario ve su progreso ahí.`);
+            } catch (cause) {
+                reply(false, String(cause));
+            }
+            return;
+        }
+        const rejection = getTerminalControls(target.id)?.submitLine(request.value) ?? 'not-ready';
+        if (rejection) {
+            reply(false, `La pestaña «${target.label}» no tiene el prompt libre (${rejection}): inténtalo en un momento.`);
+            return;
+        }
+        reply(true, `Hecho: ${request.value} en la pestaña «${target.label}».`);
+    }
+
+    function decideControl(allow: boolean, forSession = false): void {
+        const [request, ...rest] = controlQueue;
+        controlQueue = rest;
+        if (!request) return;
+        if (forSession) controlAllowedForSession = true;
+        if (allow) void runControl(request);
+        else void api.agentControlReply(request.id, false, 'El usuario no lo permitió.').catch(() => {});
+    }
+
+    // El aviso del autocompletado (14-11): el estado de Clink, PSReadLine,
+    // ble.sh… (se pide una vez) y los cerrados esta vez, por shell y distro.
+    let shellAssistOfferStatus = $state<ShellAssistStatus | null>(null);
+    let shellAssistOfferLoading = false;
+    let shellAssistOfferHidden = $state<Record<string, boolean>>({});
+    const SHELL_ASSIST_PREFS = {
+        cmd: 'shellAssistCmd',
+        powershell: 'shellAssistPowershell',
+        bash: 'shellAssistBash',
+        zsh: 'shellAssistZsh',
+    } as const;
+    const activeEnvironment = $derived.by(() => {
+        const envId = app.tabs.find((tab) => tab.id === app.activeTabId)?.envId;
+        return envId ? app.environments.find((environment) => environment.id === envId) ?? null : null;
+    });
+    /** Lo que se ofrece: el primer ayudante que le falta a la shell de la
+     *  pestaña activa (en WSL, el de su distro). Nada en E2E. */
+    const shellAssistOffer = $derived.by(() => {
+        const preferences = app.preferences;
+        const environment = activeEnvironment;
+        if (!preferences || !environment || app.appInfo?.e2eTesting) return null;
+        if (preferences.shellAssist === false || preferences.offerShellAssist === false) return null;
+        const kind = environment.kind;
+        if (kind !== 'cmd' && kind !== 'powershell' && kind !== 'bash' && kind !== 'zsh') return null;
+        if (preferences[SHELL_ASSIST_PREFS[kind]] === false) return null;
+        const distro = environment.distro ?? null;
+        const missing = shellAssistOfferStatus?.shells
+            .find((shell) => shell.shell === kind)
+            ?.components.find((component) => component.installed === false && (component.distro ?? null) === distro);
+        if (!missing) return null;
+        const key = `${kind}|${distro ?? ''}`;
+        return shellAssistOfferHidden[key] ? null : { key, kind, label: missing.label, search: missing.search, distro };
+    });
+    $effect(() => {
+        const environment = activeEnvironment;
+        if (!environment || shellAssistOfferStatus || shellAssistOfferLoading || app.appInfo?.e2eTesting) return;
+        if (app.preferences?.shellAssist === false || app.preferences?.offerShellAssist === false) return;
+        if (!['cmd', 'powershell', 'bash', 'zsh'].includes(environment.kind)) return;
+        shellAssistOfferLoading = true;
+        void api.getShellAssistStatus(false)
+            .then((status) => { shellAssistOfferStatus = status; })
+            .catch(() => {})
+            .finally(() => { shellAssistOfferLoading = false; });
+    });
+
+    /** «Instalar» del aviso: Entorno y dependencias ya filtrado, como en
+     *  Ajustes; ahí se ve lo que se instala y se confirma. */
+    function installShellAssistFromOffer(offer: { key: string; search: string }): void {
+        shellAssistOfferHidden[offer.key] = true;
+        window.dispatchEvent(new CustomEvent('winslim:open-panel', { detail: { panel: 'deps', query: offer.search } }));
+    }
     let cleanModeObserved = $state(false);
     /** La paleta se monta solo mientras está abierta: cada apertura empieza
      *  con la búsqueda vacía y el estado actual de pestañas y entornos. */
@@ -214,6 +341,27 @@
             packageUpdateError = String(cause);
         } finally {
             packageUpdateRunning = false;
+        }
+    }
+
+    /** «Instalar gsudo» del aviso: la acción de WTerminal, en una pestaña
+     *  donde se ve (la misma que «Instalar» en Entorno y dependencias). */
+    async function installGsudo(): Promise<void> {
+        if (gsudoInstalling || !app.activeTabId) return;
+        gsudoInstalling = true;
+        gsudoError = '';
+        try {
+            const result = await api.runInstallAction(app.activeTabId, 'winget-gsudo');
+            if (!result.ok) {
+                gsudoError = result.error ?? app.t('gsudoOffer.failed', 'No se pudo lanzar la instalación de gsudo.');
+                return;
+            }
+            hideGsudoOfferForSession = true;
+            if (result.tabId) await app.adoptTab(result.tabId, result.created);
+        } catch (cause) {
+            gsudoError = String(cause);
+        } finally {
+            gsudoInstalling = false;
         }
     }
 
@@ -404,6 +552,14 @@
             [preferences.shortcutUiScaleUp, 'uiScaleUp'],
             [preferences.shortcutUiScaleDown, 'uiScaleDown'],
             [preferences.shortcutUiScaleReset, 'uiScaleReset'],
+            [preferences.shortcutCloseTab, 'closeTab'],
+            [preferences.shortcutRenameTab, 'renameTab'],
+            [preferences.shortcutCopyLastOutput, 'copyLastOutput'],
+            [preferences.shortcutSaveTerminalOutput, 'saveTerminalOutput'],
+            [preferences.shortcutTerminalFontUp, 'terminalFontUp'],
+            [preferences.shortcutTerminalFontDown, 'terminalFontDown'],
+            [preferences.shortcutTerminalFontReset, 'terminalFontReset'],
+            [preferences.shortcutToggleAgentChat, 'toggleAgentChat'],
         ];
         const extra = extraActions.find(([shortcut]) => shortcut && matchesShortcut(event, shortcut));
         if (extra) {
@@ -572,6 +728,26 @@
             case 'renameTab':
                 app.renamingTabId = app.activeTabId;
                 return null;
+            case 'toggleAgentChat':
+                if (preferences?.agentChat === false) return app.t('agentChat.disabled', 'El chat de agentes está apagado en Ajustes.');
+                app.agentChatVisible = !app.agentChatVisible;
+                return null;
+            case 'closeTab':
+                if (app.activeTabId) await app.closeTab(app.activeTabId);
+                return null;
+            case 'terminalFontUp':
+            case 'terminalFontDown':
+            case 'terminalFontReset': {
+                if (!preferences) return null;
+                // Los mismos límites que valida el backend (10–24 px); el de
+                // fábrica es el de `default_settings.toml`.
+                const current = preferences.terminalFontSize ?? TERMINAL_FONT_DEFAULT;
+                const next = action === 'terminalFontReset'
+                    ? TERMINAL_FONT_DEFAULT
+                    : Math.min(TERMINAL_FONT_MAX, Math.max(TERMINAL_FONT_MIN, current + (action === 'terminalFontUp' ? 1 : -1)));
+                if (next !== current) await app.savePreferences({ terminalFontSize: next });
+                return null;
+            }
             case 'clearTerminal':
                 // Antes era `terminal.clear()`, que solo vaciaba xterm: el
                 // prompt subía a la primera fila mientras ConPTY seguía con el
@@ -879,6 +1055,9 @@
                 const previous = outputQueues.get(tabId) ?? Promise.resolve();
                 const queued = previous.catch(() => undefined).then(() => {
                     getTerminal(tabId)?.writeln(notice);
+                    // Con toda su salida ya pintada: la pestaña de una IA
+                    // mira si lo último pedía su clave (`ai-key-offer`).
+                    window.dispatchEvent(new CustomEvent('winslim:terminal-exited', { detail: { tabId, code } }));
                 });
                 outputQueues.set(tabId, queued);
                 void queued.then(() => {
@@ -900,6 +1079,11 @@
             api.onEnvironmentsUpdated((inventory) =>
                 app.applyInventory(inventory),
             ),
+
+            api.onAgentControl((request) => {
+                if (request.confirm && !controlAllowedForSession) controlQueue = [...controlQueue, request];
+                else void runControl(request);
+            }),
 
             api.onCommandNotFound((event) =>
                 app.noteSuggestion(event.tabId, event.suggestion),
@@ -1087,6 +1271,13 @@
                 {/each}
             {/if}
         </div>
+
+        <!-- Chat lateral con los agentes de IA (a la derecha): no tapa la
+             terminal, la estrecha. -->
+        {#if app.agentChatVisible && app.preferences?.agentChat !== false}
+            <!-- Varios chats en paralelo, uno por pestaña (14-11). -->
+            <AgentChats />
+        {/if}
     </div>
 
     {#if app.preferences?.terminalOnlyMode === true && app.preferences.showTerminalOnlyGuide !== false && !hideTerminalOnlyGuideForSession}
@@ -1117,6 +1308,87 @@
                         void app.savePreferences({ showTerminalOnlyGuide: false });
                     }}
                 >{app.t("terminal.terminalOnlyGuideNever", "No mostrar nunca más")}</button>
+            </div>
+        </div>
+    {/if}
+
+    <!-- Una IA pide algo con `wterminal --ctl` que necesita permiso (14-11):
+         va primero, porque la IA espera la respuesta. -->
+    {#if controlQueue.length}
+        {@const request = controlQueue[0]}
+        <div class="terminal-only-guide agent-control-request" role="alertdialog" aria-live="assertive" data-testid="agent-control-request">
+            <span>{app.t("agentControl.ask", "Una IA quiere {what}.").replace("{what}", describeControl(request))}{controlQueue.length > 1 ? ` (+${controlQueue.length - 1})` : ""}</span>
+            <div class="terminal-only-guide-actions">
+                <button type="button" class="terminal-only-guide-action" data-testid="agent-control-allow" onclick={() => decideControl(true)}>{app.t("agentControl.allow", "Permitir")}</button>
+                <button type="button" class="terminal-only-guide-action" data-testid="agent-control-allow-session" onclick={() => decideControl(true, true)}>{app.t("agentControl.allowSession", "Permitir en esta sesión")}</button>
+                <button type="button" class="terminal-only-guide-action terminal-only-guide-action-danger" data-testid="agent-control-deny" onclick={() => decideControl(false)}>{app.t("agentControl.deny", "Denegar")}</button>
+            </div>
+        </div>
+    {/if}
+
+    <!-- NSudo sin forma de abrirse (14-11, Romen): como la guía del modo
+         limpio, con aceptar, cerrar esta vez y no volver a ofrecer. -->
+    {#if app.appInfo?.nsudoNeedsGsudo && app.preferences?.offerGsudo !== false && !hideGsudoOfferForSession}
+        <div class="terminal-only-guide" role="status" aria-live="polite" data-testid="gsudo-offer">
+            <span>{app.t("gsudoOffer.text", "NSudo está instalado, pero WTerminal no es administrador y no puede abrir sus pestañas. Con gsudo, cada pestaña de NSudo pide permiso (UAC) solo para ella, sin abrir WTerminal entero como administrador.")}</span>
+            {#if gsudoError}<span class="offer-error" role="alert">{gsudoError}</span>{/if}
+            <div class="terminal-only-guide-actions">
+                <button
+                    type="button"
+                    class="terminal-only-guide-action"
+                    data-testid="gsudo-offer-install"
+                    disabled={gsudoInstalling || !app.activeTabId}
+                    onclick={installGsudo}
+                >{app.t("gsudoOffer.install", "Instalar gsudo")}</button>
+                <button
+                    type="button"
+                    class="terminal-only-guide-action"
+                    data-testid="gsudo-offer-dismiss"
+                    onclick={() => (hideGsudoOfferForSession = true)}
+                >{app.t("terminal.terminalOnlyGuideDismiss", "Cerrar esta vez")}</button>
+                <button
+                    type="button"
+                    class="terminal-only-guide-action terminal-only-guide-action-danger"
+                    data-testid="gsudo-offer-never"
+                    onclick={() => {
+                        hideGsudoOfferForSession = true;
+                        void app.savePreferences({ offerGsudo: false });
+                    }}
+                >{app.t("gsudoOffer.never", "No volver a ofrecer")}</button>
+            </div>
+        </div>
+    {/if}
+
+    <!-- Al shell de la pestaña le falta su ayudante (14-11, Romen): el mismo
+         aviso; solo uno a la vez, después del de gsudo. -->
+    {#if shellAssistOffer && !(app.appInfo?.nsudoNeedsGsudo && app.preferences?.offerGsudo !== false && !hideGsudoOfferForSession)}
+        {@const offer = shellAssistOffer}
+        <div class="terminal-only-guide" role="status" aria-live="polite" data-testid="shell-assist-offer" data-shell={offer.kind}>
+            <span>{app.t("shellAssistOffer.text", "Esta pestaña de {shell} no tiene sugerencias ni colores al escribir: falta {tool}.")
+                .replace("{shell}", offer.distro ? `${offer.kind} (${offer.distro})` : offer.kind === "powershell" ? "PowerShell" : offer.kind)
+                .replace("{tool}", offer.label)}</span>
+            <div class="terminal-only-guide-actions">
+                <button
+                    type="button"
+                    class="terminal-only-guide-action"
+                    data-testid="shell-assist-offer-install"
+                    onclick={() => installShellAssistFromOffer(offer)}
+                >{app.t("shellAssistOffer.install", "Instalar {tool}").replace("{tool}", offer.label)}</button>
+                <button
+                    type="button"
+                    class="terminal-only-guide-action"
+                    data-testid="shell-assist-offer-dismiss"
+                    onclick={() => (shellAssistOfferHidden[offer.key] = true)}
+                >{app.t("terminal.terminalOnlyGuideDismiss", "Cerrar esta vez")}</button>
+                <button
+                    type="button"
+                    class="terminal-only-guide-action terminal-only-guide-action-danger"
+                    data-testid="shell-assist-offer-never"
+                    onclick={() => {
+                        shellAssistOfferHidden[offer.key] = true;
+                        void app.savePreferences({ offerShellAssist: false });
+                    }}
+                >{app.t("gsudoOffer.never", "No volver a ofrecer")}</button>
             </div>
         </div>
     {/if}
@@ -1384,6 +1656,22 @@
 
     .terminal-only-guide-action-danger {
         color: var(--muted);
+    }
+
+    .terminal-only-guide-action:disabled {
+        opacity: 0.5;
+        cursor: default;
+    }
+
+    .agent-control-request {
+        border-color: var(--warning);
+        color: var(--text);
+    }
+
+    .offer-error {
+        display: block;
+        margin-top: 3px;
+        color: var(--danger);
     }
 
     /* Dos columnas a partir de la tercera casilla: con cuatro quedan 2x2, y con

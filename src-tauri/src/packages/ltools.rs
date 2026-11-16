@@ -829,10 +829,12 @@ fn quote_for_shell(value: &str, kind: ShellKind) -> String {
     if simple {
         return value.to_string();
     }
-    if kind == ShellKind::Cmd {
-        format!("\"{}\"", value.replace('\"', "\\\""))
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+    match kind {
+        ShellKind::Cmd => format!("\"{}\"", value.replace('\"', "\\\"")),
+        // En PowerShell una comilla simple dentro de otra se dobla: `'\''` es
+        // de las shells POSIX y aquí rompía la cadena.
+        ShellKind::Powershell => format!("'{}'", value.replace('\'', "''")),
+        _ => format!("'{}'", value.replace('\'', "'\\''")),
     }
 }
 
@@ -851,11 +853,19 @@ fn command_for_action(action: &LToolsAction, executable: &str, kind: ShellKind) 
         None
     };
 
-    let mut parts = Vec::with_capacity(5);
+    let mut parts = Vec::with_capacity(6);
     if let Some(prefix) = appimage_extract_prefix {
         parts.push(prefix.to_string());
     }
-    parts.push(quote_for_shell(executable, kind));
+    let program = quote_for_shell(executable, kind);
+    // En PowerShell una ruta entre comillas es un texto, no una orden: sin el
+    // operador de llamada, `'C:\…\ltools.exe' actions run x` daba «token
+    // inesperado» (14-11). Una ruta de Windows siempre va entre comillas,
+    // porque `\` no es un carácter «simple».
+    if kind == ShellKind::Powershell && program.starts_with('\'') {
+        parts.push("&".to_string());
+    }
+    parts.push(program);
     parts.extend(["actions", "run"].into_iter().map(str::to_string));
     parts.push(quote_for_shell(&action.id, kind));
     parts.join(" ")
@@ -895,7 +905,28 @@ pub fn ltools_action_run(
         return failed("No hay una shell disponible para ejecutar esta acción.");
     };
     let command = command_for_action(&action, &executable, environment.kind);
-    if !state.tabs.write_command(&target_tab, &command) {
+    // Como el resto de acciones (instalar, scripts de la Biblioteca,
+    // Proyectos): cabecera con lo que se ejecuta, cierre con cómo acabó y la
+    // orden de verdad para la pestaña (el chat y el consejero). Antes se
+    // escribía a pelo, sin marco (14-11, «busca esta clase de cosas»).
+    let t = crate::i18n::Translator::new(&crate::i18n::active_language());
+    let notice = crate::console_ui::Notice::new(
+        t.t("verb.run", "Ejecutar"),
+        format!("LTools · {}", action.label),
+        &command,
+    );
+    let decorated = crate::console_ui::decorate(
+        &command,
+        &notice,
+        environment.kind,
+        environment.transport,
+        false,
+        &t,
+    );
+    if !state
+        .tabs
+        .write_command_shown(&target_tab, &decorated, &command)
+    {
         return failed("No se pudo escribir en la terminal activa.");
     }
     LToolsRunResult {
@@ -1063,6 +1094,16 @@ mod tests {
                 ShellKind::Cmd
             ),
             "\"C:\\Tools\\ltools-1.0.0-windows-x86_64-cli.exe\" actions run defaults.show"
+        );
+        // En PowerShell una ruta entre comillas necesita `&` para ejecutarse,
+        // y una comilla simple se dobla (14-11).
+        assert_eq!(
+            command_for_action(
+                action,
+                "C:\\L'Tools\\ltools-1.0.0-windows-x86_64-cli.exe",
+                ShellKind::Powershell
+            ),
+            "& 'C:\\L''Tools\\ltools-1.0.0-windows-x86_64-cli.exe' actions run defaults.show"
         );
     }
 

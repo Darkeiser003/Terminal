@@ -726,8 +726,10 @@
         >⟳</button>
     </div>
 
+    <!-- «Archivos» y no «Tipos de archivo»: ese es el título del desplegable de
+         justo debajo, y salía dos veces seguidas (16-11). -->
     <div class="content-section-title" data-testid="scripts-file-section-title">
-        {app.t('scripts.fileTypes', 'Tipos de archivo')}
+        {app.t('scripts.filesSection', 'Archivos')}
     </div>
         <div class="filter" aria-label={app.t('scripts.filterPlaceholder', 'Filtrar archivos por nombre, carpeta o extensión')}>
         <span aria-hidden="true">🔍</span>

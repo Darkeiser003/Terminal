@@ -359,9 +359,43 @@
         title={app.t('tabs.new', 'Nueva pestaña')}
         onclick={() => app.createTab()}
     >+</button>
+
+    <!-- El chat de agentes, al final de la fila y fijo a la derecha, justo
+         encima de donde se abre (14-11, Romen: «mover el botón ahí, y en vez
+         de palabras un símbolo, como el de las carpetas o la vista dividida,
+         fácil de identificar con una IA»): los destellos de siempre. -->
+    {#if app.preferences?.agentChat !== false && app.preferences?.showAgentChatButton !== false}<button
+        type="button"
+        class="side-toggle agent-chat-toggle"
+        class:on={app.agentChatVisible}
+        data-panel-toggle
+        data-testid="toolbar-agent-chat"
+        aria-pressed={app.agentChatVisible}
+        title={app.t('toolbar.agentChatHint', 'Abre o cierra el chat con los agentes de IA (también con :chat)')}
+        aria-label={app.t('toolbar.agentChat', 'Chat IA')}
+        onclick={() => (app.agentChatVisible = !app.agentChatVisible)}
+    >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path
+                d="M7 2.5 8.1 6 11.5 7.2 8.1 8.4 7 11.9 5.9 8.4 2.5 7.2 5.9 6Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linejoin="round"
+            />
+            <path
+                d="M12.2 9.6 12.7 11.1 14.2 11.6 12.7 12.1 12.2 13.6 11.7 12.1 10.2 11.6 11.7 11.1Z"
+                fill="currentColor"
+            />
+        </svg>
+    </button>{/if}
 </div>
 
 {#if menu && menuTab}
+    <!-- `tab` sale de `menu`: al vaciar `menu` deja de existir. Cada opción
+         lee su id ANTES de cerrar el menú (14-11, Romen: «Renombrar» y
+         «Cerrar pestaña» del menú no hacían nada; leían `tab.id` después de
+         `menu = null` y fallaban en silencio). -->
     {@const tab = menuTab}
     <!-- Fuera de la tira: su `overflow` recortaría el menú. Cualquier clic
          fuera lo cierra sin hacer nada más. -->
@@ -386,7 +420,7 @@
             type="button"
             role="menuitem"
             data-testid="tab-menu-rename"
-            onclick={() => { menu = null; app.renamingTabId = tab.id; }}
+            onclick={() => { const id = tab.id; menu = null; app.renamingTabId = id; }}
         >{app.t('tabs.menuRename', 'Renombrar')}<kbd>F2</kbd></button>
         <div class="tab-menu-colors" role="group" aria-label={app.t('tabs.menuColor', 'Color')}>
             <button
@@ -432,7 +466,7 @@
             type="button"
             role="menuitem"
             data-testid="tab-menu-close"
-            onclick={() => { menu = null; void app.closeTab(tab.id); }}
+            onclick={() => { const id = tab.id; menu = null; void app.closeTab(id); }}
         >{app.t('tabs.close', 'Cerrar pestaña')}</button>
     </div>
 {/if}
@@ -678,6 +712,14 @@
         background: var(--accent-soft);
         border-color: var(--accent);
         color: var(--accent);
+    }
+
+    /* A la derecha del todo y visible aunque las pestañas desborden la fila. */
+    .agent-chat-toggle {
+        position: sticky;
+        right: 0;
+        margin-left: auto;
+        box-shadow: -8px 0 8px var(--surface-alt);
     }
 
     .side-toggle:disabled {

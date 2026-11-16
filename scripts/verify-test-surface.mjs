@@ -592,7 +592,11 @@ check('Mi GitHub completo: Actions (artefactos, workflows con entradas, secretos
         && read('src-tauri/src/infrastructure/process.rs').includes('pub fn run_with_timeout_capture_stdin(')
         && read('src-tauri/src/lib.rs').includes('projects::gh_admin::github_admin_action,')
         && read('src/components/GithubRepoManager.svelte').includes('data-testid="gh-manage-expand"')
-        && read('src/components/GithubAdmin.svelte').includes('data-testid="gh-admin-secret-value" type="password"')
+        // El valor del secreto va en un textarea (conserva los saltos de línea
+        // de una clave PEM) tapado como una contraseña mientras no se pida verlo.
+        && read('src/components/GithubAdmin.svelte').includes('<textarea data-testid="gh-admin-secret-value" class="secret" class:masked={!showSecret}')
+        && read('src/components/GithubAdmin.svelte').includes('let showSecret = $state(false);')
+        && /textarea\.masked\s*\{\s*-webkit-text-security: disc;/.test(read('src/components/GithubAdmin.svelte'))
         && read('tests/e2e/smoke.mjs').includes("'El valor del secreto apareció en los argumentos de gh'")
         && read('tests/e2e/smoke.mjs').includes('mi-github-gestionar-vista-grande'));
 check('Instalador modular: plantilla propia con página de componentes, first-run.json, desinstalador con la carpeta propia y su tamaño, y 15 idiomas',
@@ -604,6 +608,42 @@ check('Instalador modular: plantilla propia con página de componentes, first-ru
         && read('src-tauri/tauri.windows.installer.conf.json').includes('"Hindi": "windows/installer/Hindi.nsh"')
         && read('src-tauri/src/platform/first_run.rs').includes('fn el_informe_solo_ofrece_borrar_una_carpeta_propia_de_wterminal()')
         && read('src-tauri/src/lib.rs').includes('platform::first_run::apply();'));
+// Revisión del 09-11 (C17, C21, C31-C36): «Borrar la carpeta propia» nunca
+// hace RmDir /r de la raíz, solo de las subcarpetas que el informe da por
+// borrables y con los nombres fijos de first_run::STORE_SUBDIRS; nunca una raíz
+// de disco ni la carpeta personal; «Borrar los datos» respeta la carpeta propia
+// que cuelga de %LOCALAPPDATA%\WTerminal; desinstalar borra first-run.json y
+// olvida lo aplicado; con otra huella se aplica en los dos sentidos.
+{
+    const hooks = read('src-tauri/windows/installer/hooks.nsh');
+    const template = read('src-tauri/windows/installer/installer.nsi');
+    const firstRun = read('src-tauri/src/platform/first_run.rs');
+    const subdirs = [...(firstRun.match(/pub const STORE_SUBDIRS[\s\S]*?\n\];/)?.[0] ?? '').matchAll(/\(Category::\w+, "([^"]+)"\)/g)].map((match) => match[1]);
+    check('El desinstalador borra la carpeta propia por subcarpetas, respeta la carpeta propia al borrar los datos y olvida first-run',
+        subdirs.length === 10
+            && subdirs.every((name) => hooks.includes(`!insertmacro WT_DELETE_STORE_DIR "${name}"`))
+            && !hooks.includes('RmDir /r "$WtStorePath"')
+            && hooks.includes('RmDir /r "$WtStorePath\\${NAME}"')
+            && hooks.includes('ReadINIStr $0 "${WT_REPORT}" "delete" "${NAME}"')
+            && hooks.includes('${AndIf} $1 != $WtDataKeep')
+            && hooks.includes('Delete "$INSTDIR\\first-run.json"')
+            && hooks.includes('LangString wtStoreKept ${LANG_${LANG}} "${KEPT}"')
+            && template.includes('!define WT_REPORT "$PLUGINSDIR\\wterminal-uninstall-report.ini"')
+            && template.includes('--wterminal-uninstall-report "${WT_REPORT}"')
+            && template.includes('ReadINIStr $WtDataKeep "${WT_REPORT}" "data" "keep"')
+            && template.includes('$(wtStoreKept): $WtStoreKept')
+            && template.indexOf('Var WtDataKeep') < template.indexOf('Section Uninstall')
+            && firstRun.includes('real_path(root).parent().is_none()')
+            && firstRun.includes('fn la_marca_no_basta_en_una_carpeta_con_otras_cosas_ni_en_una_raiz()')
+            && firstRun.includes('fn solo_se_borra_lo_que_se_recupera_y_nunca_lo_que_hay_que_conservar()')
+            && firstRun.includes('fn borrar_los_datos_respeta_la_carpeta_propia_que_cuelga_de_ellos()')
+            && firstRun.includes('fn con_otra_huella_anterior_se_aplica_en_los_dos_sentidos()')
+            && read('src-tauri/src/platform/mod.rs').includes('first_run::forget_applied()'));
+}
+// Tauri copia los customLanguageFiles añadiendo su propio BOM: con otro en el
+// original, makensis lee «﻿;» como orden (09-11: «Invalid command»).
+check('Los idiomas propios del instalador van sin BOM (Tauri pone el suyo al copiarlos)',
+    ['Polish', 'Romanian', 'Hindi'].every((name) => !read(`src-tauri/windows/installer/${name}.nsh`).startsWith('﻿')));
 check('La integración Windows registra y consume rutas de archivos',
     windowsIntegration.includes('Software\\Classes\\*\\shell\\WTerminal')
         && windowsIntegration.includes('--open-path')
@@ -1207,6 +1247,16 @@ check('Las pruebas quitan el PSModulePath heredado de PowerShell 7 antes de usar
     && smoke.includes("import { dropPowerShell7ModulePath } from './powershell-env.mjs';")
     && read('scripts/run-e2e-suite.mjs').includes('dropPowerShell7ModulePath();')
     && read('scripts/prepare-e2e-shell-tools.mjs').includes('env: windowsPowerShellEnvironment()'));
+// El 11-11 Grok acababa al abrirse («API key required») y ninguna prueba lo
+// había abierto: `ai-real` solo recorría una lista fija de seis. Ahora abre
+// todas las del catálogo que estén instaladas; si el catálogo crece, entran
+// solas.
+const aiCatalog = [...read('src-tauri/src/environments/ai.rs').matchAll(/AiCliDef \{ id: "([a-z0-9-]+)"/gu)].map((match) => match[1]);
+check(`ai-real abre todas las IA del catálogo instaladas (${aiCatalog.length}), no una lista fija`,
+    aiCatalog.length >= 15 && aiCatalog.includes('grok')
+    && smoke.includes("const detailedAi = new Set(['claude', 'gemini', 'codex', 'opencode', 'qwen', 'amp']);")
+    && smoke.includes('/^ai:[a-z0-9-]+$/u.test(String(environment.id))')
+    && smoke.includes("'[data-testid=\"ai-key-offer\"]'"));
 
 if (failures.length) {
     console.error(`Superficie de tests incompleta (${failures.length}/${checks.length} comprobaciones fallidas):`);

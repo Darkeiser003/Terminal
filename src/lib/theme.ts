@@ -161,6 +161,12 @@ export function applyTheme(
     document.body.dataset.density = preferences.uiDensity;
 }
 
+/** Tamaño de la letra de la terminal: los límites que valida el backend
+ *  (`terminal_font_size`, 10–24) y el de `default_settings.toml`. */
+export const TERMINAL_FONT_MIN = 10;
+export const TERMINAL_FONT_MAX = 24;
+export const TERMINAL_FONT_DEFAULT = 12;
+
 /** Límites del tamaño de la interfaz, los mismos que valida el backend. */
 export const UI_SCALE_MIN = 80;
 export const UI_SCALE_MAX = 500;

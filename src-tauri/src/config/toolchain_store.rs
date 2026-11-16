@@ -4,7 +4,7 @@
 //!
 //! | Categoría | Subcarpeta | Qué reubica | De fábrica |
 //! |---|---|---|---|
-//! | Cachés | `cache/` | npm, Yarn, Bun, Deno, pip, uv, Go, NuGet, Coursier, Composer | activa |
+//! | Cachés | `cache/` | npm, Yarn, Bun, Deno, pip, uv, Go, NuGet, Coursier, Composer, pub | activa |
 //! | Descargas del panel | `descargas/` | Los archivos que bajan las acciones del panel (ADB…) | activa |
 //! | Modelos de IA | `ia/` | `HF_HOME`; `OLLAMA_MODELS` solo si aún no hay modelos de Ollama | activa |
 //! | Herramientas nuevas | `herramientas/` | `npm -g`, `cargo install`, `go install`, `pip --user`, con su `bin` en el PATH | activa |
@@ -386,6 +386,10 @@ const CACHES: &[CacheDef] = &[
     entry("nuget", "NuGet", "NUGET_PACKAGES", "nuget", Category::Caches),
     entry("coursier", "Coursier", "COURSIER_CACHE", "coursier", Category::Caches),
     entry("composer", "Composer", "COMPOSER_CACHE_DIR", "composer", Category::Caches),
+    // Junto a las demás cachés: Ajustes pinta una cabecera cada vez que
+    // cambia la categoría respecto a la fila anterior, y detrás de las
+    // toolchains salía una segunda «Cachés» solo con pub.
+    entry("pub", "Dart y Flutter (pub)", "PUB_CACHE", "pub", Category::Caches),
     entry("downloads", "Descargas del panel", "WTERMINAL_DOWNLOADS", "panel", Category::Downloads),
     entry("huggingface", "Hugging Face", "HF_HOME", "huggingface", Category::AiModels),
     entry(OLLAMA_ENTRY, "Ollama (modelos)", "OLLAMA_MODELS", "ollama", Category::AiModels),
@@ -408,7 +412,6 @@ const CACHES: &[CacheDef] = &[
     toolchain("cabal", "Haskell (cabal)", "CABAL_DIR", "cabal", Bin::None),
     toolchain("stack", "Haskell (Stack)", "STACK_ROOT", "stack", Bin::None),
     toolchain("mix", "Elixir (Mix)", "MIX_HOME", "mix", Bin::None),
-    entry("pub", "Dart y Flutter (pub)", "PUB_CACHE", "pub", Category::Caches),
     // Configuración de los REPL: solo si aún no existía (como las
     // toolchains), para no dejar de ver la que ya tienes.
     entry("ipython", "IPython (configuración y perfiles)", "IPYTHONDIR", "ipython", Category::Config),
@@ -422,8 +425,13 @@ const CACHES: &[CacheDef] = &[
     // (`packages::actions::centralized_install`).
     entry("winget-programs", "Programas (WinGet y Chocolatey)", "WTERMINAL_PROGRAMS", "", Category::Programs),
     // Carpeta de proyectos de fábrica (`projects::github::projects_folder`).
-    entry("projects", "Proyectos de GitHub", "WTERMINAL_PROJECTS", "", Category::Projects),
+    entry(PROJECTS_ENTRY, "Proyectos de GitHub", "WTERMINAL_PROJECTS", "", Category::Projects),
 ];
+
+/// Id de la entrada de los proyectos de GitHub: apagarla en la vista de la
+/// carpeta propia devuelve los clones a su sitio de siempre
+/// ([`centralized_projects_dir`]).
+const PROJECTS_ENTRY: &str = "projects";
 
 /// Variables sin las que la carpeta `bin` de una entrada no funciona fuera de
 /// WTerminal. Los lanzadores de `pip --user` (`ipython.exe`…) importan su
@@ -961,14 +969,15 @@ pub fn default_root() -> PathBuf {
         .join("entornos")
 }
 
-/// Raíz efectiva según las preferencias: `None` si está desactivada.
 /// `<carpeta propia>\proyectos` si «Proyectos de GitHub» está activa: la
 /// carpeta de Proyectos de fábrica cuando el usuario no eligió otra
-/// (`projects::github::projects_folder`).
+/// (`projects::github::projects_folder`). `None` si la categoría o su
+/// elemento están apagados: los clones vuelven a su sitio de siempre, como
+/// dice la vista de la carpeta propia.
 pub fn centralized_projects_dir() -> Option<PathBuf> {
     let preferences = crate::preferences::current();
     sync_layout(&preferences);
-    if !preferences.toolchain_store_projects {
+    if !preferences.toolchain_store_projects || entry_disabled(PROJECTS_ENTRY) {
         return None;
     }
     effective_root(
@@ -978,6 +987,7 @@ pub fn centralized_projects_dir() -> Option<PathBuf> {
     .map(|root| category_base(&root, Category::Projects))
 }
 
+/// Raíz efectiva según las preferencias: `None` si está desactivada.
 pub fn effective_root(enabled: bool, configured: &str) -> Option<PathBuf> {
     if !enabled {
         return None;
@@ -993,7 +1003,11 @@ pub fn effective_root(enabled: bool, configured: &str) -> Option<PathBuf> {
 }
 
 fn cache_path(root: &Path, cache: &CacheDef) -> PathBuf {
-    let dir = category_base(root, cache.category);
+    cache_path_in(category_base(root, cache.category), cache)
+}
+
+/// La carpeta de una entrada dentro de la de su categoría (`dir`).
+fn cache_path_in(dir: PathBuf, cache: &CacheDef) -> PathBuf {
     // Programas no tiene subcarpeta: `<raíz>\programas\<id>`.
     if cache.subdir.is_empty() {
         dir
@@ -1117,17 +1131,80 @@ fn required_variables(
     required
 }
 
+/// Clave para comparar carpetas: barras normales, sin la del final y, en
+/// Windows, sin mayúsculas (`C:\Users\Ana\` y `c:/users/ana` son la misma).
+fn path_key(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text.trim_end_matches('/');
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.to_string()
+    }
+}
+
 fn same_dir(left: &Path, right: &Path) -> bool {
-    let normalize = |path: &Path| {
-        let text = path.to_string_lossy().replace('\\', "/");
-        let text = text.trim_end_matches('/').to_string();
-        if cfg!(windows) {
-            text.to_lowercase()
-        } else {
-            text
+    path_key(left) == path_key(right)
+}
+
+/// `inner` es `outer` o está dentro de ella, comparando como [`same_dir`]
+/// y por componentes completos (`npm-cache` no está dentro de `npm`).
+fn within(inner: &Path, outer: &Path) -> bool {
+    let inner = path_key(inner);
+    let outer = path_key(outer);
+    inner == outer || inner.starts_with(&format!("{outer}/"))
+}
+
+/// La raíz de un disco (`D:\`, `\\servidor\recurso`, `/`): no tiene carpeta
+/// madre.
+fn is_disk_root(path: &Path) -> bool {
+    path.parent().is_none()
+}
+
+/// La ruta con sus enlaces, uniones y nombres cortos (`ADMINI~1`) resueltos,
+/// para comparar carpetas que quizá aún no existen: se resuelve la parte que
+/// ya existe y se le añade el resto tal cual. Sin el prefijo `\\?\` que pone
+/// Windows. Si no existe nada de la ruta, la devuelve igual.
+fn resolved(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            let mut real = without_verbatim_prefix(real);
+            for part in rest.iter().rev() {
+                real.push(part);
+            }
+            return real;
         }
-    };
-    normalize(left) == normalize(right)
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
+}
+
+/// Una de las dos rutas es la otra o está dentro de ella, con enlaces,
+/// uniones y nombres cortos resueltos y, en Windows, sin mayúsculas.
+/// `store_adopt` la usa para no borrar un original que es (o contiene) su
+/// propia copia.
+pub fn paths_overlap(left: &Path, right: &Path) -> bool {
+    let left = resolved(left);
+    let right = resolved(right);
+    within(&left, &right) || within(&right, &left)
 }
 
 /// La variable la definió el usuario (y manda la suya). Si vale justo la
@@ -1201,14 +1278,20 @@ fn system_location(
         (OLLAMA_ENTRY, _) => home(&[".ollama", "models"]),
         ("npm-global", true) => roaming(&["npm"]),
         ("npm-global", false) => home(&[".npm-global"]),
+        // Solo `bin`: el resto de CARGO_HOME (registro, config.toml,
+        // credentials.toml) es de «Rust (cargo)», que ya lo mide entero.
         ("cargo-install", _) => std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
-            .or_else(|| home(&[".cargo"])),
+            .or_else(|| home(&[".cargo"]))
+            .map(|cargo_home| cargo_home.join("bin")),
         ("go-bin", _) => std::env::var_os("GOPATH")
             .map(|gopath| PathBuf::from(gopath).join("bin"))
             .or_else(|| home(&["go", "bin"])),
         ("pip-user", true) => roaming(&["Python"]),
-        ("pip-user", false) => home(&[".local"]),
+        // Fuera de Windows `pip --user` usa `~/.local`, que comparte con
+        // `~/.local/bin` y `~/.local/share` de todas las aplicaciones: lo suyo
+        // está en `lib/pythonX.Y`. Nunca se trae ([`adoptable`]).
+        ("pip-user", false) => home(&[".local", "lib"]),
         ("node-history", _) => home(&[".node_repl_history"]),
         ("python-history", _) => home(&[".python_history"]),
         ("sqlite-history", _) => home(&[".sqlite_history"]),
@@ -1338,7 +1421,8 @@ pub fn published_variables() -> Vec<(String, String)> {
 /// Lo que «Traer lo ya instalado» (`store_adopt`) puede traer por variable:
 /// cada entrada con su ubicación de siempre y su sitio en la carpeta propia.
 /// Fuera quedan las descargas (temporales), los programas (van con una unión,
-/// aparte) y los proyectos (tienen su propia carpeta en Ajustes).
+/// aparte), los proyectos (tienen su propia carpeta en Ajustes) y lo que
+/// comparte carpeta con otras cosas ([`adoptable`]).
 pub struct AdoptableEntry {
     pub id: String,
     pub label: String,
@@ -1348,6 +1432,63 @@ pub struct AdoptableEntry {
     pub destination: PathBuf,
     /// El usuario ya define la variable: manda la suya.
     pub user_defined: bool,
+    /// Por qué no se puede traer sin peligro aunque tenga contenido. `None`
+    /// si se puede. `store_adopt` la enseña bloqueada con
+    /// [`AdoptConflict::reason`]; lo ya traído (en su diario) sigue saliendo.
+    pub conflict: Option<AdoptConflict>,
+}
+
+/// Lo que impide traer una entrada: copiar y luego confirmar (que borra el
+/// original) perdería datos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptConflict {
+    /// El destino es el origen, está dentro de él o lo contiene (una carpeta
+    /// de categoría que coincide con la de siempre, o `~/.local` en Linux con
+    /// la raíz de fábrica dentro): no se copiaría nada, o la copia se
+    /// metería dentro de sí misma, y confirmar borraría la única copia.
+    Destination,
+    /// El origen está dentro de la carpeta propia (o de la carpeta de otra
+    /// entrada) o la contiene: confirmar borraría parte de la carpeta propia.
+    Store,
+    /// Otra entrada tiene el mismo origen: confirmar una borraría lo de la
+    /// otra.
+    SharedSource,
+}
+
+impl AdoptConflict {
+    /// El motivo que ve el usuario, como los demás de `store_adopt`.
+    pub fn reason(self) -> &'static str {
+        match self {
+            AdoptConflict::Destination => "Su sitio en la carpeta propia es su carpeta de siempre, o está dentro de ella o la contiene: no hay nada que traer y confirmar borraría la única copia. Elige otra carpeta para esta categoría.",
+            AdoptConflict::Store => "Su carpeta de siempre está dentro de la carpeta propia o la contiene: confirmar borraría parte de la carpeta propia.",
+            AdoptConflict::SharedSource => "Otro elemento usa la misma carpeta de siempre: confirmar uno borraría lo del otro.",
+        }
+    }
+}
+
+/// Si una entrada se puede traer por variable. No se traen nunca:
+/// - Las descargas, los programas y los proyectos (ver [`AdoptableEntry`]).
+/// - «cargo install»: lo suyo vive dentro de CARGO_HOME, en `bin` junto a
+///   los proxies de rustup (`cargo`, `rustc`, `rustup`) y con su registro de
+///   lo instalado (`.crates.toml`) en la raíz, mezclado con el registro de
+///   paquetes, `config.toml` y `credentials.toml`. Traer CARGO_HOME entero
+///   borraba todo eso al confirmar, y traer solo `bin` se llevaría los
+///   proxies. «Rust (cargo)» ya trae CARGO_HOME entero, con lo instalado.
+/// - `pip --user` fuera de Windows: su carpeta es `~/.local`, compartida con
+///   `~/.local/bin` y `~/.local/share` de todas las aplicaciones (y la raíz
+///   de fábrica de LTerminal vive dentro).
+fn adoptable(cache: &CacheDef, windows: bool) -> bool {
+    if matches!(
+        cache.category,
+        Category::Downloads | Category::Programs | Category::Projects
+    ) {
+        return false;
+    }
+    match cache.id {
+        "cargo-install" => false,
+        "pip-user" => windows,
+        _ => true,
+    }
 }
 
 pub fn adoptable_entries(root: &Path) -> Vec<AdoptableEntry> {
@@ -1355,14 +1496,9 @@ pub fn adoptable_entries(root: &Path) -> Vec<AdoptableEntry> {
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
     let temp = std::env::temp_dir();
-    CACHES
+    let mut entries: Vec<AdoptableEntry> = CACHES
         .iter()
-        .filter(|cache| {
-            !matches!(
-                cache.category,
-                Category::Downloads | Category::Programs | Category::Projects
-            )
-        })
+        .filter(|cache| adoptable(cache, cfg!(windows)))
         .filter_map(|cache| {
             let source = system_location(
                 cache,
@@ -1380,9 +1516,59 @@ pub fn adoptable_entries(root: &Path) -> Vec<AdoptableEntry> {
                 source,
                 destination: cache_path(root, cache),
                 user_defined: defined_by_user(Some(root), cache.variable),
+                conflict: None,
             })
         })
-        .collect()
+        .collect();
+    // Todo lo que ocupa la carpeta propia, aunque no se pueda traer ni esté
+    // activo: las carpetas de todas las entradas y las de las categorías.
+    let store_dirs: Vec<PathBuf> = CACHES.iter().map(|cache| cache_path(root, cache)).collect();
+    let bases: Vec<PathBuf> = Category::ALL
+        .into_iter()
+        .map(|category| category_base(root, category))
+        .collect();
+    mark_conflicts(&mut entries, root, &store_dirs, &bases);
+    entries
+}
+
+/// Marca las entradas que no se pueden traer sin peligro
+/// ([`AdoptConflict`]). Compara con las rutas resueltas ([`resolved`]) y, en
+/// Windows, sin mayúsculas: `%APPDATA%\Python` y `herramientas\python` son la
+/// misma carpeta si la de Herramientas es `%APPDATA%`.
+fn mark_conflicts(
+    entries: &mut [AdoptableEntry],
+    root: &Path,
+    store_dirs: &[PathBuf],
+    bases: &[PathBuf],
+) {
+    let overlap = |left: &Path, right: &Path| within(left, right) || within(right, left);
+    let root = resolved(root);
+    let store_dirs: Vec<PathBuf> = store_dirs.iter().map(|dir| resolved(dir)).collect();
+    let bases: Vec<PathBuf> = bases.iter().map(|dir| resolved(dir)).collect();
+    let sources: Vec<PathBuf> = entries
+        .iter()
+        .map(|entry| resolved(&entry.source))
+        .collect();
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let source = &sources[index];
+        let destination = resolved(&entry.destination);
+        entry.conflict = if overlap(source, &destination) {
+            Some(AdoptConflict::Destination)
+        } else if overlap(source, &root)
+            || store_dirs.iter().any(|dir| overlap(source, dir))
+            || bases.iter().any(|base| within(base, source))
+        {
+            Some(AdoptConflict::Store)
+        } else if sources
+            .iter()
+            .enumerate()
+            .any(|(other, path)| other != index && same_dir(path, source))
+        {
+            Some(AdoptConflict::SharedSource)
+        } else {
+            None
+        };
+    }
 }
 
 /// La categoría de una entrada por su id.
@@ -1409,22 +1595,18 @@ pub fn refresh_environment() {
     if let Some(root) = root.as_deref() {
         // Las carpetas existen desde el principio para poder abrirlas en
         // Ajustes, y las de historial para que el REPL pueda crear su archivo.
-        let _ = std::fs::create_dir_all(category_base(root, Category::Caches));
-        let marker = root.join(STORE_MARKER);
-        if !marker.exists() {
-            let _ = std::fs::write(&marker, STORE_MARKER_TEXT);
-        }
-        for cache in active_entries(categories, existing_ollama) {
-            let path = cache_path(root, cache);
-            let dir = if cache.file {
-                path.parent().map(Path::to_path_buf)
-            } else {
-                Some(path)
-            };
-            if let Some(dir) = dir {
-                let _ = std::fs::create_dir_all(dir);
-            }
-        }
+        let mut dirs = vec![category_base(root, Category::Caches)];
+        dirs.extend(
+            active_entries(categories, existing_ollama).filter_map(|cache| {
+                let path = cache_path(root, cache);
+                if cache.file {
+                    path.parent().map(Path::to_path_buf)
+                } else {
+                    Some(path)
+                }
+            }),
+        );
+        prepare_root(root, same_dir(root, &default_root()), &dirs);
     }
     crate::process::set_extra_environment(overrides_for(
         root.as_deref(),
@@ -1442,6 +1624,35 @@ pub fn refresh_environment() {
             .collect(),
     );
     crate::path_env::clear_which_cache();
+}
+
+/// Crea las carpetas (`dirs`) y deja la marca [`STORE_MARKER`] solo si la
+/// raíz es de WTerminal: la de fábrica (`factory`), o una que no existía o
+/// estaba vacía antes de crear nada en ella. Una carpeta elegida a mano que
+/// ya tenía otras cosas (`D:\Desarrollo`, la carpeta personal) nunca se
+/// marca, ni una raíz de disco: el desinstalador ofrece borrar entera una
+/// carpeta marcada (`platform::first_run`).
+fn prepare_root(root: &Path, factory: bool, dirs: &[PathBuf]) {
+    let ours = factory || (root_is_unused(root) && !is_disk_root(root));
+    for dir in dirs {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if ours {
+        let _ = std::fs::create_dir_all(root);
+        let marker = root.join(STORE_MARKER);
+        if !marker.exists() {
+            let _ = std::fs::write(&marker, STORE_MARKER_TEXT);
+        }
+    }
+}
+
+/// La carpeta no existe o está vacía. Si no se puede leer, cuenta como
+/// usada: nunca se marca una carpeta sin saber qué tiene.
+fn root_is_unused(root: &Path) -> bool {
+    match std::fs::read_dir(root) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Tamaño de una carpeta sin seguir enlaces ni uniones (evita bucles y contar
@@ -1705,10 +1916,22 @@ pub fn status() -> StoreStatus {
             })
             .collect::<Vec<_>>()
     };
-    // «Vaciar cachés» solo cuenta y borra las cachés de la carpeta propia.
+    // «Vaciar cachés» solo cuenta y borra las cachés de la carpeta propia, y
+    // las mismas que borraría ([`clearable_caches`]): si no, ofrecía vaciar
+    // unos GB y luego no liberaba nada.
+    let clearable = clearable_caches(
+        &|category| category_base(&root, category),
+        &crate::paths::home_dir(),
+        &|variable| defined_by_user(Some(&root), variable),
+    );
     let cache_bytes = caches
         .iter()
         .filter(|cache| cache.location == "own" && cache.category == Category::Caches)
+        .filter(|cache| {
+            clearable
+                .iter()
+                .any(|path| same_dir(path, Path::new(&cache.path)))
+        })
         .map(|cache| cache.bytes)
         .sum();
     StoreStatus {
@@ -1844,23 +2067,21 @@ pub fn external_sizes(refresh: bool) -> Vec<ExternalLocation> {
     locations
 }
 
-/// Vacía las cachés propias (nunca una carpeta que defina el usuario ni nada
-/// fuera de `<raíz>/cache`). Devuelve los bytes liberados.
+/// Vacía las cachés propias ([`clearable_caches`]): nunca una carpeta que
+/// defina el usuario ni nada fuera de la carpeta de la categoría de cachés.
+/// Devuelve los bytes liberados.
 pub fn clear_caches() -> u64 {
     let preferences = crate::preferences::current();
     sync_layout(&preferences);
     let root = effective_root(true, &preferences.toolchain_store_dir).unwrap_or_else(default_root);
-    let cache_root = root.join("cache");
+    let user_defined = |variable: &str| defined_by_user(Some(&root), variable);
     let mut freed = 0;
-    for cache in CACHES
-        .iter()
-        .filter(|cache| cache.category == Category::Caches)
-    {
-        if std::env::var_os(cache.variable).is_some() {
-            continue;
-        }
-        let path = cache_path(&root, cache);
-        if !path.starts_with(&cache_root) || !path.is_dir() {
+    for path in clearable_caches(
+        &|category| category_base(&root, category),
+        &crate::paths::home_dir(),
+        &user_defined,
+    ) {
+        if !path.is_dir() {
             continue;
         }
         let before = directory_size(&path);
@@ -1868,6 +2089,36 @@ pub fn clear_caches() -> u64 {
         freed += before.saturating_sub(directory_size(&path));
     }
     freed
+}
+
+/// Las carpetas que vacía «Vaciar cachés»: las de la categoría de cachés en
+/// su carpeta (la elegida para la categoría o `<raíz>\cache`, `base_of`),
+/// salvo las que fija el usuario con su variable. Si esa carpeta es una raíz
+/// de disco, la carpeta personal (o una que la contiene) o coincide con la de
+/// otra categoría, está dentro de ella o la contiene (npm global y la caché
+/// de npm acabarían en la misma `npm`), no se vacía nada.
+fn clearable_caches(
+    base_of: &dyn Fn(Category) -> PathBuf,
+    home: &Path,
+    user_defined: &dyn Fn(&str) -> bool,
+) -> Vec<PathBuf> {
+    let base = base_of(Category::Caches);
+    let cache_root = resolved(&base);
+    let collides = Category::ALL
+        .into_iter()
+        .filter(|category| *category != Category::Caches)
+        .any(|category| {
+            let other = resolved(&base_of(category));
+            within(&other, &cache_root) || within(&cache_root, &other)
+        });
+    if collides || is_disk_root(&cache_root) || within(&resolved(home), &cache_root) {
+        return Vec::new();
+    }
+    CACHES
+        .iter()
+        .filter(|cache| cache.category == Category::Caches && !user_defined(cache.variable))
+        .map(|cache| cache_path_in(base.clone(), cache))
+        .collect()
 }
 
 // Los tres comandos miden o borran carpetas y pueden tardar (la primera
@@ -1946,11 +2197,23 @@ mod tests {
         // rustup, cargo, GOPATH, Gradle, .NET, Android y, desde el 09-11,
         // cabal, Stack y Mix.
         assert_eq!(toolchains.len(), 9);
+        // cabal y Stack viven en %APPDATA% en Windows: la prueba da las tres
+        // carpetas del perfil, como las da el sistema.
+        let local = Path::new("C:/Users/ana/AppData/Local");
+        let roaming = Path::new("C:/Users/ana/AppData/Roaming");
         for cache in &toolchains {
             // Cada una sabe dónde vive cuando no se centraliza: es lo que se
             // comprueba antes de reubicarla.
             assert!(
-                system_location(cache, true, home, None, None, Path::new("C:/tmp")).is_some(),
+                system_location(
+                    cache,
+                    true,
+                    home,
+                    Some(local),
+                    Some(roaming),
+                    Path::new("C:/tmp")
+                )
+                .is_some(),
                 "{} sin ubicación de siempre",
                 cache.id
             );
@@ -2173,6 +2436,8 @@ mod tests {
         assert_eq!(at("npm", false), Some(home.join(".npm")));
         assert_eq!(at("npm-global", true), Some(roaming.join("npm")));
         assert_eq!(at("pip-user", true), Some(roaming.join("Python")));
+        // En Linux, lo de `pip --user`, no `~/.local` entero.
+        assert_eq!(at("pip-user", false), Some(home.join(".local").join("lib")));
         assert_eq!(
             at("node-history", false),
             Some(home.join(".node_repl_history"))
@@ -2219,6 +2484,333 @@ mod tests {
     }
 
     #[test]
+    fn cada_categoria_sale_una_sola_vez_y_seguida() {
+        // Ajustes pinta una cabecera cada vez que cambia la categoría respecto
+        // a la fila anterior: una entrada lejos de las suyas la repetía
+        // («Cachés» dos veces, la segunda solo con pub).
+        let mut order: Vec<Category> = Vec::new();
+        for cache in CACHES {
+            if order.last() != Some(&cache.category) {
+                assert!(
+                    !order.contains(&cache.category),
+                    "{} está lejos de las demás de su categoría",
+                    cache.id
+                );
+                order.push(cache.category);
+            }
+        }
+        // El orden que espera el E2E (`expectedCategories` de smoke.mjs).
+        assert_eq!(
+            order,
+            vec![
+                Category::Caches,
+                Category::Downloads,
+                Category::AiModels,
+                Category::Tools,
+                Category::ReplHistory,
+                Category::Toolchains,
+                Category::Config,
+                Category::Plugins,
+                Category::Programs,
+                Category::Projects,
+            ]
+        );
+    }
+
+    #[test]
+    fn el_elemento_de_proyectos_se_apaga_por_su_id() {
+        // `centralized_projects_dir` mira este id: apagarlo en la vista
+        // devuelve los clones a su sitio de siempre.
+        let projects = CACHES
+            .iter()
+            .find(|cache| cache.id == PROJECTS_ENTRY)
+            .unwrap();
+        assert_eq!(projects.category, Category::Projects);
+        assert_eq!(projects.variable, "WTERMINAL_PROJECTS");
+    }
+
+    #[test]
+    fn cargo_install_y_pip_user_en_linux_no_se_traen_y_ningun_origen_se_repite() {
+        let home = PathBuf::from("/home/u");
+        let local = PathBuf::from("/local");
+        let roaming = PathBuf::from("/roaming");
+        let temp = PathBuf::from("/tmp");
+        for windows in [true, false] {
+            let sources: Vec<(&str, PathBuf)> = CACHES
+                .iter()
+                .filter(|cache| adoptable(cache, windows))
+                .filter_map(|cache| {
+                    system_location(cache, windows, &home, Some(&local), Some(&roaming), &temp)
+                        .map(|source| (cache.id, source))
+                })
+                .collect();
+            let ids: Vec<&str> = sources.iter().map(|(id, _)| *id).collect();
+            // «Rust (cargo)» ya trae CARGO_HOME entero, con lo instalado con
+            // «cargo install»; traer este se llevaba (y al confirmar borraba)
+            // CARGO_HOME o los proxies de rustup.
+            assert!(!ids.contains(&"cargo-install"), "windows={windows}");
+            assert!(ids.contains(&"cargo-home"), "windows={windows}");
+            // En Linux `pip --user` comparte `~/.local` con todo lo demás.
+            assert_eq!(ids.contains(&"pip-user"), windows);
+            for fuera in ["downloads", "winget-programs", "projects"] {
+                assert!(!ids.contains(&fuera), "{fuera}");
+            }
+            for (index, (id, source)) in sources.iter().enumerate() {
+                assert_ne!(source, &home.join(".local"), "{id}");
+                for (other, path) in &sources[index + 1..] {
+                    assert!(
+                        !same_dir(source, path),
+                        "{id} y {other} comparten origen (windows={windows})"
+                    );
+                }
+            }
+        }
+        // Lo que se mide de «cargo install» es su `bin`, no CARGO_HOME entero
+        // (que ya mide «Rust (cargo)»).
+        let cargo_install = CACHES
+            .iter()
+            .find(|cache| cache.id == "cargo-install")
+            .unwrap();
+        let measured = system_location(
+            cargo_install,
+            true,
+            &home,
+            Some(&local),
+            Some(&roaming),
+            &temp,
+        )
+        .unwrap();
+        assert!(measured.ends_with("bin"), "{}", measured.display());
+    }
+
+    fn adoptable_entry(id: &str, source: PathBuf, destination: PathBuf) -> AdoptableEntry {
+        AdoptableEntry {
+            id: id.to_string(),
+            label: id.to_string(),
+            category: Category::Tools,
+            variable: "WTERMINAL_PRUEBA",
+            source,
+            destination,
+            user_defined: false,
+            conflict: None,
+        }
+    }
+
+    #[test]
+    fn no_se_trae_lo_que_pisa_su_destino_la_carpeta_propia_u_otro_origen() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        // La raíz de fábrica de LTerminal vive dentro de `~/.local`.
+        let root = home
+            .join(".local")
+            .join("share")
+            .join("LTerminal")
+            .join("entornos");
+        let base = |category: Category| root.join(category.dir());
+        let roaming = home.join("AppData").join("Roaming");
+        std::fs::create_dir_all(roaming.join("Python")).unwrap();
+        std::fs::create_dir_all(home.join(".cache").join("huggingface")).unwrap();
+        let elegida = home.join("datos").join("ia");
+        let mut entries = vec![
+            // La carpeta de «Modelos de IA» es `~/.cache`: el destino es el
+            // origen y confirmar borraría la única copia (C19).
+            adoptable_entry(
+                "huggingface",
+                home.join(".cache").join("huggingface"),
+                home.join(".cache").join("huggingface"),
+            ),
+            // Con Herramientas en `%APPDATA%`: `Python` y `python` son la
+            // misma carpeta en Windows.
+            adoptable_entry("pip-user", roaming.join("Python"), roaming.join("python")),
+            // `~/.local` contiene el destino: la copia se metía en sí misma
+            // (C3).
+            adoptable_entry(
+                "local",
+                home.join(".local"),
+                base(Category::Tools).join("python"),
+            ),
+            // El CARGO_HOME que ya publicó WTerminal está dentro de la raíz.
+            adoptable_entry(
+                "dentro",
+                base(Category::Toolchains).join("cargo-home"),
+                base(Category::Tools).join("cargo"),
+            ),
+            // Contiene la carpeta elegida para una categoría fuera de la raíz.
+            adoptable_entry("contiene", home.join("datos"), home.join("otra")),
+            // Dos entradas con el mismo origen (C2).
+            adoptable_entry(
+                "a",
+                home.join(".cargo"),
+                base(Category::Toolchains).join("a"),
+            ),
+            adoptable_entry("b", home.join(".cargo"), base(Category::Tools).join("b")),
+            // Lo normal: nada se pisa (`npm-cache` no está dentro de `npm`).
+            adoptable_entry(
+                "npm",
+                home.join("npm-cache"),
+                base(Category::Caches).join("npm"),
+            ),
+        ];
+        let mut bases: Vec<PathBuf> = Category::ALL.into_iter().map(base).collect();
+        bases.push(elegida);
+        let store_dirs = vec![base(Category::Caches).join("npm"), home.join("npm")];
+        mark_conflicts(&mut entries, &root, &store_dirs, &bases);
+        let conflict = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap()
+                .conflict
+        };
+        assert_eq!(conflict("huggingface"), Some(AdoptConflict::Destination));
+        assert_eq!(
+            conflict("pip-user"),
+            cfg!(windows).then_some(AdoptConflict::Destination)
+        );
+        assert_eq!(conflict("local"), Some(AdoptConflict::Destination));
+        assert_eq!(conflict("dentro"), Some(AdoptConflict::Store));
+        assert_eq!(conflict("contiene"), Some(AdoptConflict::Store));
+        assert_eq!(conflict("a"), Some(AdoptConflict::SharedSource));
+        assert_eq!(conflict("b"), Some(AdoptConflict::SharedSource));
+        assert_eq!(conflict("npm"), None);
+        for conflict in [
+            AdoptConflict::Destination,
+            AdoptConflict::Store,
+            AdoptConflict::SharedSource,
+        ] {
+            assert!(conflict.reason().len() > 40, "{conflict:?}");
+        }
+    }
+
+    #[test]
+    fn las_rutas_se_comparan_por_carpetas_completas_y_sin_mayusculas_en_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("Roaming");
+        std::fs::create_dir_all(base.join("Python")).unwrap();
+        assert!(paths_overlap(
+            &base.join("Python"),
+            &base.join("Python").join("Python312")
+        ));
+        assert!(paths_overlap(&base, &base.join("npm")));
+        assert!(!paths_overlap(&base.join("npm-cache"), &base.join("npm")));
+        assert_eq!(
+            paths_overlap(&base.join("Python"), &base.join("python")),
+            cfg!(windows)
+        );
+        // Lo que aún no existe se compara igual que lo que sí.
+        assert!(paths_overlap(
+            &base.join("no").join("existe"),
+            &base.join("no")
+        ));
+        assert!(is_disk_root(Path::new(if cfg!(windows) {
+            r"D:\"
+        } else {
+            "/"
+        })));
+        assert!(!is_disk_root(&base));
+    }
+
+    #[test]
+    fn la_marca_solo_va_en_una_raiz_que_crea_wterminal_o_en_la_de_fabrica() {
+        let dir = tempfile::tempdir().unwrap();
+        let marked = |root: &Path| root.join(STORE_MARKER).is_file();
+        // No existía: la crea WTerminal, con sus carpetas y la marca.
+        let nueva = dir.path().join("nueva");
+        prepare_root(&nueva, false, &[nueva.join("cache")]);
+        assert!(nueva.join("cache").is_dir());
+        assert!(marked(&nueva));
+        // La siguiente vez ya tiene contenido, pero la marca sigue.
+        prepare_root(&nueva, false, &[nueva.join("cache")]);
+        assert!(marked(&nueva));
+        // Vacía: también la llena WTerminal.
+        let vacia = dir.path().join("vacia");
+        std::fs::create_dir_all(&vacia).unwrap();
+        prepare_root(&vacia, false, &[vacia.join("cache")]);
+        assert!(marked(&vacia));
+        // Una carpeta con cosas del usuario (C17): se crean las carpetas,
+        // pero nunca la marca, o el desinstalador ofrecería borrarla entera.
+        let ajena = dir.path().join("Desarrollo");
+        std::fs::create_dir_all(ajena.join("mi-proyecto")).unwrap();
+        prepare_root(&ajena, false, &[ajena.join("cache")]);
+        assert!(ajena.join("cache").is_dir());
+        assert!(!marked(&ajena));
+        prepare_root(&ajena, false, &[ajena.join("cache")]);
+        assert!(!marked(&ajena));
+        // La de fábrica siempre es de WTerminal.
+        prepare_root(&ajena, true, &[]);
+        assert!(marked(&ajena));
+        // Lo que no existe está sin usar; lo que tiene algo, no.
+        assert!(root_is_unused(&dir.path().join("no-existe")));
+        assert!(!root_is_unused(&ajena));
+    }
+
+    #[test]
+    fn vaciar_caches_usa_la_carpeta_de_la_categoria_y_no_pisa_otras() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("entornos");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let fabrica = |category: Category| root.join(category.dir());
+        let caches = CACHES
+            .iter()
+            .filter(|cache| cache.category == Category::Caches)
+            .count();
+        let todas = clearable_caches(&fabrica, &home, &|_| false);
+        assert_eq!(todas.len(), caches);
+        assert!(todas
+            .iter()
+            .all(|path| path.starts_with(root.join("cache"))));
+        // La que fija el usuario con su variable no se toca.
+        let sin_npm = clearable_caches(&fabrica, &home, &|variable| variable == "npm_config_cache");
+        assert_eq!(sin_npm.len(), caches - 1);
+        assert!(!sin_npm.contains(&root.join("cache").join("npm")));
+        // Con una carpeta elegida para las cachés se vacía esa (C20).
+        let propia = dir.path().join("E").join("caches");
+        let elegida = |category: Category| {
+            if category == Category::Caches {
+                propia.clone()
+            } else {
+                fabrica(category)
+            }
+        };
+        let paths = clearable_caches(&elegida, &home, &|_| false);
+        assert_eq!(paths.len(), caches);
+        assert!(paths.contains(&propia.join("npm")));
+        // La misma que Herramientas: la caché de npm y npm global serían la
+        // misma `npm`.
+        let compartida = |category: Category| match category {
+            Category::Caches | Category::Tools => propia.clone(),
+            _ => fabrica(category),
+        };
+        assert!(clearable_caches(&compartida, &home, &|_| false).is_empty());
+        // Dentro de la de otra categoría.
+        let dentro = |category: Category| {
+            if category == Category::Caches {
+                fabrica(Category::Programs).join("cache")
+            } else {
+                fabrica(category)
+            }
+        };
+        assert!(clearable_caches(&dentro, &home, &|_| false).is_empty());
+        // Una raíz de disco, la carpeta personal o una que la contiene.
+        let disco = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
+        for peligrosa in [disco, home.clone(), dir.path().join("..")] {
+            let base = |category: Category| {
+                if category == Category::Caches {
+                    peligrosa.clone()
+                } else {
+                    fabrica(category)
+                }
+            };
+            assert!(
+                clearable_caches(&base, &home, &|_| false).is_empty(),
+                "{}",
+                peligrosa.display()
+            );
+        }
+    }
+
+    #[test]
     fn la_carpeta_de_cada_categoria_solo_acepta_categorias_conocidas_y_rutas_absolutas() {
         let absoluta = if cfg!(windows) {
             r"E:\ia"
@@ -2254,9 +2846,14 @@ mod tests {
         } else {
             "/entornos"
         });
+        // Solo la categoría de cachés: desde el 09-11 la configuración y los
+        // complementos (IPython, Jupyter, starship) también llevan variables.
         let solo_caches = Categories {
             downloads: false,
             ai_models: false,
+            toolchains: false,
+            config: false,
+            plugins: false,
             ..SOLO_CACHES_DESCARGAS_E_IA
         };
         let overrides = overrides_for(Some(&root), solo_caches, false, &|variable| {

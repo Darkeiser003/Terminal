@@ -64,9 +64,10 @@ pub const UNINSTALL_CLEANUP_ARG: &str = "--wterminal-uninstall-cleanup";
 /// con WTerminal», App Paths y el protocolo `wterminal://`, y la marca
 /// RUNASADMIN. Sin esto, tras desinstalar quedaban entradas apuntando a un
 /// ejecutable que ya no existe. Lo que registró otra copia que sigue existiendo
-/// (un portable) se queda como está. No toca ajustes ni la carpeta propia: eso
-/// lo decide la casilla «Borrar los datos» del desinstalador. Devuelve el
-/// código de salida (0 si todo fue bien).
+/// (un portable) se queda como está. Olvida también lo aplicado de la página
+/// de componentes del instalador (`first_run::forget_applied`). No toca
+/// ajustes ni la carpeta propia: eso lo deciden las casillas del
+/// desinstalador. Devuelve el código de salida (0 si todo fue bien).
 #[cfg(windows)]
 pub fn uninstall_cleanup() -> i32 {
     let mut failures = 0;
@@ -83,6 +84,13 @@ pub fn uninstall_cleanup() -> i32 {
     }
     if let Err(error) = windows_integration::set_run_as_admin_flag(false) {
         eprintln!("RUNASADMIN: {error}");
+        failures += 1;
+    }
+    // Siempre, también si el PATH es de otra copia: lo de arriba deshace lo
+    // aplicado en el primer arranque, y una reinstalación con las mismas
+    // casillas (el mismo `first-run.json`) lo tiene que volver a aplicar.
+    if let Err(error) = first_run::forget_applied() {
+        eprintln!("first-run-applied.txt: {error}");
         failures += 1;
     }
     i32::from(failures > 0)

@@ -110,6 +110,31 @@ const ltoolsSelection = await importTypeScript('src/lib/ltools-selection.ts');
     assert.equal(tracker.jumpTarget(prompts[4], 'next'), null, 'tras la última no hay siguiente');
     failed.prompt.line = -1;
     assert.equal(tracker.jumpTarget(prompts[2], 'previous'), prompts[0], 'una orden que salió del historial se salta');
+    // Una orden de un botón (13-11): la pestaña no ve su Intro, pero cuenta,
+    // con su texto. Sin prompt libre espera al siguiente, como mucho 15 s.
+    tracker.mark('A', 0);
+    tracker.mark('B', 2);
+    tracker.appCommand('winget install x');
+    assert.equal(tracker.atPrompt, false, 'la orden de la app ya corre');
+    row += 3;
+    clock += 1000;
+    const fromApp = tracker.mark('D;-1978335212', 0);
+    assert.equal(fromApp?.command, 'winget install x', 'la orden de la app se apunta con su texto');
+    assert.equal(fromApp.exitCode, -1978335212);
+    tracker.appCommand('cmd /c exit 2');
+    tracker.mark('A', 0);
+    tracker.mark('B', 2);
+    assert.equal(tracker.atPrompt, false, 'la que esperaba se ata al prompt siguiente');
+    row += 1;
+    assert.equal(tracker.mark('D;2', 0)?.command, 'cmd /c exit 2');
+    tracker.appCommand('vieja');
+    clock += 20000;
+    tracker.mark('A', 0);
+    tracker.mark('B', 2);
+    assert.equal(tracker.atPrompt, true, 'pasados 15 s ya no se ata a nada');
+    tracker.submitted(false);
+    row += 1;
+    assert.equal(tracker.mark('D;0', 0)?.command, undefined, 'lo tecleado no hereda la orden de la app');
     tracker.mark('A', 0);
     tracker.mark('B', 2);
     tracker.submitted(false);
@@ -122,6 +147,16 @@ const ltoolsSelection = await importTypeScript('src/lib/ltools-selection.ts');
     assert.equal(marks.formatDuration(820, 'es'), '820 ms');
     assert.equal(marks.formatDuration(4200, 'es'), '4,2 s');
     assert.equal(marks.formatDuration(192000, 'es'), '3 min 12 s');
+    // cmd no da código: una orden que no existe se reconoce por el texto de
+    // Windows, aunque la terminal haya partido la fila.
+    const notFound = '" no se reconoce como un comando interno o externo,';
+    assert.equal(marks.inferCmdExitCode('"epo" no se reconoce como un comando interno o externo,\nprograma o archivo por lotes ejecutable.', notFound), 9009);
+    assert.equal(marks.inferCmdExitCode('"epo" no se reconoce como un\n  comando interno o externo,', notFound), 9009);
+    // Fila partida justo en un espacio: el búfer lo pierde al leerla.
+    assert.equal(marks.inferCmdExitCode('"epo" no se reconoce como un comandointerno o externo,', notFound), 9009);
+    assert.equal(marks.inferCmdExitCode('hola', notFound), null);
+    assert.equal(marks.inferCmdExitCode('"epo" no se reconoce como un comando interno o externo,', null), null);
+    assert.equal(marks.inferCmdExitCode('cualquier cosa', '  '), null);
 }
 
 const ltoolsActions = Array.from({ length: 73 }, (_, index) => ({
@@ -548,7 +583,9 @@ assert(terminalPane.includes('function noteXtermGeometry(): void')
     'la reducción transitoria de filas de xterm debe replicarse en ConPTY');
 // Las teclas no adelantan al resize de ConPTY: esperan la medida de una
 // casilla recién activada y envían antes el resize que aún esperaba debounce.
-assert(/\.then\(\(\) => activationGeometryReady\)[\s\S]{0,400}?flushPendingPtyResize\(\);\s*return resizeQueue;[\s\S]{0,80}?api\.sendInput\(tabId, data\)/u.test(terminalPane),
+// Entre paso y paso va `markInputStage` (diagnóstico de `__wtInputState`): el
+// orden es el mismo.
+assert(/return activationGeometryReady;[\s\S]{0,400}?flushPendingPtyResize\(\);\s*return resizeQueue;[\s\S]{0,400}?api\.sendInput\(tabId, data\)/u.test(terminalPane),
     'la entrada debe esperar la geometría de activación y adelantar el resize pendiente');
 assert(terminalPane.includes('pendingPtyResizeRun = runPtyResize;')
     && terminalPane.includes('resizeTimer = setTimeout(runPtyResize,'),
@@ -904,7 +941,7 @@ assert(app.includes('"terminal.terminalOnlyGuideNoShortcut"'),
         && terminalPane.includes("term.input('\\r', true);")
         && terminalPane.includes("if (term.buffer.active.type === 'alternate') return 'busy';")
         && /if \(draft\.trim\(\)\) return 'draft';\s*if \(!terminalPromptVisible\(\)\) return 'busy';/u.test(terminalPane)
-        && terminalPane.includes('registerTerminalControls(tabId, { openSearch, saveOutput, copyLastOutput, jumpToCommand, submitLine: submitLineFromApp, insertLine: insertLineFromApp });')
+        && terminalPane.includes('registerTerminalControls(tabId, { openSearch, saveOutput, copyLastOutput, jumpToCommand, submitLine: submitLineFromApp, insertLine: insertLineFromApp, lastCommandContext });')
         && terminalPane.includes('unregisterTerminalControls(tabId);'),
         'TerminalPane teclea por la ruta del teclado y solo sobre un prompt vacío');
     assert(paletteComponent.includes('role="combobox"') && paletteComponent.includes('aria-activedescendant')
@@ -1182,6 +1219,20 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
         'Ajustes → Terminal activa los enlaces y su confirmación');
     assert(/^terminalLinks = true$/mu.test(defaults) && /^terminalLinksConfirm = true$/mu.test(defaults),
         'los enlaces vienen activados y con confirmación de fábrica');
+    // Escribir de una vez las órdenes de las acciones: su fila y, de fábrica
+    // desde el 15-11, encendida.
+    assert(settingsPanel.includes('data-testid="settings-action-commands-at-once"\n                            bind:checked={draft.actionCommandsAtOnce}')
+        && /^actionCommandsAtOnce = true$/mu.test(defaults),
+        'Ajustes tiene «Escribir de una vez las órdenes de las acciones», encendida de fábrica');
+    // Una IA que acaba pidiendo su clave: la pestaña la ofrece, el campo la
+    // oculta y la oferta se puede apagar en Ajustes (encendida de fábrica).
+    assert(settingsPanel.includes('data-testid="settings-ai-key-offer"\n                                bind:checked={draft.aiKeyOffer}')
+        && /^aiKeyOffer = true$/mu.test(defaults)
+        && terminalPane.includes('data-testid="ai-key-offer"')
+        && terminalPane.includes('type="password"\n                    class="ai-key-input"')
+        && terminalPane.includes("if (app.preferences?.aiKeyOffer === false) return;")
+        && terminalPane.includes("aiKeyValue = '';"),
+        'la oferta de clave de IA tiene su fila en Ajustes, oculta la clave y vacía el campo');
 }
 
 // Imagen a la izquierda del banner (src/lib/banner-image.ts): el banner se
@@ -1227,7 +1278,37 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
         for (const line of ['echo claude', 'dir', 'claudette', ':theme', '', null]) {
             assert.equal(fullScreen.isAiCommandLine(line), false, String(line));
         }
+        // Python en Windows: con pyreadline3 repinta toda la ventana a cada
+        // tecla (84 KB con 1024 columnas), así que va con el ancho visible.
+        const windowsPython = { windows: true, pythonVisibleWidth: true };
+        assert.equal(fullScreen.environmentFullScreenReason('ai:amp', windowsPython), 'ai-environment');
+        assert.equal(fullScreen.environmentFullScreenReason('lang:python', windowsPython), 'python-environment');
+        assert.equal(fullScreen.environmentFullScreenReason('lang:python', { windows: true, pythonVisibleWidth: false }), null,
+            'la opción de Ajustes lo apaga');
+        assert.equal(fullScreen.environmentFullScreenReason('lang:python', { windows: false, pythonVisibleWidth: true }), null,
+            'en Linux el readline de Python dibuja con VT y no lo necesita');
+        for (const id of ['cmd', 'lang:node', 'lang:ipython', 'wsl:Ubuntu:lang:python', '', null]) {
+            assert.equal(fullScreen.environmentFullScreenReason(id, windowsPython), null, String(id));
+        }
+        assert.equal(step('python-environment', [1049], true), undefined, 'la pestaña de Python manda sobre su pantalla alternativa');
+        assert.equal(step('python-command', [1049], false), undefined, 'el Python tecleado sale al volver el prompt');
+        assert.equal(fullScreen.endsWithShellPrompt('python-command'), true);
+        assert.equal(fullScreen.endsWithShellPrompt('ai-command'), true);
+        assert.equal(fullScreen.endsWithShellPrompt('python-environment'), false);
+        for (const line of ['python', 'py', 'PY -3.12', 'python3 -q', 'python3.12', '"C:\\Python312\\python.exe"', '& python.exe -X utf8', 'python -i script.py']) {
+            assert.equal(fullScreen.isInteractivePythonCommandLine(line), true, line);
+        }
+        for (const line of ['python script.py', 'python -m pip install x', 'py -c "print(1)"', 'python -', 'pythonw', 'pip', 'echo python', '', null]) {
+            assert.equal(fullScreen.isInteractivePythonCommandLine(line), false, String(line));
+        }
         const pane = await readFile('src/components/TerminalPane.svelte', 'utf8');
+        // Al cambiar de entorno, lo tecleado para el programa anterior no se
+        // entrega al nuevo (build 51: el final de una orden de Python en Node).
+        // Lo encolado con otra época no se envía (y cuenta como descartado en
+        // el diagnóstico de `__wtInputState`).
+        assert(/if \(epoch !== terminalInputEpoch\) \{[\s\S]{0,120}?return undefined;\s*\}\s*return api\.sendInput\(tabId, data\)/u.test(pane)
+            && /queuedInput = '';\n(?:\s*\/\/[^\n]*\n)*\s*terminalInputEpoch \+= 1;\n\s*if \(terminalInputBatchTimer !== undefined\) window\.clearTimeout\(terminalInputBatchTimer\);\n\s*terminalInputBatchTimer = undefined;\n\s*pendingTerminalInputData = '';/u.test(pane),
+            'el cambio de entorno abre una época nueva en la cola de entrada');
         assert(pane.includes('if (fullScreenApp) {\n            fitFullScreen();\n            return;\n        }')
             && pane.includes('const cols = Math.max(FULL_SCREEN_MIN_COLS, measuredVisibleColumns());')
             && pane.includes('if (fullScreenApp) return Math.max(FULL_SCREEN_MIN_COLS, currentDisplayCols());')
@@ -1433,6 +1514,240 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
         assert.equal(search.showSettingsIndex(headings, false), false, `${headings} apartados no llevan índice`);
     }
     assert.equal(search.showSettingsIndex(12, true), false, 'mientras se busca no hay índice');
+}
+
+// Choques de atajos (12-11): con la edición de línea de la shell o con otro
+// atajo de la app. Solo se avisa.
+{
+    const conflicts = shortcuts.shortcutConflicts;
+    assert.deepEqual(conflicts('shortcutCloseTab', { shortcutCloseTab: 'Ctrl+R' }), { shell: true, duplicateOf: null }, 'Ctrl+R es la búsqueda de la shell');
+    assert.deepEqual(conflicts('shortcutCloseTab', { shortcutCloseTab: 'Ctrl+Shift+W', shortcutNewTab: 'ctrl+shift+w' }), { shell: false, duplicateOf: 'shortcutNewTab' }, 'dos acciones con la misma tecla');
+    assert.deepEqual(conflicts('shortcutCloseTab', { shortcutCloseTab: 'Ctrl+Shift+W' }), { shell: false, duplicateOf: null });
+    assert.deepEqual(conflicts('shortcutCloseTab', { shortcutCloseTab: '' }), { shell: false, duplicateOf: null }, 'sin asignar no choca');
+}
+
+// Chat lateral con los agentes (12-11): la respuesta se parte en texto y
+// bloques de código (también uno sin cerrar mientras llega) y sin colores.
+{
+    const chat = await importTypeScript('src/lib/agent-chat.ts');
+    const fence = '```';
+    assert.deepEqual(chat.splitAgentAnswer(`Usa esto:\n${fence}bat\ndir /s\n${fence}\nY ya.`), [
+        { kind: 'text', text: 'Usa esto:' },
+        { kind: 'code', text: 'dir /s', lang: 'bat' },
+        { kind: 'text', text: 'Y ya.' },
+    ], 'texto, código (con su lenguaje) y texto');
+    assert.deepEqual(chat.splitAgentAnswer(`Mira:\n${fence}\nls -la`), [
+        { kind: 'text', text: 'Mira:' },
+        { kind: 'code', text: 'ls -la' },
+    ], 'un bloque aún sin cerrar ya cuenta como código');
+    assert.deepEqual(chat.splitAgentAnswer('Solo texto'), [{ kind: 'text', text: 'Solo texto' }]);
+    assert.equal(chat.stripAnsi('\u001b[1;32mverde\u001b[0m y \u001b]8;;https://x\u0007enlace\u001b]8;;\u0007'), 'verde y enlace',
+        'sin colores ni hipervínculos OSC 8');
+    // Los secretos de la terminal no llegan al agente.
+    const secrets = chat.redactSecrets([
+        'export OPENAI_API_KEY=sk-proj-abcdefghijklmnop1234',
+        'xai-0123456789abcdefABCDEF y ghp_0123456789abcdefghij0123456789abcd',
+        'curl -H "Authorization: Bearer abcdefghijklmnopqrstuvwx.yz"',
+        'password: "hunter2 largo"',
+        '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE\n-----END OPENSSH PRIVATE KEY-----',
+        'nada secreto aquí: ls -la',
+    ].join('\n'));
+    for (const leaked of ['sk-proj-abcdef', 'xai-0123', 'ghp_0123', 'abcdefghijklmnopqrstuvwx', 'hunter2', 'b3BlbnNzaC1rZXktdjE']) {
+        assert(!secrets.text.includes(leaked), `el contexto no lleva «${leaked}»: ${secrets.text}`);
+    }
+    assert(secrets.text.includes('nada secreto aquí: ls -la') && secrets.count >= 6, `se ocultan ${secrets.count} secretos y el resto queda`);
+    assert.deepEqual(chat.redactSecrets('git status'), { text: 'git status', count: 0 }, 'sin secretos no cambia nada');
+    const agentChat = await readFile('src/components/AgentChat.svelte', 'utf8');
+    assert(agentChat.includes('const { text: context, count } = redactSecrets(raw);'), 'el chat filtra los secretos del contexto');
+    // 16-11: qué modelo contestó. El que dice la CLI gana al elegido; sin
+    // elegir, «por defecto»; Ollama ya lo lleva en su nombre.
+    assert.deepEqual(chat.answerModel('gpt-5.1-codex', { agentId: 'ai:codex', model: 'o4-mini' }), { kind: 'reported', name: 'gpt-5.1-codex' });
+    assert.deepEqual(chat.answerModel(null, { agentId: 'ai:claude', model: ' opus ' }), { kind: 'chosen', name: 'opus' });
+    assert.deepEqual(chat.answerModel('', { agentId: 'ai:gemini', model: '' }), { kind: 'default', name: '' });
+    assert.equal(chat.answerModel(null, { agentId: 'ai:ollama:qwen3:8b', model: '' }), null);
+    assert.equal(chat.answerModel(null, null), null);
+    assert(agentChat.includes('{@const shownModel = answerModel(message.reportedModel, message.ask)}'), 'cada respuesta dice su modelo');
+    // Los reintentos por saturación se ven según pasan, no solo al cortarse,
+    // y el texto de ayuda de la caja cabe en una fila (las teclas, en `title`).
+    assert(agentChat.includes('api.onAgentChatStatus(') && agentChat.includes('retryText(message.retry)'), 'el chat enseña cada reintento');
+    assert(agentChat.includes("title={app.t('agentChat.inputHint'"), 'las teclas de la caja van en su ayuda');
+    assert(agentChat.includes('.composer textarea:placeholder-shown'), 'el texto de ayuda acaba en «…» si no cabe');
+    // Markdown de las respuestas (13-11): sin HTML, cada trozo con su tipo.
+    assert.deepEqual(chat.parseInlines('Usa **dir** o `ls`, *no* _rm_.'), [
+        { kind: 'text', text: 'Usa ' }, { kind: 'bold', text: 'dir' }, { kind: 'text', text: ' o ' },
+        { kind: 'code', text: 'ls' }, { kind: 'text', text: ', ' }, { kind: 'italic', text: 'no' },
+        { kind: 'text', text: ' ' }, { kind: 'italic', text: 'rm' }, { kind: 'text', text: '.' },
+    ], 'negrita, código y cursiva en línea');
+    assert.deepEqual(chat.parseInlines('mi_archivo_nuevo.txt <b>x</b>'), [{ kind: 'text', text: 'mi_archivo_nuevo.txt <b>x</b>' }],
+        'los guiones bajos de un nombre no son cursiva y el HTML queda como texto');
+    const blocks = chat.parseTextBlocks('## Pasos\n1. Uno\n2. Dos\n- suelto\n\n> ojo\nLínea a\nLínea b');
+    assert.deepEqual(blocks.map((block) => block.kind), ['heading', 'list', 'list', 'quote', 'paragraph'], 'título, dos listas, cita y párrafo');
+    assert.equal(blocks[0].level, 2);
+    assert.equal(blocks[1].ordered, true);
+    assert.equal(blocks[1].items.length, 2);
+    assert.equal(blocks[2].ordered, false);
+    assert.deepEqual(blocks[4].inlines, [{ kind: 'text', text: 'Línea a\nLínea b' }], 'las líneas seguidas forman un párrafo');
+    // Memoria de la conversación: las últimas vueltas con respuesta y con tope.
+    const labels = { you: 'Tú', agent: 'Agente' };
+    const history = [
+        { question: 'uno', answer: 'r1' },
+        { question: 'dos', answer: '' },
+        { question: 'tres', answer: 'r3' },
+    ];
+    assert.equal(chat.conversationTranscript(history, labels), 'Tú: uno\nAgente: r1\n\nTú: tres\nAgente: r3', 'sin las vueltas que no tuvieron respuesta');
+    assert.equal(chat.conversationTranscript(history, labels, { maxTurns: 1 }), 'Tú: tres\nAgente: r3', 'solo las últimas');
+    assert.equal(chat.conversationTranscript([{ question: 'q', answer: 'x'.repeat(50) }, { question: 'q2', answer: 'y' }], labels, { maxChars: 30 }),
+        'Tú: q2\nAgente: y', 'si no cabe, se quitan primero las viejas');
+    // La pregunta montada: conversación, adjuntos con una valla que no se corta,
+    // la pregunta y el contexto al final.
+    const promptLabels = { conversation: 'Conversación:', attachment: 'Adjunto «{name}»:', truncated: 'solo el principio', question: 'Pregunta:' };
+    assert.equal(chat.buildChatPrompt({ question: ' hola ', labels: promptLabels }), 'hola', 'sin nada más, la pregunta tal cual');
+    const prompt = chat.buildChatPrompt({
+        question: '¿Qué hace?',
+        transcript: 'Tú: a\nAgente: b',
+        attachments: [{ name: 'LEEME.md', text: `Ejemplo:\n${fence}bash\nls\n${fence}\n`, truncated: true }],
+        context: 'Orden: dir',
+        labels: promptLabels,
+    });
+    assert(prompt.startsWith('Conversación:\nTú: a\nAgente: b\n\nAdjunto «LEEME.md»: (solo el principio)\n````\n'), prompt);
+    assert(prompt.includes(`${fence}\n\`\`\`\`\n\nPregunta:\n¿Qué hace?\n\n---\nOrden: dir`), prompt);
+    // 14-11: la línea que explica el fallo, con las salidas reales de las
+    // capturas de Romen.
+    assert.equal(chat.errorHeadline("ERROR\n\n  No providers configured - please run 'crush' to set up a provider interactively."),
+        "No providers configured - please run 'crush' to set up a provider interactively.");
+    assert.equal(chat.errorHeadline('Error: No authentication information found.\n\nCopilot can be authenticated with GitHub'),
+        'No authentication information found.');
+    assert.equal(chat.errorHeadline('No auth type is selected. Please configure an auth type (e.g. via settings or `--auth-type`) before running in non-interactive mode.'),
+        'No auth type is selected. Please configure an auth type (e.g. via settings or `--auth-type`) before running in non-interactive mode.');
+    assert.equal(chat.errorHeadline('warning: Falling back from WebSockets to HTTPS transport.\nERROR: unexpected status 401 Unauthorized: Missing bearer'),
+        'unexpected status 401 Unauthorized: Missing bearer');
+    assert.equal(chat.errorHeadline('    at foo (node:internal/x:1:1)\n}\n'), '', 'sin texto útil, nada');
+    // 15-11: Continue escribe un JSON y Gemini un error con nombre detrás de
+    // la ruta de su informe; vale su mensaje.
+    assert.equal(chat.errorHeadline('{"status":"error","message":"The request failed and the interceptors did not return an alternative response"}'),
+        'The request failed and the interceptors did not return an alternative response');
+    assert.equal(chat.errorHeadline('Error when talking to Gemini API Full report available at: C:\\T\\gemini-client-error.json ModelNotFoundError: This model models/gemini-2.5-flash is no longer available to new users.\n  code: 404\n}\nAn unexpected critical error occurred:[object Object]'),
+        'This model models/gemini-2.5-flash is no longer available to new users.');
+    assert(chat.errorHeadline(`Error: ${'x'.repeat(400)}`).length === 200, 'cortada a 200');
+    assert.equal(chat.formatBytes(812), '812 B');
+    assert.equal(chat.formatBytes(3482, 'es-ES'), '3,4 KB');
+    assert.equal(chat.formatBytes(1.2 * 1024 * 1024, 'en-US'), '1.2 MB');
+    // El panel manda el modelo y la intensidad elegidos, y la memoria se apaga.
+    assert(agentChat.includes('agentChatAsk(') && /agentChatAsk\([^)]*model[^)]*effort/su.test(agentChat), 'el chat pasa modelo e intensidad');
+    assert(agentChat.includes('agentChatRemember'), 'la memoria del chat sigue su ajuste');
+    // Modo consejero: encendido de fábrica (13-11) y solo prepara la pregunta, sin mandarla.
+    assert(/^agentChatAdvisor = true$/mu.test(defaults) && /^agentChatRemember = true$/mu.test(defaults) && terminalPane.includes('if (app.preferences?.agentChatAdvisor === true && app.preferences.agentChat !== false) {')
+        && !terminalPane.includes('agentChatAsk(') && agentChat.includes('app.agentChatDraft = null;'),
+        'el modo consejero ofrece, rellena el campo y nunca pregunta solo');
+    assert(agentChat.includes('controls?.insertLine(code.trim())') && !agentChat.includes('submitLine('),
+        'el chat inserta en la terminal SIN Intro y nunca ejecuta');
+    assert(agentChat.includes("disabled={part.text.trim().includes('\\n')}"),
+        'un bloque de varias líneas no se inserta (se ejecutaría al pegarse)');
+    // 13-11: el modelo se elige de una lista (con el de fábrica real), y tras
+    // un fallo se ofrece lo que lo arregla; editar archivos, apagado.
+    assert(agentChat.includes('api.agentChatModels(') && agentChat.includes('api.agentChatFailureHelp(')
+        && agentChat.includes('data-testid="agent-chat-open-tab"') && agentChat.includes('data-testid="agent-chat-key"'),
+        'el chat pide los modelos y la ayuda tras un fallo');
+    assert(/^agentChatCanEdit = false$/mu.test(defaults), 'los agentes del chat solo leen de fábrica');
+    // 14-11 (Romen, con el menú de Claude: «los permisos tmb»): el panel manda
+    // el modo y el modo rápido; lo que edita y «Omitir permisos» siguen sus
+    // ajustes, los dos apagados, y el de fábrica es el primero (solo lee).
+    assert(/agentChatAsk\([^)]*request\.mode[^)]*request\.fast/su.test(agentChat), 'el chat pasa el modo y el modo rápido');
+    assert(/^agentChatAllowBypass = false$/mu.test(defaults), '«Omitir permisos», apagado de fábrica');
+    assert(agentChat.includes("const allowBypass = $derived(canEdit && app.preferences?.agentChatAllowBypass === true);")
+        && agentChat.includes("if (id === 'bypass') return allowBypass;")
+        && agentChat.includes("const defaultMode = $derived(canEdit && modes.includes('acceptEdits') ? 'acceptEdits' : (modes[0] ?? ''));"),
+        'los modos siguen los ajustes y el de fábrica solo lee');
+    assert(agentChat.includes('data-testid="agent-chat-mode"') && agentChat.includes('data-testid="agent-chat-bypass-warning"')
+        && agentChat.includes('data-testid="agent-chat-fast"'),
+        'el panel enseña los modos, avisa de «Omitir permisos» y ofrece el modo rápido');
+    // 14-11 noche (Romen, probando la 62): la lista de agentes sigue a la
+    // detección, el clip vuelve, las IA de pestaña van en el desplegable,
+    // «Otro…» solo si la lista puede estar incompleta y ShellGPT sin clave
+    // no se lanza.
+    assert(/\$effect\(\(\) => \{\s*void app\.environments;\s*untrack\(\(\) => void loadAgents\(\)\);\s*\}\);/u.test(agentChat)
+        && !/onMount\(\(\) => \{\s*void loadAgents\(\);/u.test(agentChat),
+        'el chat vuelve a pedir los agentes al acabar la detección');
+    assert(/class="icon clip" data-testid="agent-chat-attach"/u.test(agentChat) && !agentChat.includes("'agentChat.attachShort'"),
+        'adjuntar es el clip');
+    assert(agentChat.includes('<optgroup label={app.t(\'agentChat.openInTabGroup\'') && !agentChat.includes("'agentChat.tabOnly'")
+        && agentChat.includes('if (value.startsWith(TAB_AGENT))'),
+        'las IA de pestaña van al final del desplegable y se abren en la suya');
+    assert(agentChat.includes('{#if models?.custom !== false}'), '«Otro…» solo si la lista puede estar incompleta');
+    assert(agentChat.includes('/needs-key:([A-Z0-9_]+)/u.exec(reason)'), 'ShellGPT sin clave: se ofrece la clave sin lanzarlo');
+    assert(agentChat.includes('errorHeadline(output)') && agentChat.includes('data-testid="agent-chat-error-detail"'),
+        'el error en una línea y lo demás plegado');
+    // 14-11 noche: varios chats en paralelo (AgentChats), el botón ✦ al final
+    // de la fila de pestañas y, con varios chats, la pregunta preparada solo
+    // para el que se ve.
+    const agentChats = await readFile('src/components/AgentChats.svelte', 'utf8');
+    const appShell = await readFile('src/App.svelte', 'utf8');
+    const tabBar = await readFile('src/components/TabBar.svelte', 'utf8');
+    const toolbar = await readFile('src/components/Toolbar.svelte', 'utf8');
+    assert(appShell.includes('<AgentChats />') && !appShell.includes('<AgentChat />')
+        && agentChats.includes('<AgentChat embedded active={chat.id === activeId}')
+        && agentChats.includes('const MAX_CHATS = 6;'),
+        'el panel lleva varios chats, cada uno entero');
+    assert(agentChat.includes('if (!prepared || !active) return;'), 'la pregunta del consejero va al chat que se ve');
+    assert(tabBar.includes('data-testid="toolbar-agent-chat"') && tabBar.includes('agent-chat-toggle')
+        && !toolbar.includes('data-testid="toolbar-agent-chat"'),
+        'el botón del chat va al final de la fila de pestañas, con icono');
+    // 14-11 noche: los avisos que ofrecen instalar (gsudo y el ayudante de
+    // la shell) y el permiso del control de las IA.
+    assert(appShell.includes('data-testid="gsudo-offer"') && appShell.includes("api.runInstallAction(app.activeTabId, 'winget-gsudo')")
+        && appShell.includes('savePreferences({ offerGsudo: false })'),
+        'el aviso de gsudo instala con la acción de WTerminal y se puede no volver a ofrecer');
+    assert(appShell.includes('data-testid="shell-assist-offer"') && appShell.includes('app.appInfo?.e2eTesting')
+        && appShell.includes('savePreferences({ offerShellAssist: false })'),
+        'el aviso del autocompletado no sale en E2E y se puede no volver a ofrecer');
+    assert(appShell.includes('data-testid="agent-control-request"') && appShell.includes('api.onAgentControl(')
+        && appShell.includes("if (tab.id === agentTab) return false;")
+        && appShell.includes("if (request.confirm && !controlAllowedForSession)"),
+        'el control de las IA pide permiso y nunca escribe en la pestaña de la propia IA');
+    assert(/^offerGsudo = true$/mu.test(defaults) && /^offerShellAssist = true$/mu.test(defaults)
+        && /^agentTabGuide = true$/mu.test(defaults) && /^agentControl = true$/mu.test(defaults),
+        'los ajustes nuevos, encendidos de fábrica');
+    // El menú de la pestaña lee su id ANTES de cerrarse (antes «Renombrar» y
+    // «Cerrar pestaña» no hacían nada).
+    assert(tabBar.includes("onclick={() => { const id = tab.id; menu = null; app.renamingTabId = id; }}")
+        && tabBar.includes("onclick={() => { const id = tab.id; menu = null; void app.closeTab(id); }}")
+        && !/menu = null; [^}]*tab\.id/u.test(tabBar),
+        'el menú de la pestaña no lee la pestaña después de cerrarse');
+    assert(settingsPanel.includes('data-testid="settings-agent-chat-allow-bypass"')
+        && settingsPanel.includes('disabled={!draft.agentChat || !draft.agentChatCanEdit}'),
+        '«Omitir permisos» en Ajustes pide también editar');
+}
+
+// «Restablecer» (13-11): cada preferencia en exactamente un apartado, sin
+// claves inventadas, y nada se restablece sin pasar por el diálogo.
+{
+    const reset = await importTypeScript('src/lib/settings-reset.ts');
+    const factory = [...defaults.matchAll(/^([A-Za-z][A-Za-z0-9]*)\s*=/gmu)].map((match) => match[1]);
+    const owners = new Map();
+    for (const group of reset.RESET_GROUPS) {
+        for (const key of group.keys) owners.set(key, [...(owners.get(key) ?? []), group.id]);
+    }
+    const missing = factory.filter((key) => !owners.has(key));
+    const repeated = [...owners].filter(([, groups]) => groups.length > 1);
+    const unknown = [...owners.keys()].filter((key) => !factory.includes(key));
+    assert.deepEqual(missing, [], `preferencias sin apartado en «Restablecer»: ${missing.join(', ')}`);
+    assert.deepEqual(repeated, [], 'cada preferencia, en un solo apartado');
+    assert.deepEqual(unknown, [], `claves que no son preferencias: ${unknown.join(', ')}`);
+    for (const tab of reset.RESET_TABS) {
+        assert(reset.RESET_GROUPS.some((group) => group.tab === tab), `la pestaña ${tab} tiene apartados`);
+    }
+    assert.deepEqual(reset.keysForGroups(['aliases', 'aliases']), ['manualAliasesText']);
+    assert(reset.keysForGroups(['store']).includes('toolchainStoreDir'), 'la carpeta propia va en su apartado');
+    assert.deepEqual(reset.dangerousGroups(['theme', 'store', 'aliases']).map((group) => group.id), ['aliases', 'store']);
+    assert.equal(reset.tabState('appearance', new Set()), 'none');
+    assert.equal(reset.tabState('appearance', new Set(['theme'])), 'some');
+    assert.equal(reset.tabState('appearance', new Set(['theme', 'customThemes', 'scale'])), 'all');
+    const settingsPanel = await readFile('src/components/SettingsPanel.svelte', 'utf8');
+    const dialog = await readFile('src/components/SettingsResetDialog.svelte', 'utf8');
+    assert(!settingsPanel.includes('onclick={reset}') && settingsPanel.includes('<SettingsResetDialog'),
+        '«Restablecer» abre el diálogo en vez de restablecer de golpe');
+    assert(dialog.includes('disabled={!selected.length || busy}') && dialog.includes('onMount(() => cancelButton?.focus())'),
+        'sin nada marcado no se confirma, y lo enfocado es «Cancelar»');
 }
 
 console.log(`Lógica frontend verificada: idioma, identidad y ${configuredShortcuts.length} atajos.`);

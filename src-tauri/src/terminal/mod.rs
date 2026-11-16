@@ -2,6 +2,7 @@
 
 pub mod aliases;
 pub mod banner_image;
+pub mod cmd_failure;
 pub mod console_ui;
 pub mod current_dir;
 pub mod internal_commands;

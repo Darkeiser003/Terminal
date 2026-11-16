@@ -1,4 +1,4 @@
-﻿; Textos de la plantilla NSIS de Tauri en Polish: su CLI 2.11.5 no lo trae
+; Textos de la plantilla NSIS de Tauri en Polish: su CLI 2.11.5 no lo trae
 ; (tauri.windows.installer.conf.json > customLanguageFiles).
 LangString addOrReinstall ${LANG_POLISH} "Dodaj/zainstaluj ponownie składniki"
 LangString alreadyInstalled ${LANG_POLISH} "Już zainstalowano"

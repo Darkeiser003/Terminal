@@ -3,7 +3,7 @@ name = "winslim-terminal"
 version = "1.0.0"
 description = "WTerminal - terminal y hub de proyectos de Darkeiser003"
 authors = ["Darkeiser003"]
-license = "MIT"
+license = "AGPL-3.0-only"
 publish = false
 edition = "2021"
 rust-version = "1.77"
@@ -72,6 +72,8 @@ windows = { version = "0.61", features = [
     "Win32_Security_Cryptography_Sip",
     "Win32_Security_WinTrust",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
     "Win32_UI_Controls",
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_Shell",

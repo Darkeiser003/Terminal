@@ -40,11 +40,13 @@ export const SUITES = {
             { id: 'shell-assist', title: 'Sugerencia del historial con el color elegido en Ajustes en PowerShell 7, Windows PowerShell, cmd (Clink) y bash de WSL (ble.sh)', env: { E2E_SHELL_ASSIST_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'ai-environments', title: 'Asistentes de IA y modelos locales simulados: selector, Claude Code de la app de escritorio, pestaña, Dependencias y acción de cmd en una sola línea', env: { E2E_AI_ENVIRONMENTS_ONLY: '1' }, timeoutMs: 12 * MINUTE },
             { id: 'ai-tui', title: 'IA de terminal a pantalla completa (simulador): ancho visible en su pestaña y al encoger la ventana, desde cmd en pantalla alternativa y en línea, sin parpadeo, sin bloqueo y la shell sigue bien al salir', env: { E2E_AI_TUI_ONLY: '1' }, timeoutMs: 10 * MINUTE },
-            { id: 'ai-real', title: 'IA de terminal reales instaladas (Claude Code, Gemini, Codex, OpenCode, Qwen, Amp) sin iniciar sesión: su primera pantalla al ancho visible, sin barra ni parpadeo, y claude tecleado en cmd con la shell intacta al salir', env: { E2E_AI_REAL_ONLY: '1' }, timeoutMs: 15 * MINUTE },
+            { id: 'ai-real', title: 'IA de terminal reales instaladas sin iniciar sesión: Claude Code, Gemini, Codex, OpenCode, Qwen y Amp al ancho visible, sin barra ni parpadeo, y claude tecleado en cmd con la shell intacta al salir; además, TODAS las demás del catálogo que estén instaladas se abren sin teclear nada y no pueden acabar con error (si piden clave, la pestaña ofrece configurarla)', env: { E2E_AI_REAL_ONLY: '1' }, timeoutMs: 20 * MINUTE },
             { id: 'appearance', title: 'Temas sobre la base neutra, recolorear todo, tema propio, paleta ANSI y Biblioteca abierta al marcar', env: { E2E_APPEARANCE_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'terminal-links', title: 'Enlaces: Ctrl+clic con confirmación, OSC 8, file:// sin ejecutar, rechazos del backend y desactivación (sin abrir el navegador)', env: { E2E_TERMINAL_LINKS_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'command-palette', title: 'Paleta de comandos: Ctrl+Shift+P, flechas y Escape, filtrado, Ajustes, comandos `:` con eco pegado al prompt, aviso con texto sin enviar, limpiar y nueva pestaña', env: { E2E_COMMAND_PALETTE_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'command-marks', title: 'Marcas de orden OSC 133 en cmd, PowerShell y Git Bash: fin de orden, código de salida, marca de fallo, Intro vacío, eco pegado al prompt, copiar la salida, saltos con el teclado y aviso de orden larga', env: { E2E_COMMAND_MARKS_ONLY: '1' }, timeoutMs: 10 * MINUTE },
+            { id: 'internal-set', title: ':set desde la terminal: sí/no, nombre con guiones, valor no válido, fuera de rango, lista filtrada y ajuste desconocido', env: { E2E_INTERNAL_SET_ONLY: '1' }, timeoutMs: 10 * MINUTE },
+            { id: 'hidden-enter', title: 'Intro con la ventana minimizada: una orden larga y una corta de PowerShell se ejecutan aunque la ventana no se vea (el fallo intermitente de tab-tools en las builds 56 y 58)', env: { E2E_HIDDEN_ENTER_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'tab-tools', title: 'Pestañas y salida: renombrar con doble clic y paleta, Escape, nombre vacío, el nombre sobrevive al cambio de shell, color desde el menú de la pestaña, guardar el historial en un archivo y buscar una orden escrita para volver a escribirla sin ejecutarla', env: { E2E_TAB_TOOLS_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'context-menu-edit', title: 'Menú contextual: cortar y Supr sobre una parte interior de lo escrito (cmd, PowerShell, Git Bash), portapapeles, cursor de la shell donde estaba la selección y «Buscar» con la selección', env: { E2E_CONTEXT_MENU_EDIT_ONLY: '1' }, timeoutMs: 15 * MINUTE },
             { id: 'github-account', title: 'Mi GitHub con un gh simulado: sin sesión, gh auth login en una pestaña, cuenta y repositorios, crear, visibilidad, archivar y desarchivar, renombrar, borrar escribiendo el nombre y pidiendo delete_repo, y cerrar sesión', env: { E2E_GITHUB_ACCOUNT_ONLY: '1' }, timeoutMs: 10 * MINUTE },
@@ -53,6 +55,7 @@ export const SUITES = {
             { id: 'import-suggestion', title: 'Importar repositorios: sugerencia al entrar con cd, importar sin mover, estado de Git del importado, quitar de la lista, no volver a sugerir y apagarla en Ajustes', env: { E2E_IMPORT_SUGGESTION_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'ui-scale', title: 'Tamaño de la interfaz al 80, 100, 150 y 200 %: márgenes, nada fuera de la ventana, la terminal sin escalar, atajos y valor guardado', env: { E2E_UI_SCALE_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'low-power', title: 'Modo de bajo consumo: sugerencia en un equipo de 2 hilos (simulado), activar, reflejo en Ajustes y apagar', env: { E2E_LOW_POWER_ONLY: '1' }, timeoutMs: 5 * MINUTE },
+            { id: 'python-width', title: 'Python tecleado en cmd: ancho visible mientras corre (pyreadline3 repinta la ventana a cada tecla), tiempo de una línea, vuelta a la reserva al salir y opción de Ajustes', env: { E2E_PYTHON_WIDTH_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'fastfetch-matrix', title: 'Banner y fastfetch en cmd, PowerShell y Git Bash: al abrir, tras cls y tras redimensionar, con y sin imagen, sin líneas cortadas', env: { E2E_FASTFETCH_MATRIX_ONLY: '1' }, timeoutMs: 20 * MINUTE },
             { id: 'visual-tour', title: 'Recorrido visual: capturas de Ajustes, Proyectos, Biblioteca y Dependencias, y márgenes mínimos en ambas densidades', env: { E2E_VISUAL_TOUR_ONLY: '1' }, timeoutMs: 15 * MINUTE },
             { id: 'admin-permissions', title: 'Permisos de administrador: sección igual al backend, arranque elevado apagado y persistente, NSudo deshabilitado con motivo o a través de gsudo (simulado), sin RUNASADMIN y sin pedir nunca el UAC', env: { E2E_WINDOWS_ADMIN_ONLY: '1' }, timeoutMs: 10 * MINUTE },
@@ -133,6 +136,22 @@ export const SUITES = {
             },
             { id: 'distribution-panels', title: 'Paneles y márgenes', env: { E2E_VISUAL_TOUR_ONLY: '1', E2E_CAPTURE_VIDEO: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'distribution-path', title: 'Invocar desde el PATH', env: { E2E_PATH_INTEGRATION_ONLY: '1' }, timeoutMs: 10 * MINUTE },
+        ],
+    },
+    // 12-11 (visto por Romen): casi todo se prueba con las sugerencias de la
+    // línea de órdenes apagadas, porque cambian el eco. Esta suite repite los
+    // escenarios de eco e integridad CON Clink y PSReadLine, como los tiene el
+    // usuario. Aún no entra en la release: primero en las dirigidas.
+    components: {
+        title: 'Con los componentes del usuario',
+        description: 'Eco, entrada larga, reflujo horizontal y marcas de orden con Clink y PSReadLine encendidos.',
+        scenarios: [
+            { id: 'components-horizontal', title: 'Integridad horizontal con Clink y PSReadLine', env: { E2E_HORIZONTAL_ONLY: '1', E2E_WITH_COMPONENTS: '1' }, timeoutMs: 20 * MINUTE },
+            { id: 'components-long-input', title: 'Entrada larga con comillas con Clink y PSReadLine', env: { E2E_LONG_INPUT_ONLY: '1', E2E_WITH_COMPONENTS: '1' }, timeoutMs: 15 * MINUTE },
+            { id: 'components-input-follow', title: 'El cursor sigue a la vista con Clink y PSReadLine', env: { E2E_INPUT_FOLLOW_ONLY: '1', E2E_WITH_COMPONENTS: '1' }, timeoutMs: 15 * MINUTE },
+            { id: 'components-command-marks', title: 'Marcas de orden OSC 133 con Clink y PSReadLine', env: { E2E_COMMAND_MARKS_ONLY: '1', E2E_WITH_COMPONENTS: '1' }, timeoutMs: 10 * MINUTE },
+            { id: 'components-action-at-once', title: 'Órdenes de las acciones de una vez (actionCommandsAtOnce) con Clink', env: { E2E_ACTION_AT_ONCE_ONLY: '1', E2E_WITH_COMPONENTS: '1' }, timeoutMs: 10 * MINUTE },
+            { id: 'components-library-at-once', title: 'Scripts de la Biblioteca de una vez (actionCommandsAtOnce) con Clink y PSReadLine', env: { E2E_LIBRARY_AT_ONCE_ONLY: '1', E2E_WITH_COMPONENTS: '1' }, timeoutMs: 10 * MINUTE },
         ],
     },
     installer: {

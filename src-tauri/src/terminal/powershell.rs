@@ -11,6 +11,19 @@ use crate::environments::ShellKind;
 const BOOTSTRAP_COMMAND: &str =
     "$line = [Console]::In.ReadLine(); if ($line) { Invoke-Expression $line }";
 
+/// El comando de arranque. En E2E lleva delante la orden que manda el
+/// historial de PSReadLine a la carpeta de la prueba: así se aplica antes de
+/// leer ni teclear nada, y ni siquiera la línea que carga el inicializador
+/// (`. "init-tab-N.ps1"`) llega al historial del usuario cuando PSReadLine,
+/// y no este lector, es quien la recibe (pasaba al cambiar de shell con
+/// `:shell`: la `focused` de la 57 dejó una en el historial real).
+fn bootstrap_command(history_line: Option<&str>) -> String {
+    match history_line {
+        Some(line) => format!("{line}; {BOOTSTRAP_COMMAND}"),
+        None => BOOTSTRAP_COMMAND.to_string(),
+    }
+}
+
 /// Añade un lector de una línea antes de activar el prompt de PowerShell.
 ///
 /// Devuelve `true` cuando el proceso espera que LTerminal le entregue una
@@ -27,7 +40,9 @@ pub fn prepare_spawn_args(kind: ShellKind, args: &[String]) -> (Vec<String>, boo
         prepared.push("-NoExit".into());
     }
     prepared.push("-Command".into());
-    prepared.push(BOOTSTRAP_COMMAND.into());
+    prepared.push(bootstrap_command(
+        crate::terminal::session_files::e2e_powershell_history_line().as_deref(),
+    ));
     (prepared, true)
 }
 
@@ -100,6 +115,18 @@ mod tests {
             assert!(!awaits_line, "no debe alterar {switch}");
             assert_eq!(prepared, original);
         }
+    }
+
+    #[test]
+    fn en_e2e_el_historial_se_desvia_antes_de_leer_la_primera_linea() {
+        assert_eq!(bootstrap_command(None), BOOTSTRAP_COMMAND);
+        let line = "if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) { Set-PSReadLineOption -HistorySavePath 'E:\\t\\h.txt' }";
+        let command = bootstrap_command(Some(line));
+        // Primero el desvío, después el lector: si fuera al revés, la línea
+        // del inicializador ya se habría apuntado en el historial real.
+        assert!(command.starts_with(line));
+        assert!(command.ends_with(BOOTSTRAP_COMMAND));
+        assert_eq!(command, format!("{line}; {BOOTSTRAP_COMMAND}"));
     }
 
     #[test]

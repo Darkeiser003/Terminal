@@ -52,6 +52,9 @@
     } = $props();
 
     let section = $state<Section>('details');
+    /** Sube con el ⟳ en una sección de `gh_admin`: `GithubAdmin` vuelve a
+     *  leer su área cuando cambia. */
+    let adminReload = $state(0);
     /** Vista grande: ocupa la ventana en vez del panel estrecho. */
     let expanded = $state(false);
     let busy = $state(false);
@@ -168,6 +171,7 @@
     }
 
     async function load(next: Section, keepMessage = false): Promise<void> {
+        const again = next === section;
         section = next;
         if (!keepMessage) show('');
         if (next === 'details') {
@@ -191,7 +195,9 @@
             issues = (await work(() => issueState === 'open' ? api.githubIssues(fullName) : api.githubIssuesByState(fullName, issueState))) ?? issues;
             openItem = '';
         } else if (adminGroup(next)) {
-            // Lo lee `GithubAdmin` al montarse.
+            // Lo lee `GithubAdmin` al montarse. La misma sección otra vez (el
+            // ⟳) no la vuelve a montar `{#key}`: relee el área que tenga abierta.
+            if (again) adminReload += 1;
         } else {
             runs = (await work(() => api.githubRuns(fullName))) ?? runs;
         }
@@ -793,7 +799,7 @@
         {/each}
     {:else if adminGroup(section)}
         {#key section}
-            <GithubAdmin {fullName} group={adminGroup(section) ?? 'actions'} {onTerminal} />
+            <GithubAdmin {fullName} group={adminGroup(section) ?? 'actions'} reload={adminReload} {onTerminal} />
         {/key}
     {/if}
 </div>

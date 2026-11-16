@@ -67,6 +67,8 @@ assert.match(panel, /filteredLToolsActions/);
 assert.match(panel, /ltoolsActionLabel/);
 assert.match(panel, /scripts\.ltools\.filterPlaceholder/);
 assert.match(panel, /scripts-file-section-title/);
+// El título de la sección no repite el del desplegable «Tipos de archivo».
+assert.match(panel, /data-testid="scripts-file-section-title">\s*\{app\.t\('scripts\.filesSection'/);
 assert.match(panel, /data-testid="scripts-ltools-filter"/);
 assert.match(panel, /data-testid="scripts-ltools-action"/);
 assert.match(panel, /data-testid="scripts-ltools-run"/);

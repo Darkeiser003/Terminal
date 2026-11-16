@@ -62,7 +62,12 @@ export type PaletteAppAction =
     | 'refreshEnvironments'
     | 'uiScaleUp'
     | 'uiScaleDown'
-    | 'uiScaleReset';
+    | 'uiScaleReset'
+    | 'closeTab'
+    | 'terminalFontUp'
+    | 'terminalFontDown'
+    | 'terminalFontReset'
+    | 'toggleAgentChat';
 
 export type PaletteAction =
     | { kind: 'app'; action: PaletteAppAction }
@@ -155,17 +160,22 @@ export const PALETTE_APP_ACTIONS: ReadonlyArray<AppActionDefinition> = [
     { action: 'uiScaleUp', group: 'panels', labelKey: 'palette.action.uiScaleUp', fallback: 'Aumentar el tamaño de la interfaz', shortcut: 'shortcutUiScaleUp', command: ':ui-scale +', keywords: ['bigger', 'zoom', 'ui'] },
     { action: 'uiScaleDown', group: 'panels', labelKey: 'palette.action.uiScaleDown', fallback: 'Reducir el tamaño de la interfaz', shortcut: 'shortcutUiScaleDown', command: ':ui-scale -', keywords: ['smaller', 'zoom', 'ui'] },
     { action: 'uiScaleReset', group: 'panels', labelKey: 'palette.action.uiScaleReset', fallback: 'Tamaño de la interfaz al 100 %', shortcut: 'shortcutUiScaleReset', command: ':ui-scale 100', keywords: ['reset', 'zoom', 'ui'] },
+    { action: 'toggleAgentChat', group: 'panels', labelKey: 'palette.action.toggleAgentChat', fallback: 'Mostrar u ocultar el chat de agentes', shortcut: 'shortcutToggleAgentChat', command: ':chat', keywords: ['chat', 'agents', 'ai', 'ia', 'claude', 'gemini', 'codex'] },
     { action: 'closePanel', group: 'panels', labelKey: 'palette.action.closePanel', fallback: 'Cerrar los paneles', shortcut: 'shortcutClosePanel', command: ':panel close', keywords: ['close'] },
     { action: 'searchTerminal', group: 'terminal', labelKey: 'palette.action.searchTerminal', fallback: 'Buscar en el historial de la terminal', shortcut: 'shortcutSearchTerminal', keywords: ['search', 'find', 'scrollback'] },
     { action: 'searchHistory', group: 'terminal', labelKey: 'palette.action.searchHistory', fallback: 'Buscar en las órdenes escritas', shortcut: 'shortcutSearchHistory', keywords: ['history', 'ctrl+r', 'reverse', 'search', 'command'] },
-    { action: 'saveTerminalOutput', group: 'terminal', labelKey: 'palette.action.saveTerminalOutput', fallback: 'Guardar la salida en un archivo', keywords: ['save', 'export', 'log', 'output'] },
-    { action: 'copyLastOutput', group: 'terminal', labelKey: 'menu.copyLastOutput', fallback: 'Copiar la salida de la última orden', keywords: ['copy', 'output', 'last'] },
+    { action: 'saveTerminalOutput', group: 'terminal', labelKey: 'palette.action.saveTerminalOutput', fallback: 'Guardar la salida en un archivo', shortcut: 'shortcutSaveTerminalOutput', keywords: ['save', 'export', 'log', 'output'] },
+    { action: 'copyLastOutput', group: 'terminal', labelKey: 'menu.copyLastOutput', fallback: 'Copiar la salida de la última orden', shortcut: 'shortcutCopyLastOutput', keywords: ['copy', 'output', 'last'] },
     { action: 'previousCommand', group: 'terminal', labelKey: 'palette.action.previousCommand', fallback: 'Ir a la orden anterior', shortcut: 'shortcutPreviousCommand', keywords: ['jump', 'previous', 'command'] },
     { action: 'nextCommand', group: 'terminal', labelKey: 'palette.action.nextCommand', fallback: 'Ir a la orden siguiente', shortcut: 'shortcutNextCommand', keywords: ['jump', 'next', 'command'] },
     { action: 'clearTerminal', group: 'terminal', labelKey: 'palette.action.clearTerminal', fallback: 'Limpiar la terminal (clear)', shortcut: 'shortcutClearTerminal', command: 'clear', keywords: ['clear', 'cls'] },
+    { action: 'terminalFontUp', group: 'terminal', labelKey: 'palette.action.terminalFontUp', fallback: 'Agrandar la letra de la terminal', shortcut: 'shortcutTerminalFontUp', command: ':terminal font-size +', keywords: ['font', 'zoom', 'bigger'] },
+    { action: 'terminalFontDown', group: 'terminal', labelKey: 'palette.action.terminalFontDown', fallback: 'Achicar la letra de la terminal', shortcut: 'shortcutTerminalFontDown', command: ':terminal font-size -', keywords: ['font', 'zoom', 'smaller'] },
+    { action: 'terminalFontReset', group: 'terminal', labelKey: 'palette.action.terminalFontReset', fallback: 'Letra de la terminal a su tamaño de fábrica', shortcut: 'shortcutTerminalFontReset', keywords: ['font', 'zoom', 'reset'] },
     { action: 'toggleTerminalOnly', group: 'terminal', labelKey: 'palette.action.toggleTerminalOnly', fallback: 'Alternar el modo de terminal limpia', shortcut: 'shortcutToggleTerminalOnly', keywords: ['clean', 'fullscreen', 'terminal-only'] },
     { action: 'newTab', group: 'tabs', labelKey: 'palette.action.newTab', fallback: 'Nueva pestaña', shortcut: 'shortcutNewTab', keywords: ['tab', 'new'] },
-    { action: 'renameTab', group: 'tabs', labelKey: 'palette.action.renameTab', fallback: 'Renombrar la pestaña', keywords: ['tab', 'rename', 'title'] },
+    { action: 'closeTab', group: 'tabs', labelKey: 'palette.action.closeTab', fallback: 'Cerrar la pestaña', shortcut: 'shortcutCloseTab', keywords: ['tab', 'close'] },
+    { action: 'renameTab', group: 'tabs', labelKey: 'palette.action.renameTab', fallback: 'Renombrar la pestaña', shortcut: 'shortcutRenameTab', keywords: ['tab', 'rename', 'title'] },
     { action: 'cyclePanes', group: 'tabs', labelKey: 'palette.action.cyclePanes', fallback: 'Dividir: añadir una terminal a la vista', shortcut: 'shortcutCyclePanes', command: ':panes cycle', keywords: ['split', 'panes', ':layout', ':grid'] },
     { action: 'nextTab', group: 'tabs', labelKey: 'palette.action.nextTab', fallback: 'Pestaña siguiente', shortcut: 'shortcutNextTab', keywords: ['tab', 'next'] },
     { action: 'previousTab', group: 'tabs', labelKey: 'palette.action.previousTab', fallback: 'Pestaña anterior', shortcut: 'shortcutPreviousTab', keywords: ['tab', 'previous'] },
@@ -185,6 +195,7 @@ export const PALETTE_INTERNAL_COMMANDS: ReadonlyArray<{ line: string; descriptio
     { line: ':font list', descriptionKey: 'palette.internal.fontList', fallback: 'Lista las fuentes de terminal' },
     { line: ':language list', descriptionKey: 'palette.internal.languageList', fallback: 'Lista los idiomas' },
     { line: ':terminal list', descriptionKey: 'palette.internal.terminalList', fallback: 'Parámetros actuales de la terminal' },
+    { line: ':set list', descriptionKey: 'palette.internal.setList', fallback: 'Todos los ajustes con su valor (:set <ajuste> <valor> para cambiar uno)' },
     { line: ':banner list', descriptionKey: 'palette.internal.bannerList', fallback: 'Campos visibles del fastfetch' },
     { line: ':banner preset compact', descriptionKey: 'palette.internal.bannerCompact', fallback: 'Fastfetch esencial' },
     { line: ':banner preset full', descriptionKey: 'palette.internal.bannerFull', fallback: 'Fastfetch completo' },

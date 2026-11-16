@@ -85,10 +85,34 @@ function terminalText(tabId: string): string | null {
     const term = terminals.get(tabId);
     return term ? bufferText(term.buffer.active) : null;
 }
+/** Estado de la cola de entrada de cada pestaña (lo publica TerminalPane): en
+ *  qué barrera espera el lote de teclas que va primero, cuántos lotes con Intro
+ *  se encolaron y cuántos se enviaron a la shell. Distingue un Intro que nunca
+ *  llegó a la terminal de uno retenido en la app o de una shell que no lo
+ *  procesa (el fallo intermitente de `tab-tools` en las builds 56 y 58). */
+const inputStates = new Map<string, () => unknown>();
+
+export function registerInputState(tabId: string, read: () => unknown): void {
+    inputStates.set(tabId, read);
+}
+
+export function unregisterInputState(tabId: string): void {
+    inputStates.delete(tabId);
+}
+
+function inputState(tabId: string): unknown {
+    return inputStates.get(tabId)?.() ?? null;
+}
+
 if (typeof window !== 'undefined') {
-    const diagnostics = window as unknown as { __wtTerminalState?: typeof terminalState; __wtTerminalText?: typeof terminalText };
+    const diagnostics = window as unknown as {
+        __wtTerminalState?: typeof terminalState;
+        __wtTerminalText?: typeof terminalText;
+        __wtInputState?: typeof inputState;
+    };
     diagnostics.__wtTerminalState = terminalState;
     diagnostics.__wtTerminalText = terminalText;
+    diagnostics.__wtInputState = inputState;
 }
 
 /** Por qué una pestaña no aceptó una orden de la paleta de comandos. */
@@ -111,6 +135,9 @@ export interface TerminalControls {
     submitLine(line: string): TerminalLineRejection | null;
     /** Como `submitLine`, pero sin Intro: la orden queda escrita en el prompt. */
     insertLine(line: string): TerminalLineRejection | null;
+    /** La última orden marcada (OSC 133), su salida y su código, para dar
+     *  contexto al chat de agentes. `null` si la shell no marca órdenes. */
+    lastCommandContext(): { command: string; output: string; exitCode: number | null } | null;
 }
 
 const controls = new Map<string, TerminalControls>();

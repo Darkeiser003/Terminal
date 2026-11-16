@@ -1,5 +1,6 @@
 {
   "all": [
+    "agentChat.effort.ultracode",
     "deps.summaryAdb",
     "deps.summaryDocker",
     "deps.summaryGit",
@@ -31,6 +32,7 @@
     "scripts.operation.vpn",
     "settings.aliasExample",
     "settings.plugins",
+    "settings.reset.banner",
     "settings.shellAssistBashTool",
     "settings.shellAssistCmdTool",
     "terminal.dynamicOutput"
@@ -45,6 +47,8 @@
     "tool.gitBash"
   ],
   "de": [
+    "agentChat.mode.auto",
+    "agentChat.mode.plan",
     "banner.hardware",
     "banner.kernel",
     "banner.software",
@@ -67,9 +71,14 @@
     "settings.fontWeightNormal",
     "tabs.colorPink",
     "terminal.bannerStatus",
-    "tool.gitBash"
+    "tool.gitBash",
+    "agentChat.chats",
+    "agentChat.chatN"
   ],
   "en": [
+    "agentChat.mode.auto",
+    "agentChat.mode.manual",
+    "agentChat.mode.plan",
     "banner.cpu",
     "banner.gpu",
     "banner.hardware",
@@ -103,9 +112,13 @@
     "settings.fontWeightNormal",
     "settings.terminal",
     "terminal.bannerStatus",
-    "toolbar.logs"
+    "toolbar.logs",
+    "agentChat.chats",
+    "agentChat.chatN"
   ],
   "fr": [
+    "agentChat.mode.auto",
+    "agentChat.mode.plan",
     "deps.repl",
     "deps.repls",
     "deps.summaryLanguagesCount",
@@ -129,7 +142,8 @@
     "settings.ansiMagenta",
     "settings.fontWeightNormal",
     "terminal.visible",
-    "tool.gitBash"
+    "tool.gitBash",
+    "toolbar.agentChat"
   ],
   "hi": [
     "deps.repl",
@@ -140,6 +154,8 @@
   ],
   "it": [
     "action.subgroup.Windows completo",
+    "agentChat.agentRole",
+    "agentChat.mode.auto",
     "banner.hardware",
     "banner.kernel",
     "banner.memory",
@@ -168,7 +184,9 @@
     "terminal.bannerStatus",
     "terminal.bannerUsage",
     "theme.mint",
-    "tool.gitBash"
+    "tool.gitBash",
+    "toolbar.agentChat",
+    "agentChat.chatN"
   ],
   "ja": [
     "deps.repl",
@@ -184,6 +202,8 @@
     "tool.gitBash"
   ],
   "pl": [
+    "agentChat.mode.auto",
+    "agentChat.mode.plan",
     "deps.repl",
     "ghm.areaDependabot",
     "ghm.areaPages",
@@ -224,6 +244,17 @@
     "action.winget-ssh.label",
     "action.wslDistroInstall",
     "action.wslInsideInstallShort",
+    "agentChat.agent",
+    "agentChat.agentRole",
+    "agentChat.copied",
+    "agentChat.copy",
+    "agentChat.effort.ultra",
+    "agentChat.fast",
+    "agentChat.mode.auto",
+    "agentChat.mode.manual",
+    "agentChat.model",
+    "agentChat.send",
+    "agentChat.title",
     "app.adminTitle",
     "banner.cores",
     "banner.drives",
@@ -354,6 +385,7 @@
     "tabs.colorGreen",
     "tabs.colorPink",
     "tabs.loadingPrefix",
+    "terminal.aiKeyCancel",
     "terminal.bannerHidden",
     "terminal.bannerStatus",
     "terminal.bannerUsage",
@@ -371,6 +403,7 @@
     "tool.gitBash",
     "tool.viewerCode",
     "toolbar.adminBadge",
+    "toolbar.agentChat",
     "toolbar.explorer",
     "toolbar.logs",
     "toolbar.scripts",
@@ -381,9 +414,16 @@
     "verb.start",
     "verb.uninstall",
     "verb.verify",
-    "verb.view"
+    "verb.view",
+    "agentChat.chats",
+    "agentChat.chatN",
+    "shellAssistOffer.install",
+    "agentControl.allow"
   ],
   "ro": [
+    "agentChat.mode.auto",
+    "agentChat.mode.manual",
+    "agentChat.mode.plan",
     "banner.hardware",
     "banner.kernel",
     "banner.software",
@@ -400,7 +440,8 @@
     "settings.fontWeightNormal",
     "tabs.colorGreen",
     "terminal.bannerStatus",
-    "tool.gitBash"
+    "tool.gitBash",
+    "toolbar.agentChat"
   ],
   "ru": [
     "deps.repl",
@@ -424,15 +465,15 @@
   ],
   "englishDebt": {
     "ar": 0,
-    "de": 24,
-    "fr": 22,
+    "de": 25,
+    "fr": 23,
     "hi": 2,
     "it": 6,
     "ja": 1,
     "ko": 1,
-    "pl": 8,
+    "pl": 10,
     "pt": 5,
-    "ro": 10,
+    "ro": 12,
     "ru": 2,
     "uk": 2,
     "zh": 1
