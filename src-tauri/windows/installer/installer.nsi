@@ -451,6 +451,9 @@ Var WtStoreLabel
 ; subcarpeta de %LOCALAPPDATA%\WTerminal que «Borrar los datos» respeta.
 Var WtStoreKept
 Var WtDataKeep
+; WTerminal: dónde se quedan los perfiles portables y cuántos hay (17-11).
+Var WtProfilesPath
+Var WtProfilesCount
 !define /ifndef WS_EX_LAYOUTRTL         0x00400000
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
 Function un.ConfirmShow ; Add add a `Delete app data` check box
@@ -467,12 +470,19 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
   StrCpy $WtStoreLabel ""
   StrCpy $WtStoreKept ""
   StrCpy $WtDataKeep ""
+  StrCpy $WtProfilesPath ""
+  StrCpy $WtProfilesCount "0"
   InitPluginsDir
   Delete "${WT_REPORT}"
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --wterminal-uninstall-report "${WT_REPORT}"'
     ReadINIStr $WtDataLabel "${WT_REPORT}" "data" "label"
     ReadINIStr $WtDataKeep "${WT_REPORT}" "data" "keep"
+    ReadINIStr $WtProfilesPath "${WT_REPORT}" "profiles" "path"
+    ReadINIStr $WtProfilesCount "${WT_REPORT}" "profiles" "count"
+    ${If} $WtProfilesCount == ""
+      StrCpy $WtProfilesCount "0"
+    ${EndIf}
     ReadINIStr $0 "${WT_REPORT}" "store" "deletable"
     ${If} $0 == "1"
       ReadINIStr $WtStorePath "${WT_REPORT}" "store" "path"
@@ -518,10 +528,28 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
       StrCpy $0 "$0. $(wtStoreKept): $WtStoreKept"
       IntOp $7 72 * $2
     ${EndIf}
+    ; WTerminal: los perfiles portables se quedan siempre (van en la
+    ; configuración de la carpeta propia); dicho en la misma casilla.
+    ${If} $WtProfilesCount != "0"
+    ${AndIf} $WtProfilesPath != ""
+      StrCpy $0 "$0. $(wtProfilesKept): $WtProfilesPath"
+      IntOp $7 96 * $2
+    ${EndIf}
     IntOp $7 $7 / 96
     System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w r0, i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
     Pop $DeleteStoreCheckbox
     SendMessage $DeleteStoreCheckbox ${WM_SETFONT} $8 1
+  ${ElseIf} $WtProfilesCount != "0"
+  ${AndIf} $WtProfilesPath != ""
+    ; Sin casilla de la carpeta propia, la nota va sola en su sitio.
+    IntOp $5 130 * $2
+    IntOp $5 $5 / 96
+    IntOp $7 40 * $2
+    IntOp $7 $7 / 96
+    StrCpy $0 "$(wtProfilesKept): $WtProfilesPath"
+    System::Call 'user32::CreateWindowEx(i ${__NSD_Label_EXSTYLE}, w "${__NSD_Label_CLASS}", w r0, i ${__NSD_Label_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
+    Pop $0
+    SendMessage $0 ${WM_SETFONT} $8 1
   ${EndIf}
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave

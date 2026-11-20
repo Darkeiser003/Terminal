@@ -315,6 +315,30 @@ AppImage es el formato obligatorio de cada release; los demás son opcionales.
 No hay Flatpak ni Snap: su aislamiento impide que una terminal vea las shells,
 toolchains y archivos del sistema. AUR queda para más adelante.
 
+#### 4.1 Lo de Windows que también tiene Linux (17-11)
+
+La interfaz es la misma en las dos plataformas: avisos, chat de IA, paleta,
+marcas de orden, Biblioteca, perfiles portables y casi todos los ajustes. Lo
+que en Windows depende del sistema tiene en Linux su equivalente:
+
+| En Windows | En Linux |
+|---|---|
+| Guardar la clave de API de una IA cifrada con DPAPI | En el llavero del escritorio (Secret Service: GNOME Keyring, KWallet…) con `secret-tool` de libsecret. En `ai-keys.json` solo queda la marca `secret-service`; borrarla en Ajustes la quita también del llavero. Sin `secret-tool` no se ofrece, como antes (`environments/ai_keys.rs`) |
+| «Abrir con WTerminal» en el Explorador | «Abrir con LTerminal» en «Abrir con» de las carpetas: una entrada de escritorio del usuario, `~/.local/share/applications/lterminal-open-here.desktop` con `MimeType=inode/directory`, que lanza la AppImage (`APPIMAGE`) y no su montaje temporal. Casilla en Ajustes › Comportamiento (`platform/desktop_entry.rs`) |
+| Perfiles portables en `%LOCALAPPDATA%\WTerminal\entornos\configuracion\perfiles` | En `~/.local/share/LTerminal/entornos/configuracion/perfiles`, como `.sh` |
+| Acciones en `ui-N.ps1` / `ui-N.cmd` | En `ui-N.sh` (o `.fish`) de la carpeta de sesión, como en Git Bash y WSL |
+
+Lo que no tiene equivalente, porque en Linux no existe el problema: WebView2,
+NSudo y gsudo (y su aviso), el ancho visible de Python (es de ConPTY), la
+página de componentes del instalador y el informe del desinstalador (la
+AppImage no se instala).
+
+Estas dos piezas de Linux están escritas para compilar también en Windows, así
+que clippy y las pruebas de Windows revisan su lógica (los argumentos de
+`secret-tool` y el texto de la entrada de escritorio). Lo que no se ha podido
+comprobar todavía es su funcionamiento en un Linux de verdad: la VM se quedó
+sin hipervisor el 17-11 y sin WSL no se puede compilar ni probar la AppImage.
+
 ### 5. Carpeta propia: cachés, descargas, modelos, herramientas e historial
 
 Lo que descargan y crean desde WTerminal los gestores de paquetes, las
@@ -809,7 +833,10 @@ errores del inicializador y restaura el entorno original. No inicia servicios
 de bases de datos, contenedores, elevaciones ni dispositivos ADB reales.
 `E2E_SHELL_MATRIX_IDS=lang:haskell,lang:scala,lang:haskell,lang:scala` limita
 la matriz a esos entornos, en ese orden y con repeticiones, para repetir un
-REPL intermitente. Los REPL de lenguajes tienen 60 s para enseñar su prompt
+REPL intermitente. `E2E_SKIP_WSL=1` deja fuera todas las distros de WSL en
+todas las pruebas, como en un equipo sin WSL, y el informe apunta cada una como
+omitida con su motivo (`environment-probe-skipped`). Se usó en la build 68,
+cuando la VM se quedó sin hipervisor (17-11). Los REPL de lenguajes tienen 60 s para enseñar su prompt
 tras el arranque: los de JVM, .NET, GHC o Julia no pintan nada hasta su banner
 y, con la máquina cargada, Scala pasó de 30 s. Un REPL que se cierra solo se
 relanza hasta dos veces (otra shell y vuelta, como haría el usuario) y, si
@@ -1789,6 +1816,25 @@ formatos distintos, cuestan poco.
 La clave privada nunca está en el repositorio ni en los jobs que compilan. En
 local se pasa la carpeta con `-KeysDir`.
 
+La firma OpenSSH se comprueba con `ssh-keygen -Y verify`, así que el equipo
+necesita `ssh-keygen`. Viene con Git para Windows y con el cliente OpenSSH de
+Windows, que Windows 11 trae de serie pero las ediciones LTSC no. WTerminal lo
+busca en el `PATH`, en `System32\OpenSSH`, en `Program Files\OpenSSH` y en las
+carpetas de siempre de Git (`updater/security.rs`, `ssh_keygen_path`).
+
+#### 7.6 «No incluye las claves de confianza», cuando sí las incluye
+
+La 63 decía «Esta compilación no incluye las claves de confianza» en un equipo
+sin `ssh-keygen`, aunque las claves sí venían dentro: el mensaje no distinguía
+los dos casos. Las builds 62, 63, 65 y 67 llevan la clave pública SSH (se
+comprobó buscándola dentro de cada portable). Desde el 17-11 cada caso tiene su
+mensaje (`release_signing_problem`):
+
+- **Faltan las claves en la build:** «Esta compilación no incluye las claves de
+  confianza…». Una build así no se ofrece actualizar nunca.
+- **Faltan las herramientas en el equipo:** «Las claves de confianza vienen
+  dentro, pero falta ssh-keygen…», y dice de dónde sacarlo.
+
 ### 8. Pruebas E2E con WebDriver: comprobar lo que se ve
 
 #### 8.1 ¿Qué es?
@@ -2298,7 +2344,8 @@ WinGet falla al instante (sin salida) cuando se le lanzan varias consultas a la
 vez, así que todas las de la app pasan por `process::winget_probe` /
 `winget_run_env`, que las serializan y reintentan una vez ese fallo. El
 inventario consulta primero `winget list` y solo si falla los orígenes
-`winget`/`msstore`. Las comprobaciones de familia (`install_check`) reutilizan
+`winget`/`msstore`; lo que encuentra cada lista se suma, y la segunda no borra
+lo que marcó la primera. Las comprobaciones de familia (`install_check`) reutilizan
 durante 60 s las listas de WinGet y los inventarios de ecosistemas (pip, npm,
 gem…) de la última pasada; instalar desde el panel o repetir la detección los
 invalida. En la pasada completa, un inventario de ecosistema que agota su plazo
@@ -2371,6 +2418,7 @@ cinco herramientas salían como no instaladas.
 | `src/lib/floating-tip.ts` | Posición de tarjetas flotantes (`position: fixed`) dentro de un panel: `placeFloatingTip` calcula en coordenadas de la ventana junto a la fila (debajo, o encima si no caben unos 170 px) y `fitFloatingTip` devuelve el desplazamiento que mete la tarjeta ya medida dentro del panel por los cuatro lados, sin bucle si es más grande que él. La usa la tarjeta de carpetas de Ajustes. |
 | `src/lib/terminal-links.ts` | Enlaces de la salida: `TERMINAL_LINK_REGEX` (la expresión estricta de `@xterm/addon-web-links` ampliada a `file://`; las rutas sueltas no se detectan para no subrayar cada prompt), `isLinkActivation` (solo Ctrl + botón principal), `checkTerminalLink` (espejo de `validate_link` sin la parte del disco: esquemas `TERMINAL_LINK_SCHEMES`, longitud, caracteres ocultos, credenciales; devuelve la URL normalizada y el host que enseña la confirmación) y `linkRejectionMessageKey` (aviso por código de rechazo). |
 | `src/lib/settings-search.ts` | Buscador de Ajustes: `foldSearchText` (sin mayúsculas ni tildes), `settingsSearchVisibility` (qué títulos de sección, encabezados, filas y notas se ven para una búsqueda) y `visibleSettingsRows` (el recuento). `SettingsPanel` recorre su formulario como bloques y solo esconde lo que esta función diga; también construye el índice de apartados y pone a cada fila su explicación como `title`. |
+| `src/lib/notices.ts` | Los avisos que la app saca por su cuenta (`NOTICE_SETTINGS`, 17-11): cada uno con el ajuste que apaga su «No volver a mostrar» y dónde está su única casilla en Ajustes (`section`, `target`), para que Ajustes › Avisos lleve a ella, y `restoreAllNotices`, que los vuelve a encender todos y olvida lo dejado «para luego» (`DISMISSED_UPDATE_KEY`, `DISMISSED_PACKAGE_UPDATE_KEY`). |
 | `src/lib/settings-reset.ts` | Reparto de las preferencias en los apartados de «Restablecer» (`RESET_GROUPS`, con su riesgo: `safe`, `caution` o `danger`), `keysForGroups`, `dangerousGroups` y `tabState`. Puro: una prueba exige que cada preferencia de fábrica esté en exactamente un apartado. |
 | `src/lib/input-selection.ts` | Cortar o borrar una selección de la línea que se escribe: `promptInputStart` (dónde acaba el prompt), `columnAtTextIndex`/`contentEndColumn` (texto a celdas, caracteres anchos), `inputSelectionEdit` (flechas hasta el final de la selección y un DEL por carácter, solo dentro de lo escrito o tocando el cursor) y `selectionSearchText` (texto para «Buscar» del menú). |
 | `src/lib/banner-image.ts` | Imagen a la izquierda del banner: `findBannerBlocks` reconoce cada banner por su título tras un margen de 10 a 42 espacios, el que dejó el backend al imprimirlo (`bannerImagePadding`, `BANNER_IMAGE_GAP` igual que en Rust) y `attachBannerImages` coloca una decoración de xterm anclada a ese título (encima del margen y centrada en él con el mismo hueco a cada lado, `bannerImageBox`, y también debajo, `bannerImageHeight`, para que un prompt pegado al banner no toque la imagen; sin pasar por ConPTY), la retira si el texto cambia y sigue a la configuración y a la imagen elegida. |
@@ -2417,6 +2465,7 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/platform/system_info.rs` | Datos de sistema y hardware para banner e información. `build_banner`/`build_banner_with` componen el banner; con la imagen activada lo hacen en lo que queda tras el margen de `banner_image_padding` y desplazan cada línea con espacios. |
 | `src-tauri/src/terminal/banner_image.rs` | Imagen propia del banner: `banner_image_read` la valida por su firma (`image_mime`: PNG, JPEG, GIF, WebP, BMP, ICO, SVG con `<svg`) y tamaño (`MAX_BANNER_IMAGE_BYTES`, 8 MB) y la devuelve como `data:`. |
 | `src-tauri/src/platform/recycle.rs` | Envío a papelera del sistema. |
+| `src-tauri/src/platform/desktop_entry.rs` | Linux (17-11): «Abrir con LTerminal» en el gestor de archivos, una entrada de escritorio del usuario con `MimeType=inode/directory` en `~/.local/share/applications` que lanza la AppImage (`APPIMAGE`). IPC `desktop_integration_status/set`. Compila en todas las plataformas para que las pruebas de Windows revisen el texto de la entrada. |
 | `src-tauri/src/platform/first_run.rs` | Une el instalador modular con la app: aplica una vez por usuario lo elegido en la página de componentes (`first-run.json`: PATH y menú del Explorador con `wterminal://`) y escribe para el desinstalador el informe `--wterminal-uninstall-report` (INI en UTF-16 con lo que ocupan los datos y la carpeta propia, y si esta es de WTerminal). |
 | `src-tauri/src/platform/path_integration.rs` | Integración del ejecutable en PATH (HKCU). Ajustes bloquea la casilla mientras se aplica: dos escrituras cruzadas dejaban entradas sueltas. El E2E guarda y repone una copia exacta de `HKCU\Environment\Path` y `HKCU\Software\WTerminal\PathIntegration`, porque el perfil aislado no cubre el registro. |
 | `src-tauri/src/platform/windows_integration.rs` | Estado y activación de integración Windows (menús, App Paths, `wterminal://`) y de los permisos de administrador: `WindowsIntegrationStatus` lleva `elevated`, `nsudoLauncher`, `gsudoPath` y `windowsSudo`; `StartElevation::should_relaunch` decide «Iniciar siempre como administrador»; `relaunch_elevated` y el IPC `app_restart_as_admin` relanzan con `--elevated-relaunch`; `relaunch_unelevated` y el IPC `app_restart_unelevated` vuelven sin permisos (con `unelevated_restart_blocker` como guarda). |
@@ -2655,6 +2704,20 @@ prompt. Por eso:
   Si el cursor cabe en la primera pantalla, la línea se enseña desde el
   principio (`keepCursorHorizontallyVisible`): un resto de scroll cortaba la
   primera columna.
+- Ningún ancho publicado deja texto pintado fuera del alcance de la barra
+  (18-11). Una salida más ancha que la rejilla sale primero partida en filas
+  y, a los pocos segundos, `fitAndReport` la vuelve a medir y la pone en una
+  sola fila. Durante esos segundos, el ancho que se publicaba podía quedarse
+  por debajo de la primera fila (6680 px con filas de 7200), y su final no se
+  alcanzaba. Ahora `ensureVisibleTextReachable`, llamada desde
+  `updateHorizontalScrollState` en cada fotograma pintado, lee en el buffer de
+  xterm las filas a la vista (el DOM puede ir un fotograma por detrás tras un
+  reajuste), mide la más larga sin los espacios finales (el relleno de
+  `PROMPT_SP` de zsh o una fila con fondo de color no son texto) y amplía
+  `--terminal-content-width` si no llega. Solo amplía, nunca encoge, y no
+  actúa en pantalla completa, que va siempre al ancho de la vista. El E2E
+  `horizontal` lo vigila justo después de la salida y 5 s más tarde
+  (`widestReachable`).
 
 - La salida del inicializador no llega a xterm: el backend la sustituye por
   `banner_text` tras el marcador. El archivo que la shell imprime con `type`
@@ -2780,9 +2843,9 @@ depurar un handler.
 | `TerminalPane` con teclado o cambio de matriz | `pty_input`, `pty_resize`, `pty_print_banner`, `internal_command_parse` | `app/commands.rs` → `TabManager::{write,resize,print_banner}` y analizador interno |
 | `TerminalPane` al confirmar un Ctrl+clic sobre un enlace | `terminal_open_link` | `terminal/links.rs` → `validate_link` y opener de Tauri (navegador, carpeta o archivo mostrado en su carpeta) |
 | Selector y `AppStore` | `env_list`, `env_refresh`, `env_switch` | `app/commands.rs` → `AppState::refresh_environments` o `TabManager` con nueva generación |
-| `SettingsPanel` y `AppStore` | `settings_get`, `settings_save`, `settings_reset`, `profile_export`, `profile_import` | `app/commands.rs` → `config/preferences.rs`, `settings.rs` |
+| `SettingsPanel` y `AppStore` | `settings_get`, `settings_save`, `settings_reset`, `profile_export`, `profile_import`, `profile_status`, `profile_save_now` | `app/commands.rs` → `config/preferences.rs`, `settings.rs` |
 | `SettingsPanel` | `plugins_list`, `plugins_set_enabled`, `plugins_install`, `plugins_remove` | `config/plugins.rs` |
-| Integración de escritorio | `windows_integration_status/set`, `app_restart_as_admin`, `path_integration_status/set` | `platform/windows_integration.rs`, `platform/path_integration.rs` |
+| Integración de escritorio | `windows_integration_status/set`, `desktop_integration_status/set`, `app_restart_as_admin`, `path_integration_status/set` | `platform/windows_integration.rs`, `platform/desktop_entry.rs`, `platform/path_integration.rs` |
 | `ScriptsPanel` | `scripts_list`, `scripts_list_here`, `scripts_pick_target`, `scripts_open`, `scripts_cd`, `scripts_cd_directory`, `scripts_run`, `scripts_pin` | `app/panel_commands.rs` → `scripts/{scan,launch,pins}.rs` |
 | `ExplorerSidebar` | `explorer_list`, `explorer_follow`, `explorer_create`, `explorer_open`, `explorer_rename`, `explorer_clip`, `explorer_paste`, `explorer_trash`, `explorer_cd`, `explorer_open_directory`, `explorer_open_directory_with` | `app/panel_commands.rs` → `explorer/files.rs`, `viewers.rs` y adaptador de plataforma |
 | `DependenciesPanel` | `install_list`, `install_catalog`, `install_check`, `install_refresh`, `install_run` | `packages/commands.rs` → `actions.rs`, sondas y `TabManager::write_command` |
@@ -3908,11 +3971,13 @@ gsudo y el sudo de Windows), con:
 - **Instalar gsudo**: abre Entorno y dependencias ya filtrado por gsudo.
 - **Ofrecer gsudo** (`offerGsudo`, encendido; 14-11, Romen): si NSudo está
   instalado y esta copia no puede abrirlo (no es administrador, ni hay gsudo ni
-  el sudo de Windows en línea, `offer_gsudo`), sale un aviso abajo, como la
-  guía del modo limpio, con **«Instalar gsudo»** (lanza la acción
-  `winget-gsudo` de WTerminal en una pestaña, a la vista), **«Cerrar esta
-  vez»** y **«No volver a ofrecer»** (apaga el ajuste). Nunca sale en las
-  pruebas E2E, donde un aviso que no esperan movería la terminal.
+  el sudo de Windows en línea, `offer_gsudo`), sale abajo la misma barra que
+  la de las actualizaciones de WinGet (desde el 17-11), con **«Instalar
+  gsudo»** (lanza la acción `winget-gsudo` de WTerminal en una pestaña, a la
+  vista), **«Ahora no»** (esta sesión) y **«No volver a mostrar»** (apaga el
+  ajuste; se recupera en su casilla o en Ajustes › Comportamiento › Avisos).
+  Nunca sale en las pruebas E2E, donde un aviso que no esperan movería la
+  terminal.
 - **Reiniciar sin permisos de administrador** (solo siendo administrador): un
   proceso elevado no puede soltar sus permisos y todo lo que lanza los hereda,
   así que `run_unelevated` copia el token del Explorador (la shell del
@@ -4241,13 +4306,15 @@ y cada shell conserva su configuración.
 
 **Si falta, se ofrece** (`offerShellAssist`, encendido; 14-11, Romen): cuando la
 pestaña activa es de cmd, PowerShell, bash o zsh y a su shell (en WSL, a su
-distro) le falta su ayudante según `shell_assist_status`, sale abajo un aviso
-como la guía del modo limpio: «Esta pestaña de … no tiene sugerencias ni
-colores al escribir: falta …», con **«Instalar …»** (abre Entorno y
-dependencias ya filtrado, como en Ajustes, para ver y confirmar lo que se
-instala), **«Cerrar esta vez»** (por shell y distro) y **«No volver a
-ofrecer»** (apaga el ajuste). Sale uno a la vez, después del de gsudo, y nunca
-en las pruebas E2E (`e2eTesting` en la información de la app).
+distro) le falta su ayudante según `shell_assist_status`, sale abajo la misma
+barra que la de las actualizaciones de WinGet (desde el 17-11): «Esta pestaña
+de … no tiene sugerencias ni colores al escribir: falta …», con **«Instalar
+…»** (abre Entorno y dependencias ya filtrado, como en Ajustes, para ver y
+confirmar lo que se instala), **«Ahora no»** (por shell y distro) y **«No
+volver a mostrar»** (apaga el ajuste; se recupera en su casilla o en Ajustes ›
+Comportamiento › Avisos). Si coincide con el de gsudo o con el de WinGet, se
+apilan: los que ofrecen instalar algo van encima. Nunca sale en las pruebas
+E2E (`e2eTesting` en la información de la app).
 
 #### 5.2 El `PSModulePath` de Windows PowerShell 5.1
 
@@ -5705,6 +5772,9 @@ fábrica y dejó sin `PYTHONUSERBASE` a aider, llm e IPython.
 - **El reparto** está en `src/lib/settings-reset.ts`, y una prueba exige que
   cada preferencia de `default_settings.toml` esté en exactamente un apartado:
   una preferencia nueva no puede quedarse fuera.
+- **Los perfiles portables** (17-11): arriba de las casillas, el diálogo dice
+  cuántos hay y en qué carpeta, que restablecer no los toca, y ofrece «Guardar
+  perfil ahora» antes de confirmar ([Perfiles portables](#1-perfiles-portables)).
 
 ### 3. Buscar un ajuste
 
@@ -5778,7 +5848,7 @@ editarlos, ejecutar
 | `terminalLinksConfirm` | booleano: confirmar con el destino a la vista antes de abrir | `true` |
 | `pythonReplVisibleWidth` | booleano, solo Windows: el REPL de Python (su pestaña o `python`/`py` tecleado en la shell) usa el ancho visible y no la reserva de 1024 columnas. Se nota siempre: sus líneas largas (`print`, `help()`) se parten en el borde en vez de seguir hacia la derecha. Con `pyreadline3` además evita que teclear vaya a 2-3 letras por segundo ([Problemas conocidos](#problemas-conocidos)) | `true` |
 | `actionCommandsAtOnce` | booleano: la orden de una acción (instalar, actualizar…) aparece entera de una vez, en vez de verse escribir como la repinta la shell | `true` |
-| `aiKeyOffer` | booleano, solo Windows: si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de API, la pestaña ofrece meterla y la guarda cifrada (`environments/ai_keys.rs`) | `true` |
+| `aiKeyOffer` | booleano, en Windows y en Linux con `secret-tool`: si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de API, la pestaña ofrece meterla y la guarda cifrada (`environments/ai_keys.rs`) | `true` |
 | `agentChat` | booleano: el chat lateral con los agentes de IA (`:chat`, paleta, atajo) | `true` |
 | `agentChatAdvisor` | booleano, modo consejero: al fallar una orden, la pestaña ofrece preguntar al agente con la orden y su salida; solo deja la pregunta escrita en el chat, nunca la manda sola. No vale en todas las shells, porque depende de las marcas OSC 133 (`terminalCommandMarks`): sí en PowerShell y bash (Git Bash, WSL con bash); en cmd solo cuando la orden no existe (mensaje 9009 de Windows, `terminal/cmd_failure.rs`); no en zsh, fish ni sh (WSL con zsh, como Kali) salvo que la shell emita las marcas por su cuenta, ni dentro de un REPL (Python, Node…) o una IA de terminal | `true` |
 | `agentChatCanEdit` | booleano: el chat deja elegir los modos que editan («Aceptar ediciones», que pasa a ser el de fábrica, y «Auto»). Apagado, solo leen (Manual y Plan) | `false` |
@@ -5801,7 +5871,7 @@ editarlos, ejecutar
 | `githubSessionMode` | `onExhausted`, `always`, `never`: cuándo usar la sesión de `gh` en Explorar GitHub | `onExhausted` |
 | `suggestRepositoryImport` | booleano: sugerir importar el repositorio de GitHub de la carpeta de una pestaña | `true` |
 | `lowPowerMode` | booleano: modo de bajo consumo. La precarga del catálogo de Dependencias no se hace al arrancar (se construye al abrir el panel), la comprobación de actualizaciones de WinGet espera dos minutos y las sondas de ecosistema van de una en una. Se aplica en el siguiente arranque | `false` |
-| `lowPowerSuggest` | booleano: sugerir abajo el modo de bajo consumo cuando el equipo tiene 2 hilos de CPU o menos, menos de 8 GB de memoria, o la primera pestaña tarda más de 8 s en dar el prompt (una vez por sesión; «No volver a sugerir» lo apaga) | `true` |
+| `lowPowerSuggest` | booleano: sugerir abajo el modo de bajo consumo cuando el equipo tiene 2 hilos de CPU o menos, menos de 8 GB de memoria, o la primera pestaña tarda más de 8 s en dar el prompt (una vez por sesión; «No volver a sugerir» lo apaga). Casilla: Comportamiento › «Sugerir el modo de bajo consumo» | `true` |
 | `checkUpdatesOnStartup` | booleano: buscar una versión nueva de WTerminal en GitHub al arrancar ([Privacidad y red](#11-privacidad-y-red)) | `true` |
 | `checkPackageUpdatesOnStartup` | booleano: preguntar al gestor de paquetes por actualizaciones al arrancar | `true` |
 | `webview2Missing` | `ask`, `download`, `never`: qué hace el arranque de Windows si falta WebView2 | `ask` |
@@ -5827,6 +5897,81 @@ editarlos, ejecutar
 | `toolchainStoreDownloads`, `toolchainStoreAiModels` | booleanos: categorías activas de la carpeta propia | `true` |
 | `toolchainStoreTools`, `toolchainStoreReplHistory` | booleanos: herramientas nuevas (con sus `bin` en el PATH) e historial de los REPL en la carpeta propia | `true` |
 | `toolchainStoreToolchains` | booleano: toolchains completas (rustup, cargo, GOPATH, Gradle, .NET, Android) en la carpeta propia, solo si no estaban instaladas | `true` |
+| `clearReprintBanner` | booleano: `clear`/`cls` vuelve a pintar el mismo banner (fastfetch) tras limpiar la pantalla | `true` |
+| `showDependenciesPanel` | booleano: botón de Entorno y dependencias en la barra | `true` |
+| `showProjectsPanel` | booleano: botón de Proyectos en la barra | `true` |
+| `showScriptsPanel` | booleano: botón de la Biblioteca en la barra | `true` |
+| `showQuickActions` | booleano: acciones rápidas bajo el banner | `true` |
+| `ltoolsEnabled` | booleano: integración experimental de LTools en la Biblioteca | `false` |
+| `showExplorerPanel` | booleano: explorador de archivos lateral | `true` |
+| `showTabBar` | booleano: fila de pestañas | `true` |
+| `showEnvironmentSelector` | booleano: selector de entorno de la barra | `true` |
+| `showRefreshButton` | booleano: botón ⟳ de volver a detectar entornos | `true` |
+| `showLanguageButton` | booleano: botón de idioma de la barra | `true` |
+| `terminalOnlyMode` | booleano: modo de pantalla limpia: solo la terminal, sin barras (se sale con su atajo o `:settings`) | `false` |
+| `showTerminalOnlyGuide` | booleano: la guía del modo de pantalla limpia con su atajo de salida; su «No volver a mostrar» la apaga y se vuelve a encender con su casilla («Guía visible en pantalla limpia») o desde Ajustes › Avisos | `true` |
+| `startMaximized` | booleano: la ventana arranca maximizada | `false` |
+| `startAsAdmin` | booleano: solo Windows: al arrancar sin permisos de administrador, se relanza con el UAC; si se cancela, sigue sin elevar | `false` |
+| `manualAliasesText` | texto: alias propios, uno por línea (`nombre=orden`) | `""` |
+| `favoriteReplIds` | ids de REPL separados por comas que salen arriba en el selector | `""` |
+| `hiddenEnvironmentIds` | ids de entorno separados por comas que no salen en el selector | `""` |
+| `shortcutCommandPalette` | atajo: Abrir la paleta de comandos (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+P` |
+| `shortcutNewTab` | atajo: Nueva pestaña (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+T` |
+| `shortcutNextTab` | atajo: Pestaña siguiente (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Tab` |
+| `shortcutPreviousTab` | atajo: Pestaña anterior (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+Tab` |
+| `shortcutCyclePanes` | atajo: Dividir terminales (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+Backslash` |
+| `shortcutToggleExplorer` | atajo: Mostrar explorador (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+E` |
+| `shortcutToggleTerminalOnly` | atajo: Modo terminal limpia (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+M` |
+| `shortcutPaneLeft` | atajo: Foco a la izquierda (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+A` |
+| `shortcutPaneRight` | atajo: Foco a la derecha (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+D` |
+| `shortcutPaneUp` | atajo: Foco arriba (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+W` |
+| `shortcutPaneDown` | atajo: Foco abajo (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+S` |
+| `shortcutOpenSettings` | atajo: Abrir ajustes (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutOpenProjects` | atajo: Abrir proyectos (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutOpenScripts` | atajo: Abrir biblioteca (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutOpenDependencies` | atajo: Abrir entorno y dependencias (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutClosePanel` | atajo: Cerrar panel (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutRefreshEnvironments` | atajo: Volver a detectar entornos (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutExplorerFollow` | atajo: Seguir la ruta de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutExplorerCd` | atajo: Llevar la terminal a esta carpeta (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutClearTerminal` | atajo: Limpiar terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutSearchTerminal` | atajo: Buscar en el historial de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+F` |
+| `shortcutSearchHistory` | atajo: Buscar en las órdenes escritas (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+R` |
+| `shortcutPreviousCommand` | atajo: Ir a la orden anterior (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+ArrowUp` |
+| `shortcutNextCommand` | atajo: Ir a la orden siguiente (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+ArrowDown` |
+| `shortcutUiScaleUp` | atajo: Aumentar el tamaño de la interfaz (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+Equal` |
+| `shortcutUiScaleDown` | atajo: Reducir el tamaño de la interfaz (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+Minus` |
+| `shortcutUiScaleReset` | atajo: Tamaño de la interfaz al 100 % (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+0` |
+| `shortcutOpenSystemExplorer` | atajo: Abrir en el explorador del sistema (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutCloseTab` | atajo: Cerrar la pestaña (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutRenameTab` | atajo: Renombrar la pestaña (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutCopyLastOutput` | atajo: Copiar la salida de la última orden (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutSaveTerminalOutput` | atajo: Guardar la salida en un archivo (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutTerminalFontUp` | atajo: Agrandar la letra de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutTerminalFontDown` | atajo: Achicar la letra de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutTerminalFontReset` | atajo: Letra de la terminal a su tamaño de fábrica (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutToggleAgentChat` | atajo: Mostrar u ocultar el chat de agentes (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `uiBackgroundColor` | `#rrggbb`: fondo de la interfaz (lo rellena el tema; se puede retocar) | `#0d0d0d` |
+| `uiSurfaceColor` | `#rrggbb`: superficie de paneles y barras | `#1e1e1e` |
+| `uiSurfaceAltColor` | `#rrggbb`: superficie alternativa (filas, cajas) | `#161616` |
+| `uiBorderColor` | `#rrggbb`: bordes | `#333333` |
+| `uiTextColor` | `#rrggbb`: texto | `#d4d4d4` |
+| `uiMutedColor` | `#rrggbb`: texto secundario | `#888888` |
+| `terminalSelectionColor` | `#rrggbb`: fondo de la selección en la terminal | `#4b5056` |
+| `suggestMissingTools` | booleano: si una orden no existe y WTerminal sabe instalarla, un aviso abajo lo ofrece (nunca instala solo); su «No volver a mostrar» lo apaga. Casilla: Terminal › «Ofrecer instalar las órdenes que faltan» | `true` |
+| `offerPortableProfile` | booleano: si hay ajustes propios y ningún perfil en `<carpeta propia>/configuracion/perfiles`, un aviso sugiere guardar uno ([Perfiles portables](#1-perfiles-portables)) | `true` |
+| `terminalAdminByDefault` | booleano: solo Windows: pide el UAC al iniciar para que las shells, intérpretes y herramientas hereden permisos de administrador | `false` |
+| `toolchainStorePrograms` | booleano: categoría «Programas» (WinGet con `--location`) dentro de la carpeta propia | `true` |
+| `toolchainStoreProjects` | booleano: categoría «Proyectos de GitHub» dentro de la carpeta propia | `false` |
+| `toolchainStoreConfig` | booleano: categoría «Configuración» (REPL como IPython y Jupyter, y los perfiles portables en `configuracion/perfiles`) | `true` |
+| `toolchainStorePlugins` | booleano: categoría «Plugins» de las shells (caché de starship y el perfil de Clink propio) | `true` |
+| `toolchainStoreCategoryDirs` | texto: carpeta propia de cada categoría, `categoría=carpeta` por línea; las que no salen van en la carpeta propia | `""` |
+| `toolchainStoreDisabled` | ids de entradas apagadas una a una (separados por comas) aunque su categoría siga activa | `""` |
+| `shellAssist` | booleano: sugerencias del historial y colores en la línea de órdenes (Clink, PSReadLine, ble.sh o plugins de zsh) si están instalados | `true` |
+| `shellAssistCmd` | booleano: lo mismo, solo en cmd (Clink) | `true` |
+| `shellAssistPowershell` | booleano: lo mismo, solo en PowerShell (PSReadLine) | `true` |
+| `shellAssistBash` | booleano: lo mismo, solo en bash (ble.sh) | `true` |
+| `shellAssistZsh` | booleano: lo mismo, solo en zsh (sus plugins) | `true` |
 
 ### 8. Temas
 
@@ -5885,6 +6030,81 @@ Lo demás que toca la red lo pide siempre el usuario: clonar o explorar en
 GitHub, instalar desde Dependencias, descargar modelos o abrir enlaces. El
 modo de bajo consumo (`lowPowerMode`) además retrasa dos minutos la consulta de
 actualizaciones de programas.
+
+### 12. Avisos
+
+#### 12.1 Qué son
+
+Los avisos son las barras que WTerminal saca por su cuenta para ofrecer algo:
+una actualización, instalar lo que falta, guardar un perfil… Nunca hacen nada
+solos: el botón principal lleva a donde se ve y se confirma lo que se va a
+hacer.
+
+#### 12.2 Cómo se ven
+
+Desde el 17-11 todos los avisos de abajo usan la misma barra que el de las
+actualizaciones de WinGet. Antes, el que ofrecía instalar Clink, PSReadLine o
+ble.sh (y el de gsudo) era una caja flotante arriba a la derecha.
+
+- **Orden:** los que ofrecen instalar algo (gsudo y el ayudante de la shell) van
+  encima del de WinGet; si coinciden, se apilan.
+- **Uno cada vez:** los que solo sugieren algo (bajo consumo, importar un
+  repositorio, guardar un perfil) esperan a que no haya otro abajo.
+
+#### 12.3 «No volver a mostrar»
+
+Cada aviso tiene su botón «No volver a mostrar», que apaga su ajuste:
+
+| Aviso | Ajuste |
+|---|---|
+| Falta el ayudante de la shell (Clink, PSReadLine, ble.sh) | `offerShellAssist` |
+| Actualizaciones de las aplicaciones (WinGet o el gestor del sistema) | `checkPackageUpdatesOnStartup` |
+| Versión nueva de WTerminal | `checkUpdatesOnStartup` |
+| Una orden necesita una herramienta que no está instalada | `suggestMissingTools` |
+| Preguntar a la IA cuando falla una orden (en la pestaña) | `agentChatAdvisor` |
+| Una IA pide su clave de API (en la pestaña) | `aiKeyOffer` |
+| No tienes ningún perfil portable guardado | `offerPortableProfile` |
+| Añadir a Proyectos el repositorio de la carpeta | `suggestRepositoryImport` |
+| Modo de bajo consumo en equipos modestos | `lowPowerSuggest` |
+| gsudo para abrir las pestañas de NSudo (solo Windows) | `offerGsudo` |
+| Guía del modo de pantalla limpia | `showTerminalOnlyGuide` |
+
+«Ahora no» (o «Descartar») solo lo cierra esa vez. Importar un repositorio
+tiene además «No sugerir este», que olvida solo ese repositorio.
+
+La petición de permiso de una IA (`wterminal --ctl`) no está en la lista a
+propósito: no es un aviso, es una pregunta que la IA espera, y apagarla sería
+conceder o negar sin preguntar.
+
+#### 12.4 Recuperarlos
+
+Cada aviso tiene **una sola casilla** en Ajustes, en su sitio:
+
+| Aviso | Dónde está su casilla |
+|---|---|
+| Ayudante de la shell | Terminal › «Ofrecer instalarlo si falta», bajo el ayudante |
+| Herramienta que falta | Terminal › «Ofrecer instalar las órdenes que faltan» |
+| Preguntar a la IA | Terminal › «Modo consejero» |
+| Clave de API de una IA | Terminal › «Ofrecer la clave de API cuando una IA la pida» |
+| Actualizaciones de las aplicaciones y versión nueva | Comportamiento › Privacidad y red |
+| Bajo consumo | Comportamiento › «Sugerir el modo de bajo consumo» |
+| Importar un repositorio | Comportamiento › «Sugerir importar repositorios» |
+| Guía de pantalla limpia | Comportamiento › «Guía visible en pantalla limpia» |
+| gsudo | Comportamiento › Permisos de administrador |
+| Perfil portable | Comportamiento › Perfiles portables |
+
+Ajustes › Comportamiento › **Avisos** (`data-testid="settings-notices"`) no
+repite esas casillas:
+
+- **Lista los apagados:** solo los que están apagados ahora, cada uno como un
+  botón (`settings-notice-<id>`). Al pulsarlo, Ajustes cambia de pestaña,
+  baja hasta su casilla y la resalta un momento.
+- **«Volver a mostrar todos los avisos»:** los enciende todos y además olvida lo
+  que se dejó «para luego»: la versión de WTerminal descartada y el
+  recordatorio de 24 h de WinGet.
+
+La lista sale de `src/lib/notices.ts`, la misma que usan los botones de los
+avisos. Allí cada aviso dice en qué pestaña y en qué casilla está su ajuste.
 
 ---
 
@@ -6023,6 +6243,45 @@ contraseñas, tokens, claves privadas ni binarios, comprueba el sistema y la
 arquitectura, verifica la descarga cuando GitHub publica `SHA256SUMS.txt` y
 busca una instalación existente antes de instalar la aplicación. Después
 importa la configuración y los manifests de plugins declarativos.
+
+#### 1.1 Su carpeta
+
+Desde el 17-11 los perfiles tienen una carpeta fija: `perfiles`, dentro de la
+configuración de la carpeta propia.
+
+- **Windows:** `%LOCALAPPDATA%\WTerminal\entornos\configuracion\perfiles`.
+- **Linux:** `~/.local/share/LTerminal/entornos/configuracion/perfiles`.
+- **Si se cambia:** sigue a la carpeta propia (`toolchainStoreDir`) y a la de la
+  categoría Configuración si tiene una aparte (`toolchainStoreCategoryDirs`).
+
+Es la misma ruta para todo, y sale de una sola función
+(`commands::profiles_dir`):
+
+- **la sugerencia** (abajo);
+- **«Exportar perfil» e «Importar perfil»**, que abren el diálogo en ella;
+- **«Guardar perfil ahora»**, que guarda sin diálogo como
+  `WTerminal-Perfil-AAAA-MM-DD.ps1` (`.sh` en Linux) sin pisar otro del mismo
+  día;
+- **el diálogo de restablecer;**
+- **el desinstalador.**
+
+#### 1.2 La sugerencia
+
+Si has cambiado algún ajuste (o tienes plugins) y en la carpeta no hay ningún
+perfil, unos 45 s después de arrancar sale un aviso abajo: «Guardar perfil»,
+«Ahora no» y «No volver a mostrar» (`offerPortableProfile`). No sale en las
+pruebas E2E: el perfil de la prueba siempre trae ajustes propios.
+
+#### 1.3 Al restablecer y al desinstalar
+
+- **Restablecer:** el diálogo dice cuántos perfiles hay y dónde, recuerda que
+  restablecer no los toca y ofrece «Guardar perfil ahora» antes de confirmar.
+- **Desinstalar:** los perfiles se conservan siempre. La configuración es de lo
+  que «Borrar la carpeta propia» nunca borra, y «Borrar los datos» no toca la
+  carpeta propia. El informe del desinstalador (`[profiles]`, con la ruta y
+  cuántos hay) hace que la página de confirmación lo diga en la misma casilla
+  de la carpeta propia, o en una nota aparte si esa casilla no sale. Al
+  reinstalar, «Importar perfil» abre ya en esa carpeta.
 
 ### 2. Plugins
 

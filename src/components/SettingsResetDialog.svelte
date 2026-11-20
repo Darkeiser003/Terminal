@@ -3,8 +3,10 @@
     // a fábrica sin avisar. Aquí se elige qué apartados, cada uno con lo que
     // hace y su riesgo, y nada viene marcado: «Cancelar» es lo que se enfoca.
     import { onMount } from 'svelte';
+    import * as api from '../lib/api';
     import { app } from '../lib/appState.svelte';
     import { dangerousGroups, keysForGroups, RESET_GROUPS, RESET_TABS, tabState, type ResetRisk, type ResetTab } from '../lib/settings-reset';
+    import type { ProfileStatus } from '../lib/types';
 
     let { busy = false, onCancel, onConfirm }: {
         busy?: boolean;
@@ -51,7 +53,30 @@
         onConfirm(keysForGroups(selected), selected.length);
     }
 
+    // Los perfiles portables (17-11): restablecer no los toca, y si no hay
+    // ninguno se ofrece guardar uno antes, en su carpeta de siempre.
+    let profiles = $state<ProfileStatus | null>(null);
+    let profileSaving = $state(false);
+    let profileError = $state('');
+    async function saveProfile(): Promise<void> {
+        if (profileSaving) return;
+        profileSaving = true;
+        profileError = '';
+        try {
+            const result = await api.saveProfileNow();
+            if (!result.ok) profileError = result.error ?? app.t('profileOffer.failed', 'No se pudo guardar el perfil.');
+            profiles = await api.profileStatus().catch(() => profiles);
+        } catch (cause) {
+            profileError = String(cause);
+        } finally {
+            profileSaving = false;
+        }
+    }
+
     onMount(() => cancelButton?.focus());
+    onMount(() => {
+        void api.profileStatus().then((status) => { profiles = status; }).catch(() => {});
+    });
 </script>
 
 <!-- `data-panel-toggle`: pulsar dentro no cuenta como «fuera» de Ajustes. -->
@@ -83,6 +108,23 @@
         <p id="settings-reset-intro" class="intro">
             {app.t('settings.resetDialog.intro', 'Marca lo que quieres devolver a como viene de fábrica; lo demás no se toca. Restablecerlo todo deshace todo lo que hayas personalizado: tema, atajos, alias, idioma, la carpeta propia y más. No hay deshacer: si dudas, exporta antes un perfil.')}
         </p>
+
+        {#if profiles}
+            <div class="profiles" data-testid="settings-reset-profiles" data-count={profiles.profiles.length}>
+                <span>
+                    {profiles.profiles.length === 0
+                        ? app.t('settings.resetDialog.noProfile', 'No tienes ningún perfil portable guardado: guárdalo antes y podrás volver a como lo tienes ahora con «Importar perfil».')
+                        : app.t('settings.resetDialog.profiles', 'Perfiles portables guardados: {count} (el último, {name}). Restablecer no los toca y con «Importar perfil» vuelves a como estaban.')
+                              .replace('{count}', String(profiles.profiles.length))
+                              .replace('{name}', profiles.profiles[0].name)}
+                    <small>{profiles.dir}</small>
+                    {#if profileError}<small class="profile-error" role="alert">{profileError}</small>{/if}
+                </span>
+                <button type="button" class="plain" data-testid="settings-reset-save-profile" disabled={profileSaving} onclick={saveProfile}>
+                    {profileSaving ? app.t('profileOffer.saving', 'Guardando…') : app.t('settings.saveProfileNow', 'Guardar perfil ahora')}
+                </button>
+            </div>
+        {/if}
 
         <div class="tabs">
             {#each RESET_TABS as tab (tab)}
@@ -181,6 +223,35 @@
     .intro {
         margin: 0;
         color: var(--muted);
+    }
+
+    /* Los perfiles portables, antes de las casillas (17-11). */
+    .profiles {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 8px;
+        border-left: 2px solid var(--accent);
+        background: var(--surface-alt);
+    }
+
+    .profiles > span {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .profiles small {
+        display: block;
+        color: var(--muted);
+    }
+
+    .profiles .profile-error {
+        color: var(--danger);
+    }
+
+    .profiles button {
+        flex: 0 0 auto;
     }
 
     .tabs {

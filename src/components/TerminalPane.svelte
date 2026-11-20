@@ -2069,6 +2069,40 @@
         }
     }
 
+    /** Ningún ancho publicado deja texto fuera del alcance de la barra
+     *  (18-11, Romen). Una salida más ancha que la rejilla sale primero
+     *  partida en filas y, a los pocos segundos, `fitAndReport` la vuelve a
+     *  medir y la pone en una sola fila. Durante esos segundos el ancho
+     *  publicado podía quedarse por debajo de la primera fila (6680 px con
+     *  filas de 7200) y su final no se alcanzaba. Se mira el texto de xterm de
+     *  las filas a la vista, que está al día también justo después de cambiar
+     *  la rejilla (las filas pintadas pueden ir un fotograma por detrás), y
+     *  solo se amplía, nunca se encoge: encoger es cosa de `fitAndReport`.
+     *  Un programa a pantalla completa se queda en el ancho de la vista. */
+    function ensureVisibleTextReachable(): void {
+        if (!terminalHost || !term || fullScreenApp || term.buffer.active.type === 'alternate') return;
+        const cellWidth = terminalCellWidth();
+        if (!(cellWidth > 0)) return;
+        const buffer = term.buffer.active;
+        let columns = 0;
+        for (let row = 0; row < term.rows; row += 1) {
+            const line = buffer.getLine(buffer.viewportY + row);
+            // `translateToString(true)` solo quita las celdas vacías: los
+            // espacios escritos de verdad (el relleno de `PROMPT_SP` de zsh,
+            // una fila con fondo de color) siguen ahí y no son texto.
+            if (line) columns = Math.max(columns, line.translateToString(true).trimEnd().length);
+        }
+        columns = Math.min(columns, term.cols);
+        if (!columns) return;
+        const needed = Math.ceil((columns + 2) * cellWidth);
+        const clientWidth = terminalHost.clientWidth;
+        if (needed <= clientWidth + 1) return;
+        const published = Number.parseFloat(terminalHost.style.getPropertyValue('--terminal-content-width')) || clientWidth;
+        if (needed <= published + 1) return;
+        terminalHost.style.setProperty('--terminal-content-width', `${needed}px`);
+        syncTerminalRootWidth(needed);
+    }
+
     // Algunos builds de xterm mantienen la anchura de su raíz en el tamaño
     // del host aunque el CSS de la rejilla ya tenga una variable más grande.
     // Fijar el ancho físico en el nodo raíz evita que el flex interno lo
@@ -2576,6 +2610,7 @@
 
     function updateHorizontalScrollState(): void {
         horizontalStateFrame = undefined;
+        ensureVisibleTextReachable();
         const viewport = getHorizontalViewport();
         if (!viewport) {
             horizontalCanScrollRight = false;
@@ -6329,6 +6364,17 @@
         <div class="agent-advice" role="status" data-testid="agent-chat-advice">
             <span>{app.t('agentChat.advice', 'La orden falló (código {code}). ¿Preguntas al agente?').replace('{code}', String(agentAdvice.code))}</span>
             <button type="button" data-testid="agent-chat-advice-ask" onclick={askAgentAboutFailure}>{app.t('agentChat.adviceAsk', 'Preguntar')}</button>
+            <!-- «No volver a mostrar» apaga el modo consejero; vuelve en
+                 Ajustes > Avisos o en el chat de IA (17-11). -->
+            <button
+                type="button"
+                class="secondary"
+                data-testid="agent-chat-advice-never"
+                onclick={() => {
+                    agentAdvice = null;
+                    void app.savePreferences({ agentChatAdvisor: false });
+                }}
+            >{app.t('notice.never', 'No volver a mostrar')}</button>
             <button type="button" class="dismiss" aria-label={app.t('common.close', 'Cerrar')} onclick={() => { agentAdvice = null; }}>×</button>
         </div>
     {/if}
@@ -6350,7 +6396,9 @@
                     bind:value={aiKeyValue}
                     onkeydown={onAiKeyInputKeydown}
                 />
-                <small>{app.t('terminal.aiKeyNote', 'Se guarda cifrada para tu usuario de Windows y solo se pasa a esta IA al abrirla. Puedes apagar este aviso en Ajustes.')}</small>
+                <small>{app.appInfo?.platform === 'windows'
+                    ? app.t('terminal.aiKeyNote', 'Se guarda cifrada para tu usuario de Windows y solo se pasa a esta IA al abrirla. Puedes apagar este aviso en Ajustes.')
+                    : app.t('terminal.aiKeyNoteLinux', 'Se guarda en el llavero de tu escritorio (secret-tool) y solo se pasa a esta IA al abrirla. Puedes apagar este aviso en Ajustes.')}</small>
                 {#if aiKeyError}<small class="ai-key-error" data-testid="ai-key-error">{aiKeyError}</small>{/if}
                 <div class="ai-key-actions">
                     <button type="button" data-testid="ai-key-cancel" onclick={dismissAiKeyOffer}>{app.t('terminal.aiKeyCancel', 'Cancelar')}</button>
@@ -6360,6 +6408,14 @@
                 </div>
             {:else}
                 <div class="ai-key-actions">
+                    <button
+                        type="button"
+                        data-testid="ai-key-never"
+                        onclick={() => {
+                            dismissAiKeyOffer();
+                            void app.savePreferences({ aiKeyOffer: false });
+                        }}
+                    >{app.t('notice.never', 'No volver a mostrar')}</button>
                     <button type="button" data-testid="ai-key-dismiss" onclick={dismissAiKeyOffer}>{app.t('terminal.aiKeyDismiss', 'Ahora no')}</button>
                     <button type="button" class="primary" data-testid="ai-key-enter" onclick={() => { aiKeyEditing = true; }}>
                         {aiKeyOffer.stored ? app.t('terminal.aiKeyChange', 'Cambiar la clave…') : app.t('terminal.aiKeyEnter', 'Introducir la clave…')}
@@ -6957,6 +7013,13 @@
         border-color: transparent;
         background: transparent;
         color: var(--muted);
+    }
+
+    /* «No volver a mostrar»: sin el relleno de la acción principal. */
+    .agent-advice button.secondary {
+        border-color: var(--border);
+        background: transparent;
+        color: var(--text);
     }
 
     /* Dentro de la pestaña, arriba: no tapa el aviso de la IA ni el de

@@ -261,8 +261,8 @@ pub fn check(app: &AppHandle) -> UpdateStatus {
     let Some(repo) = crate::github::default_catalog().self_repository else {
         return status;
     };
-    if !security::release_signing_configured() {
-        status.error = Some("Esta compilación no incluye las claves de confianza Ed25519 y SSH; no se ofrecerá una release sin verificar.".into());
+    if let Some(problem) = security::release_signing_problem() {
+        status.error = Some(problem);
         return status;
     }
     let release = match client().latest_release(&repo) {
@@ -466,8 +466,8 @@ pub fn update_install(app: AppHandle, state: State<'_, Arc<AppState>>) -> Update
     let Some(repo) = crate::github::default_catalog().self_repository else {
         return failed("La actualización automática no está configurada para esta compilación.");
     };
-    if !security::release_signing_configured() {
-        return failed("Esta compilación no tiene las claves de confianza Ed25519 y SSH necesarias para actualizarse.");
+    if let Some(problem) = security::release_signing_problem() {
+        return failed(problem);
     }
 
     let release = match client().latest_release(&repo) {

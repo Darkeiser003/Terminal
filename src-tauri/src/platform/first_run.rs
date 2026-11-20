@@ -552,6 +552,14 @@ pub fn report_text(data_bytes: u64, data_keep: &str, store: Option<&StoreReport<
     lines.join("\r\n") + "\r\n"
 }
 
+/// `[profiles]`: dónde están los perfiles portables y cuántos hay
+/// (`commands::profiles_dir`). El desinstalador lo dice debajo de las
+/// casillas: se conservan siempre, porque viven en la configuración de la
+/// carpeta propia, y con ellos se recupera todo al reinstalar (17-11).
+pub fn profiles_report(dir: &Path, count: usize) -> String {
+    format!("[profiles]\r\npath={}\r\ncount={count}\r\n", dir.display())
+}
+
 /// Categorías con algo traído con «Traer lo ya instalado». El perfil de Clink
 /// (`clink-profile`) no tiene categoría: es de WTerminal y «Borrar los datos»
 /// también se lleva el de siempre.
@@ -605,7 +613,11 @@ pub fn uninstall_report(path: &Path) -> i32 {
     });
     let config = dirs::config_dir().map(|dir| dir.join("wterminal"));
     let data = data_bytes(config.as_deref(), local.as_deref(), &keep);
-    let text = report_text(data, &keep, store.as_ref());
+    let profiles = crate::commands::profiles_dir();
+    // Los mismos que cuenta Ajustes: solo perfiles, no cualquier archivo.
+    let profile_count = crate::commands::profiles_in(&profiles).len();
+    let text =
+        report_text(data, &keep, store.as_ref()) + &profiles_report(&profiles, profile_count);
     let mut bytes = vec![0xFF, 0xFE];
     for unit in text.encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
@@ -633,6 +645,14 @@ pub fn uninstall_report_argument() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn el_informe_dice_donde_se_quedan_los_perfiles() {
+        let text = profiles_report(Path::new("C:/WT/entornos/configuracion/perfiles"), 2);
+        assert!(text.starts_with("[profiles]\r\n"));
+        assert!(text.contains("path=C:/WT/entornos/configuracion/perfiles\r\n"));
+        assert!(text.ends_with("count=2\r\n"));
+    }
 
     #[test]
     fn el_archivo_del_instalador_se_lee_y_dice_que_cambiar() {

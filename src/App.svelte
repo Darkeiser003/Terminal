@@ -4,7 +4,8 @@
 
     import { onMount, tick } from "svelte";
     import type { UnlistenFn } from "@tauri-apps/api/event";
-    import type { AgentControlRequest, ImportableRepository, PackageUpdateStatus, ShellAssistStatus, UpdateStatus } from "./lib/types";
+    import type { AgentControlRequest, ImportableRepository, PackageUpdateStatus, ProfileStatus, ShellAssistStatus, UpdateStatus } from "./lib/types";
+    import { DISMISSED_PACKAGE_UPDATE_KEY, DISMISSED_UPDATE_KEY } from "./lib/notices";
 
     import * as api from "./lib/api";
     import { app } from "./lib/appState.svelte";
@@ -75,6 +76,16 @@
     let hideGsudoOfferForSession = $state(false);
     let gsudoInstalling = $state(false);
     let gsudoError = $state('');
+    // La sugerencia de guardar un perfil portable (17-11): la carpeta donde
+    // se guardaría, cerrada esta vez, guardando o el error.
+    let profileOffer = $state<ProfileStatus | null>(null);
+    let profileSaving = $state(false);
+    let profileOfferError = $state('');
+    // «Ahora no» del modo de bajo consumo: solo esta sesión (17-11).
+    let hideLowPowerForSession = $state(false);
+    const gsudoOfferVisible = $derived(
+        Boolean(app.appInfo?.nsudoNeedsGsudo) && app.preferences?.offerGsudo !== false && !hideGsudoOfferForSession,
+    );
     // Lo que piden las IA con `wterminal --ctl` (14-11): lo que necesita
     // permiso espera aquí, de uno en uno; «Permitir en esta sesión» deja pasar
     // el resto hasta cerrar WTerminal.
@@ -215,8 +226,8 @@
         event.stopPropagation();
     }
 
-    const DISMISSED_UPDATE_KEY = 'lterminal.dismissed-update-version';
-    const DISMISSED_PACKAGE_UPDATE_KEY = 'lterminal.dismissed-package-update';
+    // Lo que se deja «para luego» vive en `lib/notices.ts`, que es también
+    // quien lo olvida al volver a mostrar todos los avisos desde Ajustes.
     const PACKAGE_UPDATE_REMINDER_MS = 24 * 60 * 60 * 1000;
 
     function updateWasDismissed(version: string | undefined): boolean {
@@ -264,6 +275,48 @@
         }
         packageUpdates = null;
         packageUpdateError = '';
+    }
+
+    /** «No volver a mostrar» de un aviso: lo cierra y apaga su ajuste, que se
+     *  vuelve a encender en Ajustes > Avisos (17-11). */
+    function neverShowAgain(patch: Partial<Record<string, boolean>>): void {
+        void app.savePreferences(patch);
+    }
+
+    /** Si hay ajustes propios y ningún perfil en su carpeta, se sugiere
+     *  guardar uno (17-11). Un rato después de arrancar, para no apilarse con
+     *  lo que sale al abrir; nunca en E2E, como el aviso del autocompletado
+     *  (el perfil de la prueba siempre trae ajustes propios). */
+    function considerProfileOffer(): void {
+        if (app.appInfo?.e2eTesting) return;
+        setTimeout(() => {
+            if (app.appInfo?.e2eTesting || app.preferences?.offerPortableProfile === false) return;
+            void api.profileStatus()
+                .then((status) => {
+                    if (status.customized && status.profiles.length === 0 && app.preferences?.offerPortableProfile !== false) {
+                        profileOffer = status;
+                    }
+                })
+                .catch(() => {});
+        }, 45_000);
+    }
+
+    async function saveProfileFromOffer(): Promise<void> {
+        if (profileSaving) return;
+        profileSaving = true;
+        profileOfferError = '';
+        try {
+            const result = await api.saveProfileNow();
+            if (!result.ok) {
+                profileOfferError = result.error ?? app.t('profileOffer.failed', 'No se pudo guardar el perfil.');
+                return;
+            }
+            profileOffer = null;
+        } catch (cause) {
+            profileOfferError = String(cause);
+        } finally {
+            profileSaving = false;
+        }
     }
 
     // La carpeta de la pestaña activa cambia a menudo (cada `cd`): se espera
@@ -850,7 +903,9 @@
     onMount(() => {
         const scheduleTerminalRefresh = createTerminalRefreshScheduler(
             (callback) => window.requestAnimationFrame(() => callback()),
-            (error) => console.debug('[App] repintado final de terminal omitido', error),
+            (error) => {
+                console.debug('[App] repintado final de terminal omitido', error);
+            },
         );
         const onEnvironmentSwitchStarted = (event: Event) => {
             const detail = (event as CustomEvent<{ tabId?: string }>).detail;
@@ -1085,9 +1140,11 @@
                 else void runControl(request);
             }),
 
-            api.onCommandNotFound((event) =>
-                app.noteSuggestion(event.tabId, event.suggestion),
-            ),
+            api.onCommandNotFound((event) => {
+                // «No volver a mostrar» del aviso lo apaga (17-11).
+                if (app.preferences?.suggestMissingTools === false) return;
+                app.noteSuggestion(event.tabId, event.suggestion);
+            }),
 
         ];
 
@@ -1145,6 +1202,7 @@
                     environments: app.environments.length,
                 });
                 ready = true;
+                considerProfileOffer();
                 await tick();
                 perf.timeToOnce('ui-shell-ready', 'app.ui-shell-visible', {
                     tabs: app.tabs.length,
@@ -1326,69 +1384,70 @@
         </div>
     {/if}
 
-    <!-- NSudo sin forma de abrirse (14-11, Romen): como la guía del modo
-         limpio, con aceptar, cerrar esta vez y no volver a ofrecer. -->
-    {#if app.appInfo?.nsudoNeedsGsudo && app.preferences?.offerGsudo !== false && !hideGsudoOfferForSession}
-        <div class="terminal-only-guide" role="status" aria-live="polite" data-testid="gsudo-offer">
-            <span>{app.t("gsudoOffer.text", "NSudo está instalado, pero WTerminal no es administrador y no puede abrir sus pestañas. Con gsudo, cada pestaña de NSudo pide permiso (UAC) solo para ella, sin abrir WTerminal entero como administrador.")}</span>
-            {#if gsudoError}<span class="offer-error" role="alert">{gsudoError}</span>{/if}
-            <div class="terminal-only-guide-actions">
+    <!-- Los avisos de abajo (17-11, Romen): todos con la misma barra que el
+         de las actualizaciones de WinGet, y todos con «No volver a mostrar»,
+         que se recupera en Ajustes > Avisos. Los que ofrecen instalar algo
+         (gsudo y el ayudante de la shell: Clink, PSReadLine, ble.sh) van
+         encima del de WinGet; si coinciden, se apilan. -->
+    {#if gsudoOfferVisible}
+        <div class="update" role="status" aria-live="polite" data-testid="gsudo-offer">
+            <span>
+                {app.t("gsudoOffer.text", "NSudo está instalado, pero WTerminal no es administrador y no puede abrir sus pestañas. Con gsudo, cada pestaña de NSudo pide permiso (UAC) solo para ella, sin abrir WTerminal entero como administrador.")}
+                {#if gsudoError}<strong class="update-error" role="alert">{gsudoError}</strong>{/if}
+            </span>
+            <div class="update-actions">
                 <button
                     type="button"
-                    class="terminal-only-guide-action"
+                    class="primary"
                     data-testid="gsudo-offer-install"
                     disabled={gsudoInstalling || !app.activeTabId}
                     onclick={installGsudo}
                 >{app.t("gsudoOffer.install", "Instalar gsudo")}</button>
                 <button
                     type="button"
-                    class="terminal-only-guide-action"
                     data-testid="gsudo-offer-dismiss"
                     onclick={() => (hideGsudoOfferForSession = true)}
-                >{app.t("terminal.terminalOnlyGuideDismiss", "Cerrar esta vez")}</button>
+                >{app.t("update.later", "Ahora no")}</button>
                 <button
                     type="button"
-                    class="terminal-only-guide-action terminal-only-guide-action-danger"
                     data-testid="gsudo-offer-never"
                     onclick={() => {
                         hideGsudoOfferForSession = true;
-                        void app.savePreferences({ offerGsudo: false });
+                        neverShowAgain({ offerGsudo: false });
                     }}
-                >{app.t("gsudoOffer.never", "No volver a ofrecer")}</button>
+                >{app.t("notice.never", "No volver a mostrar")}</button>
             </div>
         </div>
     {/if}
 
-    <!-- Al shell de la pestaña le falta su ayudante (14-11, Romen): el mismo
-         aviso; solo uno a la vez, después del de gsudo. -->
-    {#if shellAssistOffer && !(app.appInfo?.nsudoNeedsGsudo && app.preferences?.offerGsudo !== false && !hideGsudoOfferForSession)}
+    <!-- Al shell de la pestaña le falta su ayudante (14-11, Romen); desde el
+         17-11, la misma barra que WinGet, encima de ella. -->
+    {#if shellAssistOffer}
         {@const offer = shellAssistOffer}
-        <div class="terminal-only-guide" role="status" aria-live="polite" data-testid="shell-assist-offer" data-shell={offer.kind}>
+        <div class="update" role="status" aria-live="polite" data-testid="shell-assist-offer" data-shell={offer.kind}>
             <span>{app.t("shellAssistOffer.text", "Esta pestaña de {shell} no tiene sugerencias ni colores al escribir: falta {tool}.")
                 .replace("{shell}", offer.distro ? `${offer.kind} (${offer.distro})` : offer.kind === "powershell" ? "PowerShell" : offer.kind)
                 .replace("{tool}", offer.label)}</span>
-            <div class="terminal-only-guide-actions">
+            <div class="update-actions">
                 <button
                     type="button"
-                    class="terminal-only-guide-action"
+                    class="primary"
                     data-testid="shell-assist-offer-install"
                     onclick={() => installShellAssistFromOffer(offer)}
                 >{app.t("shellAssistOffer.install", "Instalar {tool}").replace("{tool}", offer.label)}</button>
                 <button
                     type="button"
-                    class="terminal-only-guide-action"
                     data-testid="shell-assist-offer-dismiss"
                     onclick={() => (shellAssistOfferHidden[offer.key] = true)}
-                >{app.t("terminal.terminalOnlyGuideDismiss", "Cerrar esta vez")}</button>
+                >{app.t("update.later", "Ahora no")}</button>
                 <button
                     type="button"
-                    class="terminal-only-guide-action terminal-only-guide-action-danger"
                     data-testid="shell-assist-offer-never"
                     onclick={() => {
                         shellAssistOfferHidden[offer.key] = true;
-                        void app.savePreferences({ offerShellAssist: false });
+                        neverShowAgain({ offerShellAssist: false });
                     }}
-                >{app.t("gsudoOffer.never", "No volver a ofrecer")}</button>
+                >{app.t("notice.never", "No volver a mostrar")}</button>
             </div>
         </div>
     {/if}
@@ -1429,18 +1488,55 @@
                 >
                     {app.t("suggestion.dismiss", "Descartar")}
                 </button>
+                <button
+                    type="button"
+                    data-testid="missing-tool-never"
+                    onclick={() => {
+                        app.dismissSuggestion(app.activeTabId!);
+                        neverShowAgain({ suggestMissingTools: false });
+                    }}
+                >
+                    {app.t("notice.never", "No volver a mostrar")}
+                </button>
             </div>
         </div>
     {/if}
 
-    {#if lowPowerReason && !importSuggestion && !packageUpdates?.available && !update}
+    {#if lowPowerReason && !hideLowPowerForSession && !importSuggestion && !packageUpdates?.available && !update}
         <div class="update" role="status" aria-live="polite" data-testid="low-power-suggestion">
             <span>
                 {app.t('lowPower.suggestion', 'Como {reason}, el modo de bajo consumo puede hacer que WTerminal arranque más ágil.').replace('{reason}', lowPowerReason)}
             </span>
             <div class="update-actions">
                 <button type="button" class="primary" data-testid="low-power-accept" onclick={acceptLowPower}>{app.t('lowPower.enable', 'Activar')}</button>
-                <button type="button" data-testid="low-power-dismiss" onclick={dismissLowPower}>{app.t('projects.importDismiss', 'No volver a sugerir')}</button>
+                <button type="button" data-testid="low-power-later" onclick={() => (hideLowPowerForSession = true)}>{app.t('update.later', 'Ahora no')}</button>
+                <button type="button" data-testid="low-power-dismiss" onclick={dismissLowPower}>{app.t('notice.never', 'No volver a mostrar')}</button>
+            </div>
+        </div>
+    {/if}
+
+    <!-- Ningún perfil portable en su carpeta (17-11, Romen): un aviso cada
+         vez, cuando no hay otro abajo. -->
+    {#if profileOffer && !gsudoOfferVisible && !shellAssistOffer && !(lowPowerReason && !hideLowPowerForSession) && !importSuggestion && !packageUpdates?.available && !update}
+        <div class="update" role="status" aria-live="polite" data-testid="profile-offer">
+            <span>
+                {app.t('profileOffer.text', 'No tienes ningún perfil portable guardado. Con uno recuperas tus ajustes y tus plugins al reinstalar o en otro equipo.')}
+                <small>{app.t('profileOffer.where', 'Se guarda en {dir}').replace('{dir}', profileOffer.dir)}</small>
+                {#if profileOfferError}<strong class="update-error" role="alert">{profileOfferError}</strong>{/if}
+            </span>
+            <div class="update-actions">
+                <button type="button" class="primary" data-testid="profile-offer-save" disabled={profileSaving} onclick={saveProfileFromOffer}>
+                    {profileSaving ? app.t('profileOffer.saving', 'Guardando…') : app.t('profileOffer.save', 'Guardar perfil')}
+                </button>
+                <button type="button" data-testid="profile-offer-dismiss" onclick={() => (profileOffer = null)}>{app.t('update.later', 'Ahora no')}</button>
+                <button
+                    type="button"
+                    data-testid="profile-offer-never"
+                    onclick={() => {
+                        profileOffer = null;
+                        neverShowAgain({ offerPortableProfile: false });
+                    }}
+                >{app.t('notice.never', 'No volver a mostrar')}</button>
             </div>
         </div>
     {/if}
@@ -1459,7 +1555,17 @@
                     {app.t('projects.import', 'Importar…')}
                 </button>
                 <button type="button" data-testid="import-suggestion-dismiss" onclick={dismissImportSuggestion}>
-                    {app.t('projects.importDismiss', 'No volver a sugerir')}
+                    {app.t('projects.importDismissRepo', 'No sugerir este')}
+                </button>
+                <button
+                    type="button"
+                    data-testid="import-suggestion-never"
+                    onclick={() => {
+                        importSuggestion = null;
+                        neverShowAgain({ suggestRepositoryImport: false });
+                    }}
+                >
+                    {app.t('notice.never', 'No volver a mostrar')}
                 </button>
             </div>
         </div>
@@ -1492,6 +1598,16 @@
                 </button>
                 <button type="button" onclick={dismissPackageUpdates}>
                     {app.t('update.later', 'Ahora no')}
+                </button>
+                <button
+                    type="button"
+                    data-testid="package-update-never"
+                    onclick={() => {
+                        dismissPackageUpdates();
+                        neverShowAgain({ checkPackageUpdatesOnStartup: false });
+                    }}
+                >
+                    {app.t('notice.never', 'No volver a mostrar')}
                 </button>
             </div>
         </div>
@@ -1549,6 +1665,17 @@
                 </button>
                 <button type="button" disabled={updating} onclick={dismissUpdate}>
                     {app.t("update.later", "Ahora no")}
+                </button>
+                <button
+                    type="button"
+                    data-testid="update-never"
+                    disabled={updating}
+                    onclick={() => {
+                        dismissUpdate();
+                        neverShowAgain({ checkUpdatesOnStartup: false });
+                    }}
+                >
+                    {app.t("notice.never", "No volver a mostrar")}
                 </button>
             </div>
         </div>
@@ -1666,12 +1793,6 @@
     .agent-control-request {
         border-color: var(--warning);
         color: var(--text);
-    }
-
-    .offer-error {
-        display: block;
-        margin-top: 3px;
-        color: var(--danger);
     }
 
     /* Dos columnas a partir de la tercera casilla: con cuatro quedan 2x2, y con

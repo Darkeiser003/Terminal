@@ -632,6 +632,147 @@ pub fn profile_export(path: String) -> ProfileTransferResult {
     }
 }
 
+/// La carpeta de los perfiles portables (17-11, Romen: «adecuar y centralizar
+/// dicha ruta»): `perfiles` dentro de la subcarpeta de configuración de la
+/// carpeta propia (`<carpeta propia>\configuracion\perfiles`). Es la misma
+/// para la sugerencia, «Exportar perfil» e «Importar perfil», el diálogo de
+/// restablecer y el desinstalador, que la conserva siempre: la configuración
+/// es de lo que «Borrar la carpeta propia» nunca borra
+/// (`first_run::always_kept`) y «Borrar los datos» no toca la carpeta propia.
+pub fn profiles_dir() -> PathBuf {
+    profiles_dir_for(&preferences::current())
+}
+
+fn profiles_dir_for(preferences: &Preferences) -> PathBuf {
+    let root = crate::toolchain_store::effective_root(true, &preferences.toolchain_store_dir)
+        .unwrap_or_else(crate::toolchain_store::default_root);
+    crate::toolchain_store::category_base(&root, crate::toolchain_store::Category::Config)
+        .join("perfiles")
+}
+
+/// Los perfiles que hay en `dir`, del más nuevo al más viejo.
+pub(crate) fn profiles_in(dir: &Path) -> Vec<ProfileEntry> {
+    let mut entries: Vec<ProfileEntry> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_file() && valid_profile_path(&entry.path()))
+        .map(|entry| {
+            let modified_ms = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |elapsed| elapsed.as_millis() as u64);
+            ProfileEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path().to_string_lossy().into_owned(),
+                modified_ms,
+            }
+        })
+        .collect();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.modified_ms));
+    entries
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileEntry {
+    pub name: String,
+    pub path: String,
+    pub modified_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileStatus {
+    /// La carpeta de los perfiles ([`profiles_dir`]), exista o no.
+    pub dir: String,
+    pub profiles: Vec<ProfileEntry>,
+    /// Hay algo propio que guardar: algún ajuste distinto del de fábrica o
+    /// algún plugin. Sin nada propio, sugerir un perfil no tiene sentido.
+    pub customized: bool,
+}
+
+/// Lo que la app escribe sola (README, «Ajustes que no se editan desde la
+/// interfaz»): no cuenta como un ajuste propio que merezca un perfil.
+const SELF_WRITTEN_PREFERENCES: [&str; 3] = ["viewportCols", "viewportRows", "fileManagerId"];
+
+/// Si hay algún ajuste distinto del de fábrica, sin contar los que escribe
+/// la app sola.
+fn customized_preferences(current: &Preferences) -> bool {
+    let without_self_written = |value: Value| match value {
+        Value::Object(mut map) => {
+            for key in SELF_WRITTEN_PREFERENCES {
+                map.remove(key);
+            }
+            Some(Value::Object(map))
+        }
+        _ => None,
+    };
+    let current = serde_json::to_value(current)
+        .ok()
+        .and_then(without_self_written);
+    let defaults = serde_json::to_value(Preferences::default())
+        .ok()
+        .and_then(without_self_written);
+    current != defaults
+}
+
+#[tauri::command(async)]
+pub fn profile_status() -> ProfileStatus {
+    let current = preferences::current();
+    let dir = profiles_dir_for(&current);
+    let customized =
+        customized_preferences(&current) || !crate::config::plugins::export_bundle().is_empty();
+    ProfileStatus {
+        dir: dir.to_string_lossy().into_owned(),
+        profiles: profiles_in(&dir),
+        customized,
+    }
+}
+
+/// El nombre de un perfil guardado sin diálogo: script de la plataforma
+/// (`.ps1` en Windows, `.sh` en Linux) con la fecha, sin pisar otro del
+/// mismo día.
+fn profile_file_name(dir: &Path, app_name: &str, extension: &str, date: &str) -> PathBuf {
+    let base = format!("{app_name}-Perfil-{date}");
+    let first = dir.join(format!("{base}.{extension}"));
+    if !first.exists() {
+        return first;
+    }
+    (2..1000)
+        .map(|index| dir.join(format!("{base}-{index}.{extension}")))
+        .find(|path| !path.exists())
+        .unwrap_or(first)
+}
+
+/// «Guardar un perfil ahora» (la sugerencia, el diálogo de restablecer y
+/// Ajustes): lo mismo que «Exportar perfil», en la carpeta de los perfiles y
+/// sin preguntar dónde.
+#[tauri::command(async)]
+pub fn profile_save_now() -> ProfileTransferResult {
+    let dir = profiles_dir();
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        return ProfileTransferResult {
+            ok: false,
+            error: Some(format!("{}: {error}", dir.display())),
+            preferences: None,
+        };
+    }
+    let extension = if cfg!(windows) { "ps1" } else { "sh" };
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let target = profile_file_name(&dir, crate::identity::current().name, extension, &date);
+    let result = profile_export(target.to_string_lossy().into_owned());
+    if result.ok {
+        log_info!(
+            "Perfil portable guardado en su carpeta",
+            serde_json::json!({ "path": target.to_string_lossy() })
+        );
+    }
+    result
+}
+
 #[tauri::command(async)]
 pub fn profile_import(path: String) -> ProfileTransferResult {
     let target = Path::new(&path);
@@ -684,6 +825,9 @@ pub struct AppInfo {
     /// Corren las pruebas E2E: los avisos que ofrecen instalar algo no salen
     /// (moverían la terminal que miden).
     pub e2e_testing: bool,
+    /// Se pueden guardar claves de API de las IA: DPAPI en Windows, el
+    /// llavero del escritorio en Linux si hay `secret-tool` (17-11).
+    pub ai_keys_supported: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -742,6 +886,7 @@ pub fn app_info(app: AppHandle) -> AppInfo {
             std::env::var("LTERMINAL_E2E_TESTING").as_deref() == Ok("1"),
         ),
         e2e_testing: std::env::var("LTERMINAL_E2E_TESTING").as_deref() == Ok("1"),
+        ai_keys_supported: crate::environments::ai_keys::supported(),
     }
 }
 
@@ -854,5 +999,37 @@ mod tests {
         assert!(valid_profile_path(Path::new("perfil.sh")));
         assert!(valid_profile_path(Path::new("perfil.ps1")));
         assert!(!valid_profile_path(Path::new("perfil.exe")));
+    }
+
+    #[test]
+    fn lo_que_la_app_escribe_sola_no_cuenta_como_ajuste_propio() {
+        let mut current = Preferences::default();
+        assert!(!customized_preferences(&current));
+        current.viewport_cols = 211;
+        current.viewport_rows = 57;
+        assert!(
+            !customized_preferences(&current),
+            "el tamaño medido de la terminal no pide perfil"
+        );
+        current.terminal_font_size += 1;
+        assert!(customized_preferences(&current), "un cambio del usuario sí");
+    }
+
+    #[test]
+    fn un_perfil_guardado_sin_dialogo_no_pisa_otro_del_mismo_dia() {
+        let dir = std::env::temp_dir().join(format!("wterminal-perfiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = profile_file_name(&dir, "WTerminal", "ps1", "2026-11-17");
+        assert_eq!(first, dir.join("WTerminal-Perfil-2026-11-17.ps1"));
+        std::fs::write(&first, "x").unwrap();
+        let second = profile_file_name(&dir, "WTerminal", "ps1", "2026-11-17");
+        assert_eq!(second, dir.join("WTerminal-Perfil-2026-11-17-2.ps1"));
+        std::fs::write(dir.join("notas.txt"), "x").unwrap();
+        // Solo cuentan los perfiles, no cualquier archivo de la carpeta.
+        let listed = profiles_in(&dir);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "WTerminal-Perfil-2026-11-17.ps1");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

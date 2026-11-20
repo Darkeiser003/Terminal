@@ -1269,13 +1269,18 @@ fn chocolatey_package_inventory(expected: &HashMap<String, ()>) -> HashMap<Strin
         .collect()
 }
 
+/// Suma una salida de `winget list` al inventario. Se llama una vez por lista
+/// (la global o, si falla, la de `winget` y la de `msstore`): lo que una lista
+/// ya marcó como instalado no se borra al mezclar la siguiente. Antes cada
+/// mezcla ponía todo a «no instalado» y la lista de la Store borraba lo que
+/// había encontrado la de WinGet (Octave, MySQL, R… salían como «Instalar»).
 fn merge_winget_inventory(
     output: &str,
     expected: &HashMap<String, ()>,
     inventory: &mut HashMap<String, bool>,
 ) {
     for package in expected.keys() {
-        inventory.insert(package.clone(), false);
+        inventory.entry(package.clone()).or_insert(false);
     }
     for line in output.lines() {
         for field in split_inventory_fields(line) {
@@ -3033,6 +3038,32 @@ mod tests {
         assert_eq!(inventory.get("videolan.vlc"), Some(&true));
         assert_eq!(inventory.get("docker.dockerdesktop"), Some(&true));
         assert_eq!(inventory.get("videolan.vlc.extra"), Some(&false));
+    }
+
+    #[test]
+    fn la_lista_de_la_store_no_borra_lo_que_encontro_la_de_winget() {
+        // Si `winget list` falla, se mezclan la lista de `winget` y la de
+        // `msstore`; la segunda no puede devolver a «no instalado» lo que la
+        // primera encontró (larga 75: Octave, MySQL, R… salían como «Instalar»).
+        let expected = HashMap::from([
+            ("gnu.octave".to_string(), ()),
+            ("9nblggh4nns1".to_string(), ()),
+            ("oracle.mysql".to_string(), ()),
+        ]);
+        let mut inventory = HashMap::new();
+        merge_winget_inventory(
+            "Name        Id           Version\nGNU Octave  GNU.Octave   10.2.0\n",
+            &expected,
+            &mut inventory,
+        );
+        merge_winget_inventory(
+            "Name            Id            Version\nApp Installer   9NBLGGH4NNS1  1.26.0\n",
+            &expected,
+            &mut inventory,
+        );
+        assert_eq!(inventory.get("gnu.octave"), Some(&true));
+        assert_eq!(inventory.get("9nblggh4nns1"), Some(&true));
+        assert_eq!(inventory.get("oracle.mysql"), Some(&false));
     }
 
     #[test]

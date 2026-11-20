@@ -79,10 +79,17 @@ if ((shellAssistOnly || withComponents) && process.platform === 'win32') {
     // perfil aislado: el historial de la prueba no llega al del usuario.
     delete process.env.CLINK_PROFILE;
 }
+// Ronda sin WSL (17-11: la VM se quedó sin hipervisor y Romen decidió no
+// probar WSL en esa build): E2E_SKIP_WSL=1 deja fuera todas las distros de
+// WSL, como en un equipo que no lo tiene. Las demás shells se prueban igual y
+// el informe lo apunta (`environment-probe-skipped` con el motivo).
+const SKIP_WSL = process.platform === 'win32' && process.env.E2E_SKIP_WSL === '1';
+const SKIP_WSL_REASON = 'E2E_SKIP_WSL=1: esta ronda no prueba WSL';
+const isWslId = (id) => String(id ?? '').toLowerCase().startsWith('wsl:');
 // bash en WSL con ble.sh: se instala en el /tmp de la distro (no en su carpeta
 // personal) y la app lo carga desde ahí. E2E_SHELL_ASSIST_WSL=0 lo omite.
 let shellAssistWslDistro = null;
-if (shellAssistOnly && process.platform === 'win32' && process.env.E2E_SHELL_ASSIST_WSL !== '0') {
+if (shellAssistOnly && process.platform === 'win32' && process.env.E2E_SHELL_ASSIST_WSL !== '0' && !SKIP_WSL) {
     const { prepareWslBashWithBlesh } = await import('../../scripts/prepare-e2e-shell-tools.mjs');
     const wslBash = await prepareWslBashWithBlesh(process.env.E2E_SHELL_ASSIST_WSL_DISTRO || '', process.env.E2E_SHELL_TOOLS_DIR || undefined);
     if (wslBash) {
@@ -3819,6 +3826,102 @@ async function visibleHorizontalTextAtEnd(cell) {
 }
 
 /**
+ * Busca los números `tailStart..upper` en orden dentro del texto visible y
+ * devuelve los que faltan.
+ */
+function missingTailNumbers(text, tailStart, upper) {
+    const missing = [];
+    let cursor = -1;
+    for (let value = tailStart; value <= upper; value += 1) {
+        const found = text.indexOf(String(value), cursor + 1);
+        if (found < 0) missing.push(value);
+        else cursor = found + String(value).length - 1;
+    }
+    return missing;
+}
+
+/**
+ * Cuando una salida más ancha que la rejilla se parte en varias filas, la
+ * última fila (la que acaba en el número final) puede ser más corta que una
+ * anterior. El tope derecho del scroll enseña entonces el final de la fila más
+ * ancha, que es lo correcto, y el último número queda a la izquierda de la
+ * vista. Esta medida desplaza hasta el final de esa última fila y devuelve lo
+ * que se ve de ella. `shorterThanWidest` solo es cierto si de verdad hay otra
+ * fila que llega más a la derecha: si no, el número final tenía que verse en
+ * el tope y su ausencia es un corte real.
+ */
+async function visibleHorizontalTextAtFinalRowEnd(cell, finalToken) {
+    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const root = arguments[0];
+            const token = arguments[1];
+            const host = root.querySelector('[data-testid="terminal-host"]');
+            if (!host) return null;
+            const hostLeft = host.getBoundingClientRect().left;
+            const rows = [...root.querySelectorAll('.xterm-rows > div')];
+            const textRight = (row) => {
+                const text = row.textContent || '';
+                const trimmed = text.replace(/\\s+$/, '');
+                if (!trimmed.length) return null;
+                const range = document.createRange();
+                range.selectNodeContents(row);
+                const rects = [...range.getClientRects()].filter((rect) => rect.width > 0);
+                if (!rects.length) return null;
+                return Math.max(...rects.map((rect) => rect.right)) - hostLeft + host.scrollLeft;
+            };
+            const finalRow = rows.find((row) => (row.textContent || '').replace(/\\s+$/, '').endsWith(token));
+            if (!finalRow) return { found: false };
+            const finalRight = textRight(finalRow);
+            const widestRight = Math.max(0, ...rows.map(textRight).filter((value) => value !== null));
+            // El ancho de una celda sale del texto, no de la fila: el div de la
+            // fila mide la rejilla entera aunque el texto sea más corto.
+            const finalRange = document.createRange();
+            finalRange.selectNodeContents(finalRow);
+            const cellWidth = finalRange.getBoundingClientRect().width / Math.max(1, (finalRow.textContent || '').length);
+            const maximum = Math.max(0, host.scrollWidth - host.clientWidth);
+            const shorterThanWidest = finalRight !== null && finalRight < widestRight - cellWidth;
+            const target = Math.max(0, Math.min(maximum, Math.ceil((finalRight ?? 0) - host.clientWidth + cellWidth * 4)));
+            host.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
+            host.scrollLeft = target;
+            host.dispatchEvent(new Event('scroll', { bubbles: true }));
+            const clip = host.getBoundingClientRect();
+            const chars = [];
+            const walker = document.createTreeWalker(finalRow, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+                const node = walker.currentNode;
+                for (let index = 0; index < node.textContent.length; index += 1) {
+                    const range = document.createRange();
+                    range.setStart(node, index);
+                    range.setEnd(node, index + 1);
+                    const rect = range.getBoundingClientRect();
+                    if (rect.right > clip.left && rect.left < clip.right
+                        && rect.bottom > clip.top && rect.top < clip.bottom) {
+                        chars.push(node.textContent[index]);
+                    }
+                }
+            }
+            return {
+                found: true,
+                shorterThanWidest,
+                // 18-11: con la barra al tope, el final de la fila más ancha
+                // tiene que quedar dentro de la vista (dos celdas de margen).
+                widestReachable: widestRight <= maximum + host.clientWidth + cellWidth * 2,
+                cellWidth: Math.round(cellWidth * 1000) / 1000,
+                contentWidth: host.style.getPropertyValue('--terminal-content-width'),
+                displayCols: host.closest('.tab-pane')?.dataset.displayCols ?? '',
+                gridCols: host.closest('.tab-pane')?.dataset.terminalCols ?? '',
+                finalRight: Math.round(finalRight ?? 0),
+                widestRight: Math.round(widestRight),
+                maximum,
+                target,
+                scrollLeft: host.scrollLeft,
+                clientWidth: host.clientWidth,
+                visibleText: chars.join(''),
+            };`,
+        args: [{ [elementKey]: cell }, finalToken],
+    });
+}
+
+/**
  * Simula la salida de un instalador sin ejecutar ningún gestor de paquetes.
  * Las actualizaciones reales suelen pintar varias fases sobre la misma fila
  * usando `\r`; la barra larga se genera dentro de la shell para que el propio
@@ -4339,12 +4442,41 @@ async function exerciseHorizontalSequenceIntegrity() {
         // que la cola visible incluya el número final y una ventana segura.
         const visibleTailCount = upper >= 1000 ? 4 : 8;
         const tailStart = Math.max(1, upper - visibleTailCount + 1);
-        const missingRange = [];
-        let rangeCursor = -1;
-        for (let value = tailStart; value <= upper; value += 1) {
-            const found = visibleRange.indexOf(String(value), rangeCursor + 1);
-            if (found < 0) missingRange.push(value);
-            else rangeCursor = found + String(value).length - 1;
+        const extremeMissing = missingTailNumbers(visibleRange, tailStart, upper);
+        // Build 69: la salida 1-500 se partió en 1026 + 880 columnas; el tope
+        // derecho enseñaba bien el final de la primera fila y el «500» quedaba
+        // a la izquierda. Solo en ese caso (otra fila llega más a la derecha)
+        // vale comprobar la cola desplazando hasta el final de la última fila.
+        // La medida se toma siempre y queda en el informe; después se vuelve
+        // al tope para que la captura siga siendo la del extremo.
+        const finalRowProbe = rangeProbe
+            ? await visibleHorizontalTextAtFinalRowEnd(rangeCell, `-${upper}`).catch((error) => ({ error: String(error) }))
+            : null;
+        const finalRowMissing = finalRowProbe?.found
+            ? missingTailNumbers(String(finalRowProbe.visibleText ?? ''), tailStart, upper)
+            : null;
+        if (finalRowProbe) finalRowProbe.missing = finalRowMissing;
+        // Build 72 (18-11): la medida del tope se tomó con la salida aún
+        // partida (filas de 1024 y 884 columnas, el «500» a la izquierda del
+        // tope) y, medio segundo después, la app ya la había puesto en una
+        // sola fila: `finalRowProbe` decía que no había otra fila más ancha y
+        // se exigía la cola en una medida en la que no podía estar. Si la fila
+        // final era más corta en la MISMA instantánea del tope, vale también.
+        const extremeRows = (rangeProbe?.rows ?? []).map((row) => String(row?.text ?? '').trimEnd());
+        const extremeFinalRow = extremeRows.find((text) => text.endsWith(`-${upper}`));
+        const extremeFinalShorter = Boolean(extremeFinalRow)
+            && extremeRows.some((text) => text.length > extremeFinalRow.length + 1);
+        if (finalRowProbe) finalRowProbe.extremeFinalShorter = extremeFinalShorter;
+        const missingRange = extremeMissing.length && (finalRowProbe?.shorterThanWidest || extremeFinalShorter) && finalRowMissing
+            ? finalRowMissing
+            : extremeMissing;
+        if (finalRowProbe) await visibleHorizontalTextAtEnd(rangeCell);
+        // 18-11: desde el primer momento, no solo cuando la app vuelve a medir
+        // la salida (antes, durante 1-4 s, el final de la primera fila de una
+        // salida partida quedaba fuera: barra hasta 6680 px, fila de 7200).
+        if (finalRowProbe?.found && !finalRowProbe.widestReachable) {
+            await captureScreenshot(`scroll-numeric-sequence-${upper}-unreachable-now`);
+            throw new Error(`Justo después de la salida, la barra horizontal no llega al final de la fila más ancha en 1-${upper}: ${JSON.stringify({ finalRowProbe })}`);
         }
         if (!rangeProbe || missingRange.length) {
             await captureScreenshot(`scroll-numeric-sequence-${upper}-missing-at-end`);
@@ -4367,7 +4499,19 @@ async function exerciseHorizontalSequenceIntegrity() {
                     };`,
                 args: [],
             }).catch((error) => ({ error: String(error) }));
-            throw new Error(`El extremo horizontal perdió números en 1-${upper}: ${JSON.stringify({ domWidths, rangeProbe, missingRange, visibleRange })}`);
+            throw new Error(`El extremo horizontal perdió números en 1-${upper}: ${JSON.stringify({ domWidths, rangeProbe, finalRowProbe, missingRange, visibleRange })}`);
+        }
+        // 18-11: cuando la salida ya se ha asentado (la app vuelve a medirla a
+        // los 1,2, 2,4 y 4 s), todo el texto pintado tiene que estar al
+        // alcance de la barra, también el final de la primera fila de una
+        // salida partida.
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        const settledRowProbe = await visibleHorizontalTextAtFinalRowEnd(rangeCell, `-${upper}`)
+            .catch((error) => ({ error: String(error) }));
+        await visibleHorizontalTextAtEnd(rangeCell);
+        if (!settledRowProbe?.found || !settledRowProbe.widestReachable) {
+            await captureScreenshot(`scroll-numeric-sequence-${upper}-unreachable`);
+            throw new Error(`La barra horizontal no llega al final de la fila más ancha en 1-${upper}: ${JSON.stringify({ finalRowProbe, settledRowProbe })}`);
         }
         await new Promise((resolve) => setTimeout(resolve, 600));
         const rangeCapture = await captureScreenshot(`scroll-numeric-sequence-${upper}-at-end`);
@@ -4377,7 +4521,7 @@ async function exerciseHorizontalSequenceIntegrity() {
         if (rangeVideo && !rangeVideo.captured) {
             throw new Error(`El vídeo no capturó el extremo horizontal 1-${upper}`);
         }
-        numericRangeResults.push({ upper, rangeProbe, tailStart, missingRange, passed: true });
+        numericRangeResults.push({ upper, rangeProbe, finalRowProbe, settledRowProbe, tailStart, missingRange, passed: true });
         await clickWhenReady('.tab.active .tab-close');
         await waitUntil(async () => (await findAll('.tab')).length === rangeTabCount,
             10000, `cierre de pestaña de secuencia 1-${upper}`);
@@ -6477,6 +6621,29 @@ async function resizeWindowAndAssertTransition(width, height, label) {
     return { ...afterRect, content: afterContent };
 }
 
+/**
+ * Tras `echo MARCADOR`, espera a que se vea la SALIDA y no solo la orden
+ * tecleada: las dos filas con el marcador y la última quieta en dos lecturas
+ * seguidas. En la 76 (VM lenta) la prueba del arrastre midió la fila de la
+ * orden antes de que saliera la respuesta; el arrastre seleccionó bien esa
+ * fila, pero la comprobación miró la de la salida, que llegó después.
+ */
+async function waitForEchoedMarkerOutput(marker, label) {
+    let lastY = null;
+    await waitUntil(async () => {
+        const state = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const rows = [...document.querySelectorAll('.cell:not(.hidden) .xterm-rows > div')]
+                .filter((item) => (item.textContent || '').includes(arguments[0]));
+                const last = rows.at(-1);
+                return { count: rows.length, y: last ? Math.round(last.getBoundingClientRect().y) : null };`,
+            args: [marker],
+        });
+        const stable = state?.count >= 2 && state.y !== null && state.y === lastY;
+        lastY = state?.y ?? null;
+        return stable;
+    }, 15000, label);
+}
+
 async function verifyMouseDragSelection(marker) {
     // El modo enfocado ya usa este tamaño y evita que EdgeDriver calcule el
     // gesto sobre el viewport inicial reducido, cuya escala física puede no
@@ -6485,10 +6652,7 @@ async function verifyMouseDragSelection(marker) {
         await resizeWindow(1280, 820, { waitForBanner: false });
     }
     await sendTerminalLine(`echo ${marker}`);
-    await waitUntil(async () => {
-        const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-        return (await textOf(rows)).includes(marker);
-    }, 10000, 'marcador para seleccionar con el ratón');
+    await waitForEchoedMarkerOutput(marker, 'salida del marcador para seleccionar con el ratón');
 
     const target = await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `const marker = arguments[0];
@@ -6711,6 +6875,7 @@ async function exerciseMaximizedTabPersistence() {
 
 async function installedWslDistroNames() {
     if (process.platform !== 'win32') return null;
+    if (SKIP_WSL) return [];
     try {
         const { stdout } = await execFile('wsl.exe', ['--list', '--quiet'], {
             encoding: 'buffer',
@@ -6743,7 +6908,7 @@ async function exerciseShellMatrix() {
     // Si `wsl --list` no contestó (WSL ocupado justo al arrancar), se esperan
     // igualmente las distros pedidas en E2E_SHELL_MATRIX_IDS: la app vuelve a
     // preguntar por ellas y la matriz fallaba antes de que llegaran.
-    const requestedWslIds = (process.env.E2E_SHELL_MATRIX_IDS ?? '').split(',')
+    const requestedWslIds = (SKIP_WSL ? '' : (process.env.E2E_SHELL_MATRIX_IDS ?? '')).split(',')
         .map((id) => id.trim())
         .filter((id) => id.startsWith('wsl:'))
         .map((id) => `wsl:${id.slice(4).split(':')[0]}`);
@@ -6784,7 +6949,7 @@ async function exerciseShellMatrix() {
     const options = selectorState?.options ?? [];
     // Con el inventario completo ninguna distro debe quedar «sin comprobar»:
     // la sonda deja margen para arrancar la VM de WSL en frío.
-    const unverifiedWsl = options.filter((option) => String(option.id ?? '').startsWith('wsl:')
+    const unverifiedWsl = SKIP_WSL ? [] : options.filter((option) => String(option.id ?? '').startsWith('wsl:')
         && /sin comprobar|unverified/iu.test(option.text ?? ''));
     if (unverifiedWsl.length) {
         // Fallo aplazado: la matriz sigue con el resto (también con estas
@@ -6832,6 +6997,11 @@ async function exerciseShellMatrix() {
     const wsl1WineSkipReason = wineProbeSkipReason(process.platform, osKernelRelease());
     if (wsl1WineSkipReason && probes.has('wine-cmd')) {
         probes.set('wine-cmd', { kind: 'skip', reason: wsl1WineSkipReason });
+    }
+    if (SKIP_WSL) {
+        for (const id of probes.keys()) {
+            if (isWslId(id)) probes.set(id, { kind: 'skip', reason: SKIP_WSL_REASON });
+        }
     }
     const skipped = [];
     for (const [id, probe] of probes) {
@@ -8117,7 +8287,16 @@ async function exerciseInputSelection(shell, cell) {
     // Supr con una selección dentro de lo escrito la borra.
     const deleteTag = `DEL${Date.now().toString(36).toUpperCase()}`;
     await sendTerminalKeys(`echo uno dos tres ${deleteTag}`, cell, { enter: false, settle: true });
-    await waitUntil(async () => !(await terminalPhraseRect(cell, deleteTag, 'dos'))?.error, 15000, `${shell}: segunda línea escrita`);
+    // Build 73 (18-11, la VM un 50 % más lenta de lo normal): pwsh tardó más
+    // de 15 s en pintar esta línea, tecleada justo tras la salida de la
+    // orden anterior, y en la captura del fallo ya estaba entera. Lo que
+    // se prueba aquí es el menú, no la rapidez del eco (de eso se ocupan
+    // resize-type, queued-input e input-follow): margen de 30 s y el tiempo
+    // medido queda en el informe.
+    const secondLineStartedAt = Date.now();
+    await waitUntil(async () => !(await terminalPhraseRect(cell, deleteTag, 'dos'))?.error, 30000, `${shell}: segunda línea escrita`);
+    const secondLineEchoMs = Date.now() - secondLineStartedAt;
+    if (secondLineEchoMs > 5000) recordEvent('context-menu-slow-echo', { shell, secondLineEchoMs });
     await selectPhraseAndOpenMenu(cell, deleteTag, 'dos');
     await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: 'document.querySelector(".menu-backdrop")?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); return true;',
@@ -8140,7 +8319,7 @@ async function exerciseInputSelection(shell, cell) {
         || output.some((text) => /\bdos\b/u.test(text))) {
         throw new Error(`${shell}: Supr no borró «dos» de la orden: ${JSON.stringify(output)}`);
     }
-    return { shell, cut: phrase, clipboard, cursorKept: true, deleteKey: true };
+    return { shell, cut: phrase, clipboard, cursorKept: true, deleteKey: true, secondLineEchoMs };
 }
 
 /** Llama a un comando IPC desde la página y devuelve su resultado. Va
@@ -9053,18 +9232,22 @@ try {
         // Si `wsl.exe` no contestó al arrancar, la app vuelve a preguntar
         // durante unos 4 minutos: esperar más solo escondía el fallo tras el
         // límite de 10 min de la suite.
-        await waitUntil(async () => {
-            if ((await findAll('.env-menu')).length === 0) await clickWhenReady('.env-select');
-            return (await findAll('.env-menu [data-environment-id="wsl:Ubuntu"]')).length > 0;
-        }, Math.min(dependencyDetectionTimeoutMs, 300000), 'Ubuntu en el selector de entornos');
-        await execFile('wsl.exe', ['--shutdown'], { windowsHide: true }).catch(() => undefined);
-        await switchToEnvironment('wsl:Ubuntu');
-        await waitUntil(async () => (await findAll('[data-testid="terminal-startup-hint"]')).length > 0,
-            20000, 'aviso de arranque en una pestaña en blanco');
-        await captureScreenshot('aviso-arranque');
-        await waitUntil(async () => (await findAll('[data-testid="terminal-startup-hint"]')).length === 0,
-            90000, 'el aviso de arranque se retira al llegar texto');
-        recordEvent('unsplit', { tabs, passed: true });
+        if (SKIP_WSL) {
+            recordEvent('environment-probe-skipped', { id: 'wsl:Ubuntu', kind: 'skip', reason: `${SKIP_WSL_REASON} (aviso de arranque)` });
+        } else {
+            await waitUntil(async () => {
+                if ((await findAll('.env-menu')).length === 0) await clickWhenReady('.env-select');
+                return (await findAll('.env-menu [data-environment-id="wsl:Ubuntu"]')).length > 0;
+            }, Math.min(dependencyDetectionTimeoutMs, 300000), 'Ubuntu en el selector de entornos');
+            await execFile('wsl.exe', ['--shutdown'], { windowsHide: true }).catch(() => undefined);
+            await switchToEnvironment('wsl:Ubuntu');
+            await waitUntil(async () => (await findAll('[data-testid="terminal-startup-hint"]')).length > 0,
+                20000, 'aviso de arranque en una pestaña en blanco');
+            await captureScreenshot('aviso-arranque');
+            await waitUntil(async () => (await findAll('[data-testid="terminal-startup-hint"]')).length === 0,
+                90000, 'el aviso de arranque se retira al llegar texto');
+        }
+        recordEvent('unsplit', { tabs, wslSkipped: SKIP_WSL, passed: true });
         await assertCurrentLog();
         phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
         smokeReport.focusedScenario = 'unsplit';
@@ -9250,7 +9433,7 @@ try {
         let available = await availableEnvironments();
         // En WSL el hueco lo decide la propia shell (`__wt_banner_gap`) y Kali
         // ya deja su línea antes de cada prompt: un tamaño basta para verlo.
-        const wslGapShells = ['wsl:kali-linux:zsh', 'wsl:kali-linux', 'wsl:Ubuntu'];
+        const wslGapShells = SKIP_WSL ? [] : ['wsl:kali-linux:zsh', 'wsl:kali-linux', 'wsl:Ubuntu'];
         // WSL llega en una segunda tanda del inventario: sin esperarla, la
         // prueba no veía ninguna distro y solo medía las shells de Windows. Se
         // espera a las distros instaladas de verdad; las que no hay, no cuentan.
@@ -9627,10 +9810,7 @@ try {
         await resizeWindow(1280, 820, { waitForBanner: false });
         const marker = 'LTERMINAL_MOUSE_DRAG_SELECTION';
         await sendTerminalLine(`echo ${marker}`);
-        await waitUntil(async () => {
-            const rows = await findWhenReady('.cell:not(.hidden) .xterm-rows');
-            return (await textOf(rows)).includes(marker);
-        }, 10000, 'marcador para seleccionar con el ratón');
+        await waitForEchoedMarkerOutput(marker, 'salida del marcador para seleccionar con el ratón');
 
         const target = await request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: `const marker = arguments[0];
@@ -10595,6 +10775,46 @@ try {
         if (!tooltip.small || tooltip.title !== tooltip.small) throw new Error(`Falta la explicación de «Proyectos»: ${JSON.stringify(tooltip)}`);
         results.tooltip = tooltip.small;
         await captureScreenshot('ajustes-buscador');
+        // 5. Avisos (17-11, Romen: «ajustes duplicados»): el apartado no
+        //    repite casillas; un aviso apagado sale en su lista y lleva a su
+        //    única casilla, en otra pestaña.
+        const noticesState = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const block = document.querySelector('[data-testid="settings-notices"]');
+                return { hidden: Number(block?.getAttribute('data-hidden') ?? -1),
+                    checkboxes: document.querySelectorAll('[data-testid="settings-notices-hidden"] input').length,
+                    link: Boolean(document.querySelector('[data-testid="settings-notice-missingTool"]')) };`,
+            args: [],
+        });
+        const noticesBefore = await noticesState();
+        if (noticesBefore.hidden < 0 || noticesBefore.link) throw new Error(`Avisos antes de apagar ninguno: ${JSON.stringify(noticesBefore)}`);
+        await clickWhenReady('[data-testid="settings-tab-terminal"]');
+        await clickWhenReady('[data-testid="settings-suggest-missing-tools"]');
+        await waitUntil(async () => (await property(await findWhenReady('[data-testid="settings-suggest-missing-tools"]'), 'checked')) === false,
+            5000, 'casilla de la herramienta que falta apagada');
+        await clickWhenReady('[data-testid="settings-tab-behavior"]');
+        await waitUntil(async () => {
+            const state = await noticesState();
+            return state.link && state.hidden === noticesBefore.hidden + 1;
+        }, 5000, 'el aviso apagado sale en Avisos');
+        const noticesOff = await noticesState();
+        if (noticesOff.checkboxes !== 0) throw new Error(`Avisos repite casillas: ${JSON.stringify(noticesOff)}`);
+        await clickInView(await findWhenReady('[data-testid="settings-notice-missingTool"]'));
+        await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `const box = document.querySelector('[data-testid="settings-suggest-missing-tools"]');
+                const dialog = document.querySelector('[role="dialog"]')?.getBoundingClientRect();
+                const rect = box?.getBoundingClientRect();
+                return document.querySelector('[data-testid="settings-tab-terminal"]')?.getAttribute('aria-selected') === 'true'
+                    && document.activeElement === box && Boolean(rect && dialog && rect.top >= dialog.top && rect.bottom <= dialog.bottom);`,
+            args: [],
+        }), 5000, 'el aviso apagado lleva a su casilla');
+        await captureScreenshot('ajustes-aviso-apagado');
+        await clickWhenReady('[data-testid="settings-suggest-missing-tools"]');
+        await clickWhenReady('[data-testid="settings-tab-behavior"]');
+        await waitUntil(async () => {
+            const state = await noticesState();
+            return !state.link && state.hidden === noticesBefore.hidden;
+        }, 5000, 'el aviso vuelve a mostrarse con su casilla');
+        results.notices = { hiddenBefore: noticesBefore.hidden, jumped: true };
         await clickWhenReady('[role="dialog"] .panel-close');
         recordEvent('settings-search', { ...results, passed: true });
         await assertCurrentLog();
@@ -10695,29 +10915,50 @@ try {
             try {
                 await waitUntil(async () => {
                     ghost = await request(`/session/${sessionId}/execute/sync`, 'POST', {
-                        // En la fila del prompt, el último fragmento cuyo texto es
-                        // parte del sufijo sugerido: el primer carácter puede quedar
-                        // bajo el bloque del cursor, en un span aparte.
+                        // En la fila del prompt, el último fragmento pintado DESPUÉS
+                        // de lo tecleado (el sufijo sugerido): el primer carácter
+                        // puede quedar bajo el bloque del cursor, en un span aparte.
+                        //
+                        // Se mide por posición, no por letras. En la 71 (18-11) la
+                        // shell aún iba por «echo WT» cuando se miró: lo tecleado más
+                        // la sugerencia ya formaban el marcador entero, y la «W»
+                        // escrita, que también está en el sufijo, pasó por la
+                        // sugerencia. Ahora la última letra tecleada tiene que estar
+                        // pintada como texto escrito, no como sugerencia.
                         script: `const host = arguments[0].querySelector('[data-testid="terminal-host"]');
                             const foreground = getComputedStyle(host.querySelector('.xterm-rows')).color;
                             const row = [...host.querySelectorAll('.xterm-rows > div')]
                                 .filter((node) => (node.textContent ?? '').includes('echo ' + arguments[2])).at(-1);
                             if (!row) return null;
+                            const text = row.textContent ?? '';
+                            const typed = 'echo ' + arguments[2];
+                            const typedEnd = text.lastIndexOf(typed) + typed.length;
+                            const runs = [];
+                            const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+                            let offset = 0;
+                            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                                const length = (node.textContent ?? '').length;
+                                runs.push({ element: node.parentElement, start: offset, end: offset + length });
+                                offset += length;
+                            }
                             // Nunca la celda del cursor: lleva el color del
                             // cursor, no el de la sugerencia (con la máquina
                             // cargada a veces solo estaba pintada esa letra).
-                            const span = [...row.querySelectorAll('span')].filter((node) => {
-                                const part = (node.textContent ?? '').trim();
-                                return part.length > 0 && arguments[1].includes(part)
-                                    && !node.classList.contains('xterm-cursor');
-                            }).at(-1);
-                            if (!span) return { row: row.textContent ?? '' };
+                            const ghostRun = runs.filter((run) => run.end > typedEnd && run.element
+                                && !run.element.classList.contains('xterm-cursor')
+                                && text.slice(Math.max(run.start, typedEnd), run.end).trim().length > 0).at(-1);
+                            if (!ghostRun) return { row: text };
+                            const span = ghostRun.element;
                             const style = getComputedStyle(span);
+                            const lastTyped = runs.find((run) => run.start <= typedEnd - 1 && typedEnd - 1 < run.end);
+                            const lastTypedColor = lastTyped?.element ? getComputedStyle(lastTyped.element).color : '';
+                            const typingDone = Boolean(lastTyped?.element) && lastTyped.element !== span
+                                && lastTypedColor !== style.color;
                             return { className: span.className, color: style.color, opacity: style.opacity, fontStyle: style.fontStyle, foreground,
-                                part: span.textContent, row: row.textContent ?? '' };`,
+                                part: text.slice(Math.max(ghostRun.start, typedEnd), ghostRun.end), row: text, typingDone, lastTypedColor };`,
                         args: [{ [elementKey]: cell }, suffix, prefix],
                     });
-                    return Boolean(ghost?.part) && ghost.row.includes(`echo ${prefix}${suffix}`);
+                    return Boolean(ghost?.part) && Boolean(ghost.typingDone) && ghost.row.includes(`echo ${prefix}${suffix}`);
                 }, 15000, `sugerencia del historial en ${shell.id}`);
             } catch (error) {
                 await captureScreenshot(`sin-sugerencia-${shell.id}`);
@@ -11100,6 +11341,10 @@ try {
             if ((await findAll('.env-menu')).length === 0) await clickWhenReady('.env-select');
             return (await findAll('.env-menu [data-environment-id="ai:amp"]')).length > 0;
         }, 120000, 'Amp (simulado) en el selector de entornos');
+        // Los tiempos de respuesta se miden con el equipo en reposo: la
+        // precarga del catálogo (WinGet y decenas de sondas) coincidía con la
+        // IA en línea y la respuesta pasó de 1-2 s a 5 s (71, 72 y 74).
+        await waitForStartupPrefetch();
         await switchToEnvironment('ai:amp');
         results.aiTab = await assertDrawsInView('IA en su pestaña', 'ai-environment');
         await assertNoBlankFrames('IA en su pestaña');
@@ -12303,10 +12548,17 @@ try {
             { name: 'corta-minimizada', marker: 'WT_INTRO_CORTA_MINIMIZADA', hidden: true },
             { name: 'larga-minimizada', marker: `WT_INTRO_LARGA_MINIMIZADA_${'x'.repeat(320)}_FIN`, hidden: true },
         ];
+        // Lo que se mide es el Intro, no el tecleo: antes de pulsarlo, la orden
+        // tiene que verse entera. En la 76 (VM lenta desde el 18-11) PowerShell
+        // aún pintaba la línea larga al pulsar Intro y los 6 s se fueron en eso.
+        const lineTyped = (marker) => runScript(`return (window.__wtTerminalText?.(arguments[0]) ?? '').replace(/\\s+/gu, '').includes(arguments[1]);`, [tabId, `Write-Output${marker}`]);
         const results = [];
         try {
             for (const round of rounds) {
+                const typingStartedAt = Date.now();
                 await sendTerminalKeys(`Write-Output ${round.marker}`, cell, { enter: false, settle: true });
+                await waitUntil(() => lineTyped(round.marker), 30000, `${round.name}: orden escrita entera antes del Intro`);
+                const typedMs = Date.now() - typingStartedAt;
                 let iconic = null;
                 if (round.hidden) {
                     iconic = (await showNativeWindowForE2E(6))?.iconic ?? null;
@@ -12315,7 +12567,9 @@ try {
                 const beforeEnter = await snapshot();
                 await pressEnter();
                 const timeline = [];
-                const ranAfterMs = await waitRan(round.marker, 6000, timeline);
+                // Un Intro retenido con la ventana oculta no llega NUNCA (56 y
+                // 58); 10 s dejan margen a PowerShell con la VM lenta.
+                const ranAfterMs = await waitRan(round.marker, 10000, timeline);
                 const afterEnter = await snapshot();
                 let ranAfterRestoreMs = null;
                 if (round.hidden) {
@@ -12323,7 +12577,7 @@ try {
                     if (ranAfterMs === null) ranAfterRestoreMs = await waitRan(round.marker, 10000);
                     await sleep(500);
                 }
-                results.push({ round: round.name, hidden: round.hidden, iconic, ranAfterMs, ranAfterRestoreMs, beforeEnter, afterEnter, timeline });
+                results.push({ round: round.name, hidden: round.hidden, iconic, typedMs, ranAfterMs, ranAfterRestoreMs, beforeEnter, afterEnter, timeline });
                 await captureScreenshot(`intro-${round.name}`);
                 if (ranAfterMs === null && ranAfterRestoreMs === null) break;
                 await waitUntil(promptAtEnd, 15000, `prompt tras ${round.name}`);

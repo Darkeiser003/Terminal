@@ -3,6 +3,7 @@
 //! Los módulos de negocio no deben decidir cómo se comporta Windows o Linux:
 //! llaman a esta fachada y la selección se resuelve una sola vez al compilar.
 
+pub mod desktop_entry;
 pub mod first_run;
 #[cfg(target_os = "linux")]
 mod linux;

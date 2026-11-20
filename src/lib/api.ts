@@ -74,7 +74,9 @@ import type {
     ShellAssistStatus,
     PreferencesPayload,
     Preferences,
+    ProfileStatus,
     ProfileTransferResult,
+    DesktopIntegrationStatus,
     PluginInfo,
     WindowsIntegrationStatus,
     ProjectsState,
@@ -240,16 +242,35 @@ export function invalidateInput(tabId: string): void {
 export const parseInternalCommand = (line: string) =>
     invokeLogged<InternalCommand | null>('internal_command_parse', { line });
 
+/** La carpeta de los perfiles portables y lo que hay en ella (17-11): la
+ *  misma para la sugerencia, exportar, importar, restablecer y el
+ *  desinstalador. */
+export const profileStatus = () => invokeLogged<ProfileStatus>('profile_status');
+
+/** Guarda un perfil en su carpeta, sin diálogo (`<App>-Perfil-<fecha>`). */
+export const saveProfileNow = () => invokeLogged<ProfileTransferResult>('profile_save_now');
+
+/** `dir` + `name` con el separador de la plataforma. */
+function inProfilesDir(dir: string, name: string): string {
+    if (!dir) return name;
+    const separator = dir.includes('\\') ? '\\' : '/';
+    return dir.endsWith(separator) ? `${dir}${name}` : `${dir}${separator}${name}`;
+}
+
 export async function exportProfile(platform = 'linux'): Promise<ProfileTransferResult | null> {
     const windows = platform === 'windows';
     const extension = windows ? 'ps1' : 'sh';
     const name = windows ? 'WTerminal-Perfil.ps1' : 'LTerminal-Perfil.sh';
-    const path = await save({ defaultPath: name, filters: [{ name: 'Script de perfil', extensions: [extension, 'winslim-profile', 'lterminal-profile'] }] });
+    // El diálogo abre en la carpeta de los perfiles: es donde la sugerencia
+    // los busca y la que el desinstalador conserva.
+    const dir = (await profileStatus().catch(() => null))?.dir ?? '';
+    const path = await save({ defaultPath: inProfilesDir(dir, name), filters: [{ name: 'Script de perfil', extensions: [extension, 'winslim-profile', 'lterminal-profile'] }] });
     return path ? invokeLogged<ProfileTransferResult>('profile_export', { path }) : null;
 }
 
 export async function importProfile(): Promise<ProfileTransferResult | null> {
-    const path = await open({ multiple: false, directory: false, filters: [{ name: 'Perfil portable o script', extensions: ['winslim-profile', 'lterminal-profile', 'sh', 'ps1'] }] });
+    const dir = (await profileStatus().catch(() => null))?.dir ?? '';
+    const path = await open({ multiple: false, directory: false, defaultPath: dir || undefined, filters: [{ name: 'Perfil portable o script', extensions: ['wterminal-profile', 'winslim-profile', 'lterminal-profile', 'sh', 'ps1'] }] });
     return typeof path === 'string' ? invokeLogged<ProfileTransferResult>('profile_import', { path }) : null;
 }
 
@@ -275,6 +296,11 @@ export const getWindowsIntegration = () =>
     invokeLogged<WindowsIntegrationStatus>('windows_integration_status');
 export const setWindowsIntegration = (enabled: boolean) =>
     invokeLogged<WindowsIntegrationStatus>('windows_integration_set', { enabled });
+/** «Abrir con LTerminal» en el gestor de archivos de Linux (17-11). */
+export const getDesktopIntegration = () =>
+    invokeLogged<DesktopIntegrationStatus>('desktop_integration_status');
+export const setDesktopIntegration = (enabled: boolean) =>
+    invokeLogged<DesktopIntegrationStatus>('desktop_integration_set', { enabled });
 /** Elige una imagen para el banner; `null` si se cancela. */
 export async function pickBannerImage(): Promise<string | null> {
     const path = await open({

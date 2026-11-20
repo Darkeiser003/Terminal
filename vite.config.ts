@@ -6,9 +6,16 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 // dejaría la ventana en blanco sin decir por qué.
 const HOST = process.env.TAURI_DEV_HOST;
 
+// Sin rastros de depuración en la release (17-11, Romen): los `console.debug`
+// (repintados omitidos, foco…) y cualquier `debugger` se quitan al minificar.
+// En una build de depuración (`TAURI_ENV_DEBUG`) se quedan, que es para lo que
+// están.
+const RELEASE = !process.env.TAURI_ENV_DEBUG;
+
 export default defineConfig({
     plugins: [svelte()],
     clearScreen: false,
+    esbuild: RELEASE ? { pure: ['console.debug'], drop: ['debugger'] } : {},
     server: {
         port: 1420,
         strictPort: true,

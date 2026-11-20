@@ -141,14 +141,14 @@ fn stored_key(env_var: &str) -> Option<String> {
     let sealed = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .ok()?;
-    let plain = unprotect(&sealed).ok()?;
+    let plain = unseal(env_var, &sealed).ok()?;
     String::from_utf8(plain).ok()
 }
 
 /// Guarda (o cambia) la clave de esa variable, cifrada.
 pub fn save_key(env_var: &str, key: &str) -> anyhow::Result<()> {
     let key = validate_key(key).map_err(|reason| anyhow::anyhow!("clave no válida: {reason}"))?;
-    let sealed = protect(key.as_bytes())?;
+    let sealed = seal(env_var, key.as_bytes())?;
     let mut map = read_store();
     map.insert(
         env_var.to_string(),
@@ -163,8 +163,140 @@ pub fn clear_key(env_var: &str) -> anyhow::Result<bool> {
     let removed = map.remove(env_var).is_some();
     if removed {
         write_store(&map)?;
+        forget(env_var);
     }
     Ok(removed)
+}
+
+// ---- Dónde vive la clave cifrada ----
+//
+// Windows: DPAPI. Lo cifrado va en `ai-keys.json`; solo lo descifra este
+// usuario de Windows.
+//
+// Linux (17-11, Romen: «poner al día en Linux las mejoras de Windows»): el
+// llavero del escritorio (Secret Service: GNOME Keyring, KWallet…) con
+// `secret-tool`, de libsecret. La clave va al llavero; en `ai-keys.json` solo
+// queda una marca de que está allí ([`secret_service::MARKER`]). Sin
+// `secret-tool` no se ofrece guardarla, como antes.
+
+#[cfg(windows)]
+fn seal(_env_var: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    protect(data)
+}
+
+#[cfg(windows)]
+fn unseal(_env_var: &str, sealed: &[u8]) -> anyhow::Result<Vec<u8>> {
+    unprotect(sealed)
+}
+
+#[cfg(windows)]
+fn forget(_env_var: &str) {}
+
+#[cfg(not(windows))]
+fn seal(env_var: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    secret_service::store(env_var, data)?;
+    Ok(secret_service::MARKER.as_bytes().to_vec())
+}
+
+#[cfg(not(windows))]
+fn unseal(env_var: &str, sealed: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if sealed != secret_service::MARKER.as_bytes() {
+        anyhow::bail!("la clave guardada no es del llavero");
+    }
+    secret_service::lookup(env_var)
+}
+
+#[cfg(not(windows))]
+fn forget(env_var: &str) {
+    secret_service::clear(env_var);
+}
+
+/// El llavero del escritorio de Linux con `secret-tool`. Se compila en todas
+/// las plataformas para que las pruebas y clippy de Windows lo revisen; solo
+/// se usa fuera de Windows.
+#[cfg_attr(windows, allow(dead_code))]
+mod secret_service {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// Lo que queda en `ai-keys.json` en vez de la clave.
+    pub const MARKER: &str = "secret-service";
+    /// El atributo que agrupa las claves de la app en el llavero.
+    const APPLICATION: &str = "lterminal-ai-key";
+
+    /// Los atributos que identifican la clave de esa variable.
+    pub fn attributes(env_var: &str) -> [&str; 4] {
+        ["application", APPLICATION, "env-var", env_var]
+    }
+
+    pub fn store_args(env_var: &str) -> Vec<String> {
+        let mut args = vec!["store".to_string(), format!("--label=WTerminal: {env_var}")];
+        args.extend(attributes(env_var).iter().map(|part| part.to_string()));
+        args
+    }
+
+    pub fn lookup_args(env_var: &str) -> Vec<String> {
+        std::iter::once("lookup")
+            .chain(attributes(env_var))
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn clear_args(env_var: &str) -> Vec<String> {
+        std::iter::once("clear")
+            .chain(attributes(env_var))
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn available() -> bool {
+        crate::path_env::which("secret-tool").is_some()
+    }
+
+    /// `secret-tool store` lee la clave de su entrada, nunca de la línea de
+    /// órdenes: así no sale en la lista de procesos.
+    pub fn store(env_var: &str, secret: &[u8]) -> anyhow::Result<()> {
+        let mut child = Command::new("secret-tool")
+            .args(store_args(env_var))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("secret-tool sin entrada"))?
+            .write_all(secret)?;
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "secret-tool store: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn lookup(env_var: &str) -> anyhow::Result<Vec<u8>> {
+        let output = Command::new("secret-tool")
+            .args(lookup_args(env_var))
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()?;
+        if !output.status.success() || output.stdout.is_empty() {
+            anyhow::bail!("el llavero no tiene la clave de {env_var}");
+        }
+        Ok(output.stdout)
+    }
+
+    pub fn clear(env_var: &str) {
+        let _ = Command::new("secret-tool")
+            .args(clear_args(env_var))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 /// Las variables que hay que añadir al abrir la pestaña de esa IA (o al
@@ -271,21 +403,10 @@ fn take_blob(blob: windows::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB) -
     }
 }
 
-/// Fuera de Windows no hay DPAPI: no se guarda ninguna clave (la pestaña no
-/// lo ofrece).
-#[cfg(not(windows))]
-fn protect(_data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    anyhow::bail!("guardar claves de IA solo está disponible en Windows")
-}
-
-#[cfg(not(windows))]
-fn unprotect(_data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    anyhow::bail!("guardar claves de IA solo está disponible en Windows")
-}
-
-/// Si en esta plataforma se pueden guardar claves.
+/// Si en este equipo se pueden guardar claves: siempre en Windows (DPAPI); en
+/// Linux, si está `secret-tool` (el llavero del escritorio).
 pub fn supported() -> bool {
-    cfg!(windows)
+    cfg!(windows) || (cfg!(target_os = "linux") && secret_service::available())
 }
 
 /// Lo que la pestaña necesita para ofrecer la clave. Nunca lleva la clave.
@@ -500,6 +621,35 @@ mod tests {
         assert!(validate_key("con espacio").is_err());
         assert!(validate_key("linea\nnueva").is_err());
         assert!(validate_key(&"a".repeat(MAX_KEY_CHARS + 1)).is_err());
+    }
+
+    /// Linux (17-11): la clave va al llavero con atributos fijos y por la
+    /// entrada de `secret-tool`, nunca en sus argumentos.
+    #[test]
+    fn el_llavero_de_linux_identifica_la_clave_por_su_variable() {
+        let store = secret_service::store_args("GROK_API_KEY");
+        assert_eq!(store[0], "store");
+        assert_eq!(store[1], "--label=WTerminal: GROK_API_KEY");
+        assert_eq!(
+            &store[2..],
+            ["application", "lterminal-ai-key", "env-var", "GROK_API_KEY"]
+        );
+        assert!(!store.iter().any(|arg| arg.contains("xai-")));
+        assert_eq!(
+            secret_service::lookup_args("OPENAI_API_KEY"),
+            [
+                "lookup",
+                "application",
+                "lterminal-ai-key",
+                "env-var",
+                "OPENAI_API_KEY"
+            ]
+        );
+        assert_eq!(
+            secret_service::clear_args("OPENAI_API_KEY")[0],
+            "clear",
+            "borrar la clave en Ajustes la quita también del llavero"
+        );
     }
 
     #[cfg(windows)]

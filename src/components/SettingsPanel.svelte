@@ -25,7 +25,8 @@
         SHORTCUT_PREFERENCE_KEYS,
         type ShortcutPreferenceKey,
     } from "../lib/shortcuts";
-    import type { AiKeyStored, CustomTheme, ToolchainStoreCategory, PathIntegrationStatus, PluginInfo, Preferences, ShellAssistComponent, ShellAssistStatus, StorageLocationInfo, ThemePreset, ToolchainStoreLocation, ToolchainStoreStatus, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
+    import type { AiKeyStored, CustomTheme, DesktopIntegrationStatus, ToolchainStoreCategory, PathIntegrationStatus, PluginInfo, Preferences, ProfileStatus, ShellAssistComponent, ShellAssistStatus, StorageLocationInfo, ThemePreset, ToolchainStoreLocation, ToolchainStoreStatus, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
+    import { NOTICE_SETTINGS, restoreAllNotices, type NoticeSetting } from "../lib/notices";
     import Panel from "./Panel.svelte";
     import SettingsResetDialog from "./SettingsResetDialog.svelte";
     import { ANSI_COLOR_KEYS, clampUiScale, DEFAULT_ANSI_COLORS, effectivePalette, effectiveUiScale, themePreferencePatch, UI_SCALE_MAX, UI_SCALE_MIN } from "../lib/theme";
@@ -52,7 +53,16 @@
     let updating = $state(false);
     let updateProgress = $state<UpdateProgress | null>(null);
     let plugins = $state<PluginInfo[]>([]);
+    /** La carpeta de los perfiles portables y los que hay (17-11). */
+    let profiles = $state<ProfileStatus | null>(null);
+    /** Los avisos apagados ahora mismo, para el apartado «Avisos» (17-11):
+     *  solo se listan, porque cada uno tiene su casilla en su sitio. */
+    const hiddenNoticeRows = $derived(NOTICE_SETTINGS.filter((notice) => (app.appInfo?.platform === "windows" || !notice.windowsOnly)
+        && (notice.key !== "aiKeyOffer" || app.appInfo?.aiKeysSupported !== false)
+        && draft?.[notice.key] === false));
     let windowsIntegration = $state<WindowsIntegrationStatus | null>(null);
+    /** Linux: «Abrir con LTerminal» en el gestor de archivos (17-11). */
+    let desktopIntegration = $state<DesktopIntegrationStatus | null>(null);
     let pathIntegration = $state<PathIntegrationStatus | null>(null);
     /** Escribir el PATH avisa a todo Windows y puede tardar unos segundos. La
      *  casilla cambia al pulsarla, antes de que termine: sin bloquearla, un
@@ -64,7 +74,7 @@
     let savedAiKeys = $state<AiKeyStored[]>([]);
     let savedAiKeysLoaded = false;
     $effect(() => {
-        if (section !== "terminal" || savedAiKeysLoaded || app.appInfo?.platform !== "windows") return;
+        if (section !== "terminal" || savedAiKeysLoaded || !app.appInfo?.aiKeysSupported) return;
         savedAiKeysLoaded = true;
         void api.aiKeyList().then((items) => { savedAiKeys = items; }).catch(() => undefined);
     });
@@ -134,7 +144,12 @@
         const nextWindowsIntegration =
             app.appInfo?.platform === "windows" ? await api.getWindowsIntegration() : null;
         const nextPathIntegration = await api.getPathIntegration();
+        const nextProfiles = await api.profileStatus().catch(() => null);
+        const nextDesktopIntegration =
+            app.appInfo?.platform === "linux" ? await api.getDesktopIntegration().catch(() => null) : null;
         if (serial !== loadSerial) return;
+        profiles = nextProfiles;
+        desktopIntegration = nextDesktopIntegration;
         plugins = nextPlugins;
         windowsIntegration = nextWindowsIntegration;
         pathIntegration = nextPathIntegration;
@@ -605,6 +620,71 @@
         status = result.ok
             ? app.t("settings.profileExported", "Perfil portable exportado como script.")
             : (result.error ?? app.t("settings.profileExportFailed", "No se pudo exportar el perfil."));
+        profiles = await api.profileStatus().catch(() => profiles);
+    }
+
+    async function toggleDesktopIntegration(): Promise<void> {
+        if (!desktopIntegration) return;
+        try {
+            desktopIntegration = await api.setDesktopIntegration(!desktopIntegration.registered);
+            statusError = false;
+            status = "";
+        } catch (cause) {
+            statusError = true;
+            status = String(cause);
+        }
+    }
+
+    /** «Guardar perfil ahora»: en su carpeta, sin diálogo (17-11). */
+    async function saveProfileNow(): Promise<void> {
+        const result = await api.saveProfileNow().catch((cause) => ({ ok: false, error: String(cause) }));
+        statusError = !result.ok;
+        status = result.ok
+            ? app.t("settings.profileSaved", "Perfil guardado en {dir}.").replace("{dir}", profiles?.dir ?? "")
+            : (result.error ?? app.t("settings.profileExportFailed", "No se pudo exportar el perfil."));
+        profiles = await api.profileStatus().catch(() => profiles);
+    }
+
+    async function openProfilesFolder(): Promise<void> {
+        if (!profiles?.dir) return;
+        // La carpeta puede no existir aún: guardar el primero la crea.
+        if (profiles.profiles.length === 0) {
+            statusError = false;
+            status = app.t("settings.profilesFolderEmpty", "Aún no hay ningún perfil: «Guardar perfil ahora» crea la carpeta con el primero.");
+            return;
+        }
+        const result = await api.openDirectory(app.activeTabId ?? "", profiles.dir).catch((cause) => ({ ok: false, error: String(cause) }));
+        if (!result.ok) {
+            statusError = true;
+            status = result.error ?? app.t("error.noFolderOpen", "No hay una carpeta que abrir.");
+        }
+    }
+
+    /** «Volver a mostrar todos los avisos» (17-11): enciende todos los
+     *  ajustes de aviso y olvida lo que se dejó «para luego». */
+    function restoreNotices(): void {
+        if (!draft) return;
+        Object.assign(draft, restoreAllNotices());
+        scheduleAutoSave();
+        statusError = false;
+        status = app.t("settings.noticesRestored", "Todos los avisos vuelven a mostrarse.");
+    }
+
+    /** Un aviso apagado de la lista lleva a su casilla, en su pestaña, y la
+     *  resalta un momento. */
+    async function goToNotice(notice: NoticeSetting): Promise<void> {
+        if (!searchingSettings) section = notice.section;
+        await tick();
+        const form = settingsForm;
+        if (!form) return;
+        const find = (testId?: string) => testId ? form.querySelector<HTMLElement>(`[data-testid="${testId}"]`) : null;
+        const target = find(notice.target) ?? find(notice.fallbackTarget);
+        if (!target) return;
+        const row = target.closest<HTMLElement>("label") ?? target;
+        row.scrollIntoView({ block: "center", behavior: "smooth" });
+        target.focus({ preventScroll: true });
+        row.classList.add("notice-target");
+        window.setTimeout(() => row.classList.remove("notice-target"), 1800);
     }
 
     async function importProfile(): Promise<void> {
@@ -1733,7 +1813,16 @@
                             >
                         </span>
                     </label>
-                    {#if app.appInfo?.platform === "windows"}
+                    <label class="check">
+                        <input type="checkbox" data-testid="settings-suggest-missing-tools" bind:checked={draft.suggestMissingTools} />
+                        <span>
+                            <strong>{app.t("settings.suggestMissingTools", "Ofrecer instalar las órdenes que faltan")}</strong>
+                            <small>{app.t("settings.suggestMissingToolsHint", "Si escribes una orden que no existe y WTerminal sabe instalarla, lo ofrece abajo (nunca instala nada solo).")}</small>
+                        </span>
+                    </label>
+                    <!-- Windows (DPAPI) y, desde el 17-11, Linux con el llavero del
+                         escritorio (`secret-tool`). -->
+                    {#if app.appInfo?.aiKeysSupported}
                         <label class="check">
                             <input
                                 type="checkbox"
@@ -1748,10 +1837,15 @@
                                     )}</strong
                                 >
                                 <small
-                                    >{app.t(
-                                        "settings.aiKeyOfferHint",
-                                        "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda cifrada para tu usuario de Windows y solo se pasa a esa IA.",
-                                    )}</small
+                                    >{app.appInfo?.platform === "windows"
+                                        ? app.t(
+                                              "settings.aiKeyOfferHint",
+                                              "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda cifrada para tu usuario de Windows y solo se pasa a esa IA.",
+                                          )
+                                        : app.t(
+                                              "settings.aiKeyOfferHintLinux",
+                                              "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda en el llavero de tu escritorio (secret-tool) y solo se pasa a esa IA.",
+                                          )}</small
                                 >
                             </span>
                         </label>
@@ -2081,7 +2175,7 @@
                             <input type="checkbox" data-testid="settings-offer-shell-assist" bind:checked={draft.offerShellAssist} />
                             <span>
                                 <strong>{app.t("settings.offerShellAssist", "Ofrecer instalarlo si falta")}</strong>
-                                <small>{app.t("settings.offerShellAssistHint", "Si a la pestaña activa le falta su ayudante (Clink en cmd, PSReadLine en PowerShell, ble.sh en bash de WSL), sale un aviso abajo con «Instalar», «Cerrar esta vez» y «No volver a ofrecer».")}</small>
+                                <small>{app.t("settings.offerShellAssistHint", "Si a la pestaña activa le falta su ayudante (Clink en cmd, PSReadLine en PowerShell, ble.sh en bash de WSL), sale un aviso abajo, como el de las actualizaciones, para instalarlo.")}</small>
                             </span>
                         </label>
                         <div class="shell-assist-settings" data-testid="settings-shell-assist-shells">
@@ -2390,6 +2484,7 @@
                     <label class="check"><input data-testid="settings-show-dependencies" type="checkbox" bind:checked={draft.showDependenciesPanel} /><span><strong>{app.t("toolbar.deps", "Entorno y dependencias")}</strong><small>{app.t("settings.showDependenciesHint", "Instalar, actualizar y quitar herramientas, lenguajes, shells y modelos de IA.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-projects" type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong><small>{app.t("settings.showProjectsHint", "Tus repositorios de GitHub: anclados, clonados, explorar y Mi GitHub.")}</small></span></label>
                     <label class="check"><input data-testid="settings-low-power" type="checkbox" bind:checked={draft.lowPowerMode} /><span><strong>{app.t("settings.lowPowerMode", "Modo de bajo consumo")}</strong><small>{app.t("settings.lowPowerModeHint", "Para equipos modestos: la detección de Dependencias espera a que abras el panel, las comprobaciones de actualizaciones esperan dos minutos y las sondas van de una en una. Se aplica en el próximo arranque.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-low-power-suggest" type="checkbox" bind:checked={draft.lowPowerSuggest} /><span><strong>{app.t("settings.lowPowerSuggest", "Sugerir el modo de bajo consumo")}</strong><small>{app.t("settings.lowPowerSuggestHint", "Con pocos hilos de CPU, poca memoria o un arranque lento, se sugiere el modo de bajo consumo.")}</small></span></label>
                     <label class="check"><input data-testid="settings-suggest-repo-import" type="checkbox" bind:checked={draft.suggestRepositoryImport} /><span><strong>{app.t("settings.suggestRepositoryImport", "Sugerir importar repositorios")}</strong><small>{app.t("settings.suggestRepositoryImportHint", "Si la terminal entra en un repositorio de GitHub que no está en Proyectos, ofrece añadirlo abajo, sin moverlo.")}</small></span></label>
                     <label class="field">
                         <span>{app.t("settings.githubSessionMode", "Consultas de Explorar GitHub")}</span>
@@ -2428,9 +2523,7 @@
                     <label class="check"><input data-testid="settings-show-refresh" type="checkbox" bind:checked={draft.showRefreshButton} /><span><strong>{app.t("settings.showRefreshButton", "Refrescar entornos")}</strong><small>{app.t("settings.showRefreshButtonHint", "Botón para volver a detectar shells, intérpretes y contenedores.")}</small></span></label>
                     <label class="check"><input data-testid="settings-show-language" type="checkbox" bind:checked={draft.showLanguageButton} /><span><strong>{app.t("settings.showLanguageButton", "Selector de idioma")}</strong><small>{app.t("settings.showLanguageButtonHint", "Botón de la barra para cambiar el idioma de la interfaz.")}</small></span></label>
                     <label class="check"><input data-testid="settings-terminal-only" type="checkbox" bind:checked={draft.terminalOnlyMode} /><span><strong>{app.t("settings.terminalOnlyMode", "Modo terminal limpia")}</strong><small>{app.t("settings.terminalOnlyModeHint", "Oculta la barra superior y las pestañas para dejar la ventana dedicada a la terminal. Se recupera con el atajo configurado.")}</small></span></label>
-                    <label class="check"><input data-testid="settings-terminal-only-guide" type="checkbox" bind:checked={draft.showTerminalOnlyGuide} disabled={app.preferences?.showTerminalOnlyGuide === false} /><span><strong>{app.t("settings.terminalOnlyGuide", "Guía visible en pantalla limpia")}</strong><small>{app.preferences?.showTerminalOnlyGuide === false
-                        ? app.t("settings.terminalOnlyGuideLockedHint", "Desactivada permanentemente desde la guía. Restablece las preferencias para volver a habilitarla.")
-                        : app.t("settings.terminalOnlyGuideHint", "Muestra el atajo actual para volver al modo normal mientras la pantalla limpia está activa.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-terminal-only-guide" type="checkbox" bind:checked={draft.showTerminalOnlyGuide} /><span><strong>{app.t("settings.terminalOnlyGuide", "Guía visible en pantalla limpia")}</strong><small>{app.t("settings.terminalOnlyGuideHint", "Muestra el atajo actual para volver al modo normal mientras la pantalla limpia está activa.")}</small></span></label>
                     <label class="check"><input data-testid="settings-start-maximized" type="checkbox" bind:checked={draft.startMaximized} onchange={scheduleAutoSave} /><span><strong>{app.t("settings.startMaximized", "Iniciar maximizada")}</strong><small>{app.t("settings.startMaximizedHint", "Abre la ventana ocupando todo el espacio disponible al iniciar.")}</small></span></label>
                     <div class="heading">
                         <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
@@ -2679,6 +2772,17 @@
                             </span>
                         </label>
                     {/if}
+                    {#if desktopIntegration?.supported}
+                        <!-- Linux: el equivalente de «Abrir con WTerminal» del
+                             Explorador de Windows (17-11). -->
+                        <label class="check">
+                            <input type="checkbox" data-testid="settings-desktop-integration" checked={desktopIntegration.registered} onchange={toggleDesktopIntegration} />
+                            <span>
+                                <strong>{app.t("settings.desktopIntegration", "«Abrir con LTerminal» en el gestor de archivos")}</strong>
+                                <small>{app.t("settings.desktopIntegrationHint", "Añade LTerminal a «Abrir con» de las carpetas (Nautilus, Dolphin, Thunar, Nemo). Solo para tu usuario: {path}").replace("{path}", desktopIntegration.path)}</small>
+                            </span>
+                        </label>
+                    {/if}
                     {#if windowsIntegration?.supported}
                         <div class="heading">
                             <strong>{app.t("settings.windowsIntegration", "Integración de Windows")}</strong>
@@ -2697,7 +2801,7 @@
                             <input type="checkbox" data-testid="settings-offer-gsudo" bind:checked={draft.offerGsudo} />
                             <span>
                                 <strong>{app.t("settings.offerGsudo", "Ofrecer gsudo si hay NSudo y WTerminal no es administrador")}</strong>
-                                <small>{app.t("settings.offerGsudoHint", "Sale un aviso abajo con «Instalar gsudo», «Cerrar esta vez» y «No volver a ofrecer»: con gsudo, cada pestaña de NSudo pide el UAC solo para ella. No sale si ya hay gsudo o el sudo de Windows en modo «En línea».")}</small>
+                                <small>{app.t("settings.offerGsudoHint", "Sale un aviso abajo para instalar gsudo: con gsudo, cada pestaña de NSudo pide el UAC solo para ella. No sale si ya hay gsudo o el sudo de Windows en modo «En línea».")}</small>
                             </span>
                         </label>
                         {#if !windowsIntegration.elevated}
@@ -2765,10 +2869,31 @@
                         <strong>{app.t("settings.profiles", "Perfiles portables")}</strong>
                         <span>{app.t("settings.profilesHint", "Genera un .sh o .ps1 que detecta la aplicación, la instala desde GitHub si falta y restaura configuración y plugins declarativos. No incluye sesiones, tokens, contraseñas, claves privadas ni binarios.")}</span>
                     </div>
+                    {#if profiles}
+                        <!-- Una sola carpeta para los perfiles (17-11): la que mira
+                             la sugerencia y la que el desinstalador conserva. -->
+                        <div class="field-hint" data-testid="settings-profiles-dir" data-count={profiles.profiles.length}>
+                            {app.t("settings.profilesDir", "Carpeta de los perfiles: {dir}").replace("{dir}", profiles.dir)}
+                            · {profiles.profiles.length === 0
+                                ? app.t("settings.profilesNone", "todavía no hay ninguno")
+                                : app.t("settings.profilesCount", "Guardados: {count}; el último, {name}")
+                                      .replace("{count}", String(profiles.profiles.length))
+                                      .replace("{name}", profiles.profiles[0].name)}
+                        </div>
+                    {/if}
                     <div class="update-row">
+                        <button type="button" class="secondary" data-testid="settings-profile-save-now" onclick={saveProfileNow}>{app.t("settings.saveProfileNow", "Guardar perfil ahora")}</button>
                         <button type="button" class="secondary" onclick={exportProfile}>{app.t("settings.exportProfile", "Exportar perfil")}</button>
                         <button type="button" class="secondary" onclick={importProfile}>{app.t("settings.importProfile", "Importar perfil")}</button>
+                        <button type="button" class="secondary" data-testid="settings-profiles-open" onclick={openProfilesFolder}>{app.t("settings.openProfilesFolder", "Abrir la carpeta")}</button>
                     </div>
+                    <label class="check">
+                        <input type="checkbox" data-testid="settings-offer-portable-profile" bind:checked={draft.offerPortableProfile} />
+                        <span>
+                            <strong>{app.t("settings.offerPortableProfile", "Sugerir guardar un perfil si no hay ninguno")}</strong>
+                            <small>{app.t("settings.offerPortableProfileHint", "Si has cambiado ajustes y la carpeta de los perfiles está vacía, sale un aviso abajo para guardar uno.")}</small>
+                        </span>
+                    </label>
                     <div class="heading">
                         <strong>{app.t("settings.plugins", "Plugins")}</strong>
                         <span>{app.t("settings.pluginsHint", "Extensiones declarativas validadas; no cargan código dentro de la aplicación.")}</span>
@@ -2787,6 +2912,31 @@
                             </div>
                         {/each}
                     {/if}
+                    <!-- Los avisos apagados con «No volver a mostrar» (17-11,
+                         Romen). Sin casillas: cada aviso tiene la suya en su
+                         sitio («ajustes duplicados»); aquí solo se listan los
+                         apagados, con un enlace a su casilla, y se vuelven a
+                         mostrar todos a la vez. -->
+                    <div class="heading" data-testid="settings-notices" data-hidden={hiddenNoticeRows.length}>
+                        <strong>{app.t("settings.notices", "Avisos")}</strong>
+                        <span>{app.t("settings.noticesHint", "Cada aviso de WTerminal tiene «No volver a mostrar». Los que hayas apagado salen aquí: pulsa uno para ir a su ajuste, o vuelve a mostrarlos todos.")}</span>
+                    </div>
+                    {#if hiddenNoticeRows.length > 0}
+                        <div class="update-row hidden-notices" data-testid="settings-notices-hidden">
+                            {#each hiddenNoticeRows as notice (notice.key)}
+                                <button type="button" class="secondary" data-testid={`settings-notice-${notice.id}`} onclick={() => goToNotice(notice)}>
+                                    {app.t(`settings.notice.${notice.id}`, notice.label)}
+                                </button>
+                            {/each}
+                        </div>
+                    {/if}
+                    <div class="update-row">
+                        <button type="button" class="secondary" data-testid="settings-notices-restore" disabled={hiddenNoticeRows.length === 0} onclick={restoreNotices}>
+                            {hiddenNoticeRows.length === 0
+                                ? app.t("settings.noticesAllShown", "Todos los avisos se muestran")
+                                : app.t("settings.noticesRestore", "Volver a mostrar todos los avisos (apagados: {count})").replace("{count}", String(hiddenNoticeRows.length))}
+                        </button>
+                    </div>
                     <div class="ltools-settings" data-testid="settings-ltools">
                         <div class="heading">
                             <strong>{app.t("scripts.ltools.title", "Acciones de LTools")}</strong>
@@ -3479,6 +3629,16 @@
         align-items: flex-start;
         gap: 8px;
         cursor: pointer;
+    }
+
+    /* La casilla a la que lleva un aviso apagado de «Avisos», resaltada un
+       momento (la clase la pone `goToNotice`). */
+    .settings-form :global(.notice-target) {
+        outline: 1px solid var(--accent);
+        outline-offset: 3px;
+        border-radius: 4px;
+        background: var(--accent-soft);
+        transition: background 0.3s ease;
     }
 
     /* Las claves de IA guardadas, bajo su casilla: solo el nombre de la

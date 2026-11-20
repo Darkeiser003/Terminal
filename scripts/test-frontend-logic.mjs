@@ -1684,6 +1684,7 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
     const appShell = await readFile('src/App.svelte', 'utf8');
     const tabBar = await readFile('src/components/TabBar.svelte', 'utf8');
     const toolbar = await readFile('src/components/Toolbar.svelte', 'utf8');
+    const notices = await readFile('src/lib/notices.ts', 'utf8');
     assert(appShell.includes('<AgentChats />') && !appShell.includes('<AgentChat />')
         && agentChats.includes('<AgentChat embedded active={chat.id === activeId}')
         && agentChats.includes('const MAX_CHATS = 6;'),
@@ -1695,11 +1696,53 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
     // 14-11 noche: los avisos que ofrecen instalar (gsudo y el ayudante de
     // la shell) y el permiso del control de las IA.
     assert(appShell.includes('data-testid="gsudo-offer"') && appShell.includes("api.runInstallAction(app.activeTabId, 'winget-gsudo')")
-        && appShell.includes('savePreferences({ offerGsudo: false })'),
+        && appShell.includes('neverShowAgain({ offerGsudo: false })'),
         'el aviso de gsudo instala con la acción de WTerminal y se puede no volver a ofrecer');
     assert(appShell.includes('data-testid="shell-assist-offer"') && appShell.includes('app.appInfo?.e2eTesting')
-        && appShell.includes('savePreferences({ offerShellAssist: false })'),
+        && appShell.includes('neverShowAgain({ offerShellAssist: false })'),
         'el aviso del autocompletado no sale en E2E y se puede no volver a ofrecer');
+    // 17-11 (Romen): el aviso del ayudante de la shell y el de gsudo, con la
+    // misma barra que el de WinGet; y todos los avisos con «No volver a
+    // mostrar», recuperables en Ajustes > Avisos.
+    for (const testId of ['gsudo-offer', 'shell-assist-offer', 'profile-offer']) {
+        assert(appShell.includes(`<div class="update" role="status" aria-live="polite" data-testid="${testId}"`),
+            `el aviso ${testId} usa la barra de abajo, igual que el de WinGet`);
+    }
+    for (const [testId, key] of [
+        ['gsudo-offer-never', 'offerGsudo'], ['shell-assist-offer-never', 'offerShellAssist'],
+        ['missing-tool-never', 'suggestMissingTools'], ['low-power-dismiss', 'lowPowerSuggest'],
+        ['profile-offer-never', 'offerPortableProfile'], ['import-suggestion-never', 'suggestRepositoryImport'],
+        ['package-update-never', 'checkPackageUpdatesOnStartup'], ['update-never', 'checkUpdatesOnStartup'],
+    ]) {
+        assert(appShell.includes(`data-testid="${testId}"`), `el aviso tiene «No volver a mostrar» (${testId})`);
+        assert(notices.includes(`key: '${key}'`), `el ajuste ${key} se recupera en Ajustes > Avisos`);
+    }
+    assert(appShell.includes("api.onCommandNotFound((event) => {") && appShell.includes('suggestMissingTools === false) return;'),
+        'el aviso de herramienta que falta respeta su «No volver a mostrar»');
+    assert(terminalPane.includes('data-testid="agent-chat-advice-never"') && terminalPane.includes('savePreferences({ agentChatAdvisor: false })')
+        && terminalPane.includes('data-testid="ai-key-never"') && terminalPane.includes('savePreferences({ aiKeyOffer: false })'),
+        'los avisos de la pestaña (preguntar a la IA y la clave de API) también se pueden no volver a mostrar');
+    assert(settingsPanel.includes('data-testid="settings-notices"') && settingsPanel.includes('restoreAllNotices()')
+        && settingsPanel.includes('NOTICE_SETTINGS') && settingsPanel.includes('data-testid="settings-notices-hidden"')
+        && settingsPanel.includes('onclick={() => goToNotice(notice)}'),
+        'Ajustes > Avisos lista los apagados, lleva a su casilla y los vuelve a mostrar todos');
+    // 17-11 (Romen, «ajustes duplicados»): cada aviso tiene UNA casilla, en su
+    // sitio; el apartado Avisos no repite ninguna.
+    assert(!settingsPanel.includes('bind:checked={draft[notice.key]}'),
+        'el apartado Avisos no repite las casillas de los avisos');
+    const noticeTargets = [...notices.matchAll(/target: '([^']+)'/gu)].map((match) => match[1]);
+    assert(noticeTargets.length === [...notices.matchAll(/key: '/gu)].length,
+        'cada aviso dice dónde está su casilla');
+    for (const target of noticeTargets) {
+        assert(settingsPanel.split(`data-testid="${target}"`).length === 2,
+            `el aviso tiene una sola casilla en Ajustes (${target})`);
+    }
+    assert(!settingsPanel.includes('terminalOnlyGuideLockedHint') && !settingsPanel.includes('disabled={app.preferences?.showTerminalOnlyGuide === false}'),
+        'la guía de pantalla limpia se vuelve a encender con su casilla, sin restablecer');
+    assert(/^suggestMissingTools = true$/mu.test(defaults) && /^offerPortableProfile = true$/mu.test(defaults),
+        'los dos avisos nuevos, encendidos de fábrica');
+    assert(appShell.includes('if (app.appInfo?.e2eTesting) return;') && appShell.includes('status.customized && status.profiles.length === 0'),
+        'el perfil portable se sugiere solo con ajustes propios y ninguno guardado, y nunca en E2E');
     assert(appShell.includes('data-testid="agent-control-request"') && appShell.includes('api.onAgentControl(')
         && appShell.includes("if (tab.id === agentTab) return false;")
         && appShell.includes("if (request.confirm && !controlAllowedForSession)"),

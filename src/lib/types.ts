@@ -257,6 +257,10 @@ export interface Preferences {
     lowPowerMode: boolean;
     /** Sugerir el modo de bajo consumo si el equipo va justo. */
     lowPowerSuggest: boolean;
+    /** Ofrecer instalar la herramienta que pide una orden que no existe. */
+    suggestMissingTools: boolean;
+    /** Sugerir guardar un perfil portable si no hay ninguno en su carpeta. */
+    offerPortableProfile: boolean;
     githubSessionMode: 'always' | 'onExhausted' | 'never';
     /** Buscar versión nueva de WTerminal al arrancar. */
     checkUpdatesOnStartup: boolean;
@@ -325,6 +329,21 @@ export interface ProfileTransferResult {
     preferences?: PreferencesPayload;
 }
 
+/** Un perfil portable de su carpeta (`profile_status`). */
+export interface ProfileEntry {
+    name: string;
+    path: string;
+    modifiedMs: number;
+}
+
+/** La carpeta de los perfiles portables (`<carpeta propia>/configuracion/perfiles`),
+ *  los que hay y si hay algo propio que guardar. */
+export interface ProfileStatus {
+    dir: string;
+    profiles: ProfileEntry[];
+    customized: boolean;
+}
+
 export interface PluginInfo {
     id: string;
     name: string;
@@ -333,6 +352,14 @@ export interface PluginInfo {
     enabled: boolean;
     technologyCount: number;
     error?: string;
+}
+
+/** «Abrir con LTerminal» en el gestor de archivos de Linux: una entrada de
+ *  escritorio del usuario con `MimeType=inode/directory` (17-11). */
+export interface DesktopIntegrationStatus {
+    supported: boolean;
+    registered: boolean;
+    path: string;
 }
 
 export interface WindowsIntegrationStatus {
@@ -578,6 +605,9 @@ export interface AppInfo {
     nsudoNeedsGsudo?: boolean;
     /** Corren las pruebas E2E: no salen los avisos que ofrecen instalar. */
     e2eTesting?: boolean;
+    /** Se pueden guardar claves de API de las IA (DPAPI en Windows, el
+     *  llavero con `secret-tool` en Linux). */
+    aiKeysSupported?: boolean;
     name: string;
     slug: string;
     version: string;

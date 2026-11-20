@@ -56,8 +56,31 @@ pub fn signing_key_configured() -> bool {
 }
 
 pub fn release_signing_configured() -> bool {
-    signing_key_configured() && ssh_public_key().is_ok() && ssh_keygen_path().is_some()
+    release_signing_problem().is_none()
 }
+
+/// Por qué no se puede comprobar una release, con el motivo de verdad. Antes
+/// todo salía como «no incluye las claves de confianza», también cuando las
+/// claves sí venían dentro y lo que faltaba en el equipo era `ssh-keygen`
+/// (Windows LTSC no trae el cliente OpenSSH, 17-11, Romen con la 63).
+pub fn release_signing_problem() -> Option<String> {
+    if !signing_key_configured() || ssh_public_key().is_err() {
+        return Some(
+            "Esta compilación no incluye las claves de confianza Ed25519 y SSH; no se ofrecerá una release sin verificar.".into(),
+        );
+    }
+    if ssh_keygen_path().is_none() {
+        return Some(SSH_KEYGEN_MISSING.into());
+    }
+    None
+}
+
+/// Las claves vienen dentro, pero falta el programa que comprueba la firma SSH.
+/// Dónde se consigue depende del sistema (18-11).
+#[cfg(windows)]
+pub const SSH_KEYGEN_MISSING: &str = "Las claves de confianza vienen dentro, pero falta ssh-keygen para comprobar la firma SSH de las actualizaciones. Viene con Git para Windows o con el cliente OpenSSH de Windows (Configuración > Sistema > Características opcionales).";
+#[cfg(not(windows))]
+pub const SSH_KEYGEN_MISSING: &str = "Las claves de confianza vienen dentro, pero falta ssh-keygen para comprobar la firma SSH de las actualizaciones. Viene con el cliente de OpenSSH (el paquete openssh-client u openssh de tu distribución).";
 
 fn ssh_public_key() -> Result<(&'static str, &'static str), String> {
     let key = UPDATE_SSH_PUBLIC_KEY
@@ -94,7 +117,14 @@ fn ssh_keygen_path() -> Option<String> {
     }
     #[cfg(windows)]
     {
+        // El cliente OpenSSH de Windows no siempre está en el PATH de la app
+        // (un PATH heredado recortado); Git para Windows, en sus sitios de
+        // siempre; OpenSSH instalado con su MSI, en Program Files.
         let candidates = [
+            std::env::var_os("SystemRoot")
+                .map(|root| Path::new(&root).join("System32/OpenSSH/ssh-keygen.exe")),
+            std::env::var_os("ProgramW6432")
+                .map(|root| Path::new(&root).join("OpenSSH/ssh-keygen.exe")),
             std::env::var_os("ProgramW6432")
                 .map(|root| Path::new(&root).join("Git/usr/bin/ssh-keygen.exe")),
             std::env::var_os("ProgramFiles")

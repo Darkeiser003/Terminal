@@ -632,6 +632,12 @@ pub struct Preferences {
     pub low_power_mode: bool,
     /// Sugerir el modo de bajo consumo si el equipo va justo.
     pub low_power_suggest: bool,
+    /// Ofrecer instalar la herramienta que pide una orden que no existe
+    /// (`command_not_found`). Su «No volver a mostrar» lo apaga (17-11).
+    pub suggest_missing_tools: bool,
+    /// Sugerir guardar un perfil portable si hay ajustes propios y ninguno en
+    /// su carpeta (`app::profiles`, 17-11).
+    pub offer_portable_profile: bool,
     /// Cuándo usar la sesión de `gh` para las consultas de Explorar GitHub:
     /// `always`, `onExhausted` (al agotar las 60 públicas por hora) o `never`.
     pub github_session_mode: String,
@@ -1588,6 +1594,14 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
         ),
         low_power_mode: bool_or_default(get("lowPowerMode"), defaults.low_power_mode),
         low_power_suggest: bool_or_default(get("lowPowerSuggest"), defaults.low_power_suggest),
+        suggest_missing_tools: bool_or_default(
+            get("suggestMissingTools"),
+            defaults.suggest_missing_tools,
+        ),
+        offer_portable_profile: bool_or_default(
+            get("offerPortableProfile"),
+            defaults.offer_portable_profile,
+        ),
         github_session_mode: one_of(
             get("githubSessionMode"),
             &GITHUB_SESSION_MODES,
@@ -2075,6 +2089,13 @@ mod tests {
     #[test]
     fn ofrecer_la_clave_de_una_ia_viene_activado_y_se_puede_apagar() {
         assert!(Preferences::default().ai_key_offer);
+        // Los dos avisos nuevos del 17-11, encendidos de fábrica y apagables.
+        let defaults = Preferences::default();
+        assert!(defaults.suggest_missing_tools && defaults.offer_portable_profile);
+        let off = sanitize_preferences(
+            &json!({ "suggestMissingTools": false, "offerPortableProfile": false }),
+        );
+        assert!(!off.suggest_missing_tools && !off.offer_portable_profile);
         assert!(!sanitize_preferences(&json!({ "aiKeyOffer": false })).ai_key_offer);
     }
 

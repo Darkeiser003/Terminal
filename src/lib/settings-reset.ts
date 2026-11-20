@@ -113,7 +113,8 @@ export const RESET_GROUPS: readonly ResetGroup[] = [
         hint: 'Vuelven a verse los paneles, botones y barras que ocultaste, y el modo de bajo consumo se apaga.',
         keys: ['showDependenciesPanel', 'showProjectsPanel', 'showScriptsPanel', 'showExplorerPanel', 'showQuickActions',
             'showTabBar', 'showEnvironmentSelector', 'showRefreshButton', 'showLanguageButton', 'terminalOnlyMode',
-            'showTerminalOnlyGuide', 'lowPowerMode', 'lowPowerSuggest', 'suggestRepositoryImport'],
+            'showTerminalOnlyGuide', 'lowPowerMode', 'lowPowerSuggest', 'suggestRepositoryImport',
+            'suggestMissingTools', 'offerPortableProfile'],
     },
     {
         id: 'privacy', tab: 'behavior', risk: 'caution',
