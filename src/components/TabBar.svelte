@@ -173,7 +173,7 @@
         }
         if (event.key !== 'Enter' && event.key !== ' ') return;
         event.preventDefault();
-        void app.activateTab(tabId);
+        void app.openTab(tabId);
     }
 
     function onAuxClick(event: MouseEvent, tabId: string): void {
@@ -310,16 +310,18 @@
             class:dragging={tab.id === draggedTabId}
             class:drop-before={tab.id === dropTargetId && !dropAfter}
             class:drop-after={tab.id === dropTargetId && dropAfter}
-            class:colored={Boolean(app.tabColors[tab.id])}
-            data-tab-color={app.tabColors[tab.id] ?? null}
-            style:--tab-color={app.tabColors[tab.id] ? TAB_COLORS[app.tabColors[tab.id]] : null}
+            class:colored={Boolean(app.tabColor(tab.id))}
+            class:busy={app.busyTabs[tab.id]?.status === 'running'}
+            data-tab-color={app.tabColor(tab.id) ?? null}
+            data-busy={app.busyTabs[tab.id]?.status ?? null}
+            style:--tab-color={app.tabColor(tab.id) ? TAB_COLORS[app.tabColor(tab.id) as TabColor] : null}
             draggable={tab.id !== app.renamingTabId}
             role="tab"
             aria-selected={tab.id === app.activeTabId}
             tabindex={tab.id === app.activeTabId ? 0 : -1}
             aria-label={`${app.tabTitle(tab)}. ${app.t('tabs.dragHint', 'Arrastra para reordenar; doble clic para renombrar.')}`}
             title={app.tabTitle(tab)}
-            onclick={() => void app.activateTab(tab.id)}
+            onclick={() => void app.openTab(tab.id)}
             ondblclick={(event) => startRename(event, tab)}
             oncontextmenu={(event) => openMenu(event, tab.id)}
             onkeydown={(event) => activateFromKeyboard(event, tab.id)}
@@ -341,6 +343,21 @@
                     onblur={() => finishRename(tab.id, true)}
                 />
             {:else}
+                {#if app.busyTabs[tab.id]}
+                    {@const busy = app.busyTabs[tab.id]}
+                    <span
+                        class="tab-busy"
+                        class:still={app.preferences?.lowPowerMode === true}
+                        data-testid="tab-busy"
+                        data-status={busy.status}
+                        title={busy.status === 'running'
+                            ? app.t('tabs.busyRunning', 'En marcha: {command}').replace('{command}', busy.command)
+                            : busy.status === 'ok'
+                                ? app.t('tabs.busyDone', 'Terminó: {command}').replace('{command}', busy.command)
+                                : app.t('tabs.busyFailed', 'Falló: {command}').replace('{command}', busy.command)}
+                        aria-hidden="true"
+                    >{busy.status === 'ok' ? '✓' : busy.status === 'failed' ? '✕' : ''}</span>
+                {/if}
                 <span class="tab-label">{app.tabTitle(tab)}</span>
             {/if}
             <button
@@ -359,6 +376,17 @@
         title={app.t('tabs.new', 'Nueva pestaña')}
         onclick={() => app.createTab()}
     >+</button>
+
+    {#if app.runningBusyTabs.length >= 2}
+        <!-- Las órdenes largas que siguen en marcha, juntas en una vista. -->
+        <button
+            type="button"
+            class="tab-watch"
+            data-testid="tab-watch-running"
+            title={app.t('tabs.watchRunningHint', 'Ver juntas las pestañas con órdenes en marcha (hasta cuatro)')}
+            onclick={() => void app.watchRunningTabs()}
+        ><span class="tab-busy" data-status="running" aria-hidden="true"></span>{app.t('tabs.watchRunning', 'En marcha · {count}').replace('{count}', String(app.runningBusyTabs.length))}</button>
+    {/if}
 
     <!-- El chat de agentes, al final de la fila y fijo a la derecha, justo
          encima de donde se abre (14-11, Romen: «mover el botón ahí, y en vez
@@ -529,6 +557,71 @@
     .tab.colored {
         border-left: 3px solid var(--tab-color);
         padding-left: 8px;
+    }
+
+    /* Pestañas ocupadas (26-11): un punto que late mientras corre la orden
+       y ✓ o ✕ unos segundos al terminar. */
+    .tab-busy {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        margin-right: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1;
+    }
+
+    .tab-busy[data-status='running'] {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--tab-color, var(--accent));
+        animation: tab-busy-pulse 1.4s ease-in-out infinite;
+    }
+
+    .tab-busy[data-status='ok'] {
+        color: #3fb950;
+    }
+
+    .tab-busy[data-status='failed'] {
+        color: #e5534b;
+    }
+
+    @keyframes tab-busy-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+    }
+
+    /* En bajo consumo, sin animación. */
+    .tab-busy.still {
+        animation: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .tab-busy[data-status='running'] {
+            animation: none;
+        }
+    }
+
+    .tab-watch {
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
+        height: 28px;
+        padding: 0 10px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--surface);
+        color: var(--text);
+        font-size: 12px;
+        white-space: nowrap;
+        cursor: pointer;
+    }
+
+    .tab-watch:hover {
+        background: var(--surface-hover);
+        border-color: var(--accent);
     }
 
     .tab-menu-backdrop {

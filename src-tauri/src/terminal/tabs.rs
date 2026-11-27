@@ -155,6 +155,41 @@ fn remove_startup_query(data: &mut String, query: &str) -> bool {
     true
 }
 
+/// ConPTY hace sus preguntas en cuanto nace, en milisegundos. Un programa
+/// que pregunte lo mismo (Gemini CLI pregunta los atributos antes de dibujar)
+/// tarda más en arrancar: pasado este plazo, sus preguntas van a xterm.
+const STARTUP_PROBES_WINDOW: Duration = Duration::from_millis(1500);
+
+/// Quita de la salida las sondas de arranque de ConPTY (posición y atributos)
+/// mientras la pestaña arranca o su ventana de sondas sigue abierta, y apunta
+/// cuáles hay que contestar.
+///
+/// En los entornos sin limpieza inicial (los REPL y las IA) la ventana se
+/// cierra con lo primero que pase: la pregunta de atributos (la última que
+/// hace ConPTY), la primera salida de verdad o el plazo. Build 87: cerrarla
+/// solo con la salida se comía la pregunta del propio Gemini CLI, que se
+/// quedaba en negro esperando su respuesta.
+fn take_startup_probes(tab: &mut Tab, data: &mut String) -> bool {
+    if !tab.initializing
+        && tab.startup_probes_open
+        && tab.startup_probes_opened_at.elapsed() >= STARTUP_PROBES_WINDOW
+    {
+        tab.startup_probes_open = false;
+    }
+    if !tab.initializing && !tab.startup_probes_open {
+        return false;
+    }
+    let cursor = remove_startup_query(data, STARTUP_CURSOR_QUERY);
+    let attributes = remove_startup_query(data, STARTUP_ATTRIBUTES_QUERY);
+    let attributes_with_zero = remove_startup_query(data, STARTUP_ATTRIBUTES_QUERY_WITH_ZERO);
+    tab.startup_cursor_query_pending |= cursor;
+    tab.startup_attributes_query_pending |= attributes || attributes_with_zero;
+    if !data.is_empty() || attributes || attributes_with_zero {
+        tab.startup_probes_open = false;
+    }
+    cursor || attributes || attributes_with_zero
+}
+
 /// La salida del pty empieza a llegar en cuanto se spawnea, pero el frontend
 /// puede no estar listo todavía para esa pestaña: en el primer arranque ni
 /// siquiera se ha montado el componente, y en una pestaña nueva el xterm se
@@ -663,6 +698,10 @@ struct Tab {
     output_buffer: String,
     /// Cola más larga, para reconocer el prompt aunque haya scrolleado.
     cwd_buffer: String,
+    /// La carpeta en la que estaba la pestaña antes de pasar a una shell
+    /// NSudo (TrustedInstaller). Al volver a una shell normal se recupera
+    /// esta, no la de la sesión elevada (21-11).
+    cwd_before_elevated: Option<PathBuf>,
     /// El último comando que se reportó como no encontrado, para no sugerir lo
     /// mismo dos veces seguidas.
     last_missing_command: Option<String>,
@@ -697,6 +736,16 @@ struct Tab {
     /// Igual que la posición, ConPTY consulta los atributos VT del terminal y
     /// espera una respuesta antes de liberar la shell.
     startup_attributes_query_pending: bool,
+    /// Ventana de las sondas de arranque de ConPTY en los entornos que no
+    /// esperan la limpieza inicial (los REPL). Se cierra con la primera
+    /// salida que no sea sonda. Sin esto las contestaba xterm, y si la
+    /// interfaz iba cargada y tardaba más de los ~3 s que espera ConPTY, la
+    /// respuesta (`62;4;9;22c`) le llegaba al REPL como texto tecleado
+    /// (build 86, Node).
+    startup_probes_open: bool,
+    /// Cuándo se abrió esa ventana: pasado `STARTUP_PROBES_WINDOW` se cierra
+    /// aunque el programa no haya escrito nada.
+    startup_probes_opened_at: Instant,
     /// El script que limpia la consola y carga los aliases. En una pestaña
     /// nueva se retiene hasta el primer `pty_resize` real del frontend; usar
     /// el viewport persistido aquí hacía nacer el banner con el ancho de una
@@ -762,6 +811,7 @@ impl Tab {
             last_clear_marker: None,
             output_buffer: String::new(),
             cwd_buffer: String::new(),
+            cwd_before_elevated: None,
             last_missing_command: None,
             semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
@@ -772,6 +822,8 @@ impl Tab {
             startup_output: String::new(),
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
+            startup_probes_open: true,
+            startup_probes_opened_at: Instant::now(),
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,
@@ -877,7 +929,25 @@ impl TabManager {
     pub fn active_cwd(&self) -> Option<PathBuf> {
         let registry = self.registry.lock();
         let active = registry.active_tab_id.as_deref()?;
-        registry.find(active)?.cwd.clone()
+        let tab = registry.find(active)?;
+        // Una pestaña nueva abierta desde una NSudo no hereda la carpeta de
+        // la sesión elevada, sino la de antes de elevarse.
+        if tab_is_elevated(tab) {
+            return tab.cwd_before_elevated.clone();
+        }
+        tab.cwd.clone()
+    }
+
+    /// Carpeta en la que debe empezar `next` al sustituir la shell de una
+    /// pestaña. Salir de NSudo devuelve la de antes de entrar; entrar o
+    /// seguir en NSudo usa la actual.
+    pub fn cwd_for_switch(&self, tab_id: &str, next: &Environment) -> Option<PathBuf> {
+        let registry = self.registry.lock();
+        let tab = registry.find(tab_id)?;
+        if tab_is_elevated(tab) && !is_nsudo_env(&next.id) {
+            return tab.cwd_before_elevated.clone();
+        }
+        tab.cwd.clone()
     }
 
     pub fn activate(&self, tab_id: &str) {
@@ -1126,6 +1196,8 @@ impl TabManager {
             tab.initializing = waits_for_initial_clear(env);
             tab.startup_cursor_query_pending = false;
             tab.startup_attributes_query_pending = false;
+            tab.startup_probes_open = true;
+            tab.startup_probes_opened_at = Instant::now();
             tab.startup_started_at = Some(startup_started_at);
             tab.pending_init_command = None;
             tab.init_command_in_flight = false;
@@ -1193,6 +1265,11 @@ impl TabManager {
         // La guía de WTerminal para la IA de esta pestaña, al abrir su sesión
         // (`agentTabGuide`, 14-11). Después del log: es larga y no aporta.
         let mut args = args;
+        // NSudo no hereda la carpeta del proceso que lo lanza: sin esto, la
+        // shell elevada empezaba en la suya y no donde estaba el usuario.
+        if is_nsudo_env(&env.id) {
+            insert_nsudo_current_directory(&mut args, &spawn_dir);
+        }
         args.extend(crate::environments::agent_guide::tab_args(&env.id));
         // La clave guardada de una IA (Grok, Codex…), si la hay: se pasa como
         // su variable de entorno. No se registra en el log.
@@ -1363,6 +1440,16 @@ impl TabManager {
                     return false;
                 }
                 tab.session = Some(Arc::new(session));
+                // Al entrar en NSudo se guarda la carpeta de la shell normal;
+                // al salir se olvida (la nueva ya empezó en ella).
+                if is_nsudo_env(&env.id) {
+                    if !tab_is_elevated(tab) {
+                        tab.cwd_before_elevated =
+                            Some(tab.cwd.clone().unwrap_or_else(|| spawn_dir.to_path_buf()));
+                    }
+                } else {
+                    tab.cwd_before_elevated = None;
+                }
                 tab.env_id = Some(env.id.clone());
                 tab.env = Some(env.clone());
                 tab.label = env.label.clone();
@@ -1774,19 +1861,7 @@ impl TabManager {
                         let Some(tab) = registry.find_mut(tab_id) else {
                             return;
                         };
-                        if !tab.initializing {
-                            false
-                        } else {
-                            let cursor = remove_startup_query(&mut data, STARTUP_CURSOR_QUERY);
-                            let attributes =
-                                remove_startup_query(&mut data, STARTUP_ATTRIBUTES_QUERY);
-                            let attributes_with_zero =
-                                remove_startup_query(&mut data, STARTUP_ATTRIBUTES_QUERY_WITH_ZERO);
-                            tab.startup_cursor_query_pending |= cursor;
-                            tab.startup_attributes_query_pending |=
-                                attributes || attributes_with_zero;
-                            cursor || attributes || attributes_with_zero
-                        }
+                        take_startup_probes(tab, &mut data)
                     };
                     if startup_cursor_query {
                         self.respond_startup_cursor_query(tab_id, generation);
@@ -1968,8 +2043,10 @@ impl TabManager {
             let Some(tab) = registry.find(tab_id) else {
                 return;
             };
+            // Sin exigir `initializing`: en un REPL la pregunta se guarda en
+            // la ventana de sondas y se contesta igual. Las marcas se borran
+            // al cambiar de generación.
             if tab.generation != generation
-                || !tab.initializing
                 || (!tab.startup_cursor_query_pending && !tab.startup_attributes_query_pending)
             {
                 return;
@@ -2121,6 +2198,15 @@ impl TabManager {
                 format!(
                     "NSudo se detectó en {}, pero no pudo crear la shell TrustedInstaller.\r\nComprueba que el servicio TrustedInstaller está disponible y que NSudo puede ejecutarse con la configuración actual.",
                     startup_exe.as_deref().unwrap_or("la ruta detectada")
+                )
+            } else if startup_env
+                .as_ref()
+                .is_some_and(|env| env.id.starts_with("gsudo:"))
+            {
+                // 21-11: lo normal es que se rechazara el permiso de Windows.
+                crate::i18n::Translator::new(&crate::i18n::active_language()).t(
+                    "env.gsudoFailed",
+                    "gsudo no pudo abrir la shell de administrador. Lo más habitual es que se cancelara el permiso de Windows (UAC): vuelve a elegirla en el selector para intentarlo.",
                 )
             } else {
                 String::new()
@@ -2894,6 +2980,41 @@ fn keeps_exact_width(env_id: &str) -> bool {
     env_id.starts_with("ai:") || (cfg!(windows) && env_id == "lang:python")
 }
 
+/// Shells TrustedInstaller abiertas con NSudo (`environments::detect_windows_shells`).
+fn is_nsudo_env(env_id: &str) -> bool {
+    env_id.starts_with("nsudo:")
+}
+
+/// La pestaña corre ahora mismo una shell NSudo.
+fn tab_is_elevated(tab: &Tab) -> bool {
+    tab.env
+        .as_ref()
+        .map(|env| env.id.as_str())
+        .or(tab.env_id.as_deref())
+        .is_some_and(is_nsudo_env)
+        && tab.session.is_some()
+}
+
+/// Añade `-CurrentDirectory:<carpeta>` a los argumentos de NSudo, delante de
+/// la cuenta (`-U:T`), para que la shell elevada empiece donde estaba el
+/// usuario y no en la carpeta propia de NSudo.
+fn insert_nsudo_current_directory(args: &mut Vec<String>, dir: &Path) {
+    if args
+        .iter()
+        .any(|arg| arg.to_ascii_lowercase().starts_with("-currentdirectory"))
+    {
+        return;
+    }
+    let position = args
+        .iter()
+        .position(|arg| arg.eq_ignore_ascii_case("-U:T"))
+        .unwrap_or(0);
+    args.insert(
+        position,
+        format!("-CurrentDirectory:{}", dir.to_string_lossy()),
+    );
+}
+
 pub fn valid_viewport(cols: i64, rows: i64) -> Option<Viewport> {
     if (1..=MAX_TERMINAL_COLS).contains(&cols) && (1..=500).contains(&rows) {
         Some(Viewport {
@@ -2908,6 +3029,42 @@ pub fn valid_viewport(cols: i64, rows: i64) -> Option<Viewport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nsudo_empieza_en_la_carpeta_del_usuario() {
+        let mut args: Vec<String> = [
+            "-Wait",
+            "-UseCurrentConsole",
+            "-U:T",
+            "-P:E",
+            "cmd.exe",
+            "/d",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect();
+        insert_nsudo_current_directory(&mut args, Path::new(r"C:\Mis proyectos"));
+        assert_eq!(args[2], r"-CurrentDirectory:C:\Mis proyectos");
+        assert_eq!(args[3], "-U:T");
+        // A través de gsudo la ruta de NSudo va delante y no estorba.
+        let mut through: Vec<String> = [r"C:\NSudoLC.exe", "-Wait", "-U:T", "cmd.exe"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        insert_nsudo_current_directory(&mut through, Path::new(r"D:\x"));
+        assert_eq!(through[2], r"-CurrentDirectory:D:\x");
+        // No se repite.
+        insert_nsudo_current_directory(&mut through, Path::new(r"E:\y"));
+        assert_eq!(
+            through
+                .iter()
+                .filter(|arg| arg.starts_with("-CurrentDirectory"))
+                .count(),
+            1
+        );
+        assert!(is_nsudo_env("nsudo:cmd"));
+        assert!(!is_nsudo_env("cmd"));
+    }
 
     #[test]
     fn una_ia_que_falla_conserva_su_pestaña_tarde_lo_que_tarde() {
@@ -3129,6 +3286,47 @@ mod tests {
     }
 
     #[test]
+    fn un_repl_tambien_consume_las_sondas_de_arranque() {
+        // Build 86: en Node la respuesta tardía de xterm llegó como texto.
+        let env = Environment {
+            id: "lang:node".into(),
+            label: "Node.js · REPL".into(),
+            repl: true,
+            ..Environment::default()
+        };
+        let mut tab = Tab::pending("tab-node".into(), &env, Viewport::default(), 1);
+        assert!(!tab.initializing, "un REPL no espera la limpieza inicial");
+        let mut data = format!("{STARTUP_CURSOR_QUERY}{STARTUP_ATTRIBUTES_QUERY}");
+        assert!(take_startup_probes(&mut tab, &mut data));
+        assert!(data.is_empty());
+        assert!(tab.startup_cursor_query_pending && tab.startup_attributes_query_pending);
+        assert!(
+            !tab.startup_probes_open,
+            "tras la de atributos, ConPTY ya no pregunta más"
+        );
+
+        // Build 87: lo que pregunte después el propio programa (Gemini CLI
+        // antes de dibujar nada) sigue yendo a xterm.
+        let mut data = STARTUP_ATTRIBUTES_QUERY.to_string();
+        assert!(!take_startup_probes(&mut tab, &mut data));
+        assert_eq!(data, STARTUP_ATTRIBUTES_QUERY);
+
+        // Solo la de posición y luego salida: la salida cierra la ventana.
+        let mut tab = Tab::pending("tab-node-2".into(), &env, Viewport::default(), 1);
+        let mut data = format!("{STARTUP_CURSOR_QUERY}Welcome");
+        assert!(take_startup_probes(&mut tab, &mut data));
+        assert_eq!(data, "Welcome");
+        assert!(!tab.startup_probes_open);
+
+        // Pasado el plazo tampoco se quita nada.
+        let mut tab = Tab::pending("tab-node-3".into(), &env, Viewport::default(), 1);
+        tab.startup_probes_opened_at = Instant::now() - STARTUP_PROBES_WINDOW;
+        let mut data = STARTUP_ATTRIBUTES_QUERY.to_string();
+        assert!(!take_startup_probes(&mut tab, &mut data));
+        assert_eq!(data, STARTUP_ATTRIBUTES_QUERY);
+    }
+
+    #[test]
     fn la_consulta_de_atributos_recibe_la_misma_respuesta_que_xterm() {
         let mut data = format!("{STARTUP_ATTRIBUTES_QUERY}resto");
         assert!(remove_startup_query(&mut data, STARTUP_ATTRIBUTES_QUERY));
@@ -3182,6 +3380,7 @@ mod tests {
             last_clear_marker: None,
             output_buffer: String::new(),
             cwd_buffer: String::new(),
+            cwd_before_elevated: None,
             last_missing_command: None,
             semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
@@ -3192,6 +3391,8 @@ mod tests {
             startup_output: String::new(),
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
+            startup_probes_open: true,
+            startup_probes_opened_at: Instant::now(),
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,
@@ -3226,6 +3427,7 @@ mod tests {
             last_clear_marker: None,
             output_buffer: String::new(),
             cwd_buffer: String::new(),
+            cwd_before_elevated: None,
             last_missing_command: None,
             semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
@@ -3236,6 +3438,8 @@ mod tests {
             startup_output: String::new(),
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
+            startup_probes_open: true,
+            startup_probes_opened_at: Instant::now(),
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,
@@ -3317,6 +3521,7 @@ mod tests {
             last_clear_marker: None,
             output_buffer: String::new(),
             cwd_buffer: String::new(),
+            cwd_before_elevated: None,
             last_missing_command: None,
             semantic_zones: SemanticZoneSplitter::new(),
             banner_rows: 0,
@@ -3327,6 +3532,8 @@ mod tests {
             startup_output: String::new(),
             startup_cursor_query_pending: false,
             startup_attributes_query_pending: false,
+            startup_probes_open: true,
+            startup_probes_opened_at: Instant::now(),
             pending_init_command: None,
             init_command_in_flight: false,
             viewport_confirmed: false,

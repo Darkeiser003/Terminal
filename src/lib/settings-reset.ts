@@ -33,7 +33,7 @@ const SHORTCUTS = [
     'shortcutClearTerminal', 'shortcutSearchTerminal', 'shortcutSearchHistory', 'shortcutPreviousCommand',
     'shortcutNextCommand', 'shortcutUiScaleUp', 'shortcutUiScaleDown', 'shortcutUiScaleReset', 'shortcutOpenSystemExplorer',
     'shortcutCloseTab', 'shortcutRenameTab', 'shortcutCopyLastOutput', 'shortcutSaveTerminalOutput', 'shortcutTerminalFontUp',
-    'shortcutTerminalFontDown', 'shortcutTerminalFontReset', 'shortcutToggleAgentChat',
+    'shortcutTerminalFontDown', 'shortcutTerminalFontReset', 'shortcutToggleAgentChat', 'shortcutGoToTab',
 ] as const;
 
 export const RESET_GROUPS: readonly ResetGroup[] = [
@@ -76,13 +76,20 @@ export const RESET_GROUPS: readonly ResetGroup[] = [
         id: 'commands', tab: 'terminal', risk: 'caution',
         label: 'Órdenes, enlaces y Python',
         hint: 'Las marcas de cada orden, cómo se abren los enlaces, el ancho de Python y escribir de una vez las órdenes de las acciones.',
-        keys: ['terminalCommandMarks', 'terminalLinks', 'terminalLinksConfirm', 'pythonReplVisibleWidth', 'actionCommandsAtOnce'],
+        keys: ['terminalCommandMarks', 'terminalLinks', 'terminalLinksConfirm', 'pythonReplVisibleWidth', 'actionCommandsAtOnce', 'keepActionCommandLine', 'applyProgramDefaults'],
+    },
+    {
+        id: 'busyTabs', tab: 'terminal', risk: 'safe',
+        label: 'Pestañas ocupadas y avisos al terminar',
+        hint: 'El nombre y el color de las pestañas mientras corre una orden larga, sus tiempos, colores, reglas y excepciones, el aviso al terminar y la vista de las que siguen en marcha. No toca los nombres ni colores puestos a mano.',
+        keys: ['busyTabRename', 'busyTabColor', 'busyTabSeconds', 'busyTabSecondsLowPower', 'busyTabColors', 'busyTabRules', 'busyTabExclude',
+            'commandDoneNotice', 'commandDoneSeconds', 'commandDoneSecondsLowPower', 'commandDoneOtherTab', 'busyTabGroup', 'busyTabUngroup', 'busyTabUngroupSeconds'],
     },
     {
         id: 'ai', tab: 'terminal', risk: 'caution',
         label: 'IA y chat',
         hint: 'El chat lateral, el consejero, la memoria y si los agentes pueden editar archivos u omitir permisos. No borra las claves de API guardadas.',
-        keys: ['aiKeyOffer', 'agentChat', 'agentChatAdvisor', 'showAgentChatButton', 'agentChatRemember', 'agentChatCanEdit', 'agentChatAllowBypass', 'agentChatGuide', 'agentTabGuide', 'agentControl'],
+        keys: ['aiKeyOffer', 'agentChat', 'agentChatAdvisor', 'agentChatAdvisorSend', 'showAgentChatButton', 'agentChatRemember', 'agentChatHistory', 'agentChatRestore', 'agentChatNativeSessions', 'agentChatAutoTitle', 'agentChatShowResumed', 'agentChatPinHelp', 'agentChatForgetNative', 'agentChatCleanup', 'agentChatCleanupDays', 'agentChatHelpMaxDays', 'agentChatHelpMaxMessages', 'agentChatCanEdit', 'agentChatAllowBypass', 'agentChatGuide', 'agentTabGuide', 'agentControl'],
     },
     {
         id: 'banner', tab: 'terminal', risk: 'caution',
@@ -113,8 +120,8 @@ export const RESET_GROUPS: readonly ResetGroup[] = [
         hint: 'Vuelven a verse los paneles, botones y barras que ocultaste, y el modo de bajo consumo se apaga.',
         keys: ['showDependenciesPanel', 'showProjectsPanel', 'showScriptsPanel', 'showExplorerPanel', 'showQuickActions',
             'showTabBar', 'showEnvironmentSelector', 'showRefreshButton', 'showLanguageButton', 'terminalOnlyMode',
-            'showTerminalOnlyGuide', 'lowPowerMode', 'lowPowerSuggest', 'suggestRepositoryImport',
-            'suggestMissingTools', 'offerPortableProfile'],
+            'showTerminalOnlyGuide', 'lowPowerMode', 'lowPowerSuggest', 'probeLowPriority', 'probeMaxParallel', 'suggestRepositoryImport',
+            'suggestMissingTools', 'offerPortableProfile', 'offerProfileUpdate', 'showFirstSteps'],
     },
     {
         id: 'privacy', tab: 'behavior', risk: 'caution',
@@ -147,7 +154,8 @@ export const RESET_GROUPS: readonly ResetGroup[] = [
         keys: ['toolchainStoreEnabled', 'toolchainStoreDir', 'toolchainStoreDownloads', 'toolchainStoreAiModels',
             'toolchainStoreTools', 'toolchainStoreReplHistory', 'toolchainStoreToolchains', 'toolchainStorePrograms',
             'toolchainStoreProjects', 'toolchainStoreConfig', 'toolchainStorePlugins', 'toolchainStoreCategoryDirs',
-            'toolchainStoreDisabled'],
+            'toolchainStoreDisabled', 'regenerableAutoClean', 'regenerableAutoCleanDays', 'regenerableCleanCaches',
+            'regenerableCleanDownloads', 'regenerableCleanDetection', 'regenerableCleanLogs'],
     },
     {
         id: 'admin', tab: 'behavior', risk: 'caution',

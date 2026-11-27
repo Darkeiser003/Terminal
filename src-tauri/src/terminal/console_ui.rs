@@ -410,6 +410,14 @@ const CMD_ERASE_TYPED_LINE: &str = "@echo \x1b[1A\x1b[2K\x1b[1A";
 /// puede llegar a 260 (`MAX_PATH`). Una línea más larga ocuparía varias filas.
 const CMD_ERASE_TYPED_LINE_MAX: usize = 1024 - 260 - 4;
 
+/// «Dejar a la vista la línea tecleada de las acciones» (22-11, Romen): de
+/// fábrica se borra porque la cabecera ya enseña la orden; con el ajuste se
+/// queda, como en una orden escrita a mano. En las pruebas de unidad, el de
+/// fábrica.
+fn keep_typed_line() -> bool {
+    !cfg!(test) && crate::preferences::current().keep_action_command_line
+}
+
 fn cmd_frame_scripts(
     notice: &Notice,
     pause: Option<&str>,
@@ -427,6 +435,11 @@ fn cmd_frame_scripts(
         // El código que dejó la orden, antes que nada (`call` no lo cambia).
         // Después de guardarlo da igual que `set` lo ponga a 0 en un `.cmd`.
         format!("@set \"{CMD_RC_VAR}=%errorlevel%\""),
+        // El PATH se refresca ANTES de pintar el resultado y «Pulsa Enter»:
+        // tarda un par de segundos (lanza PowerShell) y un Enter pulsado en
+        // ese hueco se perdía, la pausa seguía esperando y se comía la primera
+        // letra de la acción siguiente («all» en vez de «call», 22-11).
+        format!("@{}", cmd_path_refresh("%%")),
         "@echo.".to_string(),
         // Distinto de 0 y no `if errorlevel 1`: winget falla con códigos
         // negativos (-1978335212…) y esos pasaban por buenos (13-11).
@@ -445,7 +458,6 @@ fn cmd_frame_scripts(
             .map(cmd_file_echo),
     );
     fin.push(":wsterm_end".to_string());
-    fin.push(format!("@{}", cmd_path_refresh("%%")));
     // El prompt de cmd no puede decir cómo acabó la orden: lo dice aquí la
     // marca `D` con el código real, y la pestaña la pinta en rojo y ofrece el
     // consejero si falló. `set /p` la escribe sin salto de línea.
@@ -480,7 +492,7 @@ fn cmd_framed(
 ) -> Option<String> {
     let seq = CMD_FRAME_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let line = cmd_one_line(command, seq);
-    let erase_typed_line = line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX;
+    let erase_typed_line = line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX && !keep_typed_line();
     let (ini, fin) = cmd_frame_scripts(notice, pause, t, erase_typed_line);
     std::fs::write(dir.join(format!("ui-{seq}-ini.cmd")), ini).ok()?;
     std::fs::write(dir.join(format!("ui-{seq}-fin.cmd")), fin).ok()?;
@@ -562,7 +574,7 @@ fn ps_framed(
     let line = format!(". '{}'", shown.replace('\'', "''"));
     let mut statements = Vec::new();
     // Como en cmd: si la línea pudiera ocupar más de una fila, no se borra.
-    if line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX {
+    if line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX && !keep_typed_line() {
         statements.push(PS_ERASE_TYPED_LINE.to_string());
     }
     statements.extend(powershell_statements(command, notice, pause, t));
@@ -676,7 +688,7 @@ fn sh_framed(
         format!(". {shown}")
     };
     let mut statements = Vec::new();
-    if line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX {
+    if line.chars().count() <= CMD_ERASE_TYPED_LINE_MAX && !keep_typed_line() {
         statements.push(SH_ERASE_TYPED_LINE.to_string());
     }
     if fish {

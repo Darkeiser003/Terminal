@@ -2,9 +2,10 @@
     // Raíz de la interfaz. Aquí se cargan el estado inicial y las suscripciones
     // a los eventos del pty: una sola vez para toda la app, no una por pestaña.
 
-    import { onMount, tick } from "svelte";
+    import { onMount, tick, untrack } from "svelte";
+    import { latestProfile, preferencesFingerprint, shouldOfferProfileUpdate } from "./lib/profile-update";
     import type { UnlistenFn } from "@tauri-apps/api/event";
-    import type { AgentControlRequest, ImportableRepository, PackageUpdateStatus, ProfileStatus, ShellAssistStatus, UpdateStatus } from "./lib/types";
+    import type { AgentControlRequest, ImportableRepository, PackageUpdateStatus, Preferences, ProfileStatus, ShellAssistStatus, UpdateStatus } from "./lib/types";
     import { DISMISSED_PACKAGE_UPDATE_KEY, DISMISSED_UPDATE_KEY } from "./lib/notices";
 
     import * as api from "./lib/api";
@@ -12,7 +13,7 @@
     import type { PaletteAppAction, PaletteEntry } from "./lib/command-palette";
     import { panels } from "./lib/panels.svelte";
     import * as perf from "./lib/performance";
-    import { matchesPaneShortcut, matchesShortcut } from "./lib/shortcuts";
+    import { goToTabIndex, matchesPaneShortcut, matchesShortcut } from "./lib/shortcuts";
     import { createTerminalRefreshScheduler } from "./lib/terminal-render";
     import {
         clampUiScale,
@@ -31,6 +32,8 @@
     import ProjectsPanel from "./components/ProjectsPanel.svelte";
     import ScriptsPanel from "./components/ScriptsPanel.svelte";
     import SettingsPanel from "./components/SettingsPanel.svelte";
+    import FirstSteps from "./components/FirstSteps.svelte";
+    import { openFirstSteps, shouldAutoShowFirstSteps } from "./lib/first-steps";
     import StorePanel from "./components/StorePanel.svelte";
     import TabBar from "./components/TabBar.svelte";
     import TerminalPane from "./components/TerminalPane.svelte";
@@ -83,8 +86,92 @@
     let profileOfferError = $state('');
     // «Ahora no» del modo de bajo consumo: solo esta sesión (17-11).
     let hideLowPowerForSession = $state(false);
+    // Una acción necesita administrador y no hay gsudo ni sudo de Windows
+    // (21-11): la barra explica qué hacer en vez de un error suelto.
+    let adminNeeded = $state<{ actionId: string; error: string } | null>(null);
+    let adminRestarting = $state(false);
+    // Ajustes cambiados con un perfil ya guardado (21-11): «Guardar en el
+    // perfil actual», «Crear otro», «Cerrar» y «No volver a mostrar».
+    let profileUpdateOffer = $state<{ name: string; path: string } | null>(null);
+    let profileUpdateSaving = $state(false);
+    let profileUpdateError = $state('');
+    // Turno de la última comprobación al cerrar Ajustes y huella de lo último
+    // guardado en el perfil desde el aviso (build 78: el aviso volvía a salir
+    // justo después de «Guardar en el perfil actual»).
+    let profileUpdateCheck = 0;
+    let profileSavedFingerprint = '';
+    let settingsFingerprint = '';
+    // La guía de primeros pasos (21-11): sale sola una vez cargados los
+    // ajustes, y mientras se ve los avisos de abajo esperan (CSS en <main>).
+    let firstStepsActive = $state(false);
+    let firstStepsConsidered = false;
+    $effect(() => {
+        const preferences = app.preferences;
+        const info = app.appInfo;
+        if (firstStepsConsidered || !preferences || !info) return;
+        firstStepsConsidered = true;
+        if (shouldAutoShowFirstSteps(preferences.showFirstSteps, Boolean(info.e2eTesting))) {
+            untrack(() => (firstStepsActive = true));
+        }
+    });
+    $effect(() => {
+        const open = panels.open === 'settings';
+        untrack(() => {
+            if (open) {
+                settingsFingerprint = preferencesFingerprint(app.preferences);
+                profileUpdateOffer = null;
+                // Una comprobación de un cierre anterior que aún no acabó ya
+                // no vale: sacaría el aviso con Ajustes abierto (build 78).
+                profileUpdateCheck += 1;
+            } else if (settingsFingerprint) {
+                const before = settingsFingerprint;
+                settingsFingerprint = '';
+                considerProfileUpdate(before);
+            }
+        });
+    });
+    // Solo en las pruebas E2E (22-11): sacar a la fuerza un aviso que en
+    // ellas no saldría (gsudo, ayudante de la shell, perfil portable) para
+    // probar sus botones y «No volver a mostrar». Fuera de las pruebas no
+    // existe. Respeta igual las preferencias de cada aviso.
+    let e2eForcedNotices = $state<Record<string, boolean>>({});
+    $effect(() => {
+        if (!app.appInfo?.e2eTesting) return;
+        (window as unknown as { __wtE2eForceNotice?: (kind: string) => boolean }).__wtE2eForceNotice = (kind: string) => {
+            if (kind === 'portableProfile') {
+                if (app.preferences?.offerPortableProfile === false) return false;
+                profileOffer = { dir: '(prueba)', profiles: [], customized: true };
+                return true;
+            }
+            // Las dos de actualizaciones, con datos de prueba (no se pulsa
+            // «Actualizar»: solo «Ahora no» y «No volver a mostrar»).
+            if (kind === 'packageUpdates') {
+                if (app.preferences?.checkPackageUpdatesOnStartup === false) return false;
+                packageUpdates = { available: true, manager: 'winget' };
+                return true;
+            }
+            if (kind === 'appUpdate') {
+                if (app.preferences?.checkUpdatesOnStartup === false) return false;
+                update = { currentVersion: '1.0.0', latestVersion: '9.9.9', available: true, canSelfUpdate: false };
+                return true;
+            }
+            if (kind === 'gsudo') hideGsudoOfferForSession = false;
+            if (kind === 'shellAssist') shellAssistOfferHidden = {};
+            e2eForcedNotices = { ...e2eForcedNotices, [kind]: true };
+            return true;
+        };
+        // El ajuste tal como lo ve la interfaz (24-11): al guardar, el backend
+        // lo tiene antes que la interfaz, y las pruebas deben esperar a esta.
+        (window as unknown as { __wtE2ePreference?: (key: string) => unknown }).__wtE2ePreference = (key: string) =>
+            (app.preferences as unknown as Record<string, unknown> | null)?.[key];
+        // Guardar ajustes por la interfaz, como desde Ajustes (26-11): guardarlos
+        // directamente en el backend no avisa a la interfaz.
+        (window as unknown as { __wtE2eSavePreferences?: (patch: Record<string, unknown>) => Promise<void> }).__wtE2eSavePreferences =
+            (patch: Record<string, unknown>) => app.savePreferences(patch as Partial<Preferences>);
+    });
     const gsudoOfferVisible = $derived(
-        Boolean(app.appInfo?.nsudoNeedsGsudo) && app.preferences?.offerGsudo !== false && !hideGsudoOfferForSession,
+        (Boolean(app.appInfo?.nsudoNeedsGsudo) || Boolean(e2eForcedNotices.gsudo))
+            && app.preferences?.offerGsudo !== false && !hideGsudoOfferForSession,
     );
     // Lo que piden las IA con `wterminal --ctl` (14-11): lo que necesita
     // permiso espera aquí, de uno en uno; «Permitir en esta sesión» deja pasar
@@ -170,9 +257,14 @@
     const shellAssistOffer = $derived.by(() => {
         const preferences = app.preferences;
         const environment = activeEnvironment;
-        if (!preferences || !environment || app.appInfo?.e2eTesting) return null;
+        if (!preferences || !environment) return null;
+        if (app.appInfo?.e2eTesting && !e2eForcedNotices.shellAssist) return null;
         if (preferences.shellAssist === false || preferences.offerShellAssist === false) return null;
         const kind = environment.kind;
+        if (app.appInfo?.e2eTesting && e2eForcedNotices.shellAssist) {
+            const key = 'e2e|';
+            return shellAssistOfferHidden[key] ? null : { key, kind: 'cmd' as const, label: 'Clink', search: 'clink', distro: null };
+        }
         if (kind !== 'cmd' && kind !== 'powershell' && kind !== 'bash' && kind !== 'zsh') return null;
         if (preferences[SHELL_ASSIST_PREFS[kind]] === false) return null;
         const distro = environment.distro ?? null;
@@ -219,6 +311,21 @@
     // hace que los bloques que aún esperan turno en la cola no se pinten sobre
     // la sesión siguiente.
     const outputEpochs = new Map<string, number>();
+    // La salida que espera turno en la cola, por pestaña (26-11, Romen: «las
+    // salidas salen letra a letra»). ConPTY entrega trozos de pocos bytes
+    // (un `ping` o un bucle de `echo`, casi un tercio de menos de 16) y cada
+    // `term.write` esperaba al anterior: 2000 líneas tardaban 100 s en cmd, a
+    // unos 80 trozos por segundo. Lo que llega mientras otro trozo se pinta se
+    // junta aquí y se escribe de una vez, en el mismo orden.
+    const outputBatches = new Map<string, { data: string; epoch: number }>();
+    /** Un trozo más grande que esto empieza otra escritura: xterm reparte
+     *  igual el trabajo, pero así ningún frame carga con megas de golpe. */
+    const OUTPUT_BATCH_MAX = 256 * 1024;
+    /** Un borrado o el fin del proceso van en la cola detrás de la salida que
+     *  ya espera: lo que llegue después no puede colarse delante de ellos. */
+    function closeOutputBatch(tabId: string): void {
+        outputBatches.delete(tabId);
+    }
     function consumeShortcut(event: KeyboardEvent): void {
         // Capturarlo en la fase de captura es importante: el textarea oculto de
         // xterm recibe las flechas antes que un listener normal de la ventana.
@@ -299,6 +406,54 @@
                 })
                 .catch(() => {});
         }, 45_000);
+    }
+
+    /** Al cerrar Ajustes: si cambió algo y ya hay un perfil, se ofrece
+     *  guardarlo. Se espera un momento y luego a que acabe de guardarse el
+     *  último cambio: con el equipo cargado guardar tardó 6,6 s y el aviso no
+     *  salía (larga 81, 21-11). */
+    function considerProfileUpdate(before: string): void {
+        const check = ++profileUpdateCheck;
+        const current = () => check === profileUpdateCheck && panels.open !== 'settings';
+        setTimeout(async () => {
+            await app.preferencesSettled();
+            if (!current() || app.preferences?.offerProfileUpdate === false) return;
+            const after = preferencesFingerprint(app.preferences);
+            // Lo que ya está guardado en el perfil no se vuelve a ofrecer.
+            if (before === after || after === profileSavedFingerprint) return;
+            void api.profileStatus()
+                .then((status) => {
+                    if (!current()) return;
+                    const latest = latestProfile(status.profiles);
+                    if (latest && shouldOfferProfileUpdate(before, after, status.profiles, app.preferences?.offerProfileUpdate !== false)) {
+                        profileUpdateError = '';
+                        profileUpdateOffer = { name: latest.name, path: latest.path };
+                    }
+                })
+                .catch(() => {});
+        }, 600);
+    }
+
+    async function saveProfileUpdate(mode: 'current' | 'new'): Promise<void> {
+        if (profileUpdateSaving || !profileUpdateOffer) return;
+        profileUpdateSaving = true;
+        profileUpdateError = '';
+        try {
+            const result = mode === 'current'
+                ? await api.updateProfile(profileUpdateOffer.path)
+                : await api.saveProfileNow();
+            if (!result.ok) {
+                profileUpdateError = result.error ?? app.t('profileOffer.failed', 'No se pudo guardar el perfil.');
+                return;
+            }
+            profileUpdateOffer = null;
+            profileSavedFingerprint = preferencesFingerprint(app.preferences);
+            profileUpdateCheck += 1;
+        } catch (cause) {
+            profileUpdateError = String(cause);
+        } finally {
+            profileUpdateSaving = false;
+        }
     }
 
     async function saveProfileFromOffer(): Promise<void> {
@@ -426,6 +581,7 @@
         // después del fastfetch nuevo.
         const previous = outputQueues.get(tabId) ?? Promise.resolve();
         outputEpochs.set(tabId, (outputEpochs.get(tabId) ?? 0) + 1);
+        closeOutputBatch(tabId);
         // Las promesas antiguas siguen resolviendo, pero ya no son la cola
         // vigente. La siguiente salida empieza desde una cola limpia.
         if (!preserveOrdering) outputQueues.delete(tabId);
@@ -565,7 +721,10 @@
             return;
         }
         // Atajos direccionales configurables: mover el foco en la vista dividida.
-        {
+        // Solo con la pantalla partida (22-11, Romen: «si no, no tienen uso
+        // real»): con una sola terminal la tecla llega a la shell. Antes, con
+        // Ctrl izq.+A/D/W/S, bash/zsh/WSL perdían Ctrl+A, D, W y S siempre.
+        if (app.visibleTabs.length >= 2) {
             const directions = [
                 [preferences.shortcutPaneLeft, "left"],
                 [preferences.shortcutPaneRight, "right"],
@@ -618,6 +777,15 @@
         if (extra) {
             consumeShortcut(event);
             void runAppAction(extra[1]);
+            return;
+        }
+        // Ir a la pestaña 1…10 con el número (22-11). Sin esa pestaña, la
+        // tecla sigue su camino.
+        const tabIndex = goToTabIndex(event, preferences.shortcutGoToTab);
+        const tabTarget = tabIndex === null ? undefined : app.tabs[tabIndex];
+        if (tabTarget) {
+            consumeShortcut(event);
+            void app.activateTab(tabTarget.id);
         }
     }
 
@@ -688,6 +856,10 @@
                 }
                 return null;
             }
+            case 'openFirstSteps':
+                panels.close();
+                openFirstSteps();
+                return null;
             case 'toggleTerminalOnly':
                 if (!preferences) return null;
                 panels.close();
@@ -781,6 +953,10 @@
             case 'renameTab':
                 app.renamingTabId = app.activeTabId;
                 return null;
+            case 'watchRunningTabs':
+                return (await app.watchRunningTabs())
+                    ? null
+                    : app.t('palette.noRunningTabs', 'No hay ninguna orden larga en marcha.');
             case 'toggleAgentChat':
                 if (preferences?.agentChat === false) return app.t('agentChat.disabled', 'El chat de agentes está apagado en Ajustes.');
                 app.agentChatVisible = !app.agentChatVisible;
@@ -959,9 +1135,21 @@
                 window.dispatchEvent(new CustomEvent('winslim:terminal-output-busy', {
                     detail: { tabId, data, ...(isShellClear ? { kind: 'clear' } : {}) },
                 }));
-                const previous = outputQueues.get(tabId) ?? Promise.resolve();
                 const epoch = outputEpochs.get(tabId) ?? 0;
+                // Si ya hay salida esperando turno (de esta misma sesión), este
+                // trozo va con ella en la misma escritura.
+                const waiting = outputBatches.get(tabId);
+                if (waiting && waiting.epoch === epoch && waiting.data.length + data.length <= OUTPUT_BATCH_MAX) {
+                    waiting.data += data;
+                    return;
+                }
+                const batch = { data, epoch };
+                outputBatches.set(tabId, batch);
+                const previous = outputQueues.get(tabId) ?? Promise.resolve();
                 const queued = previous.catch(() => undefined).then(() => new Promise<void>((resolve) => {
+                    // Le toca: desde aquí, lo que llegue va a la siguiente.
+                    if (outputBatches.get(tabId) === batch) outputBatches.delete(tabId);
+                    data = batch.data;
                     if ((outputEpochs.get(tabId) ?? 0) !== epoch) {
                         resolve();
                         return;
@@ -1045,6 +1233,7 @@
             // fila donde se escribe la siguiente entrada.
             api.onClear((tabId) => {
                 const previous = invalidateTerminalOutput(tabId, true);
+                closeOutputBatch(tabId);
                 // Marcar el origen permite que TerminalPane descarte la
                 // reserva horizontal de la salida anterior solo cuando el
                 // clear haya terminado. Un evento busy normal no debe tocar
@@ -1107,6 +1296,7 @@
                         "[Proceso finalizado con código {code}]",
                     )
                     .replace("{code}", String(code))}\x1b[0m`;
+                closeOutputBatch(tabId);
                 const previous = outputQueues.get(tabId) ?? Promise.resolve();
                 const queued = previous.catch(() => undefined).then(() => {
                     getTerminal(tabId)?.writeln(notice);
@@ -1159,9 +1349,12 @@
                     canSelfUpdate: status.canSelfUpdate,
                     reason: status.error ? 'unavailable' : undefined,
                 });
+                // La respuesta puede llegar tarde: si mientras tanto se pidió
+                // «No volver a mostrar», no sale (24-11).
                 if (
                     status.available
                     && status.canSelfUpdate
+                    && app.preferences?.checkUpdatesOnStartup !== false
                     && !updateWasDismissed(status.latestVersion)
                 ) update = status;
             })
@@ -1182,7 +1375,14 @@
                 packageUpdateCheck(status.available ? 'available' : 'none', {
                     manager: status.manager,
                 });
-                if (status.available && !packageUpdateWasDismissed(status.manager)) {
+                // winget puede tardar más de un minuto: si mientras tanto se
+                // pidió «No volver a mostrar», el aviso ya no sale (24-11:
+                // salía igual y la prueba de los avisos lo cazó).
+                if (
+                    status.available
+                    && app.preferences?.checkPackageUpdatesOnStartup !== false
+                    && !packageUpdateWasDismissed(status.manager)
+                ) {
                     packageUpdates = status;
                 }
             })
@@ -1236,6 +1436,10 @@
 
         window.addEventListener("error", onError);
         window.addEventListener("unhandledrejection", onRejection);
+        const onAdminNeeded = (event: Event) => {
+            adminNeeded = (event as CustomEvent<{ actionId: string; error: string }>).detail;
+        };
+        window.addEventListener(api.ADMIN_NEEDED_EVENT, onAdminNeeded);
         const onControlKeyState = (event: KeyboardEvent) => {
             if (event.code === "ControlLeft") leftControlPressed = event.type === "keydown";
         };
@@ -1252,6 +1456,7 @@
             window.removeEventListener('winslim:open-panel', openPanelFromTerminal);
             window.removeEventListener("error", onError);
             window.removeEventListener("unhandledrejection", onRejection);
+            window.removeEventListener(api.ADMIN_NEEDED_EVENT, onAdminNeeded);
             window.removeEventListener("keydown", onControlKeyState, true);
             window.removeEventListener("keyup", onControlKeyState, true);
             window.removeEventListener("blur", onWindowBlur);
@@ -1275,6 +1480,7 @@
 
 <main
     class:platform-linux={app.appInfo?.platform === "linux"}
+    class:first-steps-active={firstStepsActive}
     class:terminal-only={app.preferences?.terminalOnlyMode === true}
     data-window-mode={app.preferences?.terminalOnlyMode === true ? "terminal-only" : "normal"}
     aria-label={app.preferences?.terminalOnlyMode === true
@@ -1356,7 +1562,7 @@
                     class="terminal-only-guide-action"
                     data-testid="terminal-only-guide-dismiss"
                     onclick={() => (hideTerminalOnlyGuideForSession = true)}
-                >{app.t("terminal.terminalOnlyGuideDismiss", "Cerrar esta vez")}</button>
+                >{app.t("update.later", "Ahora no")}</button>
                 <button
                     type="button"
                     class="terminal-only-guide-action terminal-only-guide-action-danger"
@@ -1365,7 +1571,7 @@
                         hideTerminalOnlyGuideForSession = true;
                         void app.savePreferences({ showTerminalOnlyGuide: false });
                     }}
-                >{app.t("terminal.terminalOnlyGuideNever", "No mostrar nunca más")}</button>
+                >{app.t("notice.never", "No volver a mostrar")}</button>
             </div>
         </div>
     {/if}
@@ -1416,6 +1622,49 @@
                         neverShowAgain({ offerGsudo: false });
                     }}
                 >{app.t("notice.never", "No volver a mostrar")}</button>
+            </div>
+        </div>
+    {/if}
+
+    <!-- Una acción necesita administrador (21-11): la pidió el usuario, así
+         que sale siempre, con las dos salidas posibles y «Cerrar». -->
+    {#if adminNeeded}
+        <div class="update" role="alert" data-testid="admin-needed" data-action={adminNeeded.actionId}>
+            <span>
+                {app.t("adminNeeded.text", "Esta acción necesita permisos de administrador. Con gsudo, Windows pedirá permiso (UAC) solo para ella; también puedes reiniciar WTerminal como administrador.")}
+                {#if gsudoError}<strong class="update-error" role="alert">{gsudoError}</strong>{/if}
+            </span>
+            <div class="update-actions">
+                <button
+                    type="button"
+                    class="primary"
+                    data-testid="admin-needed-gsudo"
+                    disabled={gsudoInstalling || !app.activeTabId}
+                    onclick={async () => {
+                        await installGsudo();
+                        if (!gsudoError) adminNeeded = null;
+                    }}
+                >{app.t("gsudoOffer.install", "Instalar gsudo")}</button>
+                <button
+                    type="button"
+                    data-testid="admin-needed-restart"
+                    disabled={adminRestarting}
+                    onclick={async () => {
+                        adminRestarting = true;
+                        try {
+                            await api.restartAsAdmin();
+                        } catch (cause) {
+                            gsudoError = String(cause);
+                        } finally {
+                            adminRestarting = false;
+                        }
+                    }}
+                >{app.t("settings.restartAsAdmin", "Reiniciar como administrador")}</button>
+                <button
+                    type="button"
+                    data-testid="admin-needed-close"
+                    onclick={() => (adminNeeded = null)}
+                >{app.t("common.close", "Cerrar")}</button>
             </div>
         </div>
     {/if}
@@ -1502,6 +1751,27 @@
         </div>
     {/if}
 
+    {#each app.commandDoneNotices as notice (notice.id)}
+        <!-- La orden larga de otra pestaña terminó (26-11). -->
+        <div class="update command-done" class:failed={notice.failed} role="status" aria-live="polite" data-testid="command-done-notice" data-tab-id={notice.tabId}>
+            <span>{notice.text}</span>
+            <div class="update-actions">
+                <button
+                    type="button"
+                    class="primary"
+                    data-testid="command-done-go"
+                    onclick={() => { app.dismissCommandDone(notice.id); void app.openTab(notice.tabId); }}
+                >{app.t('terminal.commandDoneGo', 'Ir a la pestaña')}</button>
+                <button type="button" data-testid="command-done-close" onclick={() => app.dismissCommandDone(notice.id)}>{app.t('terminal.commandDoneClose', 'Cerrar')}</button>
+                <button
+                    type="button"
+                    data-testid="command-done-never"
+                    onclick={() => { app.dismissCommandDone(notice.id); neverShowAgain({ commandDoneOtherTab: false }); }}
+                >{app.t('notice.never', 'No volver a mostrar')}</button>
+            </div>
+        </div>
+    {/each}
+
     {#if lowPowerReason && !hideLowPowerForSession && !importSuggestion && !packageUpdates?.available && !update}
         <div class="update" role="status" aria-live="polite" data-testid="low-power-suggestion">
             <span>
@@ -1535,6 +1805,33 @@
                     onclick={() => {
                         profileOffer = null;
                         neverShowAgain({ offerPortableProfile: false });
+                    }}
+                >{app.t('notice.never', 'No volver a mostrar')}</button>
+            </div>
+        </div>
+    {/if}
+
+    <!-- Ajustes cambiados con un perfil ya guardado (21-11, Romen). Lo pide
+         lo que el usuario acaba de hacer, así que no espera a los demás. -->
+    {#if profileUpdateOffer}
+        <div class="update" role="status" aria-live="polite" data-testid="profile-update-offer">
+            <span>
+                {app.t('profileUpdate.text', 'Has cambiado ajustes. ¿Los guardas en tu perfil portable para no perderlos al reinstalar o en otro equipo?')}
+                <small>{app.t('profileUpdate.current', 'Perfil actual: {name}').replace('{name}', profileUpdateOffer.name)}</small>
+                {#if profileUpdateError}<strong class="update-error" role="alert">{profileUpdateError}</strong>{/if}
+            </span>
+            <div class="update-actions">
+                <button type="button" class="primary" data-testid="profile-update-current" disabled={profileUpdateSaving} onclick={() => saveProfileUpdate('current')}>
+                    {profileUpdateSaving ? app.t('profileOffer.saving', 'Guardando…') : app.t('profileUpdate.saveCurrent', 'Guardar en el perfil actual')}
+                </button>
+                <button type="button" data-testid="profile-update-new" disabled={profileUpdateSaving} onclick={() => saveProfileUpdate('new')}>{app.t('profileUpdate.saveNew', 'Crear otro perfil')}</button>
+                <button type="button" data-testid="profile-update-dismiss" onclick={() => (profileUpdateOffer = null)}>{app.t('update.later', 'Ahora no')}</button>
+                <button
+                    type="button"
+                    data-testid="profile-update-never"
+                    onclick={() => {
+                        profileUpdateOffer = null;
+                        neverShowAgain({ offerProfileUpdate: false });
                     }}
                 >{app.t('notice.never', 'No volver a mostrar')}</button>
             </div>
@@ -1596,7 +1893,7 @@
                         ? app.t('update.installing', 'Actualizando…')
                         : app.t('update.packagesNow', 'Actualizar')}
                 </button>
-                <button type="button" onclick={dismissPackageUpdates}>
+                <button type="button" data-testid="package-update-dismiss" onclick={dismissPackageUpdates}>
                     {app.t('update.later', 'Ahora no')}
                 </button>
                 <button
@@ -1663,7 +1960,7 @@
                         ? app.t("update.installing", "Actualizando…")
                         : app.t("update.install", "Actualizar y reiniciar")}
                 </button>
-                <button type="button" disabled={updating} onclick={dismissUpdate}>
+                <button type="button" data-testid="update-dismiss" disabled={updating} onclick={dismissUpdate}>
                     {app.t("update.later", "Ahora no")}
                 </button>
                 <button
@@ -1692,6 +1989,7 @@
     {/if}
     {#if settingsMounted}
         <SettingsPanel bind:this={settings} />
+        <FirstSteps bind:active={firstStepsActive} />
     {/if}
     {#if storeMounted}
         <StorePanel bind:this={store} />
@@ -1705,6 +2003,12 @@
 </main>
 
 <style>
+    /* Mientras se ve la guía de primeros pasos, los avisos de abajo esperan:
+       siguen en su estado y salen al cerrarla (21-11). */
+    main.first-steps-active .update {
+        display: none;
+    }
+
     main {
         display: flex;
         flex-direction: column;
@@ -1904,6 +2208,11 @@
         background: var(--accent-soft);
         color: var(--text);
         font-size: 12px;
+    }
+
+    /* Una orden de otra pestaña que falló: con el color de los fallos. */
+    .update.command-done.failed {
+        border-top-color: var(--danger);
     }
 
     .update > span {

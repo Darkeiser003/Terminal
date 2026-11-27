@@ -889,21 +889,37 @@ mod tests {
     /// empezar y la orden se veía letra a letra (15-11).
     #[test]
     fn el_eco_de_una_shell_lenta_en_empezar_tambien_sale_entero() {
-        let control = ReadControl::new(false);
         // Pedida con 500 ms para empezar; la shell tarda ~280 ms en el primer
         // trozo y repinta cada 30 ms (menos que el hueco de 100 ms), así que
         // el Intro llega hacia los 450-550 ms: contando desde que se pidió, se
         // habría soltado a los 500 ms, a veces con la orden a medias.
-        *control.echo_hold.lock() = Some((Instant::now() + Duration::from_millis(500), 1));
-        std::thread::sleep(Duration::from_millis(250));
-        let data = delivered_with(
-            ChunkedReader {
-                chunks: typed_echo(),
-                pause: Duration::from_millis(30),
-            },
-            &control,
+        //
+        // 21-11: con las 1067 pruebas a la vez en la VM lenta, el hilo del
+        // lector llegó a dormir más de 100 ms entre dos trozos de 30 ms y el
+        // hueco soltó «wwi» (sola pasaba 8 de 8). El hueco medido no es el de
+        // la prueba, así que se dan hasta tres intentos: un fallo real de la
+        // lógica falla los tres.
+        let mut last = Vec::new();
+        for _ in 0..3 {
+            let control = ReadControl::new(false);
+            *control.echo_hold.lock() = Some((Instant::now() + Duration::from_millis(500), 1));
+            std::thread::sleep(Duration::from_millis(250));
+            let data = delivered_with(
+                ChunkedReader {
+                    chunks: typed_echo(),
+                    pause: Duration::from_millis(30),
+                },
+                &control,
+            );
+            if data.first().map(String::as_str) == Some("wwiwinwinget upgrade\r\n") {
+                return;
+            }
+            last = data;
+        }
+        assert_eq!(
+            last.first().map(String::as_str),
+            Some("wwiwinwinget upgrade\r\n")
         );
-        assert_eq!(data[0], "wwiwinwinget upgrade\r\n");
     }
 
     #[test]
@@ -1011,6 +1027,64 @@ mod tests {
     fn el_viewport_por_defecto_es_80x24() {
         let size: PtySize = Viewport::default().into();
         assert_eq!((size.cols, size.rows), (80, 24));
+    }
+
+    /// Medición a mano (26-11, salida letra a letra): cuánto tarda la consola
+    /// de Windows en sacar 2000 líneas de cmd, sin la ventana de WTerminal.
+    /// `cargo test medir_velocidad_de_conpty -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn medir_velocidad_de_conpty() {
+        let (data_tx, data_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let cwd = std::env::temp_dir();
+        let args: Vec<String> = [
+            "/d",
+            "/c",
+            "for /L %i in (1,1,2000) do @echo linea %i de salida para medir la velocidad de WTerminal",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect();
+        for cols in [120u16, 1024] {
+            let started = Instant::now();
+            let tx = data_tx.clone();
+            let exit = exit_tx.clone();
+            let _session = spawn(
+                SpawnConfig {
+                    exe: "cmd.exe",
+                    args: &args,
+                    cwd: &cwd,
+                    viewport: Viewport { cols, rows: 30 },
+                    coalesce: false,
+                    extra_env: &[],
+                },
+                move |event| {
+                    if let PtyEvent::Data(text) = event {
+                        let _ = tx.send(text.len());
+                    }
+                },
+                move |code| {
+                    let _ = exit.send(code);
+                },
+            )
+            .expect("el pty arranca");
+            exit_rx
+                .recv_timeout(Duration::from_secs(300))
+                .expect("cmd termina");
+            let elapsed = started.elapsed();
+            let mut chunks = 0usize;
+            let mut bytes = 0usize;
+            while let Ok(size) = data_rx.recv_timeout(Duration::from_millis(500)) {
+                chunks += 1;
+                bytes += size;
+            }
+            eprintln!(
+                "conpty {cols} columnas: {} ms, {chunks} trozos, {bytes} bytes, dll propia: {:?}",
+                elapsed.as_millis(),
+                sideloaded_conpty()
+            );
+        }
     }
 
     #[test]

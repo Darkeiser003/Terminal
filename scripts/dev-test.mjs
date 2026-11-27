@@ -15,10 +15,10 @@
 //   npm run dev:test -- --rust wsl::tests --js test:frontend-logic
 import { execFile as execFileCallback, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, parse as parsePath, relative, resolve } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -42,6 +42,7 @@ const SIGNING_KEY_NAMES = {
 const USAGE = `Uso: npm run dev:test -- [opciones]
 
   --only a,b        escenarios E2E por su id (npm run dev:test -- --list)
+  --suite a,b       suites enteras con sus repeticiones (p. ej. intermitentes)
   --matrix a,b      matriz de shells/REPL solo con esos entornos, en ese orden
   --video           graba vídeo de cada escenario (E2E_CAPTURE_VIDEO=1)
   --repeat N        repite cada escenario N veces (por defecto 1)
@@ -61,7 +62,7 @@ const USAGE = `Uso: npm run dev:test -- [opciones]
 const splitList = (value) => value.split(',').map((item) => item.trim()).filter(Boolean);
 
 export function parseDevTestArgs(argv) {
-    const options = { only: [], matrix: [], rust: [], js: [], env: {}, repeat: 1, video: false, keepWsl: false, list: false, help: false, sign: true };
+    const options = { only: [], suites: [], matrix: [], rust: [], js: [], env: {}, repeat: 1, video: false, keepWsl: false, list: false, help: false, sign: true };
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
         const value = () => {
@@ -71,6 +72,8 @@ export function parseDevTestArgs(argv) {
             return next;
         };
         if (arg === '--only') options.only.push(...splitList(value()));
+        // Una suite entera con sus repeticiones (por ejemplo `intermitentes`, 22-11).
+        else if (arg === '--suite') options.suites.push(...splitList(value()));
         else if (arg === '--matrix') options.matrix.push(...splitList(value()));
         else if (arg === '--rust') options.rust.push(value());
         else if (arg === '--js') options.js.push(...splitList(value()));
@@ -100,7 +103,7 @@ export function parseDevTestArgs(argv) {
     if (options.binary && options.build && options.build !== 'none') {
         throw new Error('--binary usa un binario ya compilado: no se puede combinar con --build distinto de none');
     }
-    const wantsE2e = options.only.length > 0 || options.matrix.length > 0;
+    const wantsE2e = options.only.length > 0 || options.suites.length > 0 || options.matrix.length > 0;
     options.build = options.binary ? 'none' : (options.build ?? (wantsE2e ? 'fast' : 'none'));
     if (options.keysDir && !options.sign) throw new Error('--keys-dir y --no-sign se contradicen');
     if (options.keysDir && options.build === 'none') throw new Error('--keys-dir firma lo que se compila: no sirve sin compilar');
@@ -196,6 +199,50 @@ export function binaryFor(build, platform = process.platform) {
     return join(projectRoot, 'src-tauri', 'target', profile, name);
 }
 
+/** GB libres en la unidad de `path`, o `null` si no se puede medir. */
+export function freeGb(path) {
+    try {
+        const stats = statfsSync(path);
+        return Math.round((stats.bavail * stats.bsize) / 1024 ** 3 * 10) / 10;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * La misma regla que `windows/build.ps1` (23-11): si la unidad del temporal
+ * no llega a los 5 GB que piden las capturas y el vídeo y la de `target` va
+ * sobrada (10 GB o más), los resultados y el temporal de esta ejecución van
+ * junto a `target`. 25-11: la auditoría del catálogo dejó C: a 0 MB con sus
+ * 1,8 GB de capturas y no pudo escribir su informe. Devuelve la carpeta base
+ * o `null` si no hace falta.
+ */
+export function roomyBase({ tempDir, targetDir, tempFree, targetFree }) {
+    if (!tempDir || !targetDir || tempFree === null || targetFree === null) return null;
+    if (parsePath(resolve(tempDir)).root.toLowerCase() === parsePath(resolve(targetDir)).root.toLowerCase()) return null;
+    if (tempFree >= 5 || targetFree < 10) return null;
+    return dirname(resolve(targetDir));
+}
+
+function moveToRoomyDrive() {
+    const tempDir = process.env.TEMP || process.env.TMP || '';
+    let targetDir = join(projectRoot, 'src-tauri', 'target');
+    try {
+        targetDir = realpathSync(targetDir);
+    } catch {
+        return null;
+    }
+    const base = roomyBase({ tempDir, targetDir, tempFree: freeGb(tempDir), targetFree: freeGb(targetDir) });
+    if (!base) return null;
+    const movedTemp = join(base, 'temp');
+    process.env.TEMP = movedTemp;
+    process.env.TMP = movedTemp;
+    process.stdout.write(`
+[AVISO] Poco sitio en el temporal (${tempDir}): esta ejecución usa ${base}.
+`);
+    return base;
+}
+
 export function run(command, args, env = {}) {
     return new Promise((resolveRun) => {
         const child = spawn(command, args, { cwd: projectRoot, stdio: 'inherit', env: { ...process.env, ...env } });
@@ -228,7 +275,7 @@ async function main() {
         printList();
         return 0;
     }
-    const scenarios = resolveScenarios(options.only);
+    const scenarios = [...resolveScenarios(options.only), ...planSuites(options.suites)];
     if (!scenarios.length && !options.matrix.length && !options.rust.length && !options.js.length && options.build === 'none') {
         process.stdout.write(USAGE);
         return 2;
@@ -239,7 +286,9 @@ async function main() {
     const signing = await prepareSigning(options);
     if (signing.warning) process.stdout.write(`\n[AVISO] Sin firmar: ${signing.warning}\n`);
     const stamp = new Date().toISOString().replace(/[:.]/gu, '-').slice(0, 19);
-    const out = resolve(options.out ?? join(projectRoot, 'artifacts', 'dev-test', stamp));
+    const roomy = moveToRoomyDrive();
+    if (roomy) await mkdir(process.env.TEMP, { recursive: true });
+    const out = resolve(options.out ?? join(roomy ?? join(projectRoot, 'artifacts'), 'dev-test', stamp));
     await mkdir(out, { recursive: true });
     const results = [];
     const step = async (kind, label, action) => {

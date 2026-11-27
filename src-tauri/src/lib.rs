@@ -340,6 +340,11 @@ pub fn run() {
             session_files::prune_orphaned_sessions();
         });
 
+    // Limpieza automática de lo regenerable (24-11): apagada de fábrica.
+    let _ = std::thread::Builder::new()
+        .name("regenerable-clean".into())
+        .spawn(config::regenerable::auto_clean_if_due);
+
     // Sincroniza el PATH antes de crear la primera pestaña y antes de que el
     // frontend pueda pedir el catálogo de dependencias. Esto incluye
     // WindowsApps, donde reside winget en instalaciones modernas, aunque el
@@ -464,6 +469,7 @@ pub fn run() {
             commands::profile_import,
             commands::profile_status,
             commands::profile_save_now,
+            commands::profile_update,
             config::plugins::plugins_list,
             config::plugins::plugins_set_enabled,
             config::plugins::plugins_install,
@@ -478,6 +484,10 @@ pub fn run() {
             terminal::banner_image::banner_image_read,
             platform::path_integration::path_integration_status,
             toolchain_store::toolchain_store_status,
+            config::programs::programs_cached,
+            config::programs::programs_list,
+            config::programs::programs_set,
+            config::programs::programs_undo,
             terminal::shell_assist::shell_assist_status,
             terminal::links::terminal_open_link,
             environments::ai_keys::ai_key_offer,
@@ -490,10 +500,22 @@ pub fn run() {
             environments::agent_chat::agent_chat_read_attachment,
             environments::agent_chat::agent_chat_failure_help,
             environments::agent_chat::agent_chat_models,
+            environments::agent_chat_history::agent_chat_history_list,
+            environments::agent_chat_history::agent_chat_history_load,
+            environments::agent_chat_history::agent_chat_history_save,
+            environments::agent_chat_history::agent_chat_history_delete,
+            environments::agent_chat_history::agent_chat_history_clear,
+            environments::agent_chat_history::agent_chat_history_pin,
+            environments::agent_chat_history::agent_chat_native_forget,
+            environments::agent_chat_history::agent_chat_export,
+            environments::agent_chat_history::agent_chat_session_load,
+            environments::agent_chat_history::agent_chat_session_save,
             app::agent_control::agent_control_reply,
             terminal::cmd_failure::cmd_not_found_text,
             toolchain_store::toolchain_store_external_sizes,
             toolchain_store::toolchain_store_clear_caches,
+            config::regenerable::regenerable_sizes,
+            config::regenerable::regenerable_clean,
             store_adopt::store_adopt_candidates,
             store_adopt::store_adopt_run,
             store_adopt::store_adopt_confirm,
@@ -688,6 +710,10 @@ pub fn run() {
             let _ = std::thread::Builder::new()
                 .name("update-startup".into())
                 .spawn(commands_update::on_startup);
+            // Ajustes › Programas: recomendados y caché, en segundo plano.
+            let _ = std::thread::Builder::new()
+                .name("programs-warm-up".into())
+                .spawn(config::programs::warm_up);
             Ok(())
         })
         .on_window_event(|window, event| {

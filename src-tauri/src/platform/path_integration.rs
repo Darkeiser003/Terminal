@@ -162,6 +162,13 @@ pub fn sync_tool_bins() -> Result<(), String> {
     )
 }
 
+/// Avisa a Windows (y a las ventanas abiertas) de que cambió una variable
+/// de entorno del usuario. Lo usan los ajustes de programas (22-11).
+#[cfg(windows)]
+pub fn notify_environment_changed() {
+    host::broadcast_environment_change();
+}
+
 #[cfg(windows)]
 mod host {
     use super::PathIntegrationStatus;
@@ -284,7 +291,7 @@ mod host {
         Ok(())
     }
 
-    fn broadcast_environment_change() {
+    pub(super) fn broadcast_environment_change() {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         use std::ptr::null_mut;

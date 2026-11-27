@@ -129,6 +129,8 @@ for (const id of ['nu', 'xonsh', 'elvish']) {
 for (const [id, reasonPart] of [
     ['nsudo:cmd', 'runner E2E elevado'],
     ['nsudo:powershell', 'runner E2E elevado'],
+    ['gsudo:cmd', 'UAC'],
+    ['gsudo:powershell', 'UAC'],
     ['adb:DEVICE-1', 'dispositivo real'],
     ['docker:container:1', 'contenedor externo'],
     ['ai:claude', 'asistente de IA'],

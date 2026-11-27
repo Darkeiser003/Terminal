@@ -9,6 +9,7 @@ use std::process::Command;
 use super::traits::{HostPlatform, PathPlatform, ProcessPlatform};
 
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 
 pub struct WindowsPlatform;
 
@@ -18,6 +19,17 @@ impl ProcessPlatform for WindowsPlatform {
         // núcleos con la CPU ocupada, `gh`, `git` y las sondas de Dependencias
         // casi no avanzaban (la precarga no terminaba y Mi GitHub no cargaba).
         command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    fn configure_probe_priority(&self, command: &mut Command, low: bool) {
+        // 26-11: con decenas de sondas a prioridad normal, la salida de las
+        // shells iba a un tercio durante el primer minuto (cmd, de 153 a 49
+        // líneas por segundo). Va junto al límite de sondas a la vez
+        // (`probe_parallel_limit`): solas, con la CPU ocupada en un equipo
+        // de 2 núcleos, casi no avanzaban (ver `configure_background_command`).
+        if low {
+            command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+        }
     }
 
     fn configure_detached_command(&self, command: &mut Command) {

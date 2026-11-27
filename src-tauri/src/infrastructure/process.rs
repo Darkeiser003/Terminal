@@ -400,6 +400,91 @@ pub fn run_with_timeout_capture_stdin(
     run_with_timeout_inner(program, args, timeout, environment, true, Some(input))
 }
 
+/// Cuántas sondas pueden correr a la vez (26-11, Romen: «de forma dinámica en
+/// función de las capacidades, el modo bajo rendimiento…»). Un número en
+/// Ajustes (`probeMaxParallel`) manda; con 0, automático: una sola con el modo
+/// de bajo consumo y, si no, la mitad de los hilos de la CPU (como mínimo
+/// una). Antes corrían todas a la vez y frenaban la salida de las pestañas.
+pub fn probe_parallel_limit(configured: i64, low_power: bool, cpu_threads: usize) -> usize {
+    if configured > 0 {
+        return configured as usize;
+    }
+    if low_power {
+        return 1;
+    }
+    (cpu_threads / 2).max(1)
+}
+
+fn current_probe_limit() -> usize {
+    let preferences = crate::preferences::current();
+    let threads = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    probe_parallel_limit(
+        preferences.probe_max_parallel,
+        preferences.low_power_mode,
+        threads,
+    )
+}
+
+struct ProbeSlots {
+    running: std::sync::Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+fn probe_slots() -> &'static ProbeSlots {
+    static SLOTS: std::sync::OnceLock<ProbeSlots> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| ProbeSlots {
+        running: std::sync::Mutex::new(0),
+        freed: std::sync::Condvar::new(),
+    })
+}
+
+/// El turno de una sonda: se suelta al terminar, aunque falle.
+struct ProbeSlot;
+
+impl ProbeSlot {
+    /// Espera a que haya sitio. El límite se lee cada vez: cambiarlo en
+    /// Ajustes vale para las sondas siguientes, sin reiniciar.
+    fn acquire() -> Self {
+        let slots = probe_slots();
+        let mut running = slots
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *running >= current_probe_limit() {
+            running = slots
+                .freed
+                .wait_timeout(running, Duration::from_millis(250))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *running += 1;
+        ProbeSlot
+    }
+}
+
+impl Drop for ProbeSlot {
+    fn drop(&mut self) {
+        let slots = probe_slots();
+        let mut running = slots
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *running = running.saturating_sub(1);
+        slots.freed.notify_all();
+    }
+}
+
+/// Una sonda: hueco entre las que corren a la vez y, si se pide, prioridad
+/// baja. El plazo de la sonda cuenta desde que le toca, no desde la cola.
+fn prepare_probe(command: &mut Command) -> ProbeSlot {
+    let slot = ProbeSlot::acquire();
+    crate::platform::host()
+        .configure_probe_priority(command, crate::preferences::current().probe_low_priority);
+    slot
+}
+
 fn run_with_timeout_inner(
     program: &str,
     args: &[&str],
@@ -410,6 +495,7 @@ fn run_with_timeout_inner(
 ) -> Option<Output> {
     let mut command = hidden_command(program);
     configure_process_tree(&mut command);
+    let _slot = prepare_probe(&mut command);
     command.envs(environment.iter().copied());
     if capture_stderr {
         command.stderr(Stdio::piped());
@@ -539,6 +625,7 @@ pub fn output_text(program: &str, args: &[&str], timeout: Duration) -> Option<St
 pub fn output_text_probe(program: &str, args: &[&str], timeout: Duration) -> ProbeOutput {
     let mut command = hidden_command(program);
     configure_process_tree(&mut command);
+    let _slot = prepare_probe(&mut command);
     let Ok(mut child) = command.args(args).spawn() else {
         return ProbeOutput::NotFound;
     };
@@ -650,6 +737,26 @@ fn decode_console_output(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn las_sondas_a_la_vez_dependen_del_equipo_salvo_que_se_fijen() {
+        // Automático: la mitad de los hilos, una en bajo consumo, nunca cero.
+        assert_eq!(probe_parallel_limit(0, false, 8), 4);
+        assert_eq!(probe_parallel_limit(0, false, 1), 1);
+        assert_eq!(probe_parallel_limit(0, true, 16), 1);
+        // Un número en Ajustes manda, también en bajo consumo.
+        assert_eq!(probe_parallel_limit(6, true, 2), 6);
+    }
+
+    #[test]
+    fn el_turno_de_una_sonda_se_devuelve_al_terminar() {
+        let before = *probe_slots().running.lock().unwrap();
+        {
+            let _slot = ProbeSlot::acquire();
+            assert_eq!(*probe_slots().running.lock().unwrap(), before + 1);
+        }
+        assert_eq!(*probe_slots().running.lock().unwrap(), before);
+    }
 
     /// Lo que lanza el chat (`hidden_command`) recibe el entorno base, como
     /// las pestañas: ahí van los ajustes que apagan la autoactualización de

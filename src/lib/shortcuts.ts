@@ -42,6 +42,7 @@ export const SHORTCUT_PREFERENCE_KEYS = [
     'shortcutTerminalFontDown',
     'shortcutTerminalFontReset',
     'shortcutToggleAgentChat',
+    'shortcutGoToTab',
 ] as const;
 
 export type ShortcutPreferenceKey = (typeof SHORTCUT_PREFERENCE_KEYS)[number];
@@ -90,6 +91,7 @@ export const SHORTCUT_DEFINITIONS: ReadonlyArray<{
     { key: 'shortcutTerminalFontDown', labelKey: 'palette.action.terminalFontDown', fallback: 'Achicar la letra de la terminal' },
     { key: 'shortcutTerminalFontReset', labelKey: 'palette.action.terminalFontReset', fallback: 'Letra de la terminal a su tamaño de fábrica' },
     { key: 'shortcutToggleAgentChat', labelKey: 'palette.action.toggleAgentChat', fallback: 'Mostrar u ocultar el chat de agentes' },
+    { key: 'shortcutGoToTab', labelKey: 'settings.shortcutGoToTab', fallback: 'Ir a la pestaña 1 (con 2…9 y 0, las siguientes)' },
 ];
 
 const MODIFIER_ORDER = ['ctrl', 'alt', 'shift', 'meta'] as const;
@@ -192,7 +194,12 @@ export function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean
     if (!normalized) return false;
     const parts = normalized.split('+');
     const expectedKey = parts.at(-1);
-    return eventKey(event) === expectedKey
+    // «+» y «-» por su carácter además de por la tecla física: en el teclado
+    // español «+» es la tecla BracketRight y «-» la Slash, no Equal ni Minus
+    // (22-11, letra de la terminal con Ctrl + «+» / «-»).
+    const byCharacter = (expectedKey === 'equal' && (event.key === '+' || event.key === '='))
+        || (expectedKey === 'minus' && event.key === '-');
+    return (eventKey(event) === expectedKey || byCharacter)
         && event.ctrlKey === parts.includes('ctrl')
         && event.altKey === parts.includes('alt')
         && event.shiftKey === parts.includes('shift')
@@ -209,8 +216,12 @@ export function matchesPaneShortcut(
 ): boolean {
     const normalized = normalizeShortcut(shortcut);
     if (!normalized) return false;
-    return matchesShortcut(event, normalized)
-        && (!normalized.split('+').includes('ctrl') || leftControlPressed);
+    // Ctrl + una letra (el antiguo W/A/S/D, o uno puesto a mano) solo con el
+    // Ctrl izquierdo: el derecho sigue llegando a la shell. Con flechas u
+    // otras teclas no hace falta (22-11: Ctrl+Alt + flechas de fábrica).
+    const parts = normalized.split('+');
+    const letterWithCtrl = parts.includes('ctrl') && /^[a-z]$/u.test(parts.at(-1) ?? '');
+    return matchesShortcut(event, normalized) && (!letterWithCtrl || leftControlPressed);
 }
 
 /** Combinaciones que las shells usan para editar la línea (readline de bash y
@@ -233,4 +244,21 @@ export function shortcutConflicts(
     const duplicateOf = SHORTCUT_PREFERENCE_KEYS.find((other) =>
         other !== key && normalizeShortcut(shortcuts[other] ?? '') === normalized) ?? null;
     return { shell: SHELL_RESERVED_SHORTCUTS.includes(normalized), duplicateOf };
+}
+
+/** «Ir a la pestaña N» (22-11): el atajo guardado es el de la pestaña 1
+ *  («Ctrl+Shift+1»); con los mismos modificadores, 2…9 van a las pestañas 2
+ *  a 9 y 0 a la 10. Devuelve la posición (0-9) o `null`. */
+export function goToTabIndex(event: KeyboardEvent, shortcut: string): number | null {
+    const normalized = normalizeShortcut(shortcut);
+    if (!normalized) return null;
+    const digit = /^Digit([0-9])$/u.exec(event.code ?? '')?.[1];
+    if (digit === undefined) return null;
+    const modifiers = normalized.split('+').slice(0, -1);
+    const same = event.ctrlKey === modifiers.includes('ctrl')
+        && event.altKey === modifiers.includes('alt')
+        && event.shiftKey === modifiers.includes('shift')
+        && event.metaKey === modifiers.includes('meta');
+    if (!same) return null;
+    return digit === '0' ? 9 : Number(digit) - 1;
 }

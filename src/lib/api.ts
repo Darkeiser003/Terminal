@@ -13,7 +13,9 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { openPath } from '@tauri-apps/plugin-opener';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
+import type { AgentChatSummary, ChatSession, NativeSession, StoredChat } from './agent-chat-history';
 import type {
+    ProgramSection,
     ActionResult,
     AgentControlRequest,
     GhAdminAction,
@@ -249,6 +251,8 @@ export const profileStatus = () => invokeLogged<ProfileStatus>('profile_status')
 
 /** Guarda un perfil en su carpeta, sin diálogo (`<App>-Perfil-<fecha>`). */
 export const saveProfileNow = () => invokeLogged<ProfileTransferResult>('profile_save_now');
+/** Guarda los ajustes actuales en un perfil que ya existe en su carpeta (21-11). */
+export const updateProfile = (path: string) => invokeLogged<ProfileTransferResult>('profile_update', { path });
 
 /** `dir` + `name` con el separador de la plataforma. */
 function inProfilesDir(dir: string, name: string): string {
@@ -370,13 +374,26 @@ export const cmdNotFoundText = (): Promise<string | null> => {
 export const agentChatAgents = () => invokeLogged<AgentChatAgent[]>('agent_chat_agents');
 /** Lanza una pregunta; la respuesta llega con `onAgentChatData` y
  *  `onAgentChatDone`. La pregunta va por la entrada estándar de la CLI. */
-export const agentChatAsk = (envId: string, prompt: string, tabId?: string | null, model?: string | null, effort?: string | null, mode?: string | null, fast?: boolean) =>
+export const agentChatAsk = (envId: string, prompt: string, tabId?: string | null, model?: string | null, effort?: string | null, mode?: string | null, fast?: boolean, session?: NativeSession | null) =>
     invokeLogged<number>('agent_chat_ask', {
         envId,
         prompt,
         tabId: tabId ?? null,
-        options: { model: model || null, effort: effort || null, mode: mode || null, fast: fast === true },
+        options: { model: model || null, effort: effort || null, mode: mode || null, fast: fast === true, session: session ?? null },
     });
+/** Fija o desfija un chat del historial; `help`: el chat de ayuda (24-11). */
+export const agentChatHistoryPin = (id: string, pinned: boolean) =>
+    invokeLogged<boolean>('agent_chat_history_pin', { id, pinned });
+/** Borra la sesión propia de Claude Code o Codex de un chat (24-11). */
+export const agentChatNativeForget = (agentId: string, session: string) =>
+    invokeLogged<number>('agent_chat_native_forget', { agentId, session });
+/** Exporta un chat a Markdown donde elija el usuario (24-11). */
+export async function exportAgentChat(defaultName: string, text: string): Promise<boolean> {
+    const path = await save({ defaultPath: defaultName, filters: [{ name: 'Markdown', extensions: ['md'] }] });
+    if (!path) return false;
+    await invokeLogged<void>('agent_chat_export', { path, text });
+    return true;
+}
 /** Lee un archivo de texto para adjuntarlo a una pregunta (con tope). */
 export const agentChatReadAttachment = (path: string) =>
     invokeLogged<AgentChatAttachment>('agent_chat_read_attachment', { path });
@@ -394,6 +411,22 @@ export const agentChatFailureHelp = (envId: string, output: string) =>
  *  elegir. Nunca pregunta nada a la IA. */
 export const agentChatModels = (envId: string) =>
     invokeLogged<AgentChatModels>('agent_chat_models', { envId });
+/** Historial de los chats (23-11): un archivo por conversación en la carpeta
+ *  de datos de la app, y la sesión con los chats abiertos. */
+export const agentChatHistoryList = () =>
+    invokeLogged<AgentChatSummary[]>('agent_chat_history_list');
+export const agentChatHistoryLoad = (id: string) =>
+    invokeLogged<StoredChat | null>('agent_chat_history_load', { id });
+export const agentChatHistorySave = (chat: StoredChat) =>
+    invokeLogged<void>('agent_chat_history_save', { chat });
+export const agentChatHistoryDelete = (id: string) =>
+    invokeLogged<boolean>('agent_chat_history_delete', { id });
+export const agentChatHistoryClear = () =>
+    invokeLogged<number>('agent_chat_history_clear');
+export const agentChatSessionLoad = () =>
+    invokeLogged<ChatSession | null>('agent_chat_session_load');
+export const agentChatSessionSave = (session: ChatSession) =>
+    invokeLogged<void>('agent_chat_session_save', { session });
 /** Corta una pregunta en curso. */
 export const agentChatCancel = (requestId: number) =>
     invokeLogged<boolean>('agent_chat_cancel', { requestId });
@@ -404,9 +437,16 @@ export const onAgentChatDone = (callback: (requestId: number, code: number | nul
         (event) => callback(event.payload.requestId, event.payload.code, event.payload.error, event.payload.detail ?? null));
 /** Mientras llega una respuesta: un reintento por saturación (`retry`) o el
  *  modelo que dice estar usando la CLI (`model`, p. ej. Codex). */
-export const onAgentChatStatus = (callback: (requestId: number, status: { retry: { attempt: number; max: number; status: number } | null; model: string | null }) => void): Promise<UnlistenFn> =>
-    listen<{ requestId: number; retry?: { attempt: number; max: number; status: number } | null; model?: string | null }>('agent-chat-status',
-        (event) => callback(event.payload.requestId, { retry: event.payload.retry ?? null, model: event.payload.model ?? null }));
+export const onAgentChatStatus = (callback: (requestId: number, status: { retry: { attempt: number; max: number; status: number } | null; model: string | null; session: string | null }) => void): Promise<UnlistenFn> =>
+    listen<{ requestId: number; retry?: { attempt: number; max: number; status: number } | null; model?: string | null; session?: string | null }>('agent-chat-status',
+        (event) => callback(event.payload.requestId, { retry: event.payload.retry ?? null, model: event.payload.model ?? null, session: event.payload.session ?? null }));
+/** Lo que se puede volver a generar, por partes, y cuánto ocupa (24-11). */
+export type RegenerableKind = 'caches' | 'downloads' | 'detection' | 'logs';
+export const regenerableSizes = () =>
+    invokeLogged<{ kind: RegenerableKind; bytes: number }[]>('regenerable_sizes');
+/** Limpia las partes elegidas; devuelve los bytes liberados. */
+export const regenerableClean = (kinds: RegenerableKind[]) =>
+    invokeLogged<number>('regenerable_clean', { kinds });
 /** Vacía solo las cachés propias; devuelve los bytes liberados. */
 export const clearToolchainCaches = () =>
     invokeLogged<number>('toolchain_store_clear_caches');
@@ -753,8 +793,19 @@ export const refreshInstallActions = () => invokeLogged<InstallList>('install_re
 
 /** Escribe la acción en la terminal. No la ejecuta por detrás: el comando se ve
  *  entero en la pestaña, y el usuario puede cancelarlo con Ctrl+C. */
-export const runInstallAction = (tabId: string, actionId: string) =>
-    invokeLogged<InstallRunResult>('install_run', { tabId, actionId });
+export const runInstallAction = async (tabId: string, actionId: string): Promise<InstallRunResult> => {
+    const result = await invokeLogged<InstallRunResult>('install_run', { tabId, actionId });
+    // La acción necesita administrador y no hay con qué pedirlo (21-11): sea
+    // cual sea el panel que la lanzó, la barra de App ofrece gsudo o
+    // reiniciar como administrador en vez de dejar solo el error.
+    if (!result.ok && result.needsAdmin) {
+        window.dispatchEvent(new CustomEvent(ADMIN_NEEDED_EVENT, { detail: { actionId, error: result.error ?? '' } }));
+    }
+    return result;
+};
+
+/** Evento de ventana: una acción necesita administrador (`InstallRunResult.needsAdmin`). */
+export const ADMIN_NEEDED_EVENT = 'wterminal-admin-needed';
 
 /** Lee el catálogo ltools-actions-v1 del CLI instalado, sin instalar ni
  * ejecutar nada. Si no existe, devuelve `available: false`. */
@@ -921,3 +972,12 @@ export const onSemanticZone = (
     callback: (event: SemanticZoneEvent) => void,
 ): Promise<UnlistenFn> =>
     listen<SemanticZoneEvent>('terminal-semantic-zone', (event) => callback(event.payload));
+
+/** Ajustes de los programas de la terminal: cmd, PowerShell y Git (22-11). */
+export const listProgramSettings = () => invokeLogged<ProgramSection[]>('programs_list');
+/** Lo último leído, al momento (caché en disco). */
+export const cachedProgramSettings = () => invokeLogged<ProgramSection[]>('programs_cached');
+export const setProgramSetting = (program: string, id: string, value: string) =>
+    invokeLogged<ProgramSection[]>('programs_set', { program, id, value });
+export const undoProgramSetting = (program: string) =>
+    invokeLogged<ProgramSection[]>('programs_undo', { program });

@@ -36,6 +36,9 @@ showLanguageButton = true
 terminalOnlyMode = false
 # Muestra una guía dentro de la terminal limpia para recuperar el modo normal.
 showTerminalOnlyGuide = true
+# La guía de primeros pasos sale al arrancar; terminarla o saltarla apaga esta
+# opción (21-11). Se puede volver a ver desde Ajustes o la paleta.
+showFirstSteps = true
 # Maximiza la ventana al iniciar, sin obligar a usar siempre ese tamaño.
 startMaximized = false
 startAsAdmin = false
@@ -57,13 +60,15 @@ shortcutPreviousTab = "Ctrl+Shift+Tab"
 shortcutCyclePanes = "Ctrl+Shift+Backslash"
 shortcutToggleExplorer = "Ctrl+Shift+E"
 shortcutToggleTerminalOnly = "Ctrl+Shift+M"
-# Navegación entre terminales: Ctrl izquierdo + W/A/S/D.
-shortcutPaneLeft = "Ctrl+A"
-shortcutPaneRight = "Ctrl+D"
-shortcutPaneUp = "Ctrl+W"
-shortcutPaneDown = "Ctrl+S"
+# Foco entre terminales con la pantalla partida: Ctrl+Alt + flechas (22-11).
+# Solo actúan con la vista dividida; con una sola terminal la tecla llega a la
+# shell. Antes era Ctrl izquierdo + W/A/S/D, que se comía esas teclas siempre.
+shortcutPaneLeft = "Ctrl+Alt+ArrowLeft"
+shortcutPaneRight = "Ctrl+Alt+ArrowRight"
+shortcutPaneUp = "Ctrl+Alt+ArrowUp"
+shortcutPaneDown = "Ctrl+Alt+ArrowDown"
 # Acciones sin asignación de fábrica: se pueden grabar desde Ajustes.
-shortcutOpenSettings = ""
+shortcutOpenSettings = "Ctrl+Comma"
 shortcutOpenProjects = ""
 shortcutOpenScripts = ""
 shortcutOpenDependencies = ""
@@ -80,15 +85,22 @@ shortcutUiScaleUp = "Ctrl+Alt+Equal"
 shortcutUiScaleDown = "Ctrl+Alt+Minus"
 shortcutUiScaleReset = "Ctrl+Alt+0"
 shortcutOpenSystemExplorer = ""
-# Sin tecla de fábrica: se asignan en Ajustes → Atajos.
-shortcutCloseTab = ""
+# Atajos (22-11): Ctrl+Shift para las acciones de WTerminal y Ctrl+Alt solo
+# para flechas y tamaño de la interfaz. Los vacíos se asignan en Ajustes.
+shortcutCloseTab = "Ctrl+Shift+W"
 shortcutRenameTab = ""
 shortcutCopyLastOutput = ""
 shortcutSaveTerminalOutput = ""
-shortcutTerminalFontUp = ""
-shortcutTerminalFontDown = ""
-shortcutTerminalFontReset = ""
-shortcutToggleAgentChat = ""
+shortcutTerminalFontUp = "Ctrl+Equal"
+shortcutTerminalFontDown = "Ctrl+Minus"
+# Letra de la terminal: el gesto del navegador, Ctrl + «+» / «-» / 0. «+» y «-»
+# se reconocen por su carácter, así valen en el teclado español y en el inglés.
+shortcutTerminalFontReset = "Ctrl+0"
+shortcutToggleAgentChat = "Ctrl+Shift+A"
+# Ir a la pestaña N: esta combinación con 1…9 (pestañas 1 a 9) y 0 (la 10).
+# Ctrl+Shift y no Ctrl+Alt: en un teclado español AltGr es Ctrl+Alt y con
+# AltGr+1/2/3 se escriben | @ # (22-11).
+shortcutGoToTab = "Ctrl+Shift+1"
 
 # Los temas de fábrica comparten la base negra de «Cian técnico» y solo
 # cambian el acento y la selección. themeRecolorAll = true deja que el tema
@@ -115,18 +127,47 @@ terminalAnsiColors = []
 terminalFontCustom = ""
 terminalFontFamily = "ubuntu-mono"
 terminalFontSize = 12
-terminalLineHeight = 1.5
+terminalLineHeight = 1.2
 terminalLetterSpacing = 0.0
 terminalCursorStyle = "block"
 terminalFontWeight = "normal"
 terminalPadding = 10
-terminalScrollback = 5000
+terminalScrollback = 10000
 terminalCursorBlink = true
 # Enlaces clicables en la salida (Ctrl+clic): http, https y file, validados en
 # el backend; con confirmación, el destino se muestra antes de abrirlo.
 terminalCommandMarks = true
 terminalLinks = true
 terminalLinksConfirm = true
+# Pestañas ocupadas (26-11): una orden que tarda más de `busyTabSeconds`
+# (`busyTabSecondsLowPower` en bajo consumo) pone su nombre en la pestaña
+# mientras corre. Necesita las marcas de órdenes. El nombre puesto a mano manda.
+busyTabRename = true
+# Y un color según el tipo de orden (`busyTabColors`), las reglas propias
+# (`busyTabRules`, «principio de la orden=color» separadas por `;`) o, si no,
+# por turno. El color puesto a mano manda.
+busyTabColor = true
+busyTabSeconds = 5
+busyTabSecondsLowPower = 10
+busyTabColors = "logs=blue,server=green,build=orange,install=purple,network=cyan"
+busyTabRules = ""
+# Programas que duran pero se están usando: solo cambian el nombre.
+busyTabExclude = "vim,nvim,vi,nano,micro,emacs,hx,less,more,man,htop,top,btop,glances,ssh,mosh,telnet,tmux,screen,zellij,wsl,cmd,powershell,pwsh,bash,zsh,fish,sh,claude,codex,gemini,qwen,opencode,aider,copilot,ollama"
+# Avisar al terminar una orden que tardó más de `commandDoneSeconds`
+# (`commandDoneSecondsLowPower` en bajo consumo).
+commandDoneNotice = true
+commandDoneSeconds = 10
+commandDoneSecondsLowPower = 20
+# Si la que termina es otra pestaña, avisarlo en la que se está viendo,
+# con su nombre y un botón para ir a ella.
+commandDoneOtherTab = true
+# Al entrar en una pestaña ocupada, verla junto a las demás que siguen en
+# marcha (hasta 4). Apagado de fábrica: cambia lo que se ve.
+busyTabGroup = false
+# Sacar de esa vista la que termina, pasados `busyTabUngroupSeconds`, salvo
+# la que se está mirando.
+busyTabUngroup = true
+busyTabUngroupSeconds = 5
 # Windows: el REPL de Python con el ancho visible y no con la reserva de 1024
 # columnas (con pyreadline3 repinta toda la ventana a cada tecla).
 pythonReplVisibleWidth = true
@@ -134,6 +175,14 @@ pythonReplVisibleWidth = true
 # poco a poco, como las repinta la shell; true = salen de una vez (de fábrica
 # desde el 15-11, por petición de Romen).
 actionCommandsAtOnce = true
+# La línea que escribe una acción se borra (la orden ya sale en su cabecera).
+# true = se queda a la vista, como una orden escrita a mano (22-11, Romen).
+keepActionCommandLine = false
+# Ajustes › Programas: poner a cada programa instalado (también si se instala
+# después) los valores que recomienda WTerminal, una vez y sin pisar lo que
+# tuviera el usuario: Git Bash completa sin mayúsculas, npm sin mensajes de
+# financiación y WinGet sin telemetría (22-11).
+applyProgramDefaults = true
 # Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de API, la
 # pestaña ofrece meterla; se guarda cifrada para este usuario de Windows.
 aiKeyOffer = true
@@ -142,10 +191,50 @@ agentChat = true
 # Modo consejero: al fallar una orden, ofrecer preguntar al agente. Encendido de
 # fábrica desde el 13-11 (Romen): solo ofrece, nunca pregunta solo.
 agentChatAdvisor = true
+# La pregunta de ese aviso va siempre al chat «Ayuda de WTerminal» (si no
+# existe, se crea). Apagado de fábrica: se deja escrita y la mandas tú;
+# encendido, se manda sola.
+agentChatAdvisorSend = false
 # El botón «Chat» de la barra superior (abre y cierra el chat de agentes).
 showAgentChatButton = true
 # El chat recuerda la conversación: con cada pregunta va lo hablado antes.
 agentChatRemember = true
+# Los chats se guardan en el historial: cerrar una pestaña de chat no la pierde
+# y se puede volver a abrir desde el botón de historial del chat.
+agentChatHistory = true
+# Al abrir el chat vuelven las pestañas que estaban abiertas, con su conversación.
+agentChatRestore = true
+# Claude Code y Codex retoman su propia sesión: cada pregunta manda solo lo
+# nuevo y el agente recuerda también lo que leyó o hizo. Pide agentChatRemember.
+agentChatNativeSessions = true
+# Tras la primera respuesta, el agente pone un título corto al chat (24-11). Gasta una pregunta más de su cuenta: apagado de fábrica.
+agentChatAutoTitle = false
+# Marca discreta «sesión retomada» en las respuestas que retoman la sesión propia del agente (24-11).
+agentChatShowResumed = true
+# El chat de ayuda va fijado arriba del historial (24-11). Se puede desfijar desde el panel o con `:chat unpin help`.
+agentChatPinHelp = true
+# Al borrar un chat del historial, borrar también su sesión de Claude Code o Codex (24-11). De fábrica se deja: es suya.
+agentChatForgetNative = false
+# Borrar solos los chats que lleven `agentChatCleanupDays` días sin usarse, salvo los abiertos y los fijados (24-11). Apagado de fábrica.
+agentChatCleanup = false
+# Limpiar solo, cada `regenerableAutoCleanDays` días, los archivos que se pueden volver a generar (24-11). Apagado de fábrica.
+regenerableAutoClean = false
+# La limpieza automática incluye las cachés de la carpeta propia.
+regenerableCleanCaches = true
+# La limpieza automática incluye las descargas del panel (instaladores y archivos que bajan las acciones).
+regenerableCleanDownloads = true
+# La limpieza automática incluye la caché de detección.
+regenerableCleanDetection = true
+# La limpieza automática incluye la copia rotada del registro.
+regenerableCleanLogs = true
+# Días sin usarse tras los que `agentChatCleanup` borra un chat.
+agentChatCleanupDays = 90
+# El chat de ayuda empieza otro al pasar estos días desde que se creó (0: nunca, de fábrica).
+agentChatHelpMaxDays = 0
+# El chat de ayuda empieza otro al pasar estos mensajes (0: nunca, de fábrica).
+agentChatHelpMaxMessages = 0
+# Cada cuántos días hace `regenerableAutoClean` su limpieza.
+regenerableAutoCleanDays = 30
 # Los agentes del chat pueden editar la carpeta de la pestaña. Apagado de
 # fábrica: solo leen (Codex en solo lectura, Qwen en `plan`). Encendido, el
 # chat deja elegir «Aceptar ediciones» y «Auto».
@@ -168,11 +257,18 @@ agentTabGuide = true
 # los permisos del chat y la seguridad nunca se pueden tocar así.
 agentControl = true
 terminalScrollSensitivity = 3
-copyOnSelect = false
+# Copiar al seleccionar (22-11, Romen): seleccionar ya copia; siguen
+# Ctrl+Shift+C/V y el clic derecho por si se apaga.
+copyOnSelect = true
 uiDensity = "comfortable"
 uiScale = 100
 suggestRepositoryImport = true
 lowPowerMode = false
+# Sondas de detección (26-11): con prioridad baja, para que Windows atienda
+# antes a las pestañas, y como mucho `probeMaxParallel` a la vez (0:
+# automático, una con el modo de bajo consumo y si no la mitad de los hilos).
+probeLowPriority = true
+probeMaxParallel = 0
 lowPowerSuggest = true
 # Si una orden no existe y WTerminal sabe instalarla, un aviso abajo lo ofrece
 # (nunca instala nada solo), con «No volver a mostrar».
@@ -180,6 +276,9 @@ suggestMissingTools = true
 # Si has cambiado ajustes y no hay ningún perfil portable en su carpeta
 # (<carpeta propia>\configuracion\perfiles), un aviso sugiere guardar uno.
 offerPortableProfile = true
+# Si cambias ajustes y ya tienes un perfil portable, un aviso ofrece guardarlos
+# en el perfil actual o en uno nuevo.
+offerProfileUpdate = true
 githubSessionMode = "onExhausted"
 # Privacidad y red: lo que WTerminal hace por su cuenta al arrancar.
 checkUpdatesOnStartup = true

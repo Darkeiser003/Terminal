@@ -56,6 +56,7 @@ export type PaletteAppAction =
     | 'toggleTerminalOnly'
     | 'newTab'
     | 'renameTab'
+    | 'watchRunningTabs'
     | 'cyclePanes'
     | 'nextTab'
     | 'previousTab'
@@ -67,7 +68,8 @@ export type PaletteAppAction =
     | 'terminalFontUp'
     | 'terminalFontDown'
     | 'terminalFontReset'
-    | 'toggleAgentChat';
+    | 'toggleAgentChat'
+    | 'openFirstSteps';
 
 export type PaletteAction =
     | { kind: 'app'; action: PaletteAppAction }
@@ -161,6 +163,7 @@ export const PALETTE_APP_ACTIONS: ReadonlyArray<AppActionDefinition> = [
     { action: 'uiScaleDown', group: 'panels', labelKey: 'palette.action.uiScaleDown', fallback: 'Reducir el tamaño de la interfaz', shortcut: 'shortcutUiScaleDown', command: ':ui-scale -', keywords: ['smaller', 'zoom', 'ui'] },
     { action: 'uiScaleReset', group: 'panels', labelKey: 'palette.action.uiScaleReset', fallback: 'Tamaño de la interfaz al 100 %', shortcut: 'shortcutUiScaleReset', command: ':ui-scale 100', keywords: ['reset', 'zoom', 'ui'] },
     { action: 'toggleAgentChat', group: 'panels', labelKey: 'palette.action.toggleAgentChat', fallback: 'Mostrar u ocultar el chat de agentes', shortcut: 'shortcutToggleAgentChat', command: ':chat', keywords: ['chat', 'agents', 'ai', 'ia', 'claude', 'gemini', 'codex'] },
+    { action: 'openFirstSteps', group: 'panels', labelKey: 'palette.action.openFirstSteps', fallback: 'Ver los primeros pasos', keywords: ['tour', 'tutorial', 'guide', 'help', 'ayuda', 'bienvenida'] },
     { action: 'closePanel', group: 'panels', labelKey: 'palette.action.closePanel', fallback: 'Cerrar los paneles', shortcut: 'shortcutClosePanel', command: ':panel close', keywords: ['close'] },
     { action: 'searchTerminal', group: 'terminal', labelKey: 'palette.action.searchTerminal', fallback: 'Buscar en el historial de la terminal', shortcut: 'shortcutSearchTerminal', keywords: ['search', 'find', 'scrollback'] },
     { action: 'searchHistory', group: 'terminal', labelKey: 'palette.action.searchHistory', fallback: 'Buscar en las órdenes escritas', shortcut: 'shortcutSearchHistory', keywords: ['history', 'ctrl+r', 'reverse', 'search', 'command'] },
@@ -176,6 +179,7 @@ export const PALETTE_APP_ACTIONS: ReadonlyArray<AppActionDefinition> = [
     { action: 'newTab', group: 'tabs', labelKey: 'palette.action.newTab', fallback: 'Nueva pestaña', shortcut: 'shortcutNewTab', keywords: ['tab', 'new'] },
     { action: 'closeTab', group: 'tabs', labelKey: 'palette.action.closeTab', fallback: 'Cerrar la pestaña', shortcut: 'shortcutCloseTab', keywords: ['tab', 'close'] },
     { action: 'renameTab', group: 'tabs', labelKey: 'palette.action.renameTab', fallback: 'Renombrar la pestaña', shortcut: 'shortcutRenameTab', keywords: ['tab', 'rename', 'title'] },
+    { action: 'watchRunningTabs', group: 'tabs', labelKey: 'palette.action.watchRunningTabs', fallback: 'Ver juntas las órdenes en marcha', keywords: ['busy', 'running', 'watch', 'ocupadas', 'marcha', 'vigilar'] },
     { action: 'cyclePanes', group: 'tabs', labelKey: 'palette.action.cyclePanes', fallback: 'Dividir: añadir una terminal a la vista', shortcut: 'shortcutCyclePanes', command: ':panes cycle', keywords: ['split', 'panes', ':layout', ':grid'] },
     { action: 'nextTab', group: 'tabs', labelKey: 'palette.action.nextTab', fallback: 'Pestaña siguiente', shortcut: 'shortcutNextTab', keywords: ['tab', 'next'] },
     { action: 'previousTab', group: 'tabs', labelKey: 'palette.action.previousTab', fallback: 'Pestaña anterior', shortcut: 'shortcutPreviousTab', keywords: ['tab', 'previous'] },

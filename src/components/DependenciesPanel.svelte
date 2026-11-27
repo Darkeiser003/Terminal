@@ -1317,6 +1317,12 @@
         {#if action.hint}
             <div class="hint">{action.hint}</div>
         {/if}
+        {#if action.admin}
+            <!-- 21-11: se avisa antes de pulsar, no al fallar. -->
+            <div class="hint admin-hint" data-testid="deps-admin-hint">
+                {app.t('deps.adminHint', 'Necesita administrador: si WTerminal no lo es, se lanza con gsudo o el sudo de Windows y Windows pedirá permiso (UAC).')}
+            </div>
+        {/if}
         {#if action.detectionStatus === 'unknown'}
             <div class="hint detection-unknown">
                 {app.t('deps.detectionUnknownHint', 'No se ofrece instalar hasta confirmar el estado. Repite la detección.')}

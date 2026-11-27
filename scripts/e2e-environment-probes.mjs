@@ -184,6 +184,11 @@ export function environmentProbe(option, marker, { allowNsudo = false } = {}) {
     if (!id || !/^[A-Z0-9_]+$/.test(marker)) {
         return { kind: 'skip', reason: 'identificador o marcador inválido' };
     }
+    // Las shells de administrador con gsudo (21-11) piden el UAC al abrirse:
+    // una prueba automática no puede aceptarlo.
+    if (id.startsWith('gsudo:')) {
+        return { kind: 'skip', reason: 'pide el permiso de Windows (UAC) al abrirse' };
+    }
     if (id.startsWith('nsudo:')) {
         if (!allowNsudo) return { kind: 'skip', reason: 'requiere el runner E2E elevado' };
         const command = id === 'nsudo:cmd'

@@ -51,6 +51,9 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
         "set" | "ajuste" | "pref" => "set",
         // El chat lateral con los agentes de IA: lo muestra u oculta.
         "chat" | "agentes" | "agents" if argument.is_none() => "chat",
+        // Fijar o desfijar un chat del historial (24-11): `:chat pin help`,
+        // `:chat unpin <id>`. También lo puede pedir una IA con `--ctl`.
+        "chat" | "agentes" | "agents" if chat_pin_argument(argument.as_deref()) => "chatPin",
         "panes" | "layout" | "grid" => "panes",
         "explorer-here" => "openDirectory",
         "explorerhere" => "openDirectory",
@@ -70,9 +73,34 @@ pub fn parse(line: &str) -> Option<InternalCommand> {
     })
 }
 
+/// `pin <help|id>` o `unpin <help|id>`: el id, solo letras, números y guiones.
+fn chat_pin_argument(argument: Option<&str>) -> bool {
+    let mut words = argument.unwrap_or_default().split_whitespace();
+    let verb = words.next().unwrap_or_default().to_ascii_lowercase();
+    let target = words.next().unwrap_or_default();
+    matches!(verb.as_str(), "pin" | "unpin" | "fijar" | "desfijar")
+        && !target.is_empty()
+        && target.len() <= 64
+        && target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && words.next().is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fijar_y_desfijar_chats() {
+        let pin = parse(":chat unpin help").unwrap();
+        assert_eq!(pin.action, "chatPin");
+        assert_eq!(pin.argument.as_deref(), Some("unpin help"));
+        assert_eq!(parse(":chat pin c-abc-123").unwrap().action, "chatPin");
+        assert!(parse(":chat pin ../x").is_none());
+        assert!(parse(":chat borrar todo").is_none());
+        assert_eq!(parse(":chat").unwrap().action, "chat");
+    }
 
     #[test]
     fn reconoce_el_vocabulario_y_normaliza_espacios() {

@@ -7,14 +7,20 @@ import { spawn } from 'node:child_process';
 import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
-    binaryFor, defaultKeysDir, findSigningKeys, parseDevTestArgs, prepareSigning, resolveScenarios, run, signBinary,
+    binaryFor, defaultKeysDir, roomyBase, findSigningKeys, parseDevTestArgs, prepareSigning, resolveScenarios, run, signBinary,
 } from './dev-test.mjs';
 import { resolveSshKeygen } from './lib/ssh-signing.mjs';
 
 // Sin E2E no se compila; con E2E, el perfil rápido salvo que se pida otro.
 assert.equal(parseDevTestArgs(['--rust', 'wsl::tests']).build, 'none');
+// Poco sitio en el temporal y mucho junto a `target`: se va allí (25-11).
+assert.equal(roomyBase({ tempDir: 'C:/Temp', targetDir: 'E:/build/target', tempFree: 1.9, targetFree: 12 }), resolve('E:/build'));
+assert.equal(roomyBase({ tempDir: 'C:/Temp', targetDir: 'E:/build/target', tempFree: 6, targetFree: 12 }), null);
+assert.equal(roomyBase({ tempDir: 'C:/Temp', targetDir: 'E:/build/target', tempFree: 1.9, targetFree: 8 }), null);
+assert.equal(roomyBase({ tempDir: 'C:/Temp', targetDir: 'C:/build/target', tempFree: 1, targetFree: 1 }), null);
+assert.equal(roomyBase({ tempDir: 'C:/Temp', targetDir: 'E:/build/target', tempFree: null, targetFree: 12 }), null);
 assert.equal(parseDevTestArgs(['--only', 'resize-type']).build, 'fast');
 assert.equal(parseDevTestArgs(['--matrix', 'lang:scala', '--build', 'release']).build, 'release');
 assert.equal(parseDevTestArgs(['--only', 'resize-type', '--binary', 'x.exe']).build, 'none');

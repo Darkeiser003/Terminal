@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod agent_chat;
+pub mod agent_chat_history;
 pub mod agent_guide;
 pub mod ai;
 pub mod ai_cli_defaults;
@@ -356,6 +357,65 @@ fn detect_windows_shells() -> Vec<Environment> {
             ps.available = available;
             ps.no_auto_select = true;
             envs.push(ps);
+        }
+    }
+
+    // Shells de administrador con gsudo (21-11), como las de NSudo pero con la
+    // cuenta del usuario: Windows pide permiso (UAC) al abrirlas y solo esa
+    // pestaña es administrador. Si WTerminal ya lo es, sobran: cualquier
+    // shell normal ya lo es.
+    #[cfg(windows)]
+    let gsudo_shells = !crate::platform::is_process_elevated();
+    #[cfg(not(windows))]
+    let gsudo_shells = false;
+    if gsudo_shells {
+        if let Some(gsudo) = crate::platform::gsudo_path() {
+            let gsudo = gsudo.to_string_lossy().to_string();
+            let t = crate::i18n::Translator::new(&crate::i18n::active_language());
+            let note = t.t(
+                "env.gsudoNote",
+                "Shell de administrador con tu cuenta. Windows pedirá permiso (UAC) al abrirla y solo esta pestaña será administrador.",
+            );
+            let mut cmd = Environment::new(
+                "gsudo:cmd",
+                "CMD · administrador (gsudo)",
+                ShellKind::Cmd,
+                &gsudo,
+                &[],
+            );
+            cmd.args = vec![comspec.clone(), "/d".to_string()];
+            cmd.group = "Shells elevadas · gsudo".to_string();
+            cmd.shell = Some("cmd".to_string());
+            cmd.note = Some(note.clone());
+            cmd.no_auto_select = true;
+            envs.push(cmd);
+            if let Some(ps_exe) = which("pwsh.exe")
+                .or_else(|| which("pwsh"))
+                .or_else(|| which("powershell.exe"))
+                .or_else(|| which("powershell"))
+            {
+                let target = ps_exe.to_string_lossy().to_string();
+                let shell = if target.to_lowercase().contains("pwsh") {
+                    "pwsh"
+                } else {
+                    "powershell"
+                };
+                let mut ps = Environment::new(
+                    "gsudo:powershell",
+                    "PowerShell · administrador (gsudo)",
+                    ShellKind::Powershell,
+                    &gsudo,
+                    &[],
+                );
+                ps.args = std::iter::once(target)
+                    .chain(POWERSHELL_ARGS.iter().map(|arg| (*arg).to_string()))
+                    .collect();
+                ps.group = "Shells elevadas · gsudo".to_string();
+                ps.shell = Some(shell.to_string());
+                ps.note = Some(note);
+                ps.no_auto_select = true;
+                envs.push(ps);
+            }
         }
     }
 

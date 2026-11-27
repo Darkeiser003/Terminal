@@ -530,7 +530,15 @@ fn app_locations() -> Vec<Location> {
         .unwrap_or_else(|| crate::paths::home_dir().join(".local").join("share"));
     let mut locations = vec![
         Location {
-            files: ["settings.json", "plugins-state.json", "path-integration-auto"]
+            files: [
+                "settings.json",
+                "plugins-state.json",
+                "path-integration-auto",
+                "ai-keys.json",
+                "store-journal.json",
+                "programas/deshacer.json",
+                "programas/recomendados.json",
+            ]
                 .iter()
                 .map(|name| user_data.join(name))
                 .collect(),
@@ -584,6 +592,7 @@ fn app_locations() -> Vec<Location> {
                 "install-actions-snapshot.json",
                 "disk-cache.json",
                 "hardware-cache.json",
+                "programas/cache.json",
             ]
             .iter()
             .map(|name| user_data.join(name))
@@ -599,6 +608,16 @@ fn app_locations() -> Vec<Location> {
                 ),
             )
         },
+        Location::new(
+            "app-agent-chats",
+            "Chats con IA",
+            user_data.join("agent-chats"),
+            info(
+                Safety::Caution,
+                "Tus conversaciones del chat lateral con los agentes de IA: una por archivo, los chats que estaban abiertos y los fijados.",
+                "Solo si ya no las quieres: se pierden. Mejor bórralas desde el historial del chat, una a una o todas.",
+            ),
+        ),
         Location::new(
             "app-webview",
             "Datos de la interfaz",
@@ -2089,6 +2108,38 @@ pub fn clear_caches() -> u64 {
         freed += before.saturating_sub(directory_size(&path));
     }
     freed
+}
+
+/// Las carpetas de caché que se pueden vaciar ahora (las de «Vaciar cachés»),
+/// para la limpieza de lo regenerable (`regenerable`, 24-11).
+pub fn clearable_cache_paths() -> Vec<PathBuf> {
+    let preferences = crate::preferences::current();
+    let root = effective_root(true, &preferences.toolchain_store_dir).unwrap_or_else(default_root);
+    let user_defined = |variable: &str| defined_by_user(Some(&root), variable);
+    clearable_caches(
+        &|category| category_base(&root, category),
+        &crate::paths::home_dir(),
+        &user_defined,
+    )
+}
+
+/// La carpeta de una categoría si se puede vaciar sin riesgo: no es la raíz
+/// de un disco, no contiene la carpeta personal y no se cruza con la de otra
+/// categoría (24-11, para las descargas del panel).
+pub fn clearable_category_dir(category: Category) -> Option<PathBuf> {
+    let preferences = crate::preferences::current();
+    let root = effective_root(true, &preferences.toolchain_store_dir).unwrap_or_else(default_root);
+    let base = category_base(&root, category);
+    let own = resolved(&base);
+    let collides = Category::ALL
+        .into_iter()
+        .filter(|other| *other != category)
+        .any(|other| {
+            let other = resolved(&category_base(&root, other));
+            within(&other, &own) || within(&own, &other)
+        });
+    let home = resolved(&crate::paths::home_dir());
+    (!collides && !is_disk_root(&own) && !within(&home, &own) && own.is_dir()).then_some(base)
 }
 
 /// Las carpetas que vacía «Vaciar cachés»: las de la categoría de cachés en

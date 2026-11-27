@@ -22,10 +22,13 @@ export type NoticeKey =
     | 'agentChatAdvisor'
     | 'aiKeyOffer'
     | 'offerPortableProfile'
+    | 'offerProfileUpdate'
     | 'suggestRepositoryImport'
     | 'lowPowerSuggest'
     | 'offerGsudo'
-    | 'showTerminalOnlyGuide';
+    | 'showTerminalOnlyGuide'
+    | 'showFirstSteps'
+    | 'commandDoneOtherTab';
 
 export interface NoticeSetting {
     key: NoticeKey;
@@ -94,6 +97,13 @@ export const NOTICE_SETTINGS: readonly NoticeSetting[] = [
         target: 'settings-offer-portable-profile',
     },
     {
+        key: 'offerProfileUpdate',
+        id: 'profileUpdate',
+        label: 'Guardar los ajustes cambiados en tu perfil',
+        section: 'behavior',
+        target: 'settings-offer-profile-update',
+    },
+    {
         key: 'suggestRepositoryImport',
         id: 'repositoryImport',
         label: 'Añadir a Proyectos el repositorio de la carpeta',
@@ -121,6 +131,20 @@ export const NOTICE_SETTINGS: readonly NoticeSetting[] = [
         label: 'Guía del modo de pantalla limpia',
         section: 'behavior',
         target: 'settings-terminal-only-guide',
+    },
+    {
+        key: 'commandDoneOtherTab',
+        id: 'commandDoneOtherTab',
+        label: 'Terminó la orden larga de otra pestaña',
+        section: 'terminal',
+        target: 'settings-command-done-other-tab',
+    },
+    {
+        key: 'showFirstSteps',
+        id: 'firstSteps',
+        label: 'Guía de primeros pasos',
+        section: 'behavior',
+        target: 'settings-show-first-steps',
     },
 ];
 

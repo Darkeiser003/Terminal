@@ -15,6 +15,7 @@
     import { alignSixelWithConpty } from '../lib/sixel-conpty';
     import { attachBannerImages, type BannerImageController } from '../lib/banner-image';
     import { invalidateLinkCache } from '../lib/link-cache';
+    import { busyDelayMs, commandLabel, DEFAULT_BUSY_TAB_EXCLUDE, isExcludedCommand } from '../lib/busy-tabs';
     import { AI_COMMAND_MIN_MS, aiCommandName, endsWithShellPrompt, environmentFullScreenReason, flattenCsiParams, FULL_SCREEN_MIN_COLS, fullScreenTransition, isAiCommandLine, isInteractivePythonCommandLine, type EnvironmentWidthOptions, type FullScreenAppReason } from '../lib/full-screen-app';
     import { columnAtTextIndex, comparePoints, contentEndColumn, inputSelectionEdit, promptInputStart, selectionSearchText, type BufferPoint, type InputSelectionEdit } from '../lib/input-selection';
     import { TERMINAL_LINK_REGEX, checkTerminalLink, isLinkActivation, linkRejectionMessageKey, type TerminalLinkScheme } from '../lib/terminal-links';
@@ -1053,7 +1054,17 @@
             // `ayuda …` que ejecutan en la shell; el resto, la suya.
             pendingInternalEcho = line.trim();
         }
-        if (command.action === 'config') {
+        if (command.action === 'chatPin') {
+            // `:chat pin|unpin <help|id>` (24-11): también desde una IA.
+            const [verb = '', target = ''] = (command.argument ?? '').split(/\s+/u);
+            const pinned = ['pin', 'fijar'].includes(verb.toLowerCase());
+            const done = await api.agentChatHistoryPin(target, pinned).catch(() => false);
+            window.dispatchEvent(new CustomEvent('wterminal:agent-chat-history-changed'));
+            const reply = done
+                ? (pinned ? app.t('agentChat.pinDone', 'Chat fijado.') : app.t('agentChat.unpinDone', 'Chat desfijado.'))
+                : app.t('agentChat.pinMissing', 'No hay ningún chat así en el historial.');
+            writeInternal(`\r\n[${reply}]`);
+        } else if (command.action === 'config') {
             window.dispatchEvent(new CustomEvent('winslim:open-settings'));
         } else if (command.action === 'reload') {
             await app.refreshEnvironments();
@@ -3039,7 +3050,24 @@
         }, STARTUP_HINT_DELAY_MS);
     }
 
+    /** Lo que cuesta atender cada trozo de salida: solo se mide si una prueba
+     *  crea `window.__wtBusyCost` (26-11, salida letra a letra). */
     function onTerminalOutputBusy(event: Event): void {
+        const cost = (window as unknown as { __wtBusyCost?: { ms: number; calls: number } }).__wtBusyCost;
+        if (!cost) {
+            handleTerminalOutputBusy(event);
+            return;
+        }
+        const started = performance.now();
+        try {
+            handleTerminalOutputBusy(event);
+        } finally {
+            cost.ms += performance.now() - started;
+            cost.calls += 1;
+        }
+    }
+
+    function handleTerminalOutputBusy(event: Event): void {
         if (!eventBelongsToPane(event)) return;
         const detail = (event as CustomEvent<{ tabId?: string; data?: string; kind?: string }>).detail;
         // ConPTY manda secuencias invisibles nada más arrancar: el aviso sigue
@@ -3477,6 +3505,8 @@
         if (detail?.tabId !== tabId || typeof detail.requestId !== 'number') return;
         environmentSwitchRequestId = detail.requestId;
         startupEnvironmentId = detail.envId;
+        // La shell de antes se cierra con su orden: ya no está en marcha.
+        dropBusyWatch();
         armStartupHint();
         // Una IA (o Python en Windows) ocupa la pestaña entera; cualquier
         // otro entorno empieza como shell aunque el anterior dejara la
@@ -3860,6 +3890,10 @@
         // El borrador va antes que el prompt: con texto escrito la fila ya no
         // termina en `>`/`$` y parecería una terminal ocupada.
         const draft = mirroredLine ?? currentEditableLine() ?? '';
+        // Insertar lo que ya está escrito no es un fallo (23-11, Christian: un
+        // segundo clic en «Insertar en la terminal» del chat avisaba de error
+        // con la orden bien escrita por el primero). No se escribe dos veces.
+        if (!enter && draft.trim() && draft.trim() === line.trim()) return null;
         if (draft.trim()) return 'draft';
         if (!terminalPromptVisible()) return 'busy';
         term.input(line, true);
@@ -4878,6 +4912,11 @@
             refreshRows();
             requestAnimationFrame(refreshRows);
             scheduleTerminalRepaint();
+            // Build 78 (21-11): la rejilla ya tenía 9148 columnas y la barra
+            // seguía en el ancho de antes (7482 px) hasta el frame siguiente.
+            // Ampliar aquí, en el mismo paso que la rejilla, que la fila más
+            // ancha a la vista se alcance desde el primer momento.
+            ensureVisibleTextReachable();
             scheduleHorizontalScrollState();
             // El inspector del WebView y algunos gestores de ventanas cambian
             // el viewport sin emitir un resize convencional. Exponer las
@@ -5446,7 +5485,14 @@
                 // Solo lo escrito sobre un prompt que marcó la shell: la
                 // contraseña que pide una orden en marcha no tiene prompt.
                 if (submittedCommand && commandTracker?.atPrompt) app.recordCommand(submittedCommand);
+                // Pestañas ocupadas: solo una orden de verdad sobre un prompt
+                // que marcó la shell (no la contraseña de una orden en marcha
+                // ni una orden interna `:…`).
+                const busyCandidate = commandTracker?.atPrompt && !candidate.trimStart().startsWith(':')
+                    ? (submittedCommand?.trim() || typedCommandText())
+                    : '';
                 commandTracker?.submitted(!candidate.trim() && commandInputIsBlank());
+                if (busyCandidate) armBusyWatch(busyCandidate);
                 commandJumpLine = null;
                 // Una IA tecleada en la shell recibe el ancho visible antes de
                 // dibujar su primera pantalla.
@@ -5609,6 +5655,13 @@
         registerTerminal(tabId, term);
         registerTerminalControls(tabId, { openSearch, saveOutput, copyLastOutput, jumpToCommand, submitLine: submitLineFromApp, insertLine: insertLineFromApp, lastCommandContext });
         registerInputState(tabId, readInputState);
+        // Solo en las pruebas (26-11): poner una shell al ancho visible, sin la
+        // reserva de 1024 columnas, para medir cuánto frena esa reserva.
+        if (app.appInfo?.e2eTesting) {
+            const hooks = window as unknown as { __wtE2eExactWidth?: Record<string, (on: boolean) => void> };
+            hooks.__wtE2eExactWidth ??= {};
+            hooks.__wtE2eExactWidth[tabId] = (on: boolean) => setFullScreenApp(on ? 'ai-environment' : null);
+        }
         commandTracker = new CommandTracker((offset) => term?.registerMarker(offset), () => Date.now());
         term.parser.registerOscHandler(133, (data) => {
             if (host) host.dataset.commandMarksSeen = String(Number(host.dataset.commandMarksSeen ?? 0) + 1);
@@ -5644,7 +5697,10 @@
         });
         // Lo que escribe un botón cuenta como orden: marca, chat y consejero.
         void api.onCommandWritten((target, command) => {
-            if (target === tabId) commandTracker?.appCommand(command);
+            if (target === tabId) {
+                commandTracker?.appCommand(command);
+                armBusyWatch(command);
+            }
         }).then((unlisten) => {
             if (destroyed) unlisten();
             else commandWrittenUnlisten = unlisten;
@@ -5766,6 +5822,7 @@
 
     onDestroy(() => {
         destroyed = true;
+        clearTimeout(busyWatchTimer);
         observer?.disconnect();
         rootWidthObserver?.disconnect();
         window.removeEventListener('resize', onWindowResize);
@@ -5991,8 +6048,45 @@
         term?.focus();
     }
 
-    /** A partir de aquí una orden avisa al terminar: antes sería puro ruido. */
-    const LONG_COMMAND_MS = 10_000;
+    /** La orden que corre ahora y la cuenta para ponerle nombre a la pestaña
+     *  (ver `busy-tabs.ts`). */
+    let busyWatchCommand: string | null = null;
+    let busyWatchTimer: ReturnType<typeof setTimeout> | undefined;
+
+    /** Lo escrito en la fila del prompt (con sus filas partidas), por si el
+     *  espejo de entrada se perdió al editar con flechas o el historial. */
+    function typedCommandText(): string {
+        const input = commandTracker?.inputLine;
+        const buffer = term?.buffer.normal;
+        if (!input || !buffer) return '';
+        let text = buffer.getLine(input.line)?.translateToString(true, input.column) ?? '';
+        for (let line = input.line + 1; buffer.getLine(line)?.isWrapped; line += 1) {
+            text += buffer.getLine(line)?.translateToString(true) ?? '';
+        }
+        return text.trim();
+    }
+
+    function armBusyWatch(command: string): void {
+        clearTimeout(busyWatchTimer);
+        busyWatchTimer = undefined;
+        busyWatchCommand = command.trim() || null;
+        const prefs = app.preferences;
+        if (!busyWatchCommand || !prefs || (prefs.busyTabRename === false && prefs.busyTabColor === false)) return;
+        const watched = busyWatchCommand;
+        const delay = busyDelayMs(prefs.busyTabSeconds, prefs.busyTabSecondsLowPower, prefs.lowPowerMode === true, 5);
+        busyWatchTimer = setTimeout(() => {
+            busyWatchTimer = undefined;
+            if (busyWatchCommand === watched && !destroyed) app.startBusyTab(tabId, watched);
+        }, delay);
+    }
+
+    /** Sin orden en marcha (cambio de entorno, pestaña cerrada). */
+    function dropBusyWatch(): void {
+        clearTimeout(busyWatchTimer);
+        busyWatchTimer = undefined;
+        busyWatchCommand = null;
+        app.clearBusyTab(tabId);
+    }
 
     function commandSummary(record: CommandRecord): string {
         const time = formatDuration(record.durationMs ?? 0, app.catalog.language);
@@ -6029,6 +6123,8 @@
         app.agentChatDraft = {
             text: app.t('agentChat.adviceQuestion', 'Esta orden ha fallado. ¿Por qué y cómo lo arreglo?'),
             withContext: true,
+            // Siempre al chat de ayuda (24-11, Romen): no un chat nuevo cada vez.
+            help: true,
         };
         app.agentChatVisible = true;
     }
@@ -6048,6 +6144,10 @@
 
     function onCommandFinished(record: CommandRecord): void {
         if (!term) return;
+        clearTimeout(busyWatchTimer);
+        busyWatchTimer = undefined;
+        const watchedCommand = busyWatchCommand ?? record.command ?? null;
+        busyWatchCommand = null;
         // cmd no da el código en su marca: una orden que no existe se reconoce
         // por el mensaje de Windows y cuenta como fallida (9009, su ERRORLEVEL).
         if (record.exitCode === null && cmdNotFound) {
@@ -6077,9 +6177,37 @@
             agentAdviceSeq += 1;
             agentAdvice = null;
         }
-        if ((record.durationMs ?? 0) < LONG_COMMAND_MS) return;
-        showTerminalNotice(commandSummary(record));
+        const failed = record.exitCode !== null && record.exitCode !== 0;
+        app.finishBusyTab(tabId, failed);
+        const prefs = app.preferences;
+        if (prefs?.commandDoneNotice === false) return;
+        const doneMs = busyDelayMs(prefs?.commandDoneSeconds, prefs?.commandDoneSecondsLowPower, prefs?.lowPowerMode === true, 10);
+        if ((record.durationMs ?? 0) < doneMs) return;
+        // Un editor o un monitor que se cierra no es una orden que acabe.
+        if (watchedCommand && isExcludedCommand(watchedCommand, prefs?.busyTabExclude ?? DEFAULT_BUSY_TAB_EXCLUDE)) return;
+        const summary = commandSummary(record);
+        if (app.visibleTabs.includes(tabId)) {
+            showTerminalNotice(summary);
+        } else if (prefs?.commandDoneOtherTab !== false) {
+            app.pushCommandDone(tabId, commandDoneElsewhere(record, watchedCommand), failed);
+        }
         if (!active || !document.hasFocus()) void api.requestWindowAttention();
+    }
+
+    /** «journalctl terminó en 3 min · pestaña 2 (cmd)»: para avisarlo desde
+     *  la pestaña que se está viendo. */
+    function commandDoneElsewhere(record: CommandRecord, command: string | null): string {
+        const index = app.tabs.findIndex((tab) => tab.id === tabId);
+        const tab = app.tabs[index];
+        const name = commandLabel(command ?? '') || app.t('terminal.commandDoneUnnamed', 'La orden');
+        const time = formatDuration(record.durationMs ?? 0, app.catalog.language);
+        const where = app.t('terminal.commandDoneWhere', 'pestaña {index} ({tab})')
+            .replace('{index}', String(index + 1))
+            .replace('{tab}', app.tabNames[tabId] ?? tab?.label ?? '');
+        const text = record.exitCode === null || record.exitCode === 0
+            ? app.t('terminal.commandDoneOther', '{command} terminó en {time}')
+            : app.t('terminal.commandFailedOther', '{command} falló con código {code} tras {time}').replace('{code}', String(record.exitCode));
+        return `${text.replace('{command}', name).replace('{time}', time)} · ${where}`;
     }
 
     /** El espejo de entrada se pierde al editar con flechas: lo que manda es lo

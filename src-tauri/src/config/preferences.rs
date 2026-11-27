@@ -481,6 +481,9 @@ pub struct Preferences {
     pub show_language_button: bool,
     pub terminal_only_mode: bool,
     pub show_terminal_only_guide: bool,
+    /// La guía de primeros pasos sale sola al arrancar hasta terminarla o
+    /// pulsar «No volver a mostrar» (21-11).
+    pub show_first_steps: bool,
     pub start_maximized: bool,
     /// Windows: al arrancar sin permisos de administrador, relanzarse con UAC.
     /// No toca la compatibilidad del ejecutable; si se cancela el aviso, la
@@ -529,6 +532,8 @@ pub struct Preferences {
     pub shortcut_terminal_font_down: String,
     pub shortcut_terminal_font_reset: String,
     pub shortcut_toggle_agent_chat: String,
+    /// Ir a la pestaña N: el atajo de la 1; con 2…9 y 0, las siguientes.
+    pub shortcut_go_to_tab: String,
     pub theme_id: String,
     pub accent_color: String,
     pub ui_background_color: String,
@@ -571,6 +576,31 @@ pub struct Preferences {
     pub terminal_links: bool,
     /// Pedir confirmación, con el destino a la vista, antes de abrir uno.
     pub terminal_links_confirm: bool,
+    /// Pestañas ocupadas (26-11): una orden que tarda pone su nombre en la
+    /// pestaña mientras corre (el puesto a mano manda).
+    pub busy_tab_rename: bool,
+    /// Y un color por tipo de orden, regla propia o turno.
+    pub busy_tab_color: bool,
+    pub busy_tab_seconds: i64,
+    /// Lo mismo con el modo de bajo consumo, que va más lento.
+    pub busy_tab_seconds_low_power: i64,
+    /// «tipo=color» separados por comas (logs, server, build, install, network).
+    pub busy_tab_colors: String,
+    /// Reglas propias: «principio de la orden=color» separadas por `;`.
+    pub busy_tab_rules: String,
+    /// Programas que duran pero se usan: solo cambian el nombre.
+    pub busy_tab_exclude: String,
+    /// Avisar al terminar una orden larga.
+    pub command_done_notice: bool,
+    pub command_done_seconds: i64,
+    pub command_done_seconds_low_power: i64,
+    /// Si termina otra pestaña, avisarlo en la que se ve, con botón para ir.
+    pub command_done_other_tab: bool,
+    /// Al entrar en una pestaña ocupada, verla con las demás en marcha.
+    pub busy_tab_group: bool,
+    /// Sacar de esa vista la que termina (salvo la que se mira).
+    pub busy_tab_ungroup: bool,
+    pub busy_tab_ungroup_seconds: i64,
     /// Windows: el REPL de Python usa el ancho visible y no la reserva de
     /// 1024 columnas. Con `pyreadline3` repinta toda la ventana a cada tecla
     /// y con la reserva el eco iba a 2-3 letras por segundo.
@@ -580,6 +610,10 @@ pub struct Preferences {
     /// PSReadLine, ble.sh) repinta la línea a cada tecla; con esto la pestaña
     /// retiene esa salida hasta el Intro y la pinta junta. De fábrica, no.
     pub action_commands_at_once: bool,
+    /// Dejar a la vista la línea tecleada de las acciones (22-11).
+    pub keep_action_command_line: bool,
+    /// Poner los valores recomendados a los programas (22-11).
+    pub apply_program_defaults: bool,
     /// Cuando una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de
     /// API, la pestaña ofrece meterla (`environments::ai_keys`).
     pub ai_key_offer: bool,
@@ -588,12 +622,56 @@ pub struct Preferences {
     /// Al fallar una orden, la pestaña ofrece preguntar al agente con su
     /// contexto (nunca pregunta sola). De fábrica, encendido (13-11).
     pub agent_chat_advisor: bool,
+    /// La pregunta del aviso de ayuda va siempre al chat de ayuda (24-11);
+    /// con esto, además, se manda sola. De fábrica, apagado: se deja escrita
+    /// y la manda el usuario (Romen).
+    pub agent_chat_advisor_send: bool,
     /// El botón «Chat» de la barra superior, que abre y cierra el chat de
     /// agentes. Sin él, el chat se abre con `:chat`, la paleta o su atajo.
     pub show_agent_chat_button: bool,
     /// El chat manda con cada pregunta lo hablado antes en esa conversación
     /// (las últimas vueltas), para que el agente lo recuerde (13-11).
     pub agent_chat_remember: bool,
+    /// Los chats se guardan en el historial (`agent_chat_history`): cerrar
+    /// una pestaña de chat ya no la pierde (23-11, Romen: «si cierro la
+    /// pestaña, aunque sea un segundo, se borra»). Encendido de fábrica.
+    pub agent_chat_history: bool,
+    /// Al abrir el chat vuelven las pestañas que estaban abiertas, con su
+    /// conversación (23-11). Encendido de fábrica; pide el historial.
+    pub agent_chat_restore: bool,
+    /// Claude Code y Codex retoman su propia sesión (24-11): cada pregunta
+    /// manda solo lo nuevo en vez de la conversación entera, y el agente
+    /// recuerda también lo que leyó o hizo. Encendido de fábrica; pide
+    /// «recordar la conversación».
+    pub agent_chat_native_sessions: bool,
+    /// Tras la primera respuesta, el agente pone un título corto al chat (24-11). Gasta una pregunta más de su cuenta: apagado de fábrica.
+    pub agent_chat_auto_title: bool,
+    /// Marca discreta «sesión retomada» en las respuestas que retoman la sesión propia del agente (24-11).
+    pub agent_chat_show_resumed: bool,
+    /// El chat de ayuda va fijado arriba del historial (24-11). Se puede desfijar desde el panel o con `:chat unpin help`.
+    pub agent_chat_pin_help: bool,
+    /// Al borrar un chat del historial, borrar también su sesión de Claude Code o Codex (24-11). De fábrica se deja: es suya.
+    pub agent_chat_forget_native: bool,
+    /// Borrar solos los chats que lleven `agent_chat_cleanup_days` días sin usarse, salvo los abiertos y los fijados (24-11). Apagado de fábrica.
+    pub agent_chat_cleanup: bool,
+    /// Limpiar solo, cada `regenerable_auto_clean_days` días, los archivos que se pueden volver a generar (24-11). Apagado de fábrica.
+    pub regenerable_auto_clean: bool,
+    /// La limpieza automática incluye las cachés de la carpeta propia.
+    pub regenerable_clean_caches: bool,
+    /// La limpieza automática incluye las descargas del panel (instaladores y archivos que bajan las acciones).
+    pub regenerable_clean_downloads: bool,
+    /// La limpieza automática incluye la caché de detección.
+    pub regenerable_clean_detection: bool,
+    /// La limpieza automática incluye la copia rotada del registro.
+    pub regenerable_clean_logs: bool,
+    /// Días sin usarse tras los que `agent_chat_cleanup` borra un chat.
+    pub agent_chat_cleanup_days: i64,
+    /// El chat de ayuda empieza otro al pasar estos días desde que se creó (0: nunca, de fábrica).
+    pub agent_chat_help_max_days: i64,
+    /// El chat de ayuda empieza otro al pasar estos mensajes (0: nunca, de fábrica).
+    pub agent_chat_help_max_messages: i64,
+    /// Cada cuántos días hace `regenerable_auto_clean` su limpieza.
+    pub regenerable_auto_clean_days: i64,
     /// Los agentes del chat pueden editar la carpeta de la pestaña (Codex con
     /// `workspace-write`, Qwen con `auto-edit`, Claude Code con
     /// `acceptEdits`). De fábrica, apagado: solo leen (13-11, Romen). Desde
@@ -630,6 +708,10 @@ pub struct Preferences {
     /// Modo de bajo consumo: la precarga de Dependencias y la comprobación de
     /// actualizaciones se aplazan y las sondas van de una en una.
     pub low_power_mode: bool,
+    /// Las sondas de detección con prioridad baja (26-11).
+    pub probe_low_priority: bool,
+    /// Sondas a la vez; 0 es automático (`process::probe_parallel_limit`).
+    pub probe_max_parallel: i64,
     /// Sugerir el modo de bajo consumo si el equipo va justo.
     pub low_power_suggest: bool,
     /// Ofrecer instalar la herramienta que pide una orden que no existe
@@ -638,6 +720,9 @@ pub struct Preferences {
     /// Sugerir guardar un perfil portable si hay ajustes propios y ninguno en
     /// su carpeta (`app::profiles`, 17-11).
     pub offer_portable_profile: bool,
+    /// Al cambiar ajustes habiendo ya un perfil portable, ofrecer guardarlos
+    /// en él o en uno nuevo (21-11).
+    pub offer_profile_update: bool,
     /// Cuándo usar la sesión de `gh` para las consultas de Explorar GitHub:
     /// `always`, `onExhausted` (al agotar las 60 públicas por hora) o `never`.
     pub github_session_mode: String,
@@ -951,6 +1036,22 @@ fn safe_hex_color(value: Option<&Value>, fallback: &str) -> String {
 /// Respeta el valor de fábrica declarado en TOML cuando no hay booleano
 /// explícito. Antes algunos interruptores tenían su valor codificado en el
 /// validador, con lo que cambiar `default_settings.toml` no surtía efecto.
+/// Un texto de una línea escrito por el usuario (listas y reglas): sin
+/// caracteres de control y con su tope. Si no llega texto, el de fábrica; uno
+/// vacío vale (el usuario quiere la lista vacía).
+fn line_text(value: Option<&Value>, limit: usize, fallback: &str) -> String {
+    match value.and_then(Value::as_str) {
+        Some(text) => text
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(limit)
+            .collect::<String>()
+            .trim()
+            .to_string(),
+        None => fallback.to_string(),
+    }
+}
+
 fn bool_or_default(value: Option<&Value>, fallback: bool) -> bool {
     value.and_then(Value::as_bool).unwrap_or(fallback)
 }
@@ -1230,6 +1331,19 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
     ]
     .iter()
     .all(|(key, mnemonic)| safe_shortcut(get(key), "") == *mnemonic);
+    // 22-11 (Romen): la fábrica pasa de Ctrl izquierdo + W/A/S/D, que se comía
+    // Ctrl+A/D/W/S de las shells, a Ctrl+Alt + flechas, y solo con la pantalla
+    // partida. Quien conserve el conjunto completo de fábrica anterior pasa
+    // al nuevo; uno personal o parcial se respeta.
+    let wasd_pane_shortcuts = [
+        ("shortcutPaneLeft", "ctrl+a"),
+        ("shortcutPaneRight", "ctrl+d"),
+        ("shortcutPaneUp", "ctrl+w"),
+        ("shortcutPaneDown", "ctrl+s"),
+    ]
+    .iter()
+    .all(|(key, wasd)| safe_shortcut(get(key), "").to_ascii_lowercase() == *wasd);
+    let legacy_pane_shortcuts = legacy_pane_shortcuts || wasd_pane_shortcuts;
     let shortcut_pane_left = if legacy_pane_shortcuts || mnemonic_pane_shortcuts {
         defaults.shortcut_pane_left.clone()
     } else {
@@ -1319,6 +1433,7 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("showTerminalOnlyGuide"),
             defaults.show_terminal_only_guide,
         ),
+        show_first_steps: bool_or_default(get("showFirstSteps"), defaults.show_first_steps),
         start_maximized: bool_or_default(get("startMaximized"), defaults.start_maximized),
         start_as_admin: bool_or_default(get("startAsAdmin"), defaults.start_as_admin),
         offer_gsudo: bool_or_default(get("offerGsudo"), defaults.offer_gsudo),
@@ -1465,6 +1580,7 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("shortcutToggleAgentChat"),
             &defaults.shortcut_toggle_agent_chat,
         ),
+        shortcut_go_to_tab: safe_shortcut(get("shortcutGoToTab"), &defaults.shortcut_go_to_tab),
         shortcut_terminal_font_reset: safe_shortcut(
             get("shortcutTerminalFontReset"),
             &defaults.shortcut_terminal_font_reset,
@@ -1552,6 +1668,51 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("terminalLinksConfirm"),
             defaults.terminal_links_confirm,
         ),
+        busy_tab_rename: bool_or_default(get("busyTabRename"), defaults.busy_tab_rename),
+        busy_tab_color: bool_or_default(get("busyTabColor"), defaults.busy_tab_color),
+        busy_tab_seconds: integer_in_range(
+            get("busyTabSeconds"),
+            1,
+            3600,
+            defaults.busy_tab_seconds,
+        ),
+        busy_tab_seconds_low_power: integer_in_range(
+            get("busyTabSecondsLowPower"),
+            1,
+            3600,
+            defaults.busy_tab_seconds_low_power,
+        ),
+        busy_tab_colors: line_text(get("busyTabColors"), 400, &defaults.busy_tab_colors),
+        busy_tab_rules: line_text(get("busyTabRules"), 2000, &defaults.busy_tab_rules),
+        busy_tab_exclude: line_text(get("busyTabExclude"), 2000, &defaults.busy_tab_exclude),
+        command_done_notice: bool_or_default(
+            get("commandDoneNotice"),
+            defaults.command_done_notice,
+        ),
+        command_done_seconds: integer_in_range(
+            get("commandDoneSeconds"),
+            1,
+            86400,
+            defaults.command_done_seconds,
+        ),
+        command_done_seconds_low_power: integer_in_range(
+            get("commandDoneSecondsLowPower"),
+            1,
+            86400,
+            defaults.command_done_seconds_low_power,
+        ),
+        command_done_other_tab: bool_or_default(
+            get("commandDoneOtherTab"),
+            defaults.command_done_other_tab,
+        ),
+        busy_tab_group: bool_or_default(get("busyTabGroup"), defaults.busy_tab_group),
+        busy_tab_ungroup: bool_or_default(get("busyTabUngroup"), defaults.busy_tab_ungroup),
+        busy_tab_ungroup_seconds: integer_in_range(
+            get("busyTabUngroupSeconds"),
+            0,
+            3600,
+            defaults.busy_tab_ungroup_seconds,
+        ),
         python_repl_visible_width: bool_or_default(
             get("pythonReplVisibleWidth"),
             defaults.python_repl_visible_width,
@@ -1560,9 +1721,21 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             get("actionCommandsAtOnce"),
             defaults.action_commands_at_once,
         ),
+        keep_action_command_line: bool_or_default(
+            get("keepActionCommandLine"),
+            defaults.keep_action_command_line,
+        ),
+        apply_program_defaults: bool_or_default(
+            get("applyProgramDefaults"),
+            defaults.apply_program_defaults,
+        ),
         ai_key_offer: bool_or_default(get("aiKeyOffer"), defaults.ai_key_offer),
         agent_chat: bool_or_default(get("agentChat"), defaults.agent_chat),
         agent_chat_advisor: bool_or_default(get("agentChatAdvisor"), defaults.agent_chat_advisor),
+        agent_chat_advisor_send: bool_or_default(
+            get("agentChatAdvisorSend"),
+            defaults.agent_chat_advisor_send,
+        ),
         show_agent_chat_button: bool_or_default(
             get("showAgentChatButton"),
             defaults.show_agent_chat_button,
@@ -1570,6 +1743,70 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
         agent_chat_remember: bool_or_default(
             get("agentChatRemember"),
             defaults.agent_chat_remember,
+        ),
+        agent_chat_history: bool_or_default(get("agentChatHistory"), defaults.agent_chat_history),
+        agent_chat_restore: bool_or_default(get("agentChatRestore"), defaults.agent_chat_restore),
+        agent_chat_native_sessions: bool_or_default(
+            get("agentChatNativeSessions"),
+            defaults.agent_chat_native_sessions,
+        ),
+        agent_chat_auto_title: bool_or_default(
+            get("agentChatAutoTitle"),
+            defaults.agent_chat_auto_title,
+        ),
+        agent_chat_show_resumed: bool_or_default(
+            get("agentChatShowResumed"),
+            defaults.agent_chat_show_resumed,
+        ),
+        agent_chat_pin_help: bool_or_default(get("agentChatPinHelp"), defaults.agent_chat_pin_help),
+        agent_chat_forget_native: bool_or_default(
+            get("agentChatForgetNative"),
+            defaults.agent_chat_forget_native,
+        ),
+        agent_chat_cleanup: bool_or_default(get("agentChatCleanup"), defaults.agent_chat_cleanup),
+        regenerable_auto_clean: bool_or_default(
+            get("regenerableAutoClean"),
+            defaults.regenerable_auto_clean,
+        ),
+        regenerable_clean_caches: bool_or_default(
+            get("regenerableCleanCaches"),
+            defaults.regenerable_clean_caches,
+        ),
+        regenerable_clean_downloads: bool_or_default(
+            get("regenerableCleanDownloads"),
+            defaults.regenerable_clean_downloads,
+        ),
+        regenerable_clean_detection: bool_or_default(
+            get("regenerableCleanDetection"),
+            defaults.regenerable_clean_detection,
+        ),
+        regenerable_clean_logs: bool_or_default(
+            get("regenerableCleanLogs"),
+            defaults.regenerable_clean_logs,
+        ),
+        agent_chat_cleanup_days: integer_in_range(
+            get("agentChatCleanupDays"),
+            1,
+            3650,
+            defaults.agent_chat_cleanup_days,
+        ),
+        agent_chat_help_max_days: integer_in_range(
+            get("agentChatHelpMaxDays"),
+            0,
+            3650,
+            defaults.agent_chat_help_max_days,
+        ),
+        agent_chat_help_max_messages: integer_in_range(
+            get("agentChatHelpMaxMessages"),
+            0,
+            10000,
+            defaults.agent_chat_help_max_messages,
+        ),
+        regenerable_auto_clean_days: integer_in_range(
+            get("regenerableAutoCleanDays"),
+            1,
+            365,
+            defaults.regenerable_auto_clean_days,
         ),
         agent_chat_can_edit: bool_or_default(get("agentChatCanEdit"), defaults.agent_chat_can_edit),
         agent_chat_guide: bool_or_default(get("agentChatGuide"), defaults.agent_chat_guide),
@@ -1593,6 +1830,13 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
             defaults.suggest_repository_import,
         ),
         low_power_mode: bool_or_default(get("lowPowerMode"), defaults.low_power_mode),
+        probe_low_priority: bool_or_default(get("probeLowPriority"), defaults.probe_low_priority),
+        probe_max_parallel: integer_in_range(
+            get("probeMaxParallel"),
+            0,
+            64,
+            defaults.probe_max_parallel,
+        ),
         low_power_suggest: bool_or_default(get("lowPowerSuggest"), defaults.low_power_suggest),
         suggest_missing_tools: bool_or_default(
             get("suggestMissingTools"),
@@ -1601,6 +1845,10 @@ fn sanitize_preferences_with_defaults(raw: &Value, defaults: &Preferences) -> Pr
         offer_portable_profile: bool_or_default(
             get("offerPortableProfile"),
             defaults.offer_portable_profile,
+        ),
+        offer_profile_update: bool_or_default(
+            get("offerProfileUpdate"),
+            defaults.offer_profile_update,
         ),
         github_session_mode: one_of(
             get("githubSessionMode"),
@@ -1994,7 +2242,8 @@ mod tests {
         // Una entrada que no sea booleana conserva el valor de fábrica...
         assert!(!prefs.auto_start_docker);
         assert!(!prefs.show_system_banner);
-        assert!(!prefs.copy_on_select);
+        // (encendido de fábrica desde el 22-11)
+        assert!(prefs.copy_on_select);
         assert!(prefs.auto_open_first_group);
     }
 
@@ -2011,6 +2260,55 @@ mod tests {
             "un valor no booleano conserva el de fábrica"
         );
         assert!(!prefs.terminal_links_confirm);
+    }
+
+    #[test]
+    fn las_sondas_van_con_prioridad_baja_y_en_automatico_de_fabrica() {
+        let defaults = Preferences::default();
+        assert!(defaults.probe_low_priority);
+        assert_eq!(defaults.probe_max_parallel, 0);
+        let prefs =
+            sanitize_preferences(&json!({ "probeMaxParallel": 500, "probeLowPriority": false }));
+        assert_eq!(prefs.probe_max_parallel, 64);
+        assert!(!prefs.probe_low_priority);
+    }
+
+    #[test]
+    fn las_pestanas_ocupadas_vienen_como_se_pidio_y_se_limpian() {
+        let defaults = Preferences::default();
+        assert!(defaults.busy_tab_rename && defaults.busy_tab_color);
+        assert_eq!(
+            (
+                defaults.busy_tab_seconds,
+                defaults.busy_tab_seconds_low_power
+            ),
+            (5, 10)
+        );
+        assert_eq!(
+            (
+                defaults.command_done_seconds,
+                defaults.command_done_seconds_low_power
+            ),
+            (10, 20)
+        );
+        assert!(defaults.command_done_notice && defaults.command_done_other_tab);
+        // Agrupar cambia lo que se ve: apagado de fábrica.
+        assert!(!defaults.busy_tab_group && defaults.busy_tab_ungroup);
+        assert!(defaults.busy_tab_colors.contains("logs=blue"));
+        assert!(defaults
+            .busy_tab_exclude
+            .split(',')
+            .any(|item| item == "vim"));
+        let prefs = sanitize_preferences(&json!({
+            "busyTabSeconds": 0,
+            "busyTabRules": "ping=red\u{0007};kubectl logs=pink",
+            "busyTabExclude": "",
+            "busyTabColors": 5
+        }));
+        assert_eq!(prefs.busy_tab_seconds, 1);
+        assert_eq!(prefs.busy_tab_rules, "ping=red;kubectl logs=pink");
+        assert!(prefs.busy_tab_exclude.is_empty(), "una lista vacía vale");
+        assert_eq!(prefs.busy_tab_colors, defaults.busy_tab_colors);
     }
 
     #[test]
@@ -2050,6 +2348,26 @@ mod tests {
         assert!(defaults.show_agent_chat_button);
         // Recordar la conversación, de fábrica (13-11).
         assert!(defaults.agent_chat_remember);
+        assert!(defaults.agent_chat_history);
+        assert!(defaults.agent_chat_restore);
+        assert!(defaults.agent_chat_native_sessions);
+        // La pregunta de ayuda se deja escrita de fábrica (24-11).
+        assert!(!defaults.agent_chat_advisor_send);
+        // Mejoras del chat y limpieza de lo regenerable (24-11).
+        assert!(!defaults.agent_chat_auto_title);
+        assert!(defaults.agent_chat_show_resumed);
+        assert!(defaults.agent_chat_pin_help);
+        assert!(!defaults.agent_chat_forget_native);
+        assert!(!defaults.agent_chat_cleanup);
+        assert!(!defaults.regenerable_auto_clean);
+        assert!(defaults.regenerable_clean_caches);
+        assert!(defaults.regenerable_clean_downloads);
+        assert!(defaults.regenerable_clean_detection);
+        assert!(defaults.regenerable_clean_logs);
+        assert_eq!(defaults.agent_chat_cleanup_days, 90);
+        assert_eq!(defaults.agent_chat_help_max_days, 0);
+        assert_eq!(defaults.agent_chat_help_max_messages, 0);
+        assert_eq!(defaults.regenerable_auto_clean_days, 30);
         // Editar la carpeta, apagado de fábrica: los agentes solo leen.
         assert!(!defaults.agent_chat_can_edit);
         // Omitir permisos, apagado de fábrica (14-11).
@@ -2091,11 +2409,17 @@ mod tests {
         assert!(Preferences::default().ai_key_offer);
         // Los dos avisos nuevos del 17-11, encendidos de fábrica y apagables.
         let defaults = Preferences::default();
-        assert!(defaults.suggest_missing_tools && defaults.offer_portable_profile);
-        let off = sanitize_preferences(
-            &json!({ "suggestMissingTools": false, "offerPortableProfile": false }),
+        assert!(
+            defaults.suggest_missing_tools
+                && defaults.offer_portable_profile
+                && defaults.offer_profile_update
         );
-        assert!(!off.suggest_missing_tools && !off.offer_portable_profile);
+        let off = sanitize_preferences(
+            &json!({ "suggestMissingTools": false, "offerPortableProfile": false, "offerProfileUpdate": false }),
+        );
+        assert!(
+            !off.suggest_missing_tools && !off.offer_portable_profile && !off.offer_profile_update
+        );
         assert!(!sanitize_preferences(&json!({ "aiKeyOffer": false })).ai_key_offer);
     }
 
@@ -2249,10 +2573,10 @@ mod tests {
             "shortcutPaneUp": "Alt+ArrowUp",
             "shortcutPaneDown": "Alt+ArrowDown"
         }));
-        assert_eq!(migrated.shortcut_pane_left, "Ctrl+A");
-        assert_eq!(migrated.shortcut_pane_right, "Ctrl+D");
-        assert_eq!(migrated.shortcut_pane_up, "Ctrl+W");
-        assert_eq!(migrated.shortcut_pane_down, "Ctrl+S");
+        assert_eq!(migrated.shortcut_pane_left, "Ctrl+Alt+ArrowLeft");
+        assert_eq!(migrated.shortcut_pane_right, "Ctrl+Alt+ArrowRight");
+        assert_eq!(migrated.shortcut_pane_up, "Ctrl+Alt+ArrowUp");
+        assert_eq!(migrated.shortcut_pane_down, "Ctrl+Alt+ArrowDown");
 
         let restored = sanitize_preferences(&json!({
             "shortcutPaneLeft": "Ctrl+Alt+H",
@@ -2260,10 +2584,31 @@ mod tests {
             "shortcutPaneUp": "Ctrl+Alt+K",
             "shortcutPaneDown": "Ctrl+Alt+J"
         }));
-        assert_eq!(restored.shortcut_pane_left, "Ctrl+A");
-        assert_eq!(restored.shortcut_pane_right, "Ctrl+D");
-        assert_eq!(restored.shortcut_pane_up, "Ctrl+W");
-        assert_eq!(restored.shortcut_pane_down, "Ctrl+S");
+        assert_eq!(restored.shortcut_pane_left, "Ctrl+Alt+ArrowLeft");
+        assert_eq!(restored.shortcut_pane_right, "Ctrl+Alt+ArrowRight");
+        assert_eq!(restored.shortcut_pane_up, "Ctrl+Alt+ArrowUp");
+        assert_eq!(restored.shortcut_pane_down, "Ctrl+Alt+ArrowDown");
+
+        // 22-11: el W/A/S/D de fábrica anterior también pasa al nuevo.
+        let wasd = sanitize_preferences(&json!({
+            "shortcutPaneLeft": "Ctrl+A",
+            "shortcutPaneRight": "Ctrl+D",
+            "shortcutPaneUp": "Ctrl+W",
+            "shortcutPaneDown": "Ctrl+S"
+        }));
+        assert_eq!(wasd.shortcut_pane_left, "Ctrl+Alt+ArrowLeft");
+        assert_eq!(wasd.shortcut_pane_down, "Ctrl+Alt+ArrowDown");
+        // Uno parcial es personal y se respeta.
+        let partial_wasd = sanitize_preferences(&json!({
+            "shortcutPaneLeft": "Ctrl+A",
+            "shortcutPaneRight": "Ctrl+D",
+            "shortcutPaneUp": "Ctrl+W",
+            "shortcutPaneDown": "Ctrl+Alt+S"
+        }));
+        assert_eq!(
+            partial_wasd.shortcut_pane_left.to_ascii_lowercase(),
+            "ctrl+a"
+        );
 
         let custom = sanitize_preferences(&json!({
             "shortcutPaneLeft": "Alt+ArrowLeft",

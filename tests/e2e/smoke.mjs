@@ -116,6 +116,28 @@ if (process.platform === 'win32') {
     }
     process.env.LTERMINAL_E2E_TESTING = '1';
 }
+// 22-11: quien actualiza desde otra build trae su catálogo guardado, con las
+// órdenes de entonces. La 82 ejecutó así la orden vieja de VirtualBox. Se
+// planta uno «de otra build» antes de abrir la app; la app debe tirarlo.
+const STALE_CATALOG_MARKER = 'WTERMINAL-CATALOGO-VIEJO-NO-DEBE-USARSE';
+const staleCatalogOnly = process.env.E2E_STALE_CATALOG_ONLY === '1' && process.platform === 'win32';
+if (staleCatalogOnly) {
+    const dataDir = join(process.env.LTERMINAL_E2E_APP_DATA_DIR, 'wterminal');
+    await mkdir(dataDir, { recursive: true });
+    const staleAction = (language) => ({
+        schema: 1,
+        language,
+        actions: [{
+            id: 'winget-virtualbox',
+            label: 'Oracle VirtualBox',
+            command: `echo ${STALE_CATALOG_MARKER}`,
+            group: 'Plataformas e integración',
+            verb: 'Instalar',
+            installed: false,
+        }],
+    });
+    await writeFile(join(dataDir, 'install-actions-snapshot.json'), JSON.stringify(staleAction('es')));
+}
 // npm/build shells on Windows do not always inherit the Cargo bin directory.
 // Resolve the installed driver from the standard per-user location before
 // falling back to PATH, so an E2E run is reproducible from a clean terminal.
@@ -156,6 +178,27 @@ const application = process.env.E2E_BINARY
 if (!application) throw new Error('E2E_BINARY debe apuntar al binario Tauri compilado');
 await access(application);
 const execFile = promisify(execFileCallback);
+
+// Características opcionales de Windows con acción «Activar» en el catálogo.
+// Cuando ya están activadas (o esperan reinicio), el catálogo esconde esa
+// acción por diseño (larga 80, 21-11: Sandbox se activó a mano en el equipo de
+// pruebas y dos comprobaciones lo tomaron por una acción perdida).
+const WINDOWS_FEATURE_ACTIONS = {
+    'windows-hyperv-enable': 'Microsoft-Hyper-V-All',
+    'windows-vmp-enable': 'VirtualMachinePlatform',
+    'windows-sandbox-enable': 'Containers-DisposableClientVM',
+};
+
+/** `true` si Windows dice que la característica de esa acción ya está activada. Sin administrador. */
+async function windowsFeatureAlreadyEnabled(actionId) {
+    const feature = WINDOWS_FEATURE_ACTIONS[actionId];
+    if (!feature || process.platform !== 'win32') return false;
+    const { stdout } = await execFile('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `(Get-CimInstance Win32_OptionalFeature -Filter "Name='${feature}'" -ErrorAction SilentlyContinue).InstallState`,
+    ], { windowsHide: true, timeout: 30_000 }).catch(() => ({ stdout: '' }));
+    return String(stdout).trim() === '1';
+}
 
 // tauri-driver puede dejar la aplicación nativa desacoplada de su árbol de
 // procesos. `tasklist` es inmediato y no abre PowerShell visible; el conjunto
@@ -399,6 +442,10 @@ const commandPaletteOnly = process.env.E2E_COMMAND_PALETTE_ONLY === '1';
 // shell) y guardar su salida. El diálogo nativo no se puede pulsar desde aquí:
 // el backend usa la ruta de `LTERMINAL_E2E_SAVE_OUTPUT_PATH`.
 const tabToolsOnly = process.env.E2E_TAB_TOOLS_ONLY === '1';
+const busyTabsOnly = process.env.E2E_BUSY_TABS_ONLY === '1';
+// Velocidad de la salida (26-11, Romen: «las salidas vienen letra a letra»):
+// cuánto tardan 2000 líneas en cmd y PowerShell y en cuántos trozos llegan.
+const outputSpeedOnly = process.env.E2E_OUTPUT_SPEED_ONLY === '1';
 // Marcas OSC 133 en cmd, PowerShell y Git Bash: fin de orden, código de salida,
 // Intro vacío, eco pegado al prompt, copiar la salida, saltos y orden larga.
 const commandMarksOnly = process.env.E2E_COMMAND_MARKS_ONLY === '1';
@@ -406,6 +453,8 @@ const commandMarksOnly = process.env.E2E_COMMAND_MARKS_ONLY === '1';
 // 12-11): con Clink encendido, la orden de una acción y su Intro llegan a
 // xterm en una sola entrega en vez de repintarse tecla a tecla.
 const actionAtOnceOnly = process.env.E2E_ACTION_AT_ONCE_ONLY === '1';
+// Instalación real del catálogo (22-11): cambia el equipo, solo a mano.
+const realInstallOnly = process.env.E2E_REAL_INSTALL_ONLY === '1' && process.platform === 'win32';
 // Lo mismo con los scripts de la Biblioteca (14-11, visto por Romen: «el
 // comando se construye de la forma antigua»), lanzados desde el panel como lo
 // hace él: un .bat en la pestaña cmd, un .ps1 que abre una pestaña de
@@ -488,7 +537,9 @@ if (adbRefreshOnly) {
 // instalar herramientas ni descargar gigas.
 const aiEnvironmentsOnly = process.env.E2E_AI_ENVIRONMENTS_ONLY === '1';
 let fakeAiDirectory = null;
-if (aiEnvironmentsOnly) {
+// Los avisos (24-11) también: el consejero solo sale con un agente al que
+// preguntar, y el simulado no depende de lo que tenga instalado el equipo.
+if (aiEnvironmentsOnly || process.env.E2E_NOTICES_ONLY === '1') {
     if (process.platform !== 'win32') throw new Error('E2E_AI_ENVIRONMENTS_ONLY simula las CLIs con archivos .cmd de Windows');
     fakeAiDirectory = await mkdtemp(join(tmpdir(), 'wterminal-e2e-ai-'));
     const fakeAiBin = join(fakeAiDirectory, 'bin');
@@ -2716,10 +2767,15 @@ async function assertLanguageAnchors(language, expected) {
     if (mismatches.length) {
         throw new Error(`Texto hardcodeado o traducción incompleta para ${language}: ${JSON.stringify({ mismatches, actual })}`);
     }
+    // Las ocho pestañas de la reorganización del 22-11 (SettingsPanel.svelte).
     const expectedTabs = [
         expected['settings.appearance'],
         expected['settings.terminal'],
-        expected['settings.behavior'],
+        expected['settings.aiTab'],
+        expected['settings.general'],
+        expected['settings.shortcutsTab'],
+        expected['settings.system'],
+        expected['settings.programs'],
         expected['settings.about'],
     ];
     if (!expectedTabs.every((label) => actual.tabs.includes(label))) {
@@ -2856,14 +2912,61 @@ async function waitUntil(predicate, timeoutMs = 20000, description = 'condición
 async function findWhenReady(css, timeoutMs = 20000) {
     const deadline = Date.now() + timeoutMs;
     let lastError;
+    let tabChecked = false;
     while (Date.now() < deadline) {
         try { return await find(css); }
         catch (error) {
             lastError = error;
+            // 22-11: Ajustes se reorganizó en más pestañas. Si una prueba busca
+            // un control de Ajustes, se abre su pestaña (sacada del propio
+            // SettingsPanel.svelte), una vez y sin recorrer las demás: un
+            // control que desaparece un momento (el del PATH mientras se
+            // escribe) no debe hacer saltar de pestaña.
+            if (!tabChecked) {
+                tabChecked = true;
+                await openSettingsTabOf(css).catch(() => undefined);
+            }
             await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
         }
     }
     throw lastError ?? new Error(`No apareció el elemento ${css}`);
+}
+
+/** Pestaña de Ajustes de cada control (`data-testid`), leída del propio
+ *  SettingsPanel.svelte: así las pruebas no dependen de en qué pestaña quedó
+ *  cada bloque tras reorganizar (22-11). */
+let settingsTabOfCache = null;
+async function settingsTabOf(testid) {
+    if (!settingsTabOfCache) {
+        settingsTabOfCache = new Map();
+        const source = await readFile(join(projectRoot, 'src', 'components', 'SettingsPanel.svelte'), 'utf8').catch(() => '');
+        let section = '';
+        for (const line of source.split('\n')) {
+            const opened = /\{#if section === "(\w+)"/u.exec(line);
+            if (opened) section = opened[1];
+            for (const match of line.matchAll(/data-testid="(settings-[a-z0-9-]+)"/gu)) {
+                if (section && !settingsTabOfCache.has(match[1])) settingsTabOfCache.set(match[1], section);
+            }
+        }
+        settingsTabOfCache.set('settings-programs', 'programs');
+    }
+    return settingsTabOfCache.get(testid) ?? null;
+}
+
+/** Si `css` es un control de Ajustes y su pestaña no es la abierta, la abre. */
+async function openSettingsTabOf(css) {
+    const testid = /data-testid="((?:settings|shortcut)-[A-Za-z0-9-]+)"/u.exec(css)?.[1];
+    if (!testid || testid.startsWith('settings-tab-')) return false;
+    // Los campos de atajos (`shortcut-…`) se pintan en bucle: todos en Atajos.
+    const tab = testid.startsWith('shortcut-') ? 'shortcuts' : await settingsTabOf(testid);
+    if (!tab) return false;
+    return request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const tab = document.querySelector('[role="dialog"] [data-testid="settings-tab-' + arguments[0] + '"]');
+            if (!tab || tab.getAttribute('aria-selected') === 'true') return false;
+            tab.click();
+            return true;`,
+        args: [tab],
+    });
 }
 
 // Un pie sticky (el de Ajustes con «Guardar») puede tapar un control que sigue
@@ -3955,7 +4058,10 @@ async function waitForProgressMarker(marker, description) {
         const text = await textOf(rows);
         const index = text.lastIndexOf(marker);
         return index >= 0 && promptLooksVisible(text.slice(index + marker.length));
-    }, 15000, description);
+        // 45 s y no 15: lo que se mide es cómo se pinta la barra, no la
+        // velocidad. El 22-11 el powershell.exe de la barra simulada tardó
+        // 18,6 s en una VM cargada y la prueba caía con la salida bien.
+    }, 45_000, description);
 }
 
 async function exerciseProgressOutputLayout() {
@@ -4374,20 +4480,28 @@ async function exerciseHorizontalSequenceIntegrity() {
     }
     // El repintado de un lienzo xterm muy ancho puede necesitar más de un
     // frame en WebView2 antes de que la captura vea la cola desplazada.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    const numericEndProbe = await visibleHorizontalTextAtEnd(numericCell);
-    const visibleNumeric = String(numericEndProbe?.visibleText ?? '');
+    // 23-11 (larga 83, auditoría): con 600 ms fijos la lectura llegó antes que
+    // el repintado (las filas aún eran las del banner y la cola estaba en
+    // 6560 px con un máximo de 6110). Se repite hasta 10 s; si la cola no
+    // aparece, el fallo es real.
     const numericTailStart = 113;
-    let nextNumber = numericTailStart;
-    let cursor = -1;
-    const missingNumeric = [];
-    while (nextNumber <= 120) {
-        const token = String(nextNumber);
-        const found = visibleNumeric.indexOf(token, cursor + 1);
-        if (found < 0) missingNumeric.push(nextNumber);
-        else cursor = found + token.length - 1;
-        nextNumber += 1;
-    }
+    let numericEndProbe = null;
+    let visibleNumeric = '';
+    let missingNumeric = [];
+    const numericDeadline = Date.now() + 10000;
+    do {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        numericEndProbe = await visibleHorizontalTextAtEnd(numericCell);
+        visibleNumeric = String(numericEndProbe?.visibleText ?? '');
+        missingNumeric = [];
+        let cursor = -1;
+        for (let nextNumber = numericTailStart; nextNumber <= 120; nextNumber += 1) {
+            const token = String(nextNumber);
+            const found = visibleNumeric.indexOf(token, cursor + 1);
+            if (found < 0) missingNumeric.push(nextNumber);
+            else cursor = found + token.length - 1;
+        }
+    } while ((!numericEndProbe || missingNumeric.length) && Date.now() < numericDeadline);
     if (!numericEndProbe || missingNumeric.length) {
         await captureScreenshot('scroll-numeric-sequence-missing-at-end');
         throw new Error(`El extremo horizontal perdió números: ${JSON.stringify({ numericEndProbe, missingNumeric, visibleNumeric })}`);
@@ -7799,7 +7913,8 @@ async function assertCurrentLog() {
             || line.includes('Banner inicial preparado')
             || line.includes('Repintado de banner solicitado')
             || line.includes('Ventana inicial mostrada')
-            || line.includes('Marcador de inicializacion recibido'))
+            || line.includes('Marcador de inicializacion recibido')
+            || line.includes('] pty spawneado {'))
         .map((line) => {
             const match = line.match(/^\[([^\]]+)\] \[[^\]]+\] \[([^\]]+)\] (.*)$/);
             if (!match) return null;
@@ -7815,6 +7930,7 @@ async function assertCurrentLog() {
         .filter(Boolean);
     const grouped = {};
     for (const event of performanceEvents) {
+        if (event.message === 'pty spawneado') continue;
         const metric = event.metric ?? event.message;
         if (!grouped[metric]) grouped[metric] = { count: 0, minMs: null, maxMs: null, totalMs: 0 };
         const duration = Number(event.durationMs);
@@ -7829,10 +7945,25 @@ async function assertCurrentLog() {
         item.avgMs = item.count ? Math.round((item.totalMs / item.count) * 100) / 100 : null;
         delete item.totalMs;
     }
+    // Las shells elevadas (gsudo y NSudo, que pasa por gsudo) tardan lo que
+    // tarde gsudo en elevar, fuera de WTerminal: en esta VM, `gsudo cmd /c
+    // echo` solo tarda de 30 a 110 s (23-11, medido con `gsudo --debug`). Se
+    // registran, pero no cuentan para el límite de ConPTY.
+    const spawnedEnv = new Map(performanceEvents
+        .filter((event) => event.message === 'pty spawneado' && event.envId)
+        .map((event) => [`${event.tabId}:${event.generation}`, String(event.envId)]));
+    const elevatedStartups = [];
     const shellStartups = performanceEvents
         .filter((event) => event.message === 'Marcador de inicializacion recibido')
+        .filter((event) => {
+            const envId = spawnedEnv.get(`${event.tabId}:${event.generation}`) ?? '';
+            if (!/^(gsudo|nsudo):/u.test(envId)) return true;
+            elevatedStartups.push({ envId, durationMs: Number(event.durationMs) });
+            return false;
+        })
         .map((event) => Number(event.durationMs))
         .filter(Number.isFinite);
+    if (elevatedStartups.length) recordEvent('elevated-shell-startup', { startups: elevatedStartups });
     if (shellStartups.length === 0) {
         throw new Error('La sesión no registró tiempos de inicialización de shell.');
     }
@@ -8325,6 +8456,419 @@ async function exerciseInputSelection(shell, cell) {
 /** Llama a un comando IPC desde la página y devuelve su resultado. Va
  *  serializado: `request` toma por error de WebDriver cualquier valor con un
  *  campo `error`. */
+/** 22-11, Romen: «haz pruebas reales… que instale todas las aplicaciones no
+ *  instaladas o actualizaciones, dar mensajes de error claros». En la app de
+ *  verdad y con la carpeta propia de verdad: pulsa Instalar en todo lo que la
+ *  detección da por no instalado y Actualizar en lo que tiene actualización
+ *  pendiente, una a una, espera el ✔ o el ✘ del marco, guarda la salida (y una
+ *  captura si falla) y al final repite la detección: lo que acabó con ✔ tiene
+ *  que verse instalado. Variables:
+ *   E2E_REAL_INSTALL_DRY=1     solo lista lo que haría;
+ *   E2E_REAL_INSTALL_IDS=a,b   solo esas acciones;
+ *   E2E_REAL_INSTALL_SKIP=a,b  además de las que no caben (Visual Studio);
+ *   E2E_REAL_INSTALL_LIMIT=n   como mucho n;
+ *   E2E_REAL_INSTALL_STORE     carpeta propia (E:\WTerminal\entornos);
+ *   E2E_REAL_INSTALL_MIN_FREE_GB  para si C: baja de esto (1,5). */
+async function exerciseRealInstall() {
+    markPhase('instalación real del catálogo');
+    const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+    const list = (value) => String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+    const store = process.env.E2E_REAL_INSTALL_STORE || 'E:\\WTerminal\\entornos';
+    const dry = process.env.E2E_REAL_INSTALL_DRY === '1';
+    const onlyIds = new Set(list(process.env.E2E_REAL_INSTALL_IDS));
+    // Visual Studio son varios GB en C: aunque se pida otra carpeta, y la de
+    // proyectos hace `git pull` en los repositorios del usuario. Hyper-V y
+    // Virtual Machine Platform: Romen quitó el hipervisor de la VM el 17-11
+    // porque la dejaba medio corrupta; solo con E2E_REAL_INSTALL_IDS.
+    const skipIds = new Set(['editor-visualstudio-win', 'git-pull-projects',
+        ...(onlyIds.size > 0 ? [] : ['windows-hyperv-enable', 'windows-vmp-enable']),
+        ...list(process.env.E2E_REAL_INSTALL_SKIP)]);
+    const limit = Number(process.env.E2E_REAL_INSTALL_LIMIT || 0);
+    const minFreeGb = Number(process.env.E2E_REAL_INSTALL_MIN_FREE_GB || 1.5);
+    const actionTimeoutMs = Number(process.env.E2E_REAL_INSTALL_ACTION_TIMEOUT_MS || 45 * 60_000);
+    const freeGbOn = async (drive) => {
+        const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+            `[math]::Round((Get-PSDrive ${drive}).Free / 1GB, 2)`], { windowsHide: true, timeout: 30_000 }).catch(() => ({ stdout: '' }));
+        const value = Number(String(stdout).trim().replace(',', '.'));
+        return Number.isFinite(value) ? value : null;
+    };
+
+    await waitForBannerPanes(1, 60000);
+    const preferences = (await invokeJson('settings_get')).preferences;
+    await invokeJson('settings_save', { incoming: {
+        ...preferences,
+        toolchainStoreEnabled: true,
+        toolchainStoreDir: store,
+        toolchainStorePrograms: true,
+        toolchainStoreDownloads: true,
+        toolchainStoreTools: true,
+        toolchainStoreToolchains: true,
+        toolchainStoreConfig: true,
+    } });
+    // Una shell nueva hereda las variables de la carpeta propia
+    // (WTERMINAL_PROGRAMS, WTERMINAL_DOWNLOADS…), como al abrir la app.
+    await switchToEnvironment('powershell');
+    await switchToEnvironment('cmd');
+
+    const before = await invokeJsonLong('install_refresh');
+    const actions = before.actions ?? [];
+    const verbOf = (action) => String(action.verb ?? '').toLowerCase();
+    const isInstall = (action) => !action.verb || /^instalar|^install/u.test(verbOf(action));
+    const isUpdate = (action) => /^actualizar|^update/u.test(verbOf(action));
+    const pendingUpdate = (action) => isUpdate(action) && /actualizaci|update/iu.test(`${action.group} ${action.groupKey ?? ''}`);
+    const candidates = actions.filter((action) => {
+        if (skipIds.has(action.id)) return false;
+        if (onlyIds.size > 0) return onlyIds.has(action.id);
+        if (action.detectionStatus) return false;
+        return (isInstall(action) && action.installed === false) || pendingUpdate(action);
+    });
+    // Lo que no cabe o no puede funcionar aquí, dicho en el informe:
+    // - modelos de IA: de 9 a 65 GB cada uno; solo los pequeños de
+    //   E2E_REAL_INSTALL_MODELS (por defecto uno o dos de pocos GB);
+    // - distribuciones WSL con E2E_SKIP_WSL (equipo sin hipervisor).
+    const allowedModels = new Set(list(process.env.E2E_REAL_INSTALL_MODELS ?? 'ai-model-qwen3-5-2b,ai-model-gemma4-e4b'));
+    const notHere = (action) => {
+        if (onlyIds.size > 0) return null;
+        if (/^ai-model-/u.test(action.id) && !allowedModels.has(action.id)) return 'modelo de IA grande: no cabe';
+        if (/^wsl-distro-/u.test(action.id) && process.env.E2E_SKIP_WSL === '1') return 'WSL sin hipervisor en este equipo';
+        return null;
+    };
+    const excluded = candidates.filter((action) => notHere(action)).map((action) => ({ id: action.id, reason: notHere(action) }));
+    // Las actualizaciones, al final: «Actualizar todo» puede cambiar
+    // programas que la propia prueba usa.
+    const ordered = candidates.filter((action) => !notHere(action))
+        .sort((a, b) => Number(pendingUpdate(a)) - Number(pendingUpdate(b)));
+    const planned = limit > 0 ? ordered.slice(0, limit) : ordered;
+    recordEvent('real-install-plan', {
+        store,
+        catalog: actions.length,
+        unknown: actions.filter((action) => action.detectionStatus).map((action) => action.id),
+        planned: planned.map((action) => ({ id: action.id, label: action.label, verb: action.verb, group: action.group, admin: action.admin })),
+        skipped: actions.filter((action) => skipIds.has(action.id)).map((action) => action.id),
+        excluded,
+    });
+    if (excluded.length > 0) {
+        process.stdout.write(`E2E instalación real: fuera por no caber o no poder funcionar aquí (${excluded.length}): ${excluded.map((item) => `${item.id} (${item.reason})`).join(', ')}.\n`);
+    }
+    process.stdout.write(`E2E instalación real: ${planned.length} acciones (${planned.map((action) => action.id).join(', ')}).\n`);
+    if (dry) return;
+
+    const tabId = await runScript("return document.querySelector('.tab.active')?.dataset.tabId;");
+    await runScript(`window.__wtRealChunks = [];
+        if (!window.__wtRealListener) {
+            window.__wtRealListener = (event) => {
+                if (typeof event.detail?.data === 'string') window.__wtRealChunks.push([event.detail.tabId, event.detail.data]);
+            };
+            window.addEventListener('winslim:terminal-output-busy', window.__wtRealListener);
+        }
+        return true;`);
+    const strip = (text) => text
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_78=>]/gu, '')
+        .replace(/\r/gu, '');
+    const outputOf = async (tab) => strip((await runScript('return window.__wtRealChunks.filter((item) => item[0] === arguments[0]).map((item) => item[1]).join("");', [tab])) ?? '');
+
+    const results = [];
+    for (const [index, action] of planned.entries()) {
+        const free = await freeGbOn('C');
+        const storeDrive = /^[A-Za-z]:/u.test(store) ? store[0].toUpperCase() : 'C';
+        const storeFree = storeDrive === 'C' ? free : await freeGbOn(storeDrive);
+        const minStoreGb = Number(process.env.E2E_REAL_INSTALL_MIN_STORE_GB || 6);
+        if ((free !== null && free < minFreeGb) || (storeFree !== null && storeFree < minStoreGb)) {
+            const reason = `C: con ${free} GB libres (mínimo ${minFreeGb}), ${storeDrive}: con ${storeFree} GB (mínimo ${minStoreGb})`;
+            results.push({ id: action.id, status: 'stopped', reason });
+            process.stdout.write(`E2E instalación real: PARADA, ${reason}.\n`);
+            break;
+        }
+        const startedAt = Date.now();
+        await runScript('window.__wtRealChunks = []; return true;');
+        const run = await invokeJsonLong('install_run', { tabId, actionId: action.id }, 10 * 60_000);
+        const entry = { id: action.id, label: action.label, verb: action.verb, admin: action.admin, freeGbBefore: free };
+        if (!run?.ok) {
+            entry.status = 'not-started';
+            entry.error = run?.error ?? JSON.stringify(run);
+            entry.clearError = Boolean(run?.error && run.error.trim().length >= 15);
+            results.push(entry);
+            process.stdout.write(`  [${index + 1}/${planned.length}] ${action.id}: NO EMPEZÓ — ${entry.error}\n`);
+            continue;
+        }
+        const outputTab = run.tabId ?? tabId;
+        let text = '';
+        try {
+            await waitUntil(async () => {
+                // Una instalación tarda minutos: mirar cada 2 s basta.
+                await new Promise((resolveDelay) => setTimeout(resolveDelay, 2000));
+                text = await outputOf(outputTab);
+                return /[✔✘][^\n]*\n[^\n]*(Enter|Intro)/u.test(text);
+            }, actionTimeoutMs, `resultado de ${action.id}`);
+        } catch (error) {
+            entry.status = 'timeout';
+            entry.output = text.slice(-4000);
+            await captureScreenshot(`instalacion-real-${action.id}-sin-final`);
+            results.push(entry);
+            process.stdout.write(`  [${index + 1}/${planned.length}] ${action.id}: SIN FINAL en ${Math.round(actionTimeoutMs / 60000)} min\n`);
+            // Ctrl+C y Enter para recuperar la pestaña antes de la siguiente.
+            await invokeJson('pty_input', { tabId: outputTab, data: '\x03' }).catch(() => undefined);
+            continue;
+        }
+        entry.durationMs = Date.now() - startedAt;
+        entry.status = text.lastIndexOf('✔') > text.lastIndexOf('✘') ? 'ok' : 'failed';
+        entry.output = text.slice(-4000);
+        if (entry.status === 'failed') {
+            // Mensaje claro: además de la línea genérica del marco, alguna
+            // línea de la salida que no sea solo «código de salida: N».
+            const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+            const footer = lines.findLastIndex((line) => line.startsWith('✘'));
+            const explanation = lines.slice(Math.max(0, footer - 12), footer)
+                .filter((line) => !/^[│└┌]/u.test(line) && !/c[oó]digo de salida:?\s*-?\d+\s*$/iu.test(line));
+            entry.clearError = explanation.length > 0;
+            entry.explanation = explanation.slice(-6);
+            await captureScreenshot(`instalacion-real-${action.id}-fallo`);
+        }
+        results.push(entry);
+        process.stdout.write(`  [${index + 1}/${planned.length}] ${action.id}: ${entry.status} (${Math.round(entry.durationMs / 1000)} s)\n`);
+        // El Intro, a la terminal: con el foco en otro sitio (el botón
+        // «Ajustes» tras una acción) abría Ajustes en vez de cerrar la pausa
+        // (22-11). Se cierran los diálogos y se enfoca la terminal.
+        await runScript(`document.querySelector('[role="dialog"] .panel-close')?.click();
+            const area = document.querySelector('.cell:not(.hidden) .xterm-helper-textarea') ?? document.querySelector('.xterm-helper-textarea');
+            area?.focus();
+            return Boolean(area);`);
+        await pressTerminalKey('\uE007');
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 1500));
+    }
+
+    // Lo que acabó con ✔ tiene que verse instalado al detectar de nuevo.
+    const after = await invokeJsonLong('install_refresh');
+    const afterById = new Map((after.actions ?? []).map((action) => [action.id, action]));
+    const notDetected = results
+        .filter((entry) => entry.status === 'ok' && !/^actualizar|^update/u.test(String(entry.verb ?? '').toLowerCase()))
+        .filter((entry) => {
+            const now = afterById.get(entry.id);
+            // Instalada: la acción «Instalar» desaparece o sale instalada.
+            return now && now.installed === false;
+        })
+        .map((entry) => entry.id);
+    const failed = results.filter((entry) => entry.status !== 'ok');
+    const unclear = results.filter((entry) => entry.status === 'failed' && !entry.clearError).map((entry) => entry.id);
+    recordEvent('real-install-results', { results, notDetected, unclear });
+    const reportFile = join(dirname(smokeReport.reportPath ?? join(tmpdir(), 'x')), 'instalacion-real.json');
+    await writeFile(reportFile, JSON.stringify({ store, results, notDetected, unclear }, null, 2)).catch(() => undefined);
+    process.stdout.write(`E2E instalación real: ${results.length - failed.length} bien, ${failed.length} con fallo, ${notDetected.length} sin detectar tras instalar, ${unclear.length} sin mensaje claro. Informe: ${reportFile}\n`);
+    if (failed.length > 0 || notDetected.length > 0) {
+        throw new Error(`Instalación real: fallos ${JSON.stringify(failed.map((entry) => ({ id: entry.id, status: entry.status, why: entry.explanation ?? entry.error ?? entry.reason })))}; sin detectar ${JSON.stringify(notDetected)}`);
+    }
+}
+
+/** Pulsa un atajo tal como lo guarda la app («Ctrl+Shift+P»), con teclas
+ *  reales de WebDriver y el foco en la terminal activa. */
+async function pressShortcut(shortcut) {
+    const named = {
+        ctrl: '', control: '', shift: '', alt: '', meta: '',
+        tab: '', enter: '', escape: '', space: ' ',
+        arrowup: '', arrowdown: '', arrowleft: '', arrowright: '',
+        backslash: '\\', equal: '=', minus: '-', comma: ',', period: '.', slash: '/',
+    };
+    const keys = String(shortcut).split('+').filter(Boolean).map((part) => {
+        const lower = part.toLowerCase();
+        if (named[lower]) return named[lower];
+        const fn = /^f(\d{1,2})$/u.exec(lower);
+        if (fn) return String.fromCharCode(0xE031 + Number(fn[1]) - 1);
+        return part.length === 1 ? lower : part;
+    });
+    await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const cell = document.querySelector('.cell:not(.hidden) .xterm-helper-textarea')
+                ?? document.querySelector('.xterm-helper-textarea');
+            cell?.focus();
+            return Boolean(cell);`,
+        args: [],
+    });
+    await request(`/session/${sessionId}/actions`, 'POST', {
+        actions: [{
+            type: 'key',
+            id: 'keyboard',
+            actions: [
+                ...keys.map((value) => ({ type: 'keyDown', value })),
+                ...[...keys].reverse().map((value) => ({ type: 'keyUp', value })),
+            ],
+        }],
+    });
+    await request(`/session/${sessionId}/actions`, 'DELETE').catch(() => undefined);
+}
+
+/** 22-11 (Romen: «ir diseñando nuevos test… atajos, ajustes»). Cada atajo
+ *  con efecto visible, pulsado de verdad: los de fábrica y los que vienen
+ *  vacíos, a los que se les pone una combinación como haría el usuario. Al
+ *  final todo vuelve como estaba. */
+async function exerciseAllShortcuts() {
+    markPhase('atajos de teclado');
+    await waitForBannerPanes(1, 60000);
+    const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+    const original = (await invokeJson('settings_get')).preferences;
+    const assigned = {
+        shortcutOpenSettings: 'Ctrl+Alt+Shift+J',
+        shortcutOpenProjects: 'Ctrl+Alt+Shift+K',
+        shortcutOpenScripts: 'Ctrl+Alt+Shift+L',
+        shortcutOpenDependencies: 'Ctrl+Alt+Shift+U',
+        shortcutClosePanel: 'Ctrl+Alt+Shift+O',
+        shortcutCloseTab: 'Ctrl+Alt+Shift+Y',
+    };
+    const prefs = { ...original };
+    for (const [key, value] of Object.entries(assigned)) if (!prefs[key]) prefs[key] = value;
+    await invokeJson('settings_save', { incoming: prefs });
+    await waitUntil(async () => (await invokeJson('settings_get')).preferences.shortcutOpenSettings === prefs.shortcutOpenSettings,
+        10000, 'atajos asignados guardados');
+    const dialogs = async () => (await findAll('[role="dialog"]')).length;
+    const results = [];
+    const check = async (key, effect, description) => {
+        const shortcut = prefs[key];
+        if (!shortcut) {
+            results.push({ key, skipped: 'sin atajo' });
+            return;
+        }
+        await pressShortcut(shortcut);
+        try {
+            await waitUntil(effect, 20000, `${description} con ${shortcut}`);
+        } catch (error) {
+            await captureScreenshot(`atajo-${key}-fallo`);
+            throw new Error(`El atajo ${shortcut} (${key}) no hizo «${description}»`, { cause: error });
+        }
+        results.push({ key, shortcut, ok: true });
+    };
+    const closePanel = async () => {
+        await check('shortcutClosePanel', async () => (await dialogs()) === 0, 'cerrar el panel');
+    };
+
+    await check('shortcutOpenSettings', async () => (await findAll('[data-testid="settings-tab-behavior"]')).length > 0, 'abrir Ajustes');
+    await closePanel();
+    await check('shortcutOpenProjects', async () => (await dialogs()) > 0, 'abrir Proyectos');
+    await closePanel();
+    await check('shortcutOpenScripts', async () => (await dialogs()) > 0, 'abrir la Biblioteca');
+    await closePanel();
+    await check('shortcutOpenDependencies', async () => (await dialogs()) > 0, 'abrir Entorno y dependencias');
+    await closePanel();
+
+    await check('shortcutCommandPalette', async () => (await findAll('[data-testid="command-palette"]')).length > 0, 'abrir la paleta');
+    await pressTerminalKey('');
+    await waitUntil(async () => (await findAll('[data-testid="command-palette"]')).length === 0, 5000, 'cerrar la paleta con Esc');
+    await check('shortcutSearchTerminal', async () => (await findAll('[data-testid="terminal-search"]')).length > 0, 'buscar en la terminal');
+    await pressTerminalKey('');
+    await waitUntil(async () => (await findAll('[data-testid="terminal-search"]')).length === 0, 5000, 'cerrar la búsqueda con Esc');
+    await check('shortcutSearchHistory', async () => (await findAll('[data-testid="history-search"]')).length > 0, 'buscar en las órdenes escritas');
+    await pressTerminalKey('');
+    await waitUntil(async () => (await findAll('[data-testid="history-search"]')).length === 0, 5000, 'cerrar el historial con Esc');
+
+    const tabState = () => runScript(`return { count: document.querySelectorAll('.tab[data-tab-id]').length,
+        active: document.querySelector('.tab.active')?.dataset.tabId ?? null };`);
+    const first = await tabState();
+    await check('shortcutNewTab', async () => (await tabState()).count === first.count + 1, 'abrir una pestaña nueva');
+    const second = await tabState();
+    await check('shortcutPreviousTab', async () => (await tabState()).active === first.active, 'ir a la pestaña anterior');
+    await check('shortcutNextTab', async () => (await tabState()).active === second.active, 'ir a la pestaña siguiente');
+    await check('shortcutCloseTab', async () => (await tabState()).count === first.count, 'cerrar la pestaña');
+
+    const explorerShown = async () => (await findAll('aside.explorer')).length > 0;
+    const explorerBefore = await explorerShown();
+    await check('shortcutToggleExplorer', async () => (await explorerShown()) !== explorerBefore, 'mostrar u ocultar el explorador');
+    await check('shortcutToggleExplorer', async () => (await explorerShown()) === explorerBefore, 'volver a dejar el explorador como estaba');
+
+    const toolbarShown = async () => (await findAll('[data-testid="toolbar-settings"]')).length > 0;
+    await check('shortcutToggleTerminalOnly', async () => !(await toolbarShown()), 'entrar en el modo terminal limpia');
+    await check('shortcutToggleTerminalOnly', async () => toolbarShown(), 'salir del modo terminal limpia');
+
+    await invokeJson('settings_save', { incoming: original });
+    recordEvent('shortcuts-all', { results });
+    process.stdout.write(`E2E atajos: ${results.filter((item) => item.ok).length} comprobados (${results.map((item) => `${item.key}${item.shortcut ? `=${item.shortcut}` : ' (sin atajo)'}`).join(', ')}).\n`);
+}
+
+/** 22-11. Todas las casillas de Ajustes, una a una: se guarda, cambia SOLO
+ *  su ajuste y al desmarcarla todo queda como estaba. Las que tocan Windows
+ *  (PATH, registro, arranque, administrador, carpeta propia) no se tocan. */
+async function exerciseSettingsRoundtrip() {
+    markPhase('todas las casillas de Ajustes');
+    await waitForBannerPanes(1, 60000);
+    const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+    const touchesWindows = /path|admin|elevat|autostart|startup|start-with|run-at|integration|registry|default-terminal|store|toolchain|context-menu-shell|reset/iu;
+    // Lo que la app escribe sola mientras se usa (tamaños, posición, última
+    // pestaña…) no cuenta como «cambió otro ajuste».
+    const volatile = /size|width|height|cols|rows|position|lastSeen|last[A-Z]|dismiss|hidden[A-Z].*Session|window|explorerOpen|explorerWidth/u;
+    const diff = (a, b) => Object.keys({ ...a, ...b })
+        .filter((key) => !volatile.test(key) && JSON.stringify(a?.[key]) !== JSON.stringify(b?.[key]));
+    await clickWhenReady('[data-testid="toolbar-settings"]');
+    await findWhenReady('[role="dialog"]');
+    const tabs = await runScript(`return [...document.querySelectorAll('[data-testid^="settings-tab-"]')]
+        .map((tab) => tab.dataset.testid);`);
+    const results = [];
+    const skipped = [];
+    for (const tab of tabs) {
+        await clickWhenReady(`[data-testid="${tab}"]`);
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
+        const boxes = await runScript(`return [...document.querySelectorAll('[role="dialog"] input[type="checkbox"][data-testid]')]
+            .filter((box) => !box.disabled && box.offsetParent !== null)
+            .map((box) => box.dataset.testid);`);
+        for (const testid of boxes) {
+            if (touchesWindows.test(testid)) {
+                skipped.push(testid);
+                continue;
+            }
+            const css = `[data-testid="${testid}"]`;
+            if ((await findAll(css)).length === 0) continue;
+            const before = (await invokeJson('settings_get')).preferences;
+            await toggleCheckboxAndWait(css);
+            await waitForSettingsAutosave();
+            const middle = (await invokeJson('settings_get')).preferences;
+            const changed = diff(before, middle);
+            // Restaurar: la casilla puede haber escondido otras; se vuelve a
+            // la pestaña y se desmarca.
+            if ((await findAll(css)).length === 0) await clickWhenReady(`[data-testid="${tab}"]`);
+            if ((await findAll(css)).length > 0) {
+                await toggleCheckboxAndWait(css);
+                await waitForSettingsAutosave();
+            }
+            const after = (await invokeJson('settings_get')).preferences;
+            const notRestored = diff(before, after);
+            results.push({ tab, testid, changed, notRestored });
+            if (changed.length === 0) {
+                await captureScreenshot(`casilla-${testid}-no-guarda`);
+                throw new Error(`La casilla ${testid} (${tab}) no cambió ningún ajuste guardado`);
+            }
+            if (notRestored.length > 0) {
+                // Dejarlo como estaba antes de seguir, para no arrastrarlo.
+                await invokeJson('settings_save', { incoming: before });
+                throw new Error(`La casilla ${testid} (${tab}) no vuelve a dejarlo como estaba: ${notRestored.join(', ')}`);
+            }
+        }
+    }
+    await clickWhenReady('[role="dialog"] .panel-close');
+    const multi = results.filter((item) => item.changed.length > 1);
+    recordEvent('settings-roundtrip', { results, skipped, multi });
+    if (results.length < 20) throw new Error(`Solo se probaron ${results.length} casillas: el recorrido no encontró las de Ajustes`);
+    process.stdout.write(`E2E casillas de Ajustes: ${results.length} probadas, ${skipped.length} sin tocar por tocar Windows (${skipped.join(', ')}), ${multi.length} cambian más de un ajuste (${multi.map((item) => `${item.testid}: ${item.changed.join('+')}`).join('; ')}).\n`);
+}
+
+/** Como `invokeJson`, para órdenes que tardan minutos (la detección
+ *  completa): WebDriver corta un script a los pocos segundos, así que la
+ *  respuesta se deja en la página y se va mirando. */
+async function invokeJsonLong(command, args = {}, timeoutMs = 20 * 60_000) {
+    const key = `__wtLong${Date.now()}${Math.random().toString(36).slice(2)}`;
+    await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        script: `const key = arguments[0];
+            window[key] = { done: false };
+            window.__TAURI_INTERNALS__.invoke(arguments[1], arguments[2]).then(
+                (result) => { window[key] = { done: true, value: JSON.stringify(result) }; },
+                (error) => { window[key] = { done: true, error: String(error) }; });
+            return true;`,
+        args: [key, command, args],
+    });
+    let state = null;
+    await waitUntil(async () => {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 2000));
+        state = await request(`/session/${sessionId}/execute/sync`, 'POST', { script: 'return window[arguments[0]] ?? null;', args: [key] });
+        return Boolean(state?.done);
+    }, timeoutMs, `respuesta de ${command}`);
+    if (state.error) throw new Error(`${command}: ${state.error}`);
+    return JSON.parse(state.value);
+}
+
 async function invokeJson(command, args = {}) {
     return JSON.parse(await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: 'return window.__TAURI_INTERNALS__.invoke(arguments[0], arguments[1]).then((result) => JSON.stringify(result));',
@@ -8333,11 +8877,12 @@ async function invokeJson(command, args = {}) {
 }
 
 async function verifyAdminPermissions() {
-    await clickWhenReady('[data-testid="settings-tab-behavior"]');
+    // Desde el 22-11 los permisos de administrador están en Sistema.
+    await clickWhenReady('[data-testid="settings-tab-system"]');
     await waitUntil(async () => (await attribute(
-        await findWhenReady('[data-testid="settings-tab-behavior"]'),
+        await findWhenReady('[data-testid="settings-tab-system"]'),
         'aria-selected',
-    )) === 'true', 5000, 'selección de Comportamiento para los permisos de administrador');
+    )) === 'true', 5000, 'selección de Sistema para los permisos de administrador');
     const section = await findWhenReady('[data-testid="settings-admin"]');
     await scrollIntoView(section);
     const backend = await invokeJson('windows_integration_status');
@@ -8510,7 +9055,7 @@ async function verifyGsudoRoute(directory, initialLauncher) {
         await waitUntil(async () => (await findAll('[role="dialog"]')).length === 0, 5000, 'cierre de Ajustes antes de releer los permisos');
         await clickWhenReady('[data-testid="toolbar-settings"]');
         await findWhenReady('[role="dialog"]');
-        await clickWhenReady('[data-testid="settings-tab-behavior"]');
+        await clickWhenReady('[data-testid="settings-tab-system"]');
         const statusNode = await findWhenReady('[data-testid="settings-admin-status"]');
         await waitUntil(async () => (await attribute(await findWhenReady('[data-testid="settings-admin-status"]'), 'data-launcher')) === 'gsudo',
             10000, 'Ajustes muestra NSudo a través de gsudo');
@@ -8738,7 +9283,7 @@ try {
         pendingWindowsPathSnapshot = await snapshotWindowsPathIntegration();
         await clickWhenReady('[data-testid="toolbar-settings"]');
         await findWhenReady('[role="dialog"]');
-        await clickWhenReady('[data-testid="settings-tab-behavior"]');
+        await clickWhenReady('[data-testid="settings-tab-system"]');
         const pathToggle = await findWhenReady('[data-testid="settings-path-integration"]');
         const pathInitiallyEnabled = Boolean(await property(pathToggle, 'checked'));
         await clickInView(pathToggle);
@@ -9465,7 +10010,14 @@ try {
                         const lines = await bannerCut();
                         const label = `${shell}-${image ? 'imagen' : 'sin-imagen'}-${width}x${height}-${moment}`;
                         cases.push(label);
-                        const gap = await bannerGap();
+                        // Tras `clear`, PowerShell puede tardar más de 600 ms en
+                        // pintar el prompt (84: hueco «null» = aún sin prompt).
+                        // Se espera a que haya prompt, hasta 10 s, y se mide.
+                        let gap = await bannerGap();
+                        for (const started = Date.now(); gap === null && Date.now() - started < 10000;) {
+                            await pause(500);
+                            gap = await bannerGap();
+                        }
                         if (gap !== 1) gaps.push({ label, gap });
                         if (lines.length) {
                             cut.push({ label, lines });
@@ -10007,6 +10559,14 @@ try {
         markPhase('imágenes en la terminal (Sixel e iTerm2)');
         await waitForBannerPanes(1, 60000);
         const cell = await activeTerminalCell();
+        // E2E_LINE_HEIGHT: el mismo recorrido con otro alto de línea (el de
+        // fábrica pasó de 1,5 a 1,2 el 22-11).
+        if (process.env.E2E_LINE_HEIGHT) {
+            await sendTerminalLine(`:set terminalLineHeight ${process.env.E2E_LINE_HEIGHT}`, cell);
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            await sendTerminalLine('cls', cell);
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
         // Lo que llega del PTY tal cual, antes de que xterm lo interprete: así
         // se sabe si ConPTY deja pasar las secuencias de imagen.
         await request(`/session/${sessionId}/execute/sync`, 'POST', {
@@ -10712,8 +11272,11 @@ try {
             script: `return [...document.querySelectorAll('[data-testid="settings-index"] button')].map((button) => button.textContent.trim());`,
             args: [],
         });
-        const shortcutsChip = chips.findIndex((text) => /Atajos|Shortcuts/iu.test(text));
-        if (chips.length < 4 || shortcutsChip < 0) throw new Error(`Índice de Comportamiento incompleto: ${JSON.stringify(chips)}`);
+        // Desde el 22-11 los atajos tienen pestaña propia: el índice de General
+        // se prueba con un apartado del medio: lejos del inicio y con contenido
+        // detrás para que su encabezado pueda subir arriba (el último, no).
+        const shortcutsChip = Math.floor(chips.length / 2);
+        if (chips.length < 4) throw new Error(`Índice de General incompleto: ${JSON.stringify(chips)}`);
         await request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: `document.querySelectorAll('[data-testid="settings-index"] button')[arguments[0]].click(); return true;`,
             args: [shortcutsChip],
@@ -10728,7 +11291,7 @@ try {
                 const rect = heading?.getBoundingClientRect();
                 return Boolean(rect && dialog && rect.top >= dialog.top - 2 && rect.top < dialog.top + dialog.height / 2);`,
             args: [chips[shortcutsChip]],
-        }), 5000, 'el índice lleva a «Atajos de teclado»');
+        }), 5000, 'el índice lleva a su apartado');
         results.index = chips;
         // Solo las pestañas largas llevan índice: Información (4 apartados
         // cortos) no; al volver a Comportamiento, reaparece.
@@ -10816,6 +11379,116 @@ try {
         }, 5000, 'el aviso vuelve a mostrarse con su casilla');
         results.notices = { hiddenBefore: noticesBefore.hidden, jumped: true };
         await clickWhenReady('[role="dialog"] .panel-close');
+
+        // 21-11: al cerrar Ajustes con cambios y un perfil ya guardado, el aviso
+        // ofrece guardarlos en él (y no crea otro).
+        {
+            const saved = await invokeJson('profile_save_now');
+            if (!saved.ok) throw new Error(`No se pudo guardar el perfil de la prueba: ${JSON.stringify(saved)}`);
+            const before = await invokeJson('profile_status');
+            if (before.profiles.length < 1) throw new Error(`El perfil guardado no aparece: ${JSON.stringify(before)}`);
+            const toggleMissingTools = async () => {
+                await clickWhenReady('[data-testid="toolbar-settings"]');
+                await clickWhenReady('[data-testid="settings-tab-terminal"]');
+                await clickWhenReady('[data-testid="settings-suggest-missing-tools"]');
+                await new Promise((resolve) => setTimeout(resolve, 400));
+                await clickWhenReady('[role="dialog"] .panel-close');
+            };
+            await toggleMissingTools();
+            await findWhenReady('[data-testid="profile-update-offer"]', 20_000);
+            await captureScreenshot('ajustes-guardar-en-perfil');
+            await clickWhenReady('[data-testid="profile-update-current"]');
+            await waitUntil(async () => (await findAll('[data-testid="profile-update-offer"]')).length === 0,
+                8000, 'el aviso se cierra tras guardar en el perfil actual');
+            const after = await invokeJson('profile_status');
+            const latestBefore = before.profiles.reduce((a, b) => (b.modifiedMs > a.modifiedMs ? b : a));
+            const latestAfter = after.profiles.find((profile) => profile.path === latestBefore.path);
+            if (after.profiles.length !== before.profiles.length || !latestAfter || latestAfter.modifiedMs < latestBefore.modifiedMs) {
+                throw new Error(`«Guardar en el perfil actual» no reescribió el perfil: ${JSON.stringify({ before, after })}`);
+            }
+            // Deshacer el cambio vuelve a ofrecerlo; «No volver a mostrar» lo apaga
+            // para el resto de la ejecución.
+            await toggleMissingTools();
+            await findWhenReady('[data-testid="profile-update-offer"]', 20_000);
+            await clickWhenReady('[data-testid="profile-update-never"]');
+            await waitUntil(async () => (await findAll('[data-testid="profile-update-offer"]')).length === 0,
+                5000, '«No volver a mostrar» cierra el aviso del perfil');
+            results.profileUpdate = { profiles: after.profiles.length, rewritten: true };
+        }
+
+        // 21-11: la guía de primeros pasos, abierta desde Ajustes: recorre los
+        // pasos, resalta el botón del que habla y esconde los avisos de abajo.
+        {
+            await clickWhenReady('[data-testid="toolbar-settings"]');
+            await clickWhenReady('[data-testid="settings-tab-behavior"]');
+            await clickInView(await findWhenReady('[data-testid="settings-open-first-steps"]'));
+            await findWhenReady('[data-testid="first-steps"][data-step="1"]', 5000);
+            const stepCount = (await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `return document.querySelectorAll('[data-testid="first-steps"]').length === 1
+                    && !document.querySelector('[role="dialog"] .panel-close')
+                    && document.querySelector('main')?.classList.contains('first-steps-active');`,
+                args: [],
+            }));
+            if (!stepCount) throw new Error('La guía no se abrió sola, encima de un panel cerrado y con los avisos escondidos.');
+            await clickWhenReady('[data-testid="first-steps-next"]');
+            await findWhenReady('[data-testid="first-steps"][data-step="2"]', 5000);
+            await findWhenReady('[data-testid="first-steps-highlight"]', 5000);
+            await captureScreenshot('primeros-pasos-pestanas');
+            let steps = 2;
+            while ((await findAll('[data-testid="first-steps-skip"]')).length > 0 && steps < 12) {
+                await clickWhenReady('[data-testid="first-steps-next"]');
+                steps += 1;
+                await findWhenReady(`[data-testid="first-steps"][data-step="${steps}"]`, 5000);
+            }
+            await clickWhenReady('[data-testid="first-steps-next"]');
+            await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `return !document.querySelector('[data-testid="first-steps"]')
+                    && !document.querySelector('main')?.classList.contains('first-steps-active');`,
+                args: [],
+            }), 5000, '«Empezar» cierra la guía y vuelven los avisos');
+            // Admin: una acción de administrador sin gsudo dispara la barra (el
+            // backend no se lanza aquí: con gsudo en la VM pediría el UAC).
+            await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `window.dispatchEvent(new CustomEvent('wterminal-admin-needed', { detail: { actionId: 'winget-ssh', error: '' } }));`,
+                args: [],
+            });
+            await findWhenReady('[data-testid="admin-needed"][data-action="winget-ssh"]', 5000);
+            await clickWhenReady('[data-testid="admin-needed-close"]');
+            await waitUntil(async () => (await findAll('[data-testid="admin-needed"]')).length === 0,
+                5000, '«Cerrar» quita la barra de administrador');
+            results.firstSteps = { steps };
+        }
+
+        // 21-11: el clic derecho donde la app no pone menú (la barra de
+        // pestañas vacía, la cabecera) ya no saca el del navegador («Atrás»,
+        // «Actualizar», «Imprimir»); en un campo de texto sí, para pegar.
+        {
+            const browserMenu = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `const fire = (node) => {
+                        if (!node) return null;
+                        const rect = node.getBoundingClientRect();
+                        const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2,
+                            clientX: rect.right - 4, clientY: rect.top + rect.height / 2 });
+                        return node.dispatchEvent(event);
+                    };
+                    const field = document.createElement('input');
+                    field.type = 'text';
+                    document.body.appendChild(field);
+                    const result = {
+                        tabBar: fire(document.querySelector('.tab-new')?.parentElement ?? null),
+                        body: fire(document.body),
+                        field: fire(field),
+                    };
+                    field.remove();
+                    return result;`,
+                args: [],
+            });
+            // dispatchEvent devuelve false cuando se evitó el menú.
+            if (browserMenu?.tabBar !== false || browserMenu?.body !== false || browserMenu?.field !== true) {
+                throw new Error(`El menú del navegador sigue saliendo donde no debe, o falta en un campo de texto: ${JSON.stringify(browserMenu)}`);
+            }
+            results.browserContextMenu = browserMenu;
+        }
         recordEvent('settings-search', { ...results, passed: true });
         await assertCurrentLog();
         phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
@@ -11204,13 +11877,27 @@ try {
                 }
                 await waitUntil(async () => (await paneState()).fullScreenApp === 'false', 20000, `${typed} se cierra con Esc o Ctrl+C`);
                 const marker = `E2E_IA_REAL_${typed.toUpperCase()}_OK`;
+                const closedAt = Date.now();
                 await sendTerminalLine(`echo ${marker}`);
+                let echoSeenAt = 0;
                 await waitUntil(async () => {
                     const shellRows = (await rowsText()).filter(Boolean);
-                    const echoRow = shellRows.findIndex((row) => /^[A-Za-z]:[\\/][^>]*>echo /u.test(row) && row.endsWith(marker));
-                    return echoRow >= 0 && shellRows[echoRow + 1] === marker;
-                }, 20000, `la shell sigue intacta tras salir de ${typed}`);
+                    const echoRow = shellRows.findIndex((row) => /^[A-Za-z]:[\\/][^>]*>echo /u.test(row));
+                    if (echoRow >= 0 && !echoSeenAt) echoSeenAt = Date.now();
+                    return echoRow >= 0 && shellRows[echoRow].endsWith(marker) && shellRows[echoRow + 1] === marker;
+                }, 60000, `la shell sigue intacta tras salir de ${typed}`);
+                process.stdout.write(`E2E IA real ${typed} desde cmd: eco a los ${echoSeenAt ? echoSeenAt - closedAt : -1} ms, respuesta a los ${Date.now() - closedAt} ms` + String.fromCharCode(10));
             } catch (error) {
+                const lastRows = (await rowsText().catch(() => [])).filter(Boolean).slice(-8);
+                const lastState = await paneState().catch(() => null);
+                const layers = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                    script: `const c = arguments[0];
+                        return { xterms: c.querySelectorAll('.xterm').length, rowLayers: c.querySelectorAll('.xterm-rows').length,
+                            rows: [...c.querySelectorAll('.xterm-rows')].map((l) => [...l.children].map((r) => (r.textContent || '').trimEnd()).filter(Boolean).slice(-4)) };`,
+                    args: [{ [elementKey]: cell }],
+                }).catch((e) => String(e));
+                process.stdout.write(`E2E IA real ${typed} desde cmd (capas): ${JSON.stringify(layers)}` + String.fromCharCode(10));
+                process.stdout.write(`E2E IA real ${typed} desde cmd (fallo): ${JSON.stringify({ lastState, lastRows })}` + String.fromCharCode(10));
                 failures.push(`${typed} desde cmd: ${String(error?.message ?? error).slice(0, 300)}`);
                 await captureScreenshot(`ia-real-${typed}-desde-cmd-fallo`).catch(() => undefined);
             }
@@ -11637,6 +12324,26 @@ try {
         if ((await terminalRowSnapshot(cell)).rows.some((row) => row.text.trim() === 'WT_CHAT_OK')) {
             throw new Error('«Insertar en la terminal» ejecutó la orden: tenía que quedarse escrita sin Intro');
         }
+        // Un segundo «Insertar» con la orden ya escrita (23-11, Christian):
+        // antes avisaba «No se pudo escribir» aunque estuviera bien. Ahora da
+        // el mismo aviso de éxito y no la escribe dos veces.
+        {
+            const noticeText = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `return document.querySelector('[data-testid="agent-chat-notice"]')?.textContent?.trim() ?? '';`,
+                args: [],
+            });
+            const firstNotice = await noticeText();
+            await clickWhenReady('[data-testid="agent-chat-insert"]');
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 800));
+            const secondNotice = await noticeText();
+            const promptRows = (await terminalRowSnapshot(cell)).rows.filter((row) => row.text.includes('echo WT_CHAT_OK'));
+            if (!firstNotice || secondNotice !== firstNotice) {
+                throw new Error(`El segundo «Insertar» con la orden ya escrita avisa distinto: ${JSON.stringify({ firstNotice, secondNotice })}`);
+            }
+            if (promptRows.some((row) => /echo WT_CHAT_OK.*echo WT_CHAT_OK/u.test(row.text))) {
+                throw new Error(`El segundo «Insertar» escribió la orden dos veces: ${JSON.stringify(promptRows.map((row) => row.text))}`);
+            }
+        }
         // Varios chats en paralelo (14-11): un segundo chat sale en su pestaña,
         // vacío y con su propio agente; el primero sigue con su conversación,
         // escondido pero vivo; cerrar el segundo vuelve al primero.
@@ -11662,6 +12369,123 @@ try {
             const state = await chatTabs();
             return state.count === 1 && state.selected === 0 && state.messages[0] >= 4 && state.visible[0] === true;
         }, 10000, 'cerrar el segundo chat vuelve al primero con su conversación');
+        // El clic central cierra un chat, como en las pestañas (21-11).
+        await clickWhenReady('[data-testid="agent-chat-new-chat"]');
+        await waitUntil(async () => (await chatTabs()).count === 2, 10000, 'otro segundo chat para cerrarlo con el clic central');
+        {
+            // `request` ya devuelve el valor: aquí, la referencia WebDriver del nodo.
+            const secondTab = await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `return document.querySelectorAll('[data-testid="agent-chat-tab"]')[1];`,
+                args: [],
+            });
+            if (!secondTab?.[elementKey]) throw new Error('No se encontró la pestaña del segundo chat.');
+            await request(`/session/${sessionId}/actions`, 'POST', {
+                actions: [{
+                    type: 'pointer',
+                    id: 'mouse',
+                    parameters: { pointerType: 'mouse' },
+                    actions: [
+                        { type: 'pointerMove', origin: secondTab, x: 4, y: 4 },
+                        { type: 'pointerDown', button: 1 },
+                        { type: 'pointerUp', button: 1 },
+                    ],
+                }],
+            });
+            await request(`/session/${sessionId}/actions`, 'DELETE').catch(() => {});
+        }
+        await waitUntil(async () => {
+            const state = await chatTabs();
+            return state.count === 1 && state.messages[0] >= 4 && state.visible[0] === true;
+        }, 10000, 'el clic central cierra el segundo chat y deja el primero con su conversación');
+        // Historial (23-11, Romen: «si cierro la pestaña, aunque sea un
+        // segundo, se borra»): cerrar el panel y volver a abrirlo trae el chat
+        // con su conversación; el historial lo lista con el título de la
+        // primera pregunta, lo renombra (también su pestaña) y lo borra.
+        await clickWhenReady('[data-testid="agent-chat-close"]');
+        await waitUntil(async () => (await findAll('[data-testid="agent-chats"]')).length === 0, 10000, 'el panel del chat se cierra');
+        // La orden insertada sigue en el prompt: se vacía con Esc antes de
+        // escribir `:chat`.
+        {
+            const xterm = (await findAllWithin(cell, '.xterm'))[0]?.[elementKey];
+            const input = (await findAllWithin(cell, '.xterm-helper-textarea'))[0]?.[elementKey];
+            await focusTerminal(xterm, input);
+            await request(`/session/${sessionId}/actions`, 'POST', { actions: [{ type: 'key', id: 'keyboard', actions:
+                [{ type: 'keyDown', value: '\uE00C' }, { type: 'keyUp', value: '\uE00C' }] }] });
+            await waitUntil(async () => !(await terminalRowSnapshot(cell)).rows.some((row) => row.text.includes('echo WT_CHAT_OK')),
+                10000, 'Esc vacía la orden insertada');
+        }
+        await sendTerminalLine(':chat');
+        await waitUntil(async () => {
+            const state = await chatTabs();
+            return state.count === 1 && state.messages[0] >= 4 && state.visible[0] === true;
+        }, 15000, 'al reabrir el panel vuelve el chat con su conversación');
+        await clickWhenReady('[data-testid="agent-chat-history"]');
+        const historyItems = () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `return [...document.querySelectorAll('[data-testid="agent-chat-history-item"]')].map((item) => ({
+                    id: item.dataset.chatId,
+                    title: item.querySelector('.item-title')?.textContent?.trim() ?? '',
+                    open: item.classList.contains('open'),
+                }));`,
+            args: [],
+        });
+        let savedChat = null;
+        await waitUntil(async () => {
+            savedChat = (await historyItems()).find((item) => item.title.startsWith('hola & adios')) ?? null;
+            return Boolean(savedChat?.open);
+        }, 10000, 'el historial lista el chat abierto con el título de su primera pregunta');
+        await clickWhenReady(`[data-testid="agent-chat-history-item"][data-chat-id="${savedChat.id}"] [data-testid="agent-chat-history-rename"]`);
+        const renameInput = await findWhenReady('[data-testid="agent-chat-history-rename-input"]', 5000);
+        // Sin /clear: WebDriver quita el foco al vaciar, y perder el foco
+        // confirma el renombrado (cierra el campo). Se teclea como una
+        // persona: Ctrl+A, el nombre nuevo e Intro.
+        await request(`/session/${sessionId}/element/${renameInput}/value`, 'POST', { text: '\uE009a\uE000Chat renombrado E2E\uE007' });
+        await waitUntil(async () => (await historyItems()).some((item) => item.id === savedChat.id && item.title === 'Chat renombrado E2E'),
+            10000, 'el chat renombrado en el historial');
+        await waitUntil(async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: `return document.querySelector('[data-testid="agent-chat-tab"]')?.textContent?.includes('Chat renombrado E2E') === true;`,
+            args: [],
+        }), 10000, 'la pestaña del chat lleva el nombre nuevo');
+        {
+            const { readdir, readFile: readText } = await import('node:fs/promises');
+            const root = process.env.LTERMINAL_E2E_APP_DATA_DIR;
+            const file = (await readdir(root, { recursive: true })).find((entry) => String(entry).replaceAll('\\', '/').endsWith(`agent-chats/${savedChat.id}.json`));
+            if (!file) throw new Error(`No se guardó el chat ${savedChat.id} bajo ${root}`);
+            const stored = JSON.parse(await readText(join(root, String(file)), 'utf8'));
+            if (stored.title !== 'Chat renombrado E2E' || stored.messages.length < 4 || JSON.stringify(stored).includes('keyDraft')) {
+                throw new Error(`El chat guardado no es el esperado: ${JSON.stringify({ title: stored.title, messages: stored.messages?.length })}`);
+            }
+        }
+        await captureScreenshot('ia-chat-historial');
+        // Fijar y desfijar (24-11): sale en «Fijados» y se guarda en pins.json.
+        {
+            const pinState = async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `const item = document.querySelector('[data-testid="agent-chat-history-item"][data-chat-id="${savedChat.id}"]');
+                    const pin = item?.querySelector('[data-testid="agent-chat-history-pin"]');
+                    const heading = [...document.querySelectorAll('.history-list h3')].map((h) => h.textContent.trim());
+                    return { pressed: pin?.getAttribute('aria-pressed'), heading };`,
+                args: [],
+            });
+            const pinsFile = async () => {
+                const { readdir, readFile: readText } = await import('node:fs/promises');
+                const root = process.env.LTERMINAL_E2E_APP_DATA_DIR;
+                const file = (await readdir(root, { recursive: true })).find((entry) => String(entry).replaceAll('\\', '/').endsWith('agent-chats/pins.json'));
+                return file ? JSON.parse(await readText(join(root, String(file)), 'utf8')) : [];
+            };
+            await clickWhenReady(`[data-testid="agent-chat-history-item"][data-chat-id="${savedChat.id}"] [data-testid="agent-chat-history-pin"]`);
+            await waitUntil(async () => (await pinState()).pressed === 'true', 5000, 'el chat queda fijado');
+            if (!(await pinsFile()).includes(savedChat.id)) throw new Error('El chat fijado no está en pins.json');
+            await clickWhenReady(`[data-testid="agent-chat-history-item"][data-chat-id="${savedChat.id}"] [data-testid="agent-chat-history-pin"]`);
+            await waitUntil(async () => (await pinState()).pressed === 'false', 5000, 'el chat queda desfijado');
+            if ((await pinsFile()).includes(savedChat.id)) throw new Error('El chat desfijado sigue en pins.json');
+        }
+        await clickWhenReady(`[data-testid="agent-chat-history-item"][data-chat-id="${savedChat.id}"] [data-testid="agent-chat-history-delete"]`);
+        await clickWhenReady('[data-testid="agent-chat-history-delete-confirm"]');
+        await waitUntil(async () => !(await historyItems()).some((item) => item.id === savedChat.id), 10000, 'el chat borrado sale del historial');
+        await clickWhenReady('[data-testid="agent-chat-history"]');
+        await waitUntil(async () => {
+            const state = await chatTabs();
+            return state.count === 1 && state.messages[0] === 0 && state.visible[0] === true;
+        }, 10000, 'borrar el chat abierto lo deja vacío');
         await clickWhenReady('[data-testid="agent-chat-close"]');
         // La orden insertada se borra sin ejecutarla (Esc vacía la línea en cmd).
         {
@@ -12355,7 +13179,7 @@ try {
         await pressKeys('\uE007');
         await findWhenReady('[data-testid="settings-tab-behavior"]', 15000);
         await closedPalette('la paleta se cierra al ejecutar');
-        await clickWhenReady('[data-testid="settings-tab-behavior"]');
+        await clickWhenReady('[data-testid="settings-tab-shortcuts"]');
         const shortcutField = await findWhenReady('[data-testid="shortcut-shortcutCommandPalette"]');
         results.settingsShortcut = String(await property(shortcutField, 'value') ?? '');
         if (results.settingsShortcut.toLowerCase() !== 'ctrl+shift+p') problems.push(`el atajo de Ajustes no es Ctrl+Shift+P: ${results.settingsShortcut}`);
@@ -12635,6 +13459,212 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write('E2E :set OK: sí/no, nombre con guiones, valor no válido, fuera de rango, lista filtrada y ajuste desconocido.\n');
+    } else if (process.env.E2E_NOTICES_ONLY === '1') {
+        // 22-11 (Romen: «¿hay test para los popups?»): los avisos que en las
+        // pruebas no salen solos se sacan con el forzado de pruebas de la app.
+        markPhase('avisos emergentes');
+        await waitForBannerPanes(1, 60000);
+        const force = (kind) => request(`/session/${sessionId}/execute/sync`, 'POST', {
+            script: 'return window.__wtE2eForceNotice?.(arguments[0]) ?? null;',
+            args: [kind],
+        });
+        const visible = async (id) => (await findAll(`[data-testid="${id}"]`)).length > 0;
+        const pref = async (key) => (await invokeJson('settings_get')).preferences[key];
+        const notices = [
+            { kind: 'gsudo', id: 'gsudo-offer', key: 'offerGsudo' },
+            { kind: 'shellAssist', id: 'shell-assist-offer', key: 'offerShellAssist' },
+            { kind: 'portableProfile', id: 'profile-offer', key: 'offerPortableProfile' },
+            { kind: 'packageUpdates', id: 'package-update', key: 'checkPackageUpdatesOnStartup', box: 'package-update-now' },
+            { kind: 'appUpdate', id: 'update', key: 'checkUpdatesOnStartup', box: 'update-never' },
+        ];
+        const results = [];
+        for (const notice of notices) {
+            await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, [notice.key]: true } });
+            if ((await force(notice.kind)) === null) throw new Error('La app no tiene el forzado de avisos de las pruebas');
+            // Los de actualizaciones no tienen caja propia con nombre: se mira un botón suyo.
+            const shown = () => visible(notice.box ?? notice.id);
+            await waitUntil(shown, 10000, `aparece el aviso ${notice.id}`);
+            await captureScreenshot(`aviso-${notice.id}`);
+            await clickWhenReady(`[data-testid="${notice.id}-dismiss"]`);
+            await waitUntil(async () => !(await shown()), 5000, `«Ahora no» cierra ${notice.id}`);
+            if ((await pref(notice.key)) !== true) throw new Error(`«Ahora no» de ${notice.id} no debe apagarlo para siempre`);
+            await force(notice.kind);
+            await waitUntil(shown, 10000, `vuelve el aviso ${notice.id}`);
+            await clickWhenReady(`[data-testid="${notice.id}-never"]`);
+            await waitUntil(async () => !(await shown()), 5000, `«No volver a mostrar» cierra ${notice.id}`);
+            await waitUntil(async () => (await pref(notice.key)) === false, 5000, `«No volver a mostrar» guarda ${notice.key}`);
+            // Y que la interfaz ya lo tenga: el backend lo guarda antes (24-11).
+            await waitUntil(async () => (await request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: 'return window.__wtE2ePreference?.(arguments[0]);',
+                args: [notice.key],
+            })) === false, 5000, `la interfaz recibe ${notice.key} apagado`);
+            await force(notice.kind);
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 1500));
+            if (await shown()) throw new Error(`${notice.id} sale aunque se pidió no volver a mostrarlo`);
+            results.push({ id: notice.id, dismiss: true, never: true });
+        }
+        // Consejero de IA: en cmd solo avisa cuando la orden no existe (24-11:
+        // con `cmd /c exit 3` no salía nunca y la prueba no había pasado aún).
+        await invokeJson('settings_save', { incoming: { ...(await invokeJson('settings_get')).preferences, agentChat: true, agentChatAdvisor: true } });
+        await switchToEnvironment('cmd');
+        // El consejero solo avisa si hay un agente que conteste en el chat.
+        await waitUntil(async () => (await invokeJson('agent_chat_agents')).some((agent) => agent.chat), 90000, 'hay un agente de IA para el consejero');
+        await sendTerminalLine('wt-orden-inexistente-e2e');
+        await waitUntil(() => visible('agent-chat-advice'), 20000, 'el consejero ofrece preguntar tras una orden que falla');
+        await captureScreenshot('aviso-consejero');
+        // Chat de ayuda (24-11): «Preguntar» va siempre al mismo chat, con la
+        // pregunta escrita y sin mandarla (agentChatAdvisorSend apagado).
+        {
+            const chatState = async () => request(`/session/${sessionId}/execute/sync`, 'POST', {
+                script: `const tabs = [...document.querySelectorAll('[data-testid="agent-chat-tab"]')].map((tab) => tab.textContent.trim());
+                    const inputs = [...document.querySelectorAll('[data-testid="agent-chat-input"]')].filter((input) => input.offsetParent !== null);
+                    return { tabs, draft: inputs[0]?.value ?? null, sent: document.querySelectorAll('[data-testid="agent-chat-message"]').length };`,
+                args: [],
+            });
+            const helpTabs = (state) => state.tabs.filter((tab) => tab.includes('Ayuda de WTerminal')).length;
+            for (let round = 0; round < 2; round += 1) {
+                if (round > 0) {
+                    await sendTerminalLine('wt-orden-inexistente-e2e-2');
+                    await waitUntil(() => visible('agent-chat-advice'), 20000, 'el consejero vuelve a ofrecer preguntar');
+                }
+                await clickWhenReady('[data-testid="agent-chat-advice-ask"]');
+                await waitUntil(async () => {
+                    const state = await chatState();
+                    return helpTabs(state) === 1 && typeof state.draft === 'string' && state.draft.includes('?');
+                }, 15000, `«Preguntar» abre el chat de ayuda con la pregunta escrita (vuelta ${round + 1})`);
+                const state = await chatState();
+                if (helpTabs(state) !== 1) throw new Error(`Debe haber un solo chat de ayuda: ${JSON.stringify(state.tabs)}`);
+                if (state.sent !== 0) throw new Error('La pregunta de ayuda se mandó sola con agentChatAdvisorSend apagado');
+                if (round === 0) await captureScreenshot('chat-de-ayuda');
+                await clickWhenReady('[data-testid="agent-chat-close"]');
+                await waitUntil(async () => !(await visible('agent-chat-input')), 5000, 'el chat se cierra');
+            }
+            results.push({ id: 'agent-chat-help', single: true, notSent: true });
+            await sendTerminalLine('wt-orden-inexistente-e2e-3');
+            await waitUntil(() => visible('agent-chat-advice'), 20000, 'el consejero ofrece preguntar otra vez');
+        }
+        await clickWhenReady('[data-testid="agent-chat-advice-never"]');
+        await waitUntil(async () => !(await visible('agent-chat-advice')), 5000, '«No volver a mostrar» cierra el consejero');
+        await waitUntil(async () => (await pref('agentChatAdvisor')) === false, 5000, '«No volver a mostrar» guarda agentChatAdvisor');
+        results.push({ id: 'agent-chat-advice', never: true });
+        notices.push({ key: 'agentChatAdvisor' });
+        // Ajustes › Avisos: «Restaurar» los devuelve todos.
+        await clickWhenReady('[data-testid="toolbar-settings"]');
+        await clickWhenReady('[data-testid="settings-notices-restore"]');
+        await waitUntil(async () => {
+            const preferences = (await invokeJson('settings_get')).preferences;
+            return notices.every((notice) => preferences[notice.key] === true);
+        }, 10000, 'Restaurar vuelve a encender los avisos');
+        await clickWhenReady('[role="dialog"] .panel-close');
+        recordEvent('notices', { results, restored: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'notices';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E avisos emergentes OK: gsudo, ayudante de la shell, perfil portable, actualizaciones y consejero de IA (Ahora no, No volver a mostrar y Restaurar).\n');
+    } else if (process.env.E2E_SHORTCUTS_ONLY === '1') {
+        await exerciseAllShortcuts();
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'shortcuts-all';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E atajos de teclado OK.\n');
+    } else if (process.env.E2E_SETTINGS_ROUNDTRIP_ONLY === '1') {
+        await exerciseSettingsRoundtrip();
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'settings-roundtrip';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E todas las casillas de Ajustes OK.\n');
+    } else if (process.env.E2E_ADMIN_REAL_ONLY === '1' && process.platform === 'win32') {
+        // 22-11, Romen: «la máquina no te va a pedir UAC, así que pruébalo sin
+        // miedo». La prueba de permisos simula gsudo; esta abre de verdad las
+        // shells de administrador y pregunta a Windows si lo son.
+        markPhase('shells de administrador de verdad');
+        await waitForBannerPanes(1, 60000);
+        const checked = [];
+        for (const id of ['gsudo:cmd', 'gsudo:powershell', 'nsudo:cmd', 'nsudo:powershell']) {
+            if ((await findAll('.env-menu')).length === 0) await clickWhenReady('.env-select');
+            const present = (await findAll(`.env-menu [data-environment-id="${id}"]`)).length > 0;
+            if (!present) {
+                checked.push({ id, present: false });
+                continue;
+            }
+            await switchToEnvironment(id);
+            const cell = await activeTerminalCell();
+            await waitUntil(async () => (await terminalRowSnapshot(cell)).rows
+                .some((row) => /[>#]\s*$/u.test(row.text.trimEnd())), 4 * 60_000, `prompt de ${id}`);
+            const line = id.endsWith(':cmd')
+                ? 'net session >nul 2>&1 && echo WT-ADMIN-%COMPUTERNAME:~0,0%SI || echo WT-ADMIN-%COMPUTERNAME:~0,0%NO'
+                : "'WT-ADMIN-' + ('NO','SI')[[int]([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)]";
+            await sendTerminalLine(line);
+            let verdict = null;
+            await waitUntil(async () => {
+                const text = (await terminalRowSnapshot(cell)).rows.map((row) => row.text).join('\n');
+                verdict = /WT-ADMIN-SI/u.test(text) ? 'SI' : /WT-ADMIN-NO/u.test(text) ? 'NO' : null;
+                return verdict !== null;
+            }, 60000, `respuesta de Windows en ${id}`);
+            await captureScreenshot(`administrador-real-${id.replace(':', '-')}`);
+            // 21-11: NSudo (y gsudo) empiezan en la carpeta del usuario, no en
+            // la del programa que eleva.
+            const rows = (await terminalRowSnapshot(cell)).rows.map((row) => row.text.trimEnd());
+            const promptFolder = rows.map((text) => text.match(/^(?:PS )?([A-Za-z]:\\[^>#]*)[>#]/u)?.[1]).filter(Boolean).at(-1) ?? '';
+            const inHome = promptFolder.toLowerCase() === homedir().toLowerCase();
+            checked.push({ id, present: true, admin: verdict === 'SI', folder: promptFolder, inHome });
+            if (verdict !== 'SI') throw new Error(`${id} se abrió SIN permisos de administrador`);
+            if (!inHome) throw new Error(`${id} empezó en ${promptFolder || '(sin prompt)'} y no en la carpeta del usuario (${homedir()})`);
+        }
+        if ((await findAll('.env-menu')).length > 0) await pressTerminalKey('');
+        if (!checked.some((item) => item.present)) {
+            throw new Error('No hay ninguna shell de administrador (gsudo ni NSudo) que probar');
+        }
+        await switchToEnvironment('cmd');
+        recordEvent('admin-real', { checked });
+        process.stdout.write(`E2E administrador real: ${checked.map((item) => `${item.id}=${item.present ? (item.admin ? 'admin' : 'NO') : 'no hay'}`).join(', ')}.\n`);
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'admin-real';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E shells de administrador de verdad OK.\n');
+    } else if (staleCatalogOnly) {
+        markPhase('catálogo guardado por otra build');
+        await waitForBannerPanes(1, 60000);
+        const catalog = await invokeJson('install_catalog');
+        const stale = (catalog.actions ?? []).filter((action) => String(action.command).includes(STALE_CATALOG_MARKER));
+        const virtualbox = (catalog.actions ?? []).find((action) => action.id === 'winget-virtualbox');
+        if (stale.length > 0) {
+            throw new Error(`La app usó el catálogo guardado por otra build: ${stale.map((action) => action.id).join(', ')}`);
+        }
+        if ((catalog.actions ?? []).length < 50) {
+            throw new Error(`El catálogo rehecho salió casi vacío (${(catalog.actions ?? []).length} acciones)`);
+        }
+        // La de VirtualBox, si aplica a este equipo, es la de ahora: sin la
+        // carpeta propia (`__OWN__` vacío) y con la explicación del fallo.
+        if (virtualbox && virtualbox.command.includes('$wtStart') === false) {
+            throw new Error('La acción de VirtualBox no es la de esta build');
+        }
+        const { text: log } = await readCurrentLog();
+        const discarded = log.includes('Catálogo guardado de otra build');
+        if (!discarded) throw new Error('El registro no dice que se descartó el catálogo de otra build');
+        recordEvent('stale-catalog', { actions: catalog.actions.length, virtualboxCurrent: Boolean(virtualbox), discarded });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'stale-catalog';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E catálogo de otra build descartado OK.\n');
+    } else if (realInstallOnly) {
+        await exerciseRealInstall();
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'real-install';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write('E2E instalación real del catálogo OK.\n');
     } else if (actionAtOnceOnly) {
         markPhase('órdenes de las acciones de una vez');
         await waitForBannerPanes(1, 60000);
@@ -12985,6 +14015,198 @@ try {
         smokeReport.status = 'passed';
         smokeReport.logValidated = true;
         process.stdout.write(`E2E marcas de orden OK: ${results.map((result) => result.shell).join(', ')}, código de salida, Intro vacío, copiar salida, saltos y aviso de orden larga (${longDone.duration} ms).\n`);
+    } else if (outputSpeedOnly) {
+        markPhase('velocidad de la salida');
+        await waitForBannerPanes(1, 60000);
+        const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+        const lines = Number(process.env.E2E_OUTPUT_SPEED_LINES ?? 2000);
+        const cmdLoop = { id: 'cmd', command: `for /L %i in (1,1,${lines}) do @echo linea %i de salida para medir la velocidad de WTerminal`, done: /\n[A-Za-z]:\\[^\n>]*>\s*$/u };
+        const psLoop = { id: 'powershell', command: `1..${lines} | ForEach-Object { "linea $_ de salida para medir la velocidad de WTerminal" }`, done: /\nPS [^\n>]*>\s*$/u };
+        // cmd dos veces: en cuanto arranca, con la detección de entornos en
+        // marcha, y otra con la detección terminada (26-11: la carga del
+        // arranque, sospechosa del freno), y PowerShell al final.
+        const shells = [
+            { ...cmdLoop, label: 'cmd-arranque' },
+            { ...cmdLoop, label: 'cmd-tranquilo', waitInventory: true },
+            { ...psLoop, label: 'powershell-tranquilo', waitInventory: true },
+        ];
+        const results = [];
+        for (const shell of shells) {
+            if (shell.waitInventory) {
+                await waitUntil(async () => (await attribute(await findWhenReady('.env-select'), 'disabled')) === null,
+                    dependencyDetectionTimeoutMs, 'inventario completo de entornos');
+                // Lo que se lanza detrás del inventario (catálogo, WinGet).
+                await new Promise((resolveDelay) => setTimeout(resolveDelay, Number(process.env.E2E_OUTPUT_SPEED_SETTLE_MS ?? 20000)));
+            }
+            await switchToEnvironment(shell.id);
+            await waitForBannerPanes(1, 60000);
+            const cell = await activeTerminalCell();
+            const tabId = await runScript("return document.querySelector('.tab.active')?.dataset.tabId;");
+            if (process.env.E2E_OUTPUT_SPEED_EXACT === '1') {
+                await runScript('window.__wtE2eExactWidth?.[arguments[0]]?.(true); return true;', [tabId]);
+            }
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 2000));
+            await runScript(`window.__wtSpeedTab = arguments[0];
+                window.__wtSpeed = { chunks: 0, bytes: 0, first: 0, last: 0, small: 0 };
+                window.__wtBusyCost = { ms: 0, calls: 0 };
+                if (!window.__wtSpeedListener) {
+                    window.__wtSpeedListener = (event) => {
+                        const data = event.detail?.data;
+                        if (event.detail?.tabId !== window.__wtSpeedTab || typeof data !== 'string') return;
+                        const now = performance.now();
+                        const speed = window.__wtSpeed;
+                        speed.chunks += 1;
+                        speed.bytes += data.length;
+                        if (data.length < 16) speed.small += 1;
+                        if (!speed.first) speed.first = now;
+                        speed.last = now;
+                    };
+                    window.addEventListener('winslim:terminal-output-busy', window.__wtSpeedListener);
+                }
+                return true;`, [tabId]);
+            const started = Date.now();
+            await sendTerminalKeys(shell.command, cell, { enter: true, settle: false });
+            await waitUntil(async () => {
+                const text = String(await runScript('return window.__wtTerminalText?.(arguments[0]) ?? "";', [tabId])).trimEnd();
+                return text.includes(`linea ${lines} de salida`) && shell.done.test(`\n${text.split('\n').at(-1)}`);
+            }, 240000, `${shell.id}: las ${lines} líneas y su prompt`);
+            const elapsed = Date.now() - started;
+            const speed = await runScript('return window.__wtSpeed;');
+            const busyCost = await runScript('const cost = window.__wtBusyCost; window.__wtBusyCost = undefined; return cost;');
+            const result = {
+                shell: shell.label ?? shell.id,
+                lines,
+                elapsedMs: elapsed,
+                linesPerSecond: Math.round(lines / (elapsed / 1000)),
+                chunks: speed.chunks,
+                smallChunks: speed.small,
+                bytesPerChunk: Math.round(speed.bytes / Math.max(1, speed.chunks)),
+                outputSpanMs: Math.round(speed.last - speed.first),
+                // Lo que se fue en atender cada trozo en las pestañas.
+                busyHandlerMs: Math.round(busyCost?.ms ?? -1),
+                busyHandlerCalls: busyCost?.calls ?? -1,
+                gridCols: Number(await runScript("return Number(document.querySelector('.cell:not(.hidden) .tab-pane')?.dataset.terminalCols ?? 0);")),
+            };
+            // ping: una línea por segundo. Se apunta en cuántos trozos llega
+            // cada línea y qué trae cada uno (sin secuencias), para ver si la
+            // salida llega letra a letra.
+            await runScript(`window.__wtSpeedTrace = [];
+                if (!window.__wtTraceListener) {
+                    window.__wtTraceListener = (event) => {
+                        if (event.detail?.tabId === window.__wtSpeedTab && typeof event.detail.data === 'string' && window.__wtSpeedTrace.length < 400) {
+                            window.__wtSpeedTrace.push([Math.round(performance.now()), event.detail.data]);
+                        }
+                    };
+                    window.addEventListener('winslim:terminal-output-busy', window.__wtTraceListener);
+                }
+                return true;`);
+            await sendTerminalKeys('ping -n 4 127.0.0.1', cell, { enter: true, settle: false });
+            await waitUntil(async () => {
+                const text = String(await runScript('return window.__wtTerminalText?.(arguments[0]) ?? "";', [tabId])).trimEnd();
+                return /(Paquetes|Packets)[^\n]*\n[\s\S]*$/u.test(text) && shell.done.test(`\n${text.split('\n').at(-1)}`);
+            }, 30000, `${shell.id}: ping termina`);
+            const trace = await runScript('return window.__wtSpeedTrace;');
+            const visible = (data) => data.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_78=>]/gu, '');
+            const pieces = trace.map(([, data]) => visible(data)).filter((text) => text.length > 0);
+            result.ping = {
+                chunks: trace.length,
+                visibleChunks: pieces.length,
+                tinyVisibleChunks: pieces.filter((text) => text.replace(/\s/gu, '').length <= 2).length,
+                sample: pieces.slice(0, 40),
+                rawSample: trace.slice(0, 12).map(([at, data]) => [at - trace[0][0], data.slice(0, 160)]),
+            };
+            results.push(result);
+            process.stdout.write(`E2E velocidad ${result.shell}: ${JSON.stringify({ ...result, ping: { ...result.ping, rawSample: undefined } })}\n`);
+            await captureScreenshot(`velocidad-salida-${result.shell}`);
+        }
+        recordEvent('output-speed', { results, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'output-speed';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E velocidad de la salida OK: ${results.map((result) => `${result.shell} ${result.linesPerSecond} líneas/s en ${result.chunks} trozos`).join(', ')}.\n`);
+    } else if (busyTabsOnly) {
+        // Pestañas ocupadas (26-11): nombre y color mientras corre una orden
+        // larga, aviso desde otra pestaña con «Ir a la pestaña» y la vista de
+        // las que siguen en marcha, que suelta la que termina.
+        markPhase('pestañas ocupadas');
+        await waitForBannerPanes(1, 60000);
+        const runScript = (script, args = []) => request(`/session/${sessionId}/execute/sync`, 'POST', { script, args });
+        const testPreferences = {
+            busyTabRename: true, busyTabColor: true, busyTabSeconds: 2, busyTabSecondsLowPower: 2,
+            commandDoneNotice: true, commandDoneSeconds: 4, commandDoneSecondsLowPower: 4, commandDoneOtherTab: true,
+            busyTabGroup: false, busyTabUngroup: true, busyTabUngroupSeconds: 1, lowPowerMode: false,
+        };
+        const original = (await invokeJson('settings_get')).preferences;
+        const restore = Object.fromEntries(Object.keys(testPreferences).map((key) => [key, original[key]]));
+        // Por la interfaz, como desde Ajustes: guardarlos en el backend no le
+        // avisa a ella.
+        await runScript('return window.__wtE2eSavePreferences(arguments[0]).then(() => true);', [testPreferences]);
+        await waitUntil(() => runScript("return window.__wtE2ePreference?.('busyTabSeconds') === 2;"), 10000, 'ajustes de prueba en la interfaz');
+        const tabState = (id) => runScript(`const tab = document.querySelector('.tab[data-tab-id="' + arguments[0] + '"]');
+            return tab ? { title: tab.getAttribute('title') ?? '', color: tab.dataset.tabColor ?? '', busy: tab.dataset.busy ?? '',
+                active: tab.classList.contains('active') } : null;`, [id]);
+        const activeId = () => runScript("return document.querySelector('.tab.active')?.dataset.tabId ?? '';");
+        const visibleCells = () => runScript("return document.querySelectorAll('.cell:not(.hidden)').length;");
+        const firstId = await activeId();
+        const firstTitle = (await tabState(firstId)).title;
+        const cell = await activeTerminalCell();
+        // ping de Windows: 9 intentos son unos 8 s.
+        await sendTerminalKeys('ping -n 9 127.0.0.1', cell, { enter: true, settle: false });
+        let running = null;
+        await waitUntil(async () => {
+            running = await tabState(firstId);
+            return running?.busy === 'running' && running.title === 'ping';
+        }, 10000, 'la pestaña se llama «ping» mientras corre');
+        if (running.color !== 'cyan') throw new Error(`ping es de red y va en turquesa: ${JSON.stringify(running)}`);
+
+        // A otra pestaña: el aviso sale en la que se ve y lleva a la de ping.
+        await clickWhenReady('.tab-new');
+        await waitUntil(async () => (await activeId()) !== firstId, 15000, 'pestaña nueva activa');
+        const secondId = await activeId();
+        await waitForBannerPanes(1, 60000);
+        let notice = null;
+        await waitUntil(async () => {
+            notice = await runScript(`const node = document.querySelector('[data-testid="command-done-notice"][data-tab-id="' + arguments[0] + '"]');
+                return node ? node.textContent.trim() : null;`, [firstId]);
+            return Boolean(notice);
+        }, 20000, 'aviso de que la orden de la otra pestaña terminó');
+        if (!notice.includes('ping') || !notice.includes(firstTitle)) throw new Error(`El aviso no dice qué orden ni de qué pestaña: ${notice}`);
+        const finished = await tabState(firstId);
+        if (finished.busy !== 'ok' || finished.title !== firstTitle) throw new Error(`Al terminar vuelve su nombre con la marca de bien: ${JSON.stringify(finished)}`);
+        await captureScreenshot('pestanas-ocupadas-aviso');
+        await clickWhenReady(`[data-testid="command-done-notice"][data-tab-id="${firstId}"] [data-testid="command-done-go"]`);
+        await waitUntil(async () => (await activeId()) === firstId, 5000, '«Ir a la pestaña» lleva a la de ping');
+        await waitUntil(async () => (await tabState(firstId)).busy === '', 5000, 'la marca de terminado se quita al verla');
+
+        // Dos en marcha: el botón «En marcha» las junta y suelta la que
+        // termina (salvo la que se mira).
+        await sendTerminalKeys('ping -n 10 127.0.0.1', await activeTerminalCell(), { enter: true, settle: false });
+        await runScript("document.querySelector('.tab[data-tab-id=\"' + arguments[0] + '\"]').click();", [secondId]);
+        await waitUntil(async () => (await activeId()) === secondId, 5000, 'vuelta a la segunda pestaña');
+        await sendTerminalKeys('ping -n 18 127.0.0.1', await activeTerminalCell(), { enter: true, settle: false });
+        await waitUntil(async () => (await findAll('[data-testid="tab-watch-running"]')).length > 0, 10000, 'botón «En marcha» con dos órdenes');
+        await clickWhenReady('[data-testid="tab-watch-running"]');
+        await waitUntil(async () => (await visibleCells()) === 2, 5000, 'las dos en la vista dividida');
+        await captureScreenshot('pestanas-ocupadas-vigilancia');
+        // La segunda es la más reciente y la activa: la primera termina antes
+        // y sale de la vista.
+        await waitUntil(async () => (await activeId()) === secondId, 5000, 'la más reciente queda activa');
+        await waitUntil(async () => (await visibleCells()) === 1, 20000, 'la que terminó sale de la vista');
+        const left = await tabState(secondId);
+        if (left?.busy !== 'running') throw new Error(`La que sigue en marcha se queda: ${JSON.stringify(left)}`);
+        // La que queda termina sola; los ajustes, como estaban.
+        await waitUntil(async () => (await tabState(secondId))?.busy !== 'running', 25000, 'la segunda orden termina');
+        await runScript('return window.__wtE2eSavePreferences(arguments[0]).then(() => true);', [restore]);
+
+        recordEvent('busy-tabs', { notice, passed: true });
+        await assertCurrentLog();
+        phaseTimings.push({ name: phaseName, durationMs: Date.now() - phaseStartedAt });
+        smokeReport.focusedScenario = 'busy-tabs';
+        smokeReport.status = 'passed';
+        smokeReport.logValidated = true;
+        process.stdout.write(`E2E pestañas ocupadas OK: nombre y color de ping, aviso «${notice}», ir a la pestaña y vista de las que siguen en marcha.\n`);
     } else if (tabToolsOnly) {
         markPhase('renombrar pestañas y guardar la salida');
         await waitForBannerPanes(1, 60000);
@@ -13396,7 +14618,19 @@ try {
         await captureScreenshot('seguimiento-retroceso');
         // E. Mayús+rueda lleva la vista al principio (gesto del usuario) y al
         // seguir escribiendo vuelve al cursor.
-        await request(`/session/${sessionId}/execute/sync`, 'POST', {
+        // Build 85: con el equipo lento, el eco del Retroceso aún llegaba y
+        // la rueda se medía una sola vez a los 200 ms. Antes de la rueda se
+        // espera a que la línea deje de cambiar; después se vigila 2 s.
+        {
+            let last = -1;
+            await waitUntil(async () => {
+                const length = (await probe()).lineLength;
+                const stable = length === last;
+                last = length;
+                return stable;
+            }, 10000, 'línea estable antes de la rueda').catch(() => undefined);
+        }
+        const wheelImmediate = await request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: `const host = arguments[0].querySelector('[data-testid="terminal-host"]');
                 for (let step = 0; step < 12; step += 1) {
                     host.dispatchEvent(new WheelEvent('wheel', { deltaY: -400, shiftKey: true, bubbles: true, cancelable: true }));
@@ -13404,9 +14638,14 @@ try {
                 return host.scrollLeft;`,
             args: [{ [elementKey]: cell }],
         });
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        const wheelReadings = [];
+        await waitUntil(async () => {
+            const state = await probe();
+            wheelReadings.push(Math.round(state.scrollLeft));
+            return state.scrollLeft <= 1;
+        }, 2000, 'vista al principio tras Mayús+rueda').catch(() => undefined);
         const afterWheel = await probe();
-        if (afterWheel.scrollLeft > 1) failures.push({ phase: 'rueda', ...afterWheel, reason: 'Mayús+rueda no desplazó la vista al principio' });
+        if (afterWheel.scrollLeft > 1) failures.push({ phase: 'rueda', ...afterWheel, wheelImmediate: wheelImmediate?.value ?? wheelImmediate, wheelReadings, reason: 'Mayús+rueda no desplazó la vista al principio' });
         {
             const before = (await probe()).lineLength;
             await keys('WHL');
@@ -13566,7 +14805,10 @@ try {
             await rotateTo(4);
             let cell = await originalCell();
             await click(cell);
-            await waitUntil(async () => (await tinyRows(await originalCell())) > 0 && (await tinyRows(await originalCell())) <= 3, 10000, 'casilla de 1-3 filas');
+            // Con el alto de línea 1,2 de fábrica (22-11) la casilla de 480×270
+            // entre cuatro tiene 5 filas (con 1,5 tenía 3): las cuatro órdenes
+            // siguen sin caber, que es lo que hace desplazar el historial.
+            await waitUntil(async () => (await tinyRows(await originalCell())) > 0 && (await tinyRows(await originalCell())) <= 5, 10000, 'casilla de 1-5 filas');
             cell = await originalCell();
             const rowsBefore = await tinyRows(cell);
             // Varias órdenes en 1-3 filas: el historial se desplaza en ConPTY y xterm.
@@ -15420,10 +16662,17 @@ try {
             externalVirtualizationIds.some((id) => key.endsWith(`/${id}`)));
         const externalUnknownActions = externalVirtualizationActions.filter((action) =>
             action.state === 'unknown' || action.detectionStatus === 'unknown');
+        const featuresAlreadyEnabled = new Set();
+        for (const id of Object.keys(WINDOWS_FEATURE_ACTIONS)) {
+            if (!externalVirtualizationActions.some((action) => action.id === id)
+                && await windowsFeatureAlreadyEnabled(id)) featuresAlreadyEnabled.add(id);
+        }
         const externalMissingIds = externalCatalogKeys
             .map((key) => key.slice(key.lastIndexOf('/') + 1))
             .filter((id) => {
                 if (externalVirtualizationActions.some((action) => action.id === id)) return false;
+                // Ya activada en Windows: «Activar» se esconde por diseño.
+                if (featuresAlreadyEnabled.has(id)) return false;
                 // Cuando Docker Desktop ya está instalado, la acción base de
                 // instalación desaparece por diseño y la familia queda
                 // representada por docker-check/start/list/version y sus
@@ -16466,6 +17715,8 @@ try {
     if (process.platform === 'win32' || process.platform === 'linux') {
         markPhase('integración de WTerminal en PATH');
         pendingWindowsPathSnapshot = await snapshotWindowsPathIntegration();
+        // Desde el 22-11 el PATH está en Sistema.
+        await clickWhenReady('[data-testid="settings-tab-system"]');
         const pathToggle = await findWhenReady('[data-testid="settings-path-integration"]');
         const pathInitiallyEnabled = Boolean(await property(pathToggle, 'checked'));
         await clickInView(pathToggle);
@@ -16520,6 +17771,8 @@ try {
     }
     // Entornos y descargas: la lista de cachés propias aparece sin esperar a
     // medir las ubicaciones externas (el escenario enfocado cubre el resto).
+    // Desde el 22-11 está en General y el PATH en Sistema: se vuelve a General.
+    await clickWhenReady('[data-testid="settings-tab-behavior"]');
     await waitUntil(async () => (await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `return document.querySelectorAll('[data-testid="settings-toolchain-store-caches"] .store-row').length;`,
         args: [],
@@ -17339,9 +18592,23 @@ try {
         // explícitos sin ejecutarla: habilitar características de Windows
         // altera el sistema y exige reinicio.
         const sandboxAction = (await findAllWithin(compatibilityId, '[data-action-id="windows-sandbox-enable"]'))[0];
+        // El catálogo esconde «Activar» cuando Sandbox ya está activado o
+        // espera reinicio (larga 80, 21-11: se activó a mano en el equipo de
+        // pruebas). Solo es fallo si falta la acción y Windows dice que no
+        // está activado. Win32_OptionalFeature se lee sin ser administrador.
         if (!sandboxAction) {
-            throw new Error('Windows no muestra la acción Activar Windows Sandbox');
+            if (!(await windowsFeatureAlreadyEnabled('windows-sandbox-enable'))) {
+                throw new Error('Windows no muestra la acción Activar Windows Sandbox');
+            }
+            recordEvent('windows-sandbox-contract', {
+                actionId: 'windows-sandbox-enable',
+                visible: false,
+                skipped: true,
+                reason: 'Windows Sandbox ya está activado o espera reinicio en este equipo',
+                activationAttempted: false,
+            });
         }
+        if (sandboxAction) {
         const sandboxSubgroup = await request(`/session/${sessionId}/execute/sync`, 'POST', {
             script: 'return arguments[0].closest("details.subgroup");',
             args: [{ [elementKey]: sandboxAction[elementKey] }],
@@ -17377,6 +18644,7 @@ try {
             visible: true,
             activationAttempted: false,
         });
+        }
     } else {
         // Array.find no espera promesas: localizar CrossOver con el mismo patrón
         // explícito usado para el grupo evita que vuelva a degradarse a una fila
@@ -17758,7 +19026,18 @@ try {
                 || (indicator.getAnimations().length === 0 && getComputedStyle(indicator).opacity === '1');`,
         args: [{ [elementKey]: horizontalCell }],
     }), 3000, 'el indicador de desplazamiento horizontal termina de aparecer');
-    const horizontalHelpSnapshot = await terminalHorizontalSnapshot(horizontalCell);
+    // En la 88 (25-11) esa espera pasó porque el indicador aún no tenía la
+    // clase `visible`; apareció justo después y la foto lo pilló a medias
+    // (opacidad 0,45 y 0,17). Con la ayuda desbordada se repite la foto hasta
+    // que el indicador está quieto del todo.
+    let horizontalHelpSnapshot = await terminalHorizontalSnapshot(horizontalCell);
+    const helpIndicatorSettled = (snapshot) => !(snapshot?.host?.scrollWidth > snapshot?.host?.clientWidth + 2)
+        || (snapshot?.indicator?.opacity === '1' && String(snapshot?.indicator?.className ?? '').includes('visible'));
+    const helpIndicatorDeadline = Date.now() + 3000;
+    while (!helpIndicatorSettled(horizontalHelpSnapshot) && Date.now() < helpIndicatorDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        horizontalHelpSnapshot = await terminalHorizontalSnapshot(horizontalCell);
+    }
     const horizontalProbe = await request(`/session/${sessionId}/execute/sync`, 'POST', {
         script: `const terminalHost = arguments[0].querySelector('[data-testid="terminal-host"]');
             if (!terminalHost) return null;

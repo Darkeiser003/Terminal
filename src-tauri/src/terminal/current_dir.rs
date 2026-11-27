@@ -162,9 +162,12 @@ pub fn map_remote_path(raw_path: &str, env: &Environment) -> Option<String> {
     }
 }
 
-// PowerShell: `PS C:\ruta>` / cmd.exe: `C:\ruta>`
+// PowerShell: `PS C:\ruta>` / cmd.exe: `C:\ruta>`. El cmd elevado con gsudo
+// acaba en `#` (`C:\ruta# `, su `Prompt` de fábrica `$P# `): sin él, la
+// regla POSIX lo leía como `C` + `:\ruta` y guardaba `\ruta` sin unidad
+// (22-11, prueba real de administrador).
 static WINDOWS_PROMPT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)(?:^|\n)(?:PS\s+)?([A-Za-z]:\\[^\n<>|?*]*?)>\s*$").unwrap());
+    Lazy::new(|| Regex::new(r"(?m)(?:^|\n)(?:PS\s+)?([A-Za-z]:\\[^\n<>|?*#]*?)[>#]\s*$").unwrap());
 
 // Git Bash por defecto: "MINGW64 /c/ruta" y el símbolo $ en la línea
 // siguiente. También cubre MSYS y MINGW32.
@@ -386,6 +389,16 @@ mod tests {
     #[test]
     fn se_reconoce_el_prompt_de_cmd() {
         let out = "Microsoft Windows\r\n\r\nC:\\Users\\Ana>";
+        assert_eq!(
+            detect_current_directory(out, &env(Transport::Native), None),
+            Some("C:\\Users\\Ana".to_string())
+        );
+    }
+
+    /// 22-11: el cmd elevado con gsudo acaba en `#`; antes salía `\Users\Ana`.
+    #[test]
+    fn se_reconoce_el_prompt_de_cmd_elevado_con_gsudo() {
+        let out = "Shell de administrador con tu cuenta.\r\n\r\nC:\\Users\\Ana# ";
         assert_eq!(
             detect_current_directory(out, &env(Transport::Native), None),
             Some("C:\\Users\\Ana".to_string())

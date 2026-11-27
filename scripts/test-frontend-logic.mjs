@@ -750,13 +750,21 @@ assert.deepEqual(
         ['shortcutPaneDown', defaults.match(/^shortcutPaneDown\s*=\s*"([^"]*)"$/m)?.[1]],
     ]),
     {
-        shortcutPaneLeft: 'Ctrl+A',
-        shortcutPaneRight: 'Ctrl+D',
-        shortcutPaneUp: 'Ctrl+W',
-        shortcutPaneDown: 'Ctrl+S',
+        shortcutPaneLeft: 'Ctrl+Alt+ArrowLeft',
+        shortcutPaneRight: 'Ctrl+Alt+ArrowRight',
+        shortcutPaneUp: 'Ctrl+Alt+ArrowUp',
+        shortcutPaneDown: 'Ctrl+Alt+ArrowDown',
     },
-    'La navegación de fábrica debe conservar Ctrl izquierdo + W/A/S/D',
+    'El foco entre paneles de fábrica es Ctrl+Alt + flechas (22-11)',
 );
+// Solo con la pantalla partida: con una sola terminal, la tecla va a la shell.
+{
+    const appShellForPanes = app;
+    assert(appShellForPanes.includes('if (app.visibleTabs.length >= 2) {'),
+        'los atajos de foco entre paneles solo actúan con la pantalla partida');
+}
+assert(shortcuts.matchesPaneShortcut({ code: 'ArrowLeft', key: 'ArrowLeft', ctrlKey: true, altKey: true, shiftKey: false, metaKey: false }, 'Ctrl+Alt+ArrowLeft', false),
+    'Ctrl+Alt + flechas vale con cualquiera de los dos Ctrl');
 
 const event = (overrides = {}) => ({
     code: 'KeyT',
@@ -848,8 +856,8 @@ assert(app.includes('"terminal.terminalOnlyGuideNoShortcut"'),
     const coveredShortcuts = new Set(palette.PALETTE_APP_ACTIONS.map((definition) => definition.shortcut).filter(Boolean));
     assert.deepEqual(
         shortcuts.SHORTCUT_PREFERENCE_KEYS.filter((key) => !coveredShortcuts.has(key)),
-        ['shortcutCommandPalette', 'shortcutPaneLeft', 'shortcutPaneRight', 'shortcutPaneUp', 'shortcutPaneDown'],
-        'todo atajo que dispara una acción tiene su entrada en la paleta (la navegación espacial y la propia paleta no)',
+        ['shortcutCommandPalette', 'shortcutPaneLeft', 'shortcutPaneRight', 'shortcutPaneUp', 'shortcutPaneDown', 'shortcutGoToTab'],
+        'todo atajo que dispara una acción tiene su entrada en la paleta (la navegación espacial, ir a la pestaña N y la propia paleta no)',
     );
     for (const command of palette.PALETTE_INTERNAL_COMMANDS) {
         assert(command.descriptionKey in es, `falta ${command.descriptionKey}`);
@@ -858,7 +866,8 @@ assert(app.includes('"terminal.terminalOnlyGuideNoShortcut"'),
         assert(palette.isTypableInternalLine(command.line), `${command.line} se puede teclear`);
     }
     assert.equal(byId.get('app:newTab').shortcut, 'Ctrl+Shift+T', 'muestra el atajo vigente');
-    assert.equal(byId.get('app:openSettings').shortcut, '', 'un atajo sin asignar no se muestra');
+    assert.equal(byId.get('app:openSettings').shortcut, 'Ctrl+,', 'Ajustes con Ctrl+, de fábrica (22-11)');
+    assert.equal(byId.get('app:openProjects').shortcut, '', 'un atajo sin asignar no se muestra');
     assert.equal(byId.get('app:openSettings').command, ':config');
     assert.match(byId.get('app:openProjects').disabledReason, /Ajustes/u, 'un panel oculto se ve deshabilitado con el motivo');
     assert(byId.get('app:nextTab').disabledReason, 'con una sola pestaña no se navega');
@@ -992,6 +1001,14 @@ assert.equal(sixelConpty.sixelPixelAspect(undefined, '#0~~'), 2);
 assert.equal(sixelConpty.sixelPixelAspect(0, '"1;1;8;60#0~~'), 1, 'los atributos de trama mandan sobre P1');
 assert.equal(sixelConpty.sixelPixelAspect(2, '#0'), 5);
 assert.equal(sixelConpty.sixelPixelAspect(9, '#0'), 1);
+// Con atributos de trama ConPTY deja el cursor en la fila del último píxel
+// (23-11, medido en la app): 60 px a 1:1 → 2 filas, 36 px a 1:1 → 1.
+assert.equal(sixelConpty.sixelHasRaster('"1;1;8;60#0~~'), true);
+assert.equal(sixelConpty.sixelHasRaster('#0~~'), false);
+for (const [height, conptyRows] of [[60, 2], [36, 1], [120, 5]]) {
+    const box = sixelConpty.conptySixelBox(8, height, 1, { width: 8.4, height: 21 }, true);
+    assert.equal(Math.ceil(box.boxHeight / 21) - 1, conptyRows, `Sixel con trama de ${height} px: xterm debe bajar ${conptyRows} filas como ConPTY`);
+}
 // Filas que baja ConPTY medidas en Windows: 6→0, 18→1, 24→2, 42→4, 60→6, 120→12.
 for (const [height, conptyRows] of [[6, 0], [18, 1], [24, 2], [42, 4], [60, 6], [120, 12]]) {
     const box = sixelConpty.conptySixelBox(8, height, 2, { width: 8.4, height: 21 });
@@ -1526,6 +1543,119 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
     assert.deepEqual(conflicts('shortcutCloseTab', { shortcutCloseTab: '' }), { shell: false, duplicateOf: null }, 'sin asignar no choca');
 }
 
+// Historial de los chats (23-11, Romen: «si cierro la pestaña, aunque sea un
+// segundo, se borra»): título, lo que se guarda, búsqueda, grupos por fecha
+// y sesión; y el panel que los guarda, los reabre y deja borrarlos.
+{
+    const history = await importTypeScript('src/lib/agent-chat-history.ts');
+    const id = history.newChatId(1_795_000_000_000, () => 0.5);
+    assert.match(id, /^c-[a-z0-9]+-[a-z0-9]{6}$/u, 'id corto y válido como nombre de archivo');
+    assert.notEqual(history.newChatId(), history.newChatId(), 'dos ids seguidos no coinciden');
+    assert.equal(history.autoTitle('\n  ¿Por qué   falla bcdedit?\nmás texto'), '¿Por qué falla bcdedit?', 'título: primera línea sin espacios de más');
+    assert.equal(history.autoTitle('x'.repeat(80), 20), `${'x'.repeat(19)}…`, 'título largo cortado con «…»');
+    const live = [
+        { role: 'user', agent: 'Codex CLI', text: 'hola', error: null, pending: false, context: null, attachments: [{ name: 'a.txt', bytes: 3, truncated: false }] },
+        { role: 'agent', agent: 'Codex CLI', text: 'respuesta a medi', error: null, pending: true, startedAt: 10, keyDraft: 'sk-secreta', help: { apiKey: 'X' } },
+    ];
+    const stored = history.toStoredMessages(live, 'Cortado', 99);
+    assert.equal(stored[1].error, 'Cortado', 'una respuesta a medias se guarda como cortada');
+    assert.equal(stored[1].finishedAt, 99, 'con la hora del corte');
+    assert.equal(stored[1].text, 'respuesta a medi', 'y con lo que había llegado');
+    assert.ok(!('keyDraft' in stored[1]) && !('help' in stored[1]) && !('pending' in stored[1]), 'no se guardan borradores de clave, ayudas ni el estado');
+    assert.deepEqual(stored[0].attachments, [{ name: 'a.txt', bytes: 3, truncated: false }], 'los adjuntos, solo nombre y tamaño');
+    const summaries = [
+        { title: 'Arranque de Windows', agent: 'Codex CLI', updatedAt: 3 },
+        { title: 'Código de Python', agent: 'Claude Code', updatedAt: 2 },
+    ];
+    assert.deepEqual(history.searchChats(summaries, 'codigo').map((item) => item.title), ['Código de Python'], 'buscar sin tildes');
+    assert.deepEqual(history.searchChats(summaries, 'codex windows').map((item) => item.title), ['Arranque de Windows'], 'todas las palabras, también el agente');
+    assert.equal(history.searchChats(summaries, '  ').length, 2, 'sin búsqueda, todos');
+    const now = new Date(2026, 10, 23, 12, 0).getTime();
+    const day = 24 * 60 * 60 * 1000;
+    assert.equal(history.dateGroup(now - 60_000, now), 'today');
+    assert.equal(history.dateGroup(now - day, now), 'yesterday');
+    assert.equal(history.dateGroup(now - 4 * day, now), 'week');
+    assert.equal(history.dateGroup(now - 20 * day, now), 'month');
+    assert.equal(history.dateGroup(now - 90 * day, now), 'older');
+    assert.deepEqual(history.groupChatsByDate([{ updatedAt: now - 90 * day }, { updatedAt: now - 1 }], now).map((entry) => entry.group), ['today', 'older'], 'grupos en orden y sin vacíos');
+    assert.deepEqual(history.sanitizeSession({ open: ['a', 'a', '../x', 'session', 5, 'b', 'c'], active: 'zz' }, 2), { open: ['a', 'b'], active: 'a' }, 'sesión limpia: ids válidos, sin repetidos, tope y activo de los abiertos');
+    assert.deepEqual(history.sanitizeSession(null, 6), { open: [], active: null }, 'sin sesión, vacía');
+
+    const chats = await readFile('src/components/AgentChats.svelte', 'utf8');
+    const single = await readFile('src/components/AgentChat.svelte', 'utf8');
+    assert.ok(chats.includes('api.agentChatSessionLoad()') && chats.includes('api.agentChatSessionSave(pendingSession)'), 'el panel reabre y guarda los chats abiertos');
+    assert.ok(chats.includes('data-testid="agent-chat-history"') && chats.includes('data-testid="agent-chat-history-search"')
+        && chats.includes('data-testid="agent-chat-history-rename"') && chats.includes('data-testid="agent-chat-history-delete-confirm"')
+        && chats.includes('data-testid="agent-chat-history-clear-confirm"'), 'historial con búsqueda, renombrar y borrar con confirmación');
+    assert.ok(/persistNow\(\);\r?\n\s+destroyed = true;/u.test(single), 'al cerrar un chat se guarda lo último');
+    assert.ok(/function newConversation\(\): void \{\r?\n\s+if \(pending\) return;\r?\n\s+persistNow\(\);/u.test(single), '«Nueva conversación» guarda la anterior antes de empezar');
+    assert.ok(single.includes("app.preferences?.agentChatHistory !== false") && chats.includes("app.preferences?.agentChatRestore !== false"), 'los dos comportamientos siguen su ajuste');
+    const defaults = await readFile('src-tauri/default_settings.toml', 'utf8');
+    assert.ok(/^agentChatHistory = true$/mu.test(defaults) && /^agentChatRestore = true$/mu.test(defaults), 'historial y reapertura encendidos de fábrica');
+    // Sesiones propias de Claude Code y Codex (24-11).
+    assert.equal(history.canResumeNative({ agentId: 'ai:claude', id: 's1', covers: 4 }, 'ai:claude', 4), true, 'mismo agente y nada añadido: se retoma');
+    assert.equal(history.canResumeNative({ agentId: 'ai:claude', id: 's1', covers: 4 }, 'ai:codex', 4), false, 'otro agente: no');
+    assert.equal(history.canResumeNative({ agentId: 'ai:claude', id: 's1', covers: 4 }, 'ai:claude', 6), false, 'algo añadido después (un fallo): no');
+    assert.equal(history.canResumeNative(null, 'ai:claude', 0), false, 'sin sesión: no');
+    assert.deepEqual(history.nativeAfterAnswer({ id: 'u1', resume: false }, null, 'ai:claude', 2), { agentId: 'ai:claude', id: 'u1', covers: 2 }, 'Claude Code: la que se le dio');
+    assert.deepEqual(history.nativeAfterAnswer({ id: 'u1', resume: false }, 'c9', 'ai:codex', 2), { agentId: 'ai:codex', id: 'c9', covers: 2 }, 'Codex: la que dijo');
+    assert.equal(history.nativeAfterAnswer({ id: 'u1', resume: false }, null, 'ai:codex', 2), null, 'Codex sin decirla: ninguna');
+    assert.deepEqual(history.nativeAfterAnswer({ id: 's1', resume: true }, null, 'ai:codex', 6), { agentId: 'ai:codex', id: 's1', covers: 6 }, 'retomada: la misma, más lejos');
+    {
+        const [saved] = history.toStoredMessages([{ role: 'agent', agent: 'Claude', text: 'x', error: null, pending: false,
+            ask: { agentId: 'ai:claude', prompt: 'solo lo nuevo', fullPrompt: 'todo', question: 'q', model: '', effort: '', mode: '', fast: false, session: { id: 's1', resume: true } } }], 'Cortado');
+        assert.equal(saved.ask.prompt, 'todo', 'lo guardado repite la pregunta entera');
+        assert.ok(!('session' in saved.ask) && !('fullPrompt' in saved.ask), 'sin la sesión ni el duplicado');
+    }
+    // Mejoras del 24-11: fijados, caducidad del chat de ayuda, título y Markdown.
+    {
+        const now = new Date(2026, 10, 24, 12).getTime();
+        const day = 24 * 60 * 60 * 1000;
+        const grouped = history.groupChatsByDate([{ id: 'a', updatedAt: now - 1 }, { id: 'b', updatedAt: now - 90 * day, pinned: true }], now);
+        assert.deepEqual(grouped.map((entry) => entry.group), ['pinned', 'today'], 'los fijados primero, en su grupo');
+        assert.equal(history.helpChatExpired({ createdAt: now - 400 * day, messages: 900 }, now, 0, 0), false, 'de fábrica nunca caduca');
+        assert.equal(history.helpChatExpired({ createdAt: now - 31 * day, messages: 2 }, now, 30, 0), true, 'por días');
+        assert.equal(history.helpChatExpired({ createdAt: now, messages: 50 }, now, 0, 50), true, 'por mensajes');
+        assert.equal(history.cleanAgentTitle('Título: "Arreglar el PATH de Node".\nOtra línea'), 'Arreglar el PATH de Node', 'título limpio');
+        assert.equal(history.cleanAgentTitle('## **Error de git push**'), 'Error de git push');
+        assert.equal(history.exportFileName('a/b: c?'), 'a b c.md', 'nombre de archivo válido en Windows');
+        assert.equal(history.exportFileName(''), 'chat.md');
+        const markdown = history.chatToMarkdown({ title: 'Mi chat', agentLabel: 'Claude Code', createdAt: 1, updatedAt: 2, messages: [
+            { role: 'user', agent: 'Claude Code', text: 'hola', error: null },
+            { role: 'agent', agent: 'Claude Code', text: '```\necho hi\n```', error: null },
+            { role: 'agent', agent: 'Codex', text: '', error: 'Cortado' },
+        ] }, { you: 'Tú', agent: 'Agente', created: 'Empezado', updated: 'Último mensaje', error: 'Falló', untitled: 'Sin título' }, (time) => `t${time}`);
+        assert.ok(markdown.startsWith('# Mi chat\n') && markdown.includes('## Tú\n\nhola') && markdown.includes('## Claude Code\n\n```\necho hi\n```')
+            && markdown.includes('> Falló: Cortado') && markdown.includes('- Empezado: t1') && markdown.endsWith('\n'), 'Markdown con título, quién habla y código tal cual');
+        const [saved] = history.toStoredMessages([{ role: 'agent', agent: 'Claude', text: 'x', error: null, pending: false, resumed: true }], 'Cortado');
+        assert.equal(saved.resumed, true, 'la marca de sesión retomada se guarda');
+        const settingsPanel = await readFile('src/components/SettingsPanel.svelte', 'utf8');
+        for (const id of ['settings-agent-chat-auto-title', 'settings-agent-chat-pin-help', 'settings-agent-chat-forget-native', 'settings-agent-chat-cleanup', 'settings-agent-chat-help-max-days', 'settings-agent-chat-show-resumed', 'settings-regenerable-clean', 'settings-regenerable-auto']) {
+            assert.ok(settingsPanel.includes(`data-testid="${id}"`), `ajuste en Ajustes: ${id}`);
+        }
+        assert.ok(/^agentChatAutoTitle = false$/mu.test(defaults) && /^agentChatPinHelp = true$/mu.test(defaults) && /^agentChatForgetNative = false$/mu.test(defaults)
+            && /^agentChatCleanup = false$/mu.test(defaults) && /^agentChatHelpMaxDays = 0$/mu.test(defaults) && /^regenerableAutoClean = false$/mu.test(defaults),
+            'valores de fábrica pedidos por Romen el 24-11');
+        assert.ok(chats.includes("app.preferences?.agentChatForgetNative === true") && chats.includes('api.agentChatHistoryPin('), 'borrar la sesión solo con su ajuste; fijar desde el historial');
+    }
+    // La respuesta tardía de las comprobaciones de arranque respeta «No volver a mostrar» (24-11).
+    {
+        const appSource = await readFile('src/App.svelte', 'utf8');
+        assert.ok(appSource.includes('&& app.preferences?.checkPackageUpdatesOnStartup !== false') && appSource.includes('&& app.preferences?.checkUpdatesOnStartup !== false'),
+            'los avisos de actualizaciones miran el ajuste al llegar la respuesta');
+    }
+    // Chat de ayuda (24-11): el guardado más reciente.
+    assert.equal(history.latestHelpChat([{ id: 'a' }, { id: 'b', help: true }, { id: 'c', help: true }])?.id, 'b', 'el chat de ayuda más reciente');
+    assert.equal(history.latestHelpChat([{ id: 'a' }]), null, 'sin chat de ayuda: se crea');
+    assert.ok(chats.includes('async function showHelpChat()') && chats.includes("app.agentChatDraft?.help !== true"), 'la pregunta de ayuda va al chat de ayuda');
+    assert.ok(single.includes("prepared.help === true && !help") && single.includes("app.preferences?.agentChatAdvisorSend === true"), 'solo el chat de ayuda la recoge y se manda sola solo con su ajuste');
+    assert.ok(/^agentChatAdvisorSend = false$/mu.test(defaults) && /^agentChatNativeSessions = true$/mu.test(defaults), 'de fábrica: la ayuda se deja escrita y las sesiones propias encendidas');
+    // Insertar lo que ya está escrito no es un fallo (23-11, Christian).
+    const pane = await readFile('src/components/TerminalPane.svelte', 'utf8');
+    assert.ok(pane.includes('if (!enter && draft.trim() && draft.trim() === line.trim()) return null;'), 'insertar dos veces la misma orden no avisa de error');
+    assert.ok(single.includes("'agentChat.insertRejectedDraft'") && single.includes("'agentChat.insertRejectedBusy'"), 'cada motivo de rechazo con su aviso');
+}
+
 // Chat lateral con los agentes (12-11): la respuesta se parte en texto y
 // bloques de código (también uno sin cerrar mientras llega) y sin colores.
 {
@@ -1686,10 +1816,10 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
     const toolbar = await readFile('src/components/Toolbar.svelte', 'utf8');
     const notices = await readFile('src/lib/notices.ts', 'utf8');
     assert(appShell.includes('<AgentChats />') && !appShell.includes('<AgentChat />')
-        && agentChats.includes('<AgentChat embedded active={chat.id === activeId}')
+        && /<AgentChat\s+bind:this=\{handles\[chat\.id\]\}\s+embedded\s+active=\{chat\.id === activeId && !showHistory\}/u.test(agentChats)
         && agentChats.includes('const MAX_CHATS = 6;'),
         'el panel lleva varios chats, cada uno entero');
-    assert(agentChat.includes('if (!prepared || !active) return;'), 'la pregunta del consejero va al chat que se ve');
+    assert(agentChat.includes('if (!prepared || !active || (prepared.help === true && !help)) return;'), 'la pregunta va al chat que se ve; la de ayuda, solo al chat de ayuda');
     assert(tabBar.includes('data-testid="toolbar-agent-chat"') && tabBar.includes('agent-chat-toggle')
         && !toolbar.includes('data-testid="toolbar-agent-chat"'),
         'el botón del chat va al final de la fila de pestañas, con icono');
@@ -1711,8 +1841,9 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
     for (const [testId, key] of [
         ['gsudo-offer-never', 'offerGsudo'], ['shell-assist-offer-never', 'offerShellAssist'],
         ['missing-tool-never', 'suggestMissingTools'], ['low-power-dismiss', 'lowPowerSuggest'],
-        ['profile-offer-never', 'offerPortableProfile'], ['import-suggestion-never', 'suggestRepositoryImport'],
+        ['profile-offer-never', 'offerPortableProfile'], ['profile-update-never', 'offerProfileUpdate'], ['import-suggestion-never', 'suggestRepositoryImport'],
         ['package-update-never', 'checkPackageUpdatesOnStartup'], ['update-never', 'checkUpdatesOnStartup'],
+        ['command-done-never', 'commandDoneOtherTab'],
     ]) {
         assert(appShell.includes(`data-testid="${testId}"`), `el aviso tiene «No volver a mostrar» (${testId})`);
         assert(notices.includes(`key: '${key}'`), `el ajuste ${key} se recupera en Ajustes > Avisos`);
@@ -1750,6 +1881,69 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
     assert(/^offerGsudo = true$/mu.test(defaults) && /^offerShellAssist = true$/mu.test(defaults)
         && /^agentTabGuide = true$/mu.test(defaults) && /^agentControl = true$/mu.test(defaults),
         'los ajustes nuevos, encendidos de fábrica');
+    // 21-11: guardar los ajustes cambiados en el perfil y la guía de primeros pasos.
+    {
+        assert(/^offerProfileUpdate = true$/mu.test(defaults) && /^showFirstSteps = true$/mu.test(defaults),
+            'el aviso de guardar en el perfil y la guía, encendidos de fábrica');
+        const profileUpdate = await importTypeScript('src/lib/profile-update.ts');
+        const before = profileUpdate.preferencesFingerprint({ themeId: 'cyan', viewportCols: 80 });
+        assert(before === profileUpdate.preferencesFingerprint({ viewportCols: 200, themeId: 'cyan' }),
+            'el tamaño de la terminal (lo escribe la app) no cuenta como cambio, ni el orden de las claves');
+        const after = profileUpdate.preferencesFingerprint({ themeId: 'ocean', viewportCols: 80 });
+        const profiles = [
+            { name: 'viejo.ps1', path: 'C:/p/viejo.ps1', modifiedMs: 1 },
+            { name: 'nuevo.ps1', path: 'C:/p/nuevo.ps1', modifiedMs: 5 },
+        ];
+        assert(profileUpdate.latestProfile(profiles)?.name === 'nuevo.ps1' && profileUpdate.latestProfile([]) === null,
+            'se ofrece el perfil guardado más reciente');
+        assert(profileUpdate.shouldOfferProfileUpdate(before, after, profiles, true)
+            && !profileUpdate.shouldOfferProfileUpdate(before, before, profiles, true)
+            && !profileUpdate.shouldOfferProfileUpdate(before, after, [], true)
+            && !profileUpdate.shouldOfferProfileUpdate(before, after, profiles, false),
+            'solo con cambios, algún perfil y el aviso encendido');
+        assert(appShell.includes('data-testid="profile-update-current"') && appShell.includes('data-testid="profile-update-new"')
+            && appShell.includes('api.updateProfile(') && appShell.includes("panels.open === 'settings'"),
+            'el aviso ofrece guardar en el perfil actual o en otro al cerrar Ajustes');
+        // Larga 81: guardar tardó 6,6 s y la comparación llegaba antes.
+        assert(appShell.includes('await app.preferencesSettled();'),
+            'el aviso del perfil espera a que acabe de guardarse el último cambio');
+        const firstSteps = await importTypeScript('src/lib/first-steps.ts');
+        assert(firstSteps.shouldAutoShowFirstSteps(true, false) && firstSteps.shouldAutoShowFirstSteps(undefined, false)
+            && !firstSteps.shouldAutoShowFirstSteps(false, false) && !firstSteps.shouldAutoShowFirstSteps(true, true),
+            'la guía sale sola hasta apagarla, y nunca en E2E');
+        assert(new Set(firstSteps.FIRST_STEPS.map((step) => step.id)).size === firstSteps.FIRST_STEPS.length,
+            'cada paso de la guía tiene un id propio');
+        const es = JSON.parse(await readFile('src-tauri/locales/es.json', 'utf8'));
+        for (const step of firstSteps.FIRST_STEPS) {
+            assert(es[`firstSteps.${step.id}.title`] === step.title && es[`firstSteps.${step.id}.text`] === step.text,
+                `el paso ${step.id} de la guía coincide con su traducción al español`);
+        }
+        assert(appShell.includes('main.first-steps-active .update') && appShell.includes('<FirstSteps bind:active={firstStepsActive} />'),
+            'mientras se ve la guía, los avisos de abajo esperan');
+        assert(appShell.includes('window.addEventListener(api.ADMIN_NEEDED_EVENT, onAdminNeeded)')
+            && appShell.includes('data-testid="admin-needed-gsudo"') && appShell.includes('data-testid="admin-needed-restart"'),
+            'una acción de administrador sin gsudo ofrece instalarlo o reiniciar como administrador');
+        // Guía: solo Siguiente, Atrás y Saltar; terminarla o saltarla apaga la opción.
+        const firstStepsView = await readFile('src/components/FirstSteps.svelte', 'utf8');
+        assert(!firstStepsView.includes('first-steps-never')
+            && firstStepsView.includes('data-testid="first-steps-skip" onclick={() => close()}')
+            && firstStepsView.includes('savePreferences({ showFirstSteps: false })')
+            && !firstStepsView.includes('close(false)'),
+            'la guía no tiene «No volver a mostrar» y saltarla o terminarla apaga showFirstSteps');
+        // Sin el menú del navegador salvo en campos de texto o sobre texto seleccionado.
+        const browserMenu = await importTypeScript('src/lib/browser-context-menu.ts');
+        const keeps = browserMenu.keepsBrowserContextMenu;
+        assert(!keeps(null, '') && !keeps({ tagName: 'DIV' }, '') && !keeps({ tagName: 'BUTTON' }, '   '),
+            'sin campo ni selección, el clic derecho no saca el menú del navegador');
+        assert(keeps({ tagName: 'INPUT', type: 'text' }, '') && keeps({ tagName: 'input', type: '' }, '')
+            && keeps({ tagName: 'TEXTAREA' }, '') && keeps({ tagName: 'DIV', isContentEditable: true }, '')
+            && keeps({ tagName: 'DIV' }, 'texto copiado'),
+            'en un campo de texto o con texto seleccionado se deja el menú (cortar, copiar, pegar)');
+        assert(!keeps({ tagName: 'INPUT', type: 'checkbox' }, '') && !keeps({ tagName: 'INPUT', type: 'text', disabled: true }, ''),
+            'una casilla o un campo desactivado no sacan el menú del navegador');
+        const mainEntry = await readFile('src/main.ts', 'utf8');
+        assert(mainEntry.includes('installBrowserContextMenuFilter();'), 'el filtro del menú del navegador se instala al arrancar');
+    }
     // El menú de la pestaña lee su id ANTES de cerrarse (antes «Renombrar» y
     // «Cerrar pestaña» no hacían nada).
     assert(tabBar.includes("onclick={() => { const id = tab.id; menu = null; app.renamingTabId = id; }}")
@@ -1794,3 +1988,88 @@ assert.equal(terminalLinks.linkRejectionMessageKey('disabled'), null, 'con los e
 }
 
 console.log(`Lógica frontend verificada: idioma, identidad y ${configuredShortcuts.length} atajos.`);
+
+// 22-11: ir a la pestaña N con el atajo de la 1 y el número; «+» y «-» por su
+// carácter (teclado español: «+» es BracketRight y «-» Slash).
+{
+    const key = (code, extra = {}) => ({ code, key: '', ctrlKey: true, altKey: false, shiftKey: true, metaKey: false, ...extra });
+    assert.equal(shortcuts.goToTabIndex(key('Digit1'), 'Ctrl+Shift+1'), 0);
+    assert.equal(shortcuts.goToTabIndex(key('Digit9'), 'Ctrl+Shift+1'), 8);
+    assert.equal(shortcuts.goToTabIndex(key('Digit0'), 'Ctrl+Shift+1'), 9);
+    assert.equal(shortcuts.goToTabIndex(key('Digit2', { shiftKey: false }), 'Ctrl+Shift+1'), null);
+    assert.equal(shortcuts.goToTabIndex(key('KeyA'), 'Ctrl+Shift+1'), null);
+    assert.equal(shortcuts.goToTabIndex(key('Digit2'), ''), null);
+    const plusEs = { code: 'BracketRight', key: '+', ctrlKey: true, altKey: false, shiftKey: false, metaKey: false };
+    const minusEs = { code: 'Slash', key: '-', ctrlKey: true, altKey: false, shiftKey: false, metaKey: false };
+    assert(shortcuts.matchesShortcut(plusEs, 'Ctrl+Equal'), 'Ctrl + «+» del teclado español agranda la letra');
+    assert(shortcuts.matchesShortcut(minusEs, 'Ctrl+Minus'), 'Ctrl + «-» del teclado español achica la letra');
+    assert(!shortcuts.matchesShortcut({ ...plusEs, shiftKey: true }, 'Ctrl+Equal'));
+}
+
+// Pestañas ocupadas (26-11): nombre, tipo, color, excepciones y vigilancia.
+{
+    const busy = await importTypeScript('src/lib/busy-tabs.ts');
+    assert.equal(busy.commandLabel('journalctl -f -u nginx'), 'journalctl');
+    assert.equal(busy.commandLabel('sudo journalctl -f'), 'journalctl');
+    assert.equal(busy.commandLabel('npm run dev'), 'npm dev');
+    assert.equal(busy.commandLabel(String.raw`C:\tools\Ping.EXE -t 8.8.8.8`), 'Ping');
+    assert.equal(busy.commandLabel('docker logs -f web'), 'docker logs');
+    assert.equal(busy.commandLabel('python -m http.server 8000'), 'python http.server');
+    assert.equal(busy.commandLabel('python manage.py runserver'), 'python manage.py');
+    assert.equal(busy.commandLabel('RUST_LOG=debug cargo build --release'), 'cargo build');
+    assert.equal(busy.commandLabel('ping localhost | findstr TTL'), 'ping');
+    assert.equal(busy.commandLabel('   '), '');
+    assert(busy.commandLabel(`${'x'.repeat(50)}`).length <= 32);
+
+    assert.equal(busy.classifyCommand('journalctl -f'), 'logs');
+    assert.equal(busy.classifyCommand('tail -f /var/log/syslog'), 'logs');
+    assert.equal(busy.classifyCommand('tail -n 5 a.log'), null);
+    assert.equal(busy.classifyCommand('Get-Content app.log -Wait'), 'logs');
+    assert.equal(busy.classifyCommand('kubectl logs -f pod'), 'logs');
+    assert.equal(busy.classifyCommand('npm run dev'), 'server');
+    assert.equal(busy.classifyCommand('npm start'), 'server');
+    assert.equal(busy.classifyCommand('python -m http.server'), 'server');
+    assert.equal(busy.classifyCommand('cargo build --release'), 'build');
+    assert.equal(busy.classifyCommand('npm run build'), 'build');
+    assert.equal(busy.classifyCommand('next build'), 'build');
+    assert.equal(busy.classifyCommand('npm install'), 'install');
+    assert.equal(busy.classifyCommand('winget upgrade --all'), 'install');
+    assert.equal(busy.classifyCommand('pip install requests'), 'install');
+    assert.equal(busy.classifyCommand('ping -t 1.1.1.1'), 'network');
+    assert.equal(busy.classifyCommand('git clone https://x/y'), 'network');
+    assert.equal(busy.classifyCommand('git status'), null);
+    assert.equal(busy.classifyCommand('timeout 30'), null);
+
+    const colors = busy.parseCategoryColors('logs=blue, server=GREEN, build=morado, nada=red');
+    assert.deepEqual(colors, { logs: 'blue', server: 'green' });
+    assert.equal(busy.formatCategoryColors(busy.parseCategoryColors(busy.DEFAULT_BUSY_TAB_COLORS)), busy.DEFAULT_BUSY_TAB_COLORS);
+    assert.deepEqual(busy.parseBusyRules('kubectl logs=pink; ping = red;=blue;malo=morado'), [
+        { prefix: 'kubectl logs', color: 'pink' }, { prefix: 'ping', color: 'red' },
+    ]);
+
+    const base = { categoryColors: busy.DEFAULT_BUSY_TAB_COLORS, rules: '', inUse: [], turn: 0 };
+    assert.equal(busy.chooseBusyColor({ ...base, command: 'journalctl -f' }).color, 'blue');
+    // La regla propia gana al tipo, y casa por palabras enteras.
+    assert.equal(busy.chooseBusyColor({ ...base, rules: 'journalctl=pink', command: 'journalctl -f' }).color, 'pink');
+    assert.equal(busy.chooseBusyColor({ ...base, rules: 'ping=pink', command: 'pingu' }).rotated, true);
+    // Por turno, sin rojo y saltando los que ya se usan.
+    const first = busy.chooseBusyColor({ ...base, command: 'timeout 30' });
+    assert(first.rotated && first.color !== 'red');
+    assert.notEqual(busy.chooseBusyColor({ ...base, command: 'timeout 30', inUse: [first.color] }).color, first.color);
+    // Un tipo sin color propio va por turno.
+    assert.equal(busy.chooseBusyColor({ ...base, categoryColors: 'server=green', command: 'journalctl' }).rotated, true);
+
+    assert(busy.isExcludedCommand('vim notas.txt', busy.DEFAULT_BUSY_TAB_EXCLUDE));
+    assert(busy.isExcludedCommand('sudo htop', busy.DEFAULT_BUSY_TAB_EXCLUDE));
+    assert(!busy.isExcludedCommand('journalctl -f', busy.DEFAULT_BUSY_TAB_EXCLUDE));
+    assert(!busy.isExcludedCommand('vim', ''));
+
+    assert.equal(busy.busyDelayMs(5, 10, false, 5), 5000);
+    assert.equal(busy.busyDelayMs(5, 10, true, 5), 10000);
+    assert.equal(busy.busyDelayMs(undefined, undefined, false, 5), 5000);
+
+    const running = [{ id: 'a', startedAt: 1 }, { id: 'b', startedAt: 3 }, { id: 'c', startedAt: 2 }];
+    assert.deepEqual(busy.watchPanes(running, 'a', 4), ['a', 'b', 'c']);
+    assert.deepEqual(busy.watchPanes(running, 'a', 2), ['a', 'b']);
+    assert.deepEqual(busy.watchPanes(running, 'x', 4), ['b', 'c', 'a']);
+}

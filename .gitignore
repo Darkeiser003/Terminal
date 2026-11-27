@@ -137,3 +137,20 @@ src-tauri/vendor/.conpty-backup-*/
 .codex/
 .idea/
 .vscode/
+
+# Asistentes de IA: configuración, memoria y sesiones locales de cada uno
+# (22-11: se coló .claude/launch.json). Nada de esto es del proyecto.
+.claude/
+.cursor/
+.gemini/
+.qwen/
+.continue/
+.windsurf/
+.crush/
+.opencode/
+.amp/
+.grok/
+.copilot/
+.aider*
+CLAUDE.local.md
+*.nuevo

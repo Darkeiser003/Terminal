@@ -47,6 +47,8 @@ export const SUITES = {
             { id: 'command-marks', title: 'Marcas de orden OSC 133 en cmd, PowerShell y Git Bash: fin de orden, código de salida, marca de fallo, Intro vacío, eco pegado al prompt, copiar la salida, saltos con el teclado y aviso de orden larga', env: { E2E_COMMAND_MARKS_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'internal-set', title: ':set desde la terminal: sí/no, nombre con guiones, valor no válido, fuera de rango, lista filtrada y ajuste desconocido', env: { E2E_INTERNAL_SET_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'hidden-enter', title: 'Intro con la ventana minimizada: una orden larga y una corta de PowerShell se ejecutan aunque la ventana no se vea (el fallo intermitente de tab-tools en las builds 56 y 58)', env: { E2E_HIDDEN_ENTER_ONLY: '1' }, timeoutMs: 10 * MINUTE },
+            { id: 'output-speed', title: 'Velocidad de la salida: 2000 líneas en cmd y PowerShell, cuánto tardan y en cuántos trozos llegan', env: { E2E_OUTPUT_SPEED_ONLY: '1' }, timeoutMs: 10 * MINUTE },
+            { id: 'busy-tabs', title: 'Pestañas ocupadas: una orden larga pone su nombre y color a la pestaña, avisa al terminar desde otra pestaña con «Ir a la pestaña» y el botón «En marcha» junta las que siguen y suelta la que termina', env: { E2E_BUSY_TABS_ONLY: '1' }, timeoutMs: 8 * MINUTE },
             { id: 'tab-tools', title: 'Pestañas y salida: renombrar con doble clic y paleta, Escape, nombre vacío, el nombre sobrevive al cambio de shell, color desde el menú de la pestaña, guardar el historial en un archivo y buscar una orden escrita para volver a escribirla sin ejecutarla', env: { E2E_TAB_TOOLS_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'context-menu-edit', title: 'Menú contextual: cortar y Supr sobre una parte interior de lo escrito (cmd, PowerShell, Git Bash), portapapeles, cursor de la shell donde estaba la selección y «Buscar» con la selección', env: { E2E_CONTEXT_MENU_EDIT_ONLY: '1' }, timeoutMs: 15 * MINUTE },
             { id: 'github-account', title: 'Mi GitHub con un gh simulado: sin sesión, gh auth login en una pestaña, cuenta y repositorios, crear, visibilidad, archivar y desarchivar, renombrar, borrar escribiendo el nombre y pidiendo delete_repo, y cerrar sesión', env: { E2E_GITHUB_ACCOUNT_ONLY: '1' }, timeoutMs: 10 * MINUTE },
@@ -57,6 +59,8 @@ export const SUITES = {
             { id: 'low-power', title: 'Modo de bajo consumo: sugerencia en un equipo de 2 hilos (simulado), activar, reflejo en Ajustes y apagar', env: { E2E_LOW_POWER_ONLY: '1' }, timeoutMs: 5 * MINUTE },
             { id: 'python-width', title: 'Python tecleado en cmd: ancho visible mientras corre (pyreadline3 repinta la ventana a cada tecla), tiempo de una línea, vuelta a la reserva al salir y opción de Ajustes', env: { E2E_PYTHON_WIDTH_ONLY: '1' }, timeoutMs: 10 * MINUTE },
             { id: 'fastfetch-matrix', title: 'Banner y fastfetch en cmd, PowerShell y Git Bash: al abrir, tras cls y tras redimensionar, con y sin imagen, sin líneas cortadas', env: { E2E_FASTFETCH_MATRIX_ONLY: '1' }, timeoutMs: 20 * MINUTE },
+            { id: 'admin-real', title: 'Shells de administrador de verdad: gsudo y NSudo (cmd y PowerShell) abren con permisos de administrador según Windows (sin simular)', env: { E2E_ADMIN_REAL_ONLY: '1' }, timeoutMs: 25 * MINUTE },
+            { id: 'stale-catalog', title: 'Al actualizar desde otra build: el catálogo guardado por ella (con sus órdenes viejas) se tira y se rehace (la 82 instaló VirtualBox con la orden vieja)', env: { E2E_STALE_CATALOG_ONLY: '1' }, timeoutMs: 8 * MINUTE },
             { id: 'visual-tour', title: 'Recorrido visual: capturas de Ajustes, Proyectos, Biblioteca y Dependencias, y márgenes mínimos en ambas densidades', env: { E2E_VISUAL_TOUR_ONLY: '1' }, timeoutMs: 15 * MINUTE },
             { id: 'admin-permissions', title: 'Permisos de administrador: sección igual al backend, arranque elevado apagado y persistente, NSudo deshabilitado con motivo o a través de gsudo (simulado), sin RUNASADMIN y sin pedir nunca el UAC', env: { E2E_WINDOWS_ADMIN_ONLY: '1' }, timeoutMs: 10 * MINUTE },
         ],
@@ -102,7 +106,10 @@ export const SUITES = {
                 },
                 // La codificación del vídeo va al final y también cuenta: en la
                 // build 35 el límite de 75 min cortó una auditoría ya aprobada.
-                timeoutMs: 90 * MINUTE,
+                // 26-11: el catálogo pasó de 686 a 786 acciones (una captura
+                // por acción) y la 87 y la 89 llegaron al último paso a los
+                // 90 min; 120 deja margen sin esconder un cuelgue.
+                timeoutMs: 120 * MINUTE,
                 quick: {
                     env: {
                         E2E_DEPENDENCY_FIRST_PASS_COUNT_ONLY: '1',
@@ -154,6 +161,29 @@ export const SUITES = {
             { id: 'components-library-at-once', title: 'Scripts de la Biblioteca de una vez (actionCommandsAtOnce) con Clink y PSReadLine', env: { E2E_LIBRARY_AT_ONCE_ONLY: '1', E2E_WITH_COMPONENTS: '1' }, timeoutMs: 10 * MINUTE },
         ],
     },
+    // 22-11 (Romen: «haz pruebas reales… que instale todas las aplicaciones no
+    // instaladas o actualizaciones, con mensajes de error claros»). CAMBIA EL
+    // EQUIPO: instala de verdad en la carpeta propia (E:\WTerminal\entornos).
+    // No entra en ningún nivel de validación; se lanza a mano.
+    // 22-11 noche: pruebas nuevas que aún no han pasado nunca. Fuera de la
+    // larga hasta que pasen (si tuvieran un fallo propio, tumbarían la larga).
+    nuevas: {
+        title: 'Pruebas nuevas en rodaje',
+        description: 'Atajos, casillas de Ajustes y avisos emergentes; pasan a focused cuando salgan verdes varias veces.',
+        scenarios: [
+            { id: 'shortcuts-all', title: 'Atajos de teclado pulsados de verdad: paleta, búsquedas, paneles (con atajos asignados a los que vienen vacíos), pestañas nueva/anterior/siguiente/cerrar, explorador y terminal limpia; todo vuelve como estaba', env: { E2E_SHORTCUTS_ONLY: '1' }, timeoutMs: 10 * MINUTE },
+            { id: 'notices', title: 'Avisos emergentes (gsudo, ayudante de la shell, perfil portable, actualizaciones de la app y de los programas, consejero de IA): Ahora no, No volver a mostrar guardado y Restaurar desde Ajustes', env: { E2E_NOTICES_ONLY: '1' }, timeoutMs: 8 * MINUTE },
+            { id: 'settings-roundtrip', title: 'Todas las casillas de Ajustes una a una: se guarda, cambia su ajuste y al desmarcarla todo queda como estaba (sin las que tocan Windows)', env: { E2E_SETTINGS_ROUNDTRIP_ONLY: '1' }, timeoutMs: 25 * MINUTE },
+        ],
+    },
+    'real-install': {
+        title: 'Instalación real del catálogo',
+        description: 'Pulsa Instalar en todo lo que falta y Actualizar en lo pendiente, espera el resultado, guarda la salida y comprueba con una detección nueva que lo instalado se ve instalado.',
+        machineChange: true,
+        scenarios: [
+            { id: 'real-install', title: 'Instalar y actualizar de verdad todo el catálogo', env: { E2E_REAL_INSTALL_ONLY: '1', E2E_CAPTURE_SCREENSHOTS: '1' }, timeoutMs: 12 * 60 * MINUTE },
+        ],
+    },
     installer: {
         title: 'Instalador NSIS',
         description: 'Instala (un solo UAC), verifica archivos, registro y accesos directos, ejecuta el recorrido completo sobre lo instalado y desinstala comprobando que no queda nada.',
@@ -173,6 +203,26 @@ export const VALIDATION_LEVELS = {
     // único recorrido completo (por eso no hay suite `video`), el portable y el
     // instalador pasan `distribution` y cada escenario usa su bloque `quick`.
     quick: ['focused', 'downloads', 'dependency-audit', 'installer'],
+};
+
+/** Las pruebas que alguna vez fallaron a ratos (22-11). La suite
+ *  `intermitentes` las repite cinco veces cada una para saber si un arreglo
+ *  aguanta, antes de gastar una larga. Se sacan de focused y components, así
+ *  que siempre son las mismas que en la release. */
+export const INTERMITTENT_SCENARIOS = [
+    'tab-tools', 'hidden-enter', 'ai-environments', 'ai-real', 'ai-tui', 'command-marks', 'horizontal',
+    'new-tab-echo', 'new-tab-echo-forced-race', 'queued-input', 'input-follow', 'resize-type', 'long-input',
+    'scrollback-output', 'context-menu-edit', 'settings-search', 'command-palette', 'python-width',
+    'unicode-widths', 'shell-assist', 'fastfetch-matrix', 'admin-real', 'stale-catalog',
+    'components-horizontal', 'components-input-follow', 'components-command-marks',
+    'components-action-at-once', 'components-library-at-once',
+];
+SUITES.intermitentes = {
+    title: 'Las que alguna vez fallaron, cinco veces cada una',
+    description: 'Repite las pruebas que han fallado a ratos en alguna build para confirmar un arreglo antes de una larga.',
+    scenarios: [...SUITES.focused.scenarios, ...SUITES.components.scenarios]
+        .filter((scenario) => INTERMITTENT_SCENARIOS.includes(scenario.id))
+        .map((scenario) => ({ ...scenario, repeat: 5 })),
 };
 
 /** Expande los escenarios (con sus repeticiones) de las suites pedidas. Con

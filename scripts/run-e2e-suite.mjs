@@ -181,7 +181,12 @@ export async function runSuites(options) {
     }
 
     const pathAfter = await snapshotWindowsPathIntegration();
-    if (!sameWindowsPathSnapshot(pathBefore, pathAfter)) {
+    // La instalación real cambia el PATH a propósito (los instaladores añaden
+    // sus carpetas): restaurarlo desharía lo instalado.
+    const installsForReal = options.suites.includes('real-install');
+    if (installsForReal && !sameWindowsPathSnapshot(pathBefore, pathAfter)) {
+        process.stdout.write(`PATH del usuario cambiado por las instalaciones reales (se deja así): ${describeWindowsPathChange(pathBefore, pathAfter)}\n`);
+    } else if (!sameWindowsPathSnapshot(pathBefore, pathAfter)) {
         await restoreWindowsPathIntegration(pathBefore).catch(() => undefined);
         results.push({ suite: 'aislamiento', id: 'user-path', title: 'PATH del usuario intacto', status: 'failed', durationMs: 0, summary: `Las suites alteraron el PATH del usuario (${describeWindowsPathChange(pathBefore, pathAfter)}); se ha restaurado.` });
     }

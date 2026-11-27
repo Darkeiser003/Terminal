@@ -39,7 +39,9 @@ param(
     # descarga de Microsoft. Offline: como antes, con el instalador completo
     # dentro (215 MB), para imágenes recortadas sin Internet; no se publica.
     [ValidateSet('Download', 'Offline')][string]$WebView2 = 'Download',
-    [string]$KeysDir
+    [string]$KeysDir,
+    # Al terminar en verde, crear también la versión «Latest» (windows\make-latest.ps1).
+    [switch]$Latest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -205,6 +207,8 @@ if ($Help) {
     Write-Host '  -Version X.Y.Z        Sobrescribe la version del paquete.'
     Write-Host '  -NonInteractive        No espera entrada del usuario.'
     Write-Host '  -KeysDir <carpeta>     Carpeta con las claves de firma. Sin ella se pregunta (sin preguntar en -NonInteractive: release sin firmar).'
+    Write-Host '  -Latest                Al terminar en verde, crea también la versión Latest en release-latest\ (WTerminal-Latest-…, con sus sumas y firmas).'
+    Write-Host '                        Sin compilar: windows\make-latest.ps1 la hace de la última release (o de -From <carpeta>).'
     Write-Host '  Sin opciones           Release completa: EXE + portable de un solo archivo + NSIS, checks estrictos, smoke, bateria ampliada y E2E.'
     Write-Host '                        En modo interactivo, la versión se pide al principio junto al resto de opciones.'
     Write-Host '                        Un fallo de E2E se informa al final sin impedir publicar la release.'
@@ -557,6 +561,9 @@ if ($interactiveBuild) {
     }
     $CrossLinux = Read-BuildChoice 'Ejecutar también la build Linux mediante WSL' $CrossLinux
     $NoRun = [switch](-not (Read-BuildChoice 'Lanzar la aplicación al terminar' (-not $NoRun)))
+    if (-not $Fast) {
+        $Latest = [switch](Read-BuildChoice 'Crear también la versión Latest al terminar en verde' $Latest.IsPresent)
+    }
     Write-Host '  Opciones seleccionadas. La build comenzará ahora.' -ForegroundColor DarkGray
 }
 
@@ -1168,13 +1175,37 @@ function Resolve-BuildPathTarget([string]$Path) {
     return $Path
 }
 $targetPath = Resolve-BuildPathTarget (Join-Path $ProjectRoot 'src-tauri\target')
+# Si la unidad del temporal no llega a los 5 GB de E2E y vídeo y la de `target`
+# va sobrada, el temporal de esta build pasa junto a `target` (23-11: C: con
+# 2,3 GB y E: con 22). Solo para este proceso y los que lance.
+function Get-BuildFreeGb([string]$Path) {
+    $qualifier = Split-Path -Qualifier $Path -ErrorAction SilentlyContinue
+    if (-not $qualifier) { return $null }
+    $drive = Get-PSDrive -Name $qualifier.TrimEnd(':') -ErrorAction SilentlyContinue
+    if (-not $drive -or $null -eq $drive.Free) { return $null }
+    return [math]::Round($drive.Free / 1GB, 1)
+}
+if ($env:TEMP) {
+    $tempFree = Get-BuildFreeGb $env:TEMP
+    $targetFree = Get-BuildFreeGb $targetPath
+    $sameDrive = (Split-Path -Qualifier $env:TEMP) -eq (Split-Path -Qualifier $targetPath)
+    if (-not $sameDrive -and $null -ne $tempFree -and $tempFree -lt 5 -and $null -ne $targetFree -and $targetFree -ge 10) {
+        $movedTemp = Join-Path (Split-Path -Parent $targetPath) 'temp'
+        New-Item -ItemType Directory -Force -Path $movedTemp | Out-Null
+        Write-Warn "Solo $tempFree GB libres en el temporal; esta build usa $movedTemp ($targetFree GB libres)."
+        $env:TEMP = $movedTemp
+        $env:TMP = $movedTemp
+    }
+}
 $spaceChecks = [ordered]@{}
-# El repositorio solo guarda node_modules y release\ (menos de 2 GB) cuando
-# `target` vive en otra unidad.
+# Cuando `target` y el temporal viven en otra unidad, en la del repositorio
+# solo se escribe release\ (decenas de MB) y, si cambia, node_modules: 1 GB
+# basta (23-11: la 84 se paró con 1,9 GB libres en C: y 20 en E:). Si la
+# unidad también guarda `target` o el temporal, manda el mínimo de 5 GB.
 foreach ($entry in @(
         @{ Path = $targetPath; Need = 'compilar'; Min = 5 },
         @{ Path = $env:TEMP; Need = 'E2E y vídeo'; Min = 5 },
-        @{ Path = $ProjectRoot; Need = 'repositorio y release'; Min = 2 })) {
+        @{ Path = $ProjectRoot; Need = 'repositorio y release'; Min = 1 })) {
     if (-not $entry.Path) { continue }
     $qualifier = (Split-Path -Qualifier $entry.Path -ErrorAction SilentlyContinue)
     if (-not $qualifier) { continue }
@@ -1725,9 +1756,24 @@ if ($devServer) {
     throw 'Servidor de desarrollo en marcha.'
 }
 
-$running = Get-Process -Name 'wterminal' -ErrorAction SilentlyContinue
-if ($running) {
-    Write-Err "WTerminal esta abierto ($($running.Count) proceso(s))."
+# Solo estorban las copias que esta build va a reemplazar: las que se abren
+# desde el repositorio o desde `target` (que puede vivir en otra unidad). Una
+# copia guardada en otra carpeta (25-11: Romen probando releases\rapida-2511
+# mientras se lanzaba la 88) no bloquea nada. Si no se puede leer la ruta del
+# proceso, se trata como bloqueante.
+$buildRoots = @($ProjectRoot, $targetPath) | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') + '\' }
+$running = @(Get-Process -Name 'wterminal' -ErrorAction SilentlyContinue | Where-Object {
+        $exe = $_.Path
+        if (-not $exe) { return $true }
+        $full = [IO.Path]::GetFullPath($exe)
+        @($buildRoots | Where-Object { $full.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    })
+$elsewhere = @(Get-Process -Name 'wterminal' -ErrorAction SilentlyContinue).Count - $running.Count
+if ($elsewhere -gt 0) {
+    Write-Ok "WTerminal abierto desde otra carpeta ($elsewhere proceso(s)): no estorba a la build."
+}
+if ($running.Count -gt 0) {
+    Write-Err "WTerminal esta abierto desde el repositorio o target ($($running.Count) proceso(s))."
     Write-Err 'Cierralo antes de compilar: su .exe y su conpty.dll no se pueden reemplazar en uso.'
     throw 'La aplicacion esta en marcha.'
 }
@@ -3094,6 +3140,17 @@ if ($script:PostBuildIssues.Count -gt 0) {
 # Todo en verde: fuera el aviso de build en curso.
 if ($script:InProgressNote -and (Test-Path -LiteralPath $script:InProgressNote -PathType Leaf)) {
     Remove-Item -LiteralPath $script:InProgressNote -Force
+}
+# La versión «Latest» (21-11): la misma release con «Latest» en lugar del
+# número, sus sumas y sus firmas, en release-latest\.
+if ($Latest -and -not $Fast) {
+    Write-Step 'Creando la versión Latest'
+    $latestArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'make-latest.ps1'), '-From', $releaseOut, '-NonInteractive', '-Force')
+    if ($script:SigningKeysDirResolved) { $latestArgs += @('-KeysDir', $script:SigningKeysDirResolved) }
+    & powershell @latestArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn 'No se pudo crear la versión Latest; la release versionada está bien. Repítelo con windows\make-latest.ps1.'
+    }
 }
 } finally {
     try {

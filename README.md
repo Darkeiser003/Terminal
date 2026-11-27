@@ -324,7 +324,7 @@ que en Windows depende del sistema tiene en Linux su equivalente:
 | En Windows | En Linux |
 |---|---|
 | Guardar la clave de API de una IA cifrada con DPAPI | En el llavero del escritorio (Secret Service: GNOME Keyring, KWallet…) con `secret-tool` de libsecret. En `ai-keys.json` solo queda la marca `secret-service`; borrarla en Ajustes la quita también del llavero. Sin `secret-tool` no se ofrece, como antes (`environments/ai_keys.rs`) |
-| «Abrir con WTerminal» en el Explorador | «Abrir con LTerminal» en «Abrir con» de las carpetas: una entrada de escritorio del usuario, `~/.local/share/applications/lterminal-open-here.desktop` con `MimeType=inode/directory`, que lanza la AppImage (`APPIMAGE`) y no su montaje temporal. Casilla en Ajustes › Comportamiento (`platform/desktop_entry.rs`) |
+| «Abrir con WTerminal» en el Explorador | «Abrir con LTerminal» en «Abrir con» de las carpetas: una entrada de escritorio del usuario, `~/.local/share/applications/lterminal-open-here.desktop` con `MimeType=inode/directory`, que lanza la AppImage (`APPIMAGE`) y no su montaje temporal. Casilla en Ajustes › General (`platform/desktop_entry.rs`) |
 | Perfiles portables en `%LOCALAPPDATA%\WTerminal\entornos\configuracion\perfiles` | En `~/.local/share/LTerminal/entornos/configuracion/perfiles`, como `.sh` |
 | Acciones en `ui-N.ps1` / `ui-N.cmd` | En `ui-N.sh` (o `.fish`) de la carpeta de sesión, como en Git Bash y WSL |
 
@@ -409,6 +409,31 @@ Documentos:
   en vez de dejarlo partido. Lo ya instalado no se mueve, y la detección
   encuentra estos programas por WinGet y por la carpeta que registran en
   «Aplicaciones instaladas». Sin la categoría, la orden es la de siempre.
+- **Instaladores que rechazan la carpeta propia** (21-11, VirtualBox): el de
+  VirtualBox se niega a instalarse en una carpeta donde un usuario normal puede
+  escribir («Invalid installation directory specified!», error 1603 en el
+  Visor de eventos), y su protección solo carga sus controladores desde una
+  carpeta segura, así que moverlo tampoco vale. Los paquetes así
+  (`WINGET_SYSTEM_LOCATION`) van directos a su carpeta de siempre, sin
+  `--location` y sin ofrecer moverlos. Para los que no se conocen: si WinGet
+  dice que el instalador falló (`0x8A150006`) con la carpeta propia, la acción
+  lo avisa y repite la instalación **una vez** sin ella.
+- **La cabecera enseña solo la orden que instala**
+  (`winget install --id … -e --source winget …`), no el guion entero de la
+  carpeta propia, que en cmd ocupaba decenas de líneas (`command_preview`).
+- **Cuando una instalación falla, se dice por qué** (22-11): el marco ya
+  avisaba «terminó con error», pero con VirtualBox la salida solo decía
+  «código de salida: 1». Ahora, si la orden falla, la acción busca lo que
+  Windows Installer apuntó desde que empezó (Visor de eventos, `MsiInstaller`)
+  y lo enseña debajo («Windows Installer explica el fallo: …»); si no hay
+  nada y WinGet dice que falló el instalador, dice dónde está su registro.
+- **El catálogo guardado lleva el sello de la build** (22-11): la app guarda el
+  catálogo entero en `install-actions-snapshot.json`, órdenes incluidas, para
+  pintarlo al momento al abrir. Antes valía para cualquier build, así que una
+  build nueva seguía ejecutando las órdenes de la anterior: la 82 instaló
+  VirtualBox con la orden vieja (con la carpeta propia) aunque llevaba el
+  arreglo. Ahora el archivo lleva el tamaño y la fecha del programa que lo
+  escribió y otra build lo tira y lo rehace (`install_snapshot_build`).
 
 ### 6. Gestionar la carpeta propia
 
@@ -531,6 +556,31 @@ y miden en `spawn_blocking`: la primera medición externa pasa del minuto en
 frío y cada apertura de Ajustes pedía otra que esperaba a la anterior dentro
 de un hilo del runtime; con ocho aperturas la app dejaba de responder.
 
+#### 6.6.1 Limpiar lo que se puede volver a generar
+
+Debajo de «Vaciar cachés», **«Limpiar archivos que se pueden volver a
+generar»** (`config/regenerable.rs`, 24-11) junta en una sola limpieza, que se
+elige por partes, todo lo que WTerminal puede volver a crear:
+
+| Parte | Qué borra | Qué pasa después |
+|---|---|---|
+| Cachés de la carpeta propia | npm, pip, Go… (lo mismo que «Vaciar cachés») | Se vuelven a descargar al hacer falta |
+| Descargas del panel | Instaladores y archivos que bajan las acciones (`entornos\descargas`) | Se vuelven a bajar si se repite la acción |
+| Caché de detección | Entornos, discos, hardware y programas | La próxima detección tarda algo más |
+| Copia antigua del registro | `main.log.1` | Nada: el registro actual se queda |
+
+- Cada parte enseña lo que ocupa; «Limpiar lo marcado» pide confirmación con
+  el total.
+- Nunca toca programas instalados, ajustes, chats ni proyectos. Las descargas
+  solo se vacían si su carpeta no es la raíz de un disco, no contiene tu
+  carpeta personal y no se cruza con otra categoría.
+- Los temporales de sesión no hace falta: se borran solos al arrancar.
+- **Limpieza automática** (`regenerableAutoClean`, **apagada** de fábrica): al
+  abrir WTerminal, si pasaron `regenerableAutoCleanDays` días (30 de fábrica)
+  desde la última, limpia las partes marcadas. Las casillas son los mismos
+  ajustes para la limpieza a mano y la automática (`regenerableCleanCaches`,
+  `…Downloads`, `…Detection` y `…Logs`, encendidos).
+
 #### 6.7 Todas las carpetas que usa WTerminal
 
 En esa misma sección están **todas las carpetas que usa WTerminal** y las de
@@ -549,7 +599,8 @@ o el texto la hacen más alta (`src/lib/floating-tip.ts`).
 | Biblioteca de scripts | Los scripts que guardas | Solo si ya no los quieres |
 | Plugins | Plugins instalados y sus copias de seguridad | Mejor desde Ajustes → Plugins |
 | Registros (`logs`) | Diagnóstico (`main.log`, rota solo) | Sí, se vuelve a crear |
-| Caché de detección | Resultados de Entorno y dependencias, discos y hardware | Sí, la próxima detección tarda algo más |
+| Caché de detección | Resultados de Entorno y dependencias, discos, hardware y programas | Sí, la próxima detección tarda algo más |
+| Chats con IA (`agent-chats`) | Tus conversaciones del chat, los abiertos y los fijados | Solo si ya no las quieres; mejor desde el historial del chat |
 | Datos de la interfaz (WebView2/WebKitGTK) | Caché y almacenamiento del motor de la interfaz | Sí, con la app cerrada |
 | Temporales de sesión (`%TEMP%\wterminal`) | Scripts de inicio y banners, una carpeta por proceso | Sí; WTerminal borra al arrancar las de procesos que ya no existen |
 | Proyectos | Tus repositorios clonados | No: es tu trabajo |
@@ -791,9 +842,10 @@ catálogo versionado y LTerminal las descubre y ejecuta de forma segura.
 | `npm run dist:win:quick` | La misma release con `-QuickValidation`: prueba lo mismo sin repetirlo (un solo recorrido completo con vídeo, y prueba corta del portable y de lo instalado). |
 | `npm run e2e:suite` | Ejecuta suites E2E estandarizadas (`focused`, `full`, `video`, `downloads`, `dependency-audit`, `installer` y, desde el 12-11, `components`: eco, entrada larga, reflujo y marcas con Clink y PSReadLine encendidos, como los tiene el usuario; aún fuera de la release) contra un binario existente y escribe `summary.json`/`summary.md`. |
 | `npm run e2e:installer` | Instala de verdad el NSIS indicado (un UAC), lo verifica, ejecuta el E2E sobre lo instalado y lo desinstala. |
-| `npm run dev:test` | Bucle rápido para desarrollo: compila con el perfil de Cargo `fast` (release sin LTO e incremental; `target/fast/`) y ejecuta solo lo pedido: `--only` escenarios del catálogo, `--matrix` la matriz de shells con unos entornos, `--rust` tests filtrados, `--js` scripts sueltos, con `--video`, `--repeat N` y `--env CLAVE=valor`. Apaga WSL al empezar y al terminar la tanda (no entre escenarios: cada arranque de WTerminal sondea las distros y forzaría un arranque en frío) y deja `summary.md` en `artifacts/dev-test/`. `--list` enseña los escenarios. Lo que compila lleva dentro las claves públicas del actualizador, como una release, y deja en `firma/` el manifiesto del binario con sus firmas Ed25519 y SSHSIG verificadas (claves de `--keys-dir` o de la carpeta que recuerda `windows/build.ps1`; sin claves completas avisa y sigue sin firmar, y `--no-sign` lo omite). No sustituye a la build completa. |
+| `npm run e2e:suite -- --suite real-install --binary <exe>` | **Instalación real del catálogo** (22-11; CAMBIA EL EQUIPO, fuera de toda validación automática): en la app de verdad y con la carpeta propia (`E2E_REAL_INSTALL_STORE`, por defecto `E:\WTerminal\entornos`) pulsa Instalar en todo lo que la detección da por no instalado y Actualizar en lo pendiente, una a una; espera el ✔ o el ✘, guarda la salida y una captura de cada fallo, mira que cada fallo traiga una explicación además de «código de salida» y, al final, que lo instalado se vea instalado en una detección nueva. `E2E_REAL_INSTALL_DRY=1` solo lista, `E2E_REAL_INSTALL_IDS` limita, `E2E_REAL_INSTALL_SKIP` excluye (Visual Studio y el `git pull` de proyectos ya lo están) y se para si C: baja de `E2E_REAL_INSTALL_MIN_FREE_GB` (1,5). Deja `instalacion-real.json`. |
+| `npm run dev:test` | Bucle rápido para desarrollo: compila con el perfil de Cargo `fast` (release sin LTO e incremental; `target/fast/`) y ejecuta solo lo pedido: `--only` escenarios del catálogo, `--matrix` la matriz de shells con unos entornos, `--rust` tests filtrados, `--js` scripts sueltos, con `--video`, `--repeat N` y `--env CLAVE=valor`. Apaga WSL al empezar y al terminar la tanda (no entre escenarios: cada arranque de WTerminal sondea las distros y forzaría un arranque en frío) y deja `summary.md` en `artifacts/dev-test/`. Con la misma regla que `windows/build.ps1`, si la unidad del temporal tiene menos de 5 GB libres y la de `target` 10 o más, los resultados y el temporal de esa ejecución van junto a `target` (25-11: las capturas de la auditoría del catálogo dejaron C: a 0 MB). `--list` enseña los escenarios. Lo que compila lleva dentro las claves públicas del actualizador, como una release, y deja en `firma/` el manifiesto del binario con sus firmas Ed25519 y SSHSIG verificadas (claves de `--keys-dir` o de la carpeta que recuerda `windows/build.ps1`; sin claves completas avisa y sigue sin firmar, y `--no-sign` lo omite). No sustituye a la build completa. |
 | `npm run test:e2e-suite` | Comprueba sin abrir la app el catálogo de suites, el ejecutor, su resumen y la comparación de binarios del instalador. |
-| `npm run test:dev-test` | Comprueba sin compilar los argumentos de `dev:test`, la búsqueda de escenarios, el binario de cada perfil, que el perfil `fast` sigue siendo release sin LTO y la firma, con claves de usar y tirar. |
+| `npm run test:dev-test` | Comprueba sin compilar los argumentos de `dev:test`, la búsqueda de escenarios, el binario de cada perfil, que el perfil `fast` sigue siendo release sin LTO, la unidad de los resultados cuando falta sitio y la firma, con claves de usar y tirar. |
 | `npm run test:e2e-shell-tools` | Comprueba sin WSL cómo `prepareWslBashWithBlesh` elige la distro del E2E de bash. |
 | `npm run dist:win:linux` | Compila desde Linux el ejecutable Windows GNU x64, verifica los binarios nativos y ejecuta el smoke headless de Wine; el smoke GUI/WebView2 es optativo. |
 | `npm run dist:win:linux:fast` | Build cruzada Windows GNU x64 rápida para desarrollo; omite las comprobaciones previas y conserva la salida portable para probarla en Wine/Windows. |
@@ -931,6 +983,34 @@ bash build-tools/build.sh
 ```powershell
 powershell -ExecutionPolicy Bypass -File build-tools/build.ps1
 ```
+
+Desde el 22-11 (Romen: «modularizar el script: builds de este sistema, del
+otro, test y firma») el menú principal va por pasos:
+
+| Opción | Qué hace |
+|---|---|
+| 1. Compilar para este sistema | Asistente: **tipo** (depuración, rápida, portable, completa, completa por etapas y reanudable, completa + «Latest»; en Linux, depuración, rápida y AppImage rápida, sin pruebas ampliadas o completa), **etiqueta**, **pruebas** (ninguna, básicas, completas, completas + suites de release, reducida, o elegir suites o escenarios para después), **firma** (sí/no y carpeta de claves, que recuerda), **copia adicional** (carpeta, que recuerda, y subcarpeta) y un resumen antes de empezar |
+| 2. Compilar para el otro sistema | Linux desde Windows (WSL) o Windows desde Linux (MinGW, Wine) |
+| 3. Probar una build ya compilada | Sin recompilar: elige la build (depuración, rápida, release desempaquetada u otra ruta, con su fecha) y las pruebas (focused, full, `intermitentes`, `nuevas`, escenarios concretos N veces, las de release, el instalador o la instalación real del catálogo) |
+| 4. Firmar una build ya compilada | `scripts/sign-build.mjs`: `SHA256SUMS.txt` de release\, de otra carpeta o de archivos concretos, firmado con Ed25519 y SSH y verificado |
+| 5–7 | Pruebas del código, desarrollo y preview, y limpieza, como antes |
+| 8. Todas las opciones de compilar de antes | El submenú de siempre, por si se busca una combinación concreta |
+
+Piezas nuevas que usa:
+
+- `windows/build-stages.ps1`: la larga por etapas (comprobación previa
+  opcional, compilar, una suite cada vez y veredicto). Cada etapa se apunta en
+  `artifacts\build-stages\<etiqueta>\estado.txt`: relanzarla con la misma
+  `-Label` repite solo lo que faltaba, y también la comprobación o la
+  compilación si fallaron (las suites que fallaron no: quedan para el
+  veredicto). Con `-ResumeAfterReboot` y
+  `-InstallResumeAtLogon`, `windows/build-stages-resume.ps1` la relanza al
+  iniciar sesión tras un reinicio (como mucho dos veces seguidas; para
+  cancelarlo, borrar `artifacts\build-stages\pendiente.txt`).
+- `scripts/dev-test.mjs --suite <suites>`: una suite entera con sus
+  repeticiones; la suite `intermitentes` repite cinco veces cada prueba que
+  alguna vez falló.
+- `scripts/sign-build.mjs`: firmar lo ya compilado.
 
 El menú organiza las tareas por resultado: desarrollo y preview, compilación,
 pruebas/smoke sin recompilar y limpieza. Permite compilar frontend, backend,
@@ -1269,6 +1349,35 @@ artefactos y sus firmas son correctos, pero esa build no se publica ni se
 reparte. `target/` sigue siendo la salida interna de Tauri/Cargo. `-NoInstaller` omite explícitamente ese artefacto. La
 build portable no genera instalador ni accesos directos.
 
+#### 12.1 La versión «Latest» (21-11)
+
+Además de la versionada, la release se ofrece como **«Latest»**: los mismos
+archivos con «Latest» en lugar del número, para enlaces y automatizaciones que
+siempre quieren la última:
+
+| Versionada | Latest |
+|---|---|
+| `WTerminal-1.0.0-x64-setup.exe` | `WTerminal-Latest-x64-setup.exe` |
+| `WTerminal-1.0.0-Portable.exe` | `WTerminal-Latest-Portable.exe` |
+| `WTerminal-Unpacked-1.0.0.zip` | `WTerminal-Unpacked-Latest.zip` |
+
+`windows\make-latest.ps1` la crea en `release-latest\`:
+
+1. Toma una release ya hecha (`release\` por defecto, o `-From <carpeta>`, por
+   ejemplo `E:\WTerminal\releases\77`). Se niega si lleva `NO-PUBLICAR.txt`.
+2. Comprueba que cada archivo coincide con su suma de `SHA256SUMS.txt`.
+3. Si la Latest que ya hay salió de esos mismos archivos (`LATEST-ORIGEN.txt`),
+   no hace nada: **no hay cambios** (`-Force` la rehace).
+4. Copia con los nombres nuevos, calcula su `SHA256SUMS.txt` y lo firma igual
+   que la build (Ed25519 y SSHSIG, con `-KeysDir` o la última carpeta de claves
+   que usó la build; sin claves sale sin firmar, con aviso).
+5. Deja en `LATEST-ORIGEN.txt` de qué versión y carpeta salió.
+
+No compila nada. Para una Latest de código nuevo, la build la crea sola al
+terminar en verde con **`-Latest`** (en modo interactivo lo pregunta: «Crear
+también la versión Latest al terminar en verde»). Si la build acaba con
+validaciones pendientes, no se crea.
+
 La comprobación automática solo ofrece una release estable que tenga un
 artefacto compatible con `self_update::asset_for_platform`, un manifiesto
 SHA-256 y sus firmas verificables. Antes de mostrar el aviso autentica el
@@ -1421,7 +1530,7 @@ nativo.
 
 | Comprobación | Por qué está |
 |---|---|
-| Nada en marcha (puerto 1420, proceso de la app) | Windows no deja borrar un archivo en uso y `npm ci` empieza vaciando `node_modules`: con un servidor de desarrollo abierto falla con un `EPERM` sobre `esbuild.exe` que no dice cuál es la causa. |
+| Nada en marcha (puerto 1420, proceso de la app) | Windows no deja borrar un archivo en uso y `npm ci` empieza vaciando `node_modules`: con un servidor de desarrollo abierto falla con un `EPERM` sobre `esbuild.exe` que no dice cuál es la causa. De la app solo frena las copias que la build va a reemplazar, las abiertas desde el repositorio o desde `target`: una copia de otra carpeta (por ejemplo `releases\…`) puede seguir abierta mientras se compila (25-11). |
 | Recursos ConPTY oficiales verificados | El build los descarga si faltan y aborta si no puede verificar el paquete o la pareja DLL/host. |
 | WebKitGTK (Linux) | Su ausencia son cientos de líneas de error de enlazado a mitad de la compilación. |
 | Solo el artefacto esperado | Un `.deb` o `.rpm` que se cuele acabaría publicado en una release sin que nadie lo haya probado. Hasta que `linux/build.sh` los valide, `tauri.linux.conf.json` deja `targets: ["appimage"]`, aunque ya lleva la configuración de los dos paquetes (sección `utils`, metadatos AppStream). |
@@ -2029,6 +2138,16 @@ La cabecera y el cierre (con `if errorlevel`) viven en esos dos archivos de la
 carpeta de sesión; `WSTERM_UI` la pone `spawn_pty` en el entorno de cada
 pestaña.
 
+**Sin barra de progreso (21-11).** La barra de progreso de PowerShell
+(`Add-WindowsCapability`, `Invoke-WebRequest`, `Install-Module`…) se dibuja
+arriba de la ventana, encima del banner, y al borrarse descolocaba el marco: la
+cabecera salía después de la barra y el prompt antes de «completado» (captura
+de Romen con «Instalar cliente SSH» desde cmd). `wrap_powershell_command` pone
+`$ProgressPreference = 'SilentlyContinue'` delante de **todas** las acciones de
+PowerShell; en una pestaña de PowerShell la preferencia del usuario se le
+devuelve al acabar (`finally`). Las acciones de administrador (Permisos de
+administrador y NSudo, 9.6) hacen lo mismo en su PowerShell elevado.
+
 ### Sugerencias, colores y temas
 
 ```mermaid
@@ -2324,7 +2443,7 @@ da `session_files::e2e_powershell_history_line` y se aplica dos veces:
 | `USER_DATA_DIR/scripts/` | Biblioteca de scripts por defecto | `scripts/scan.rs`, `ScriptsPanel` |
 | `USER_DATA_DIR/logs/main.log` | Arranque, PTY, errores y métricas | `infrastructure/logger.rs`, E2E |
 | `USER_DATA_DIR/install-actions-cache.json` | Estado conocido por ID de acción | `packages/commands.rs` |
-| `USER_DATA_DIR/install-actions-snapshot.json` | Estructura del catálogo sin sondas, con esquema e idioma | `packages/commands.rs`; se descarta si cambia esquema o idioma |
+| `USER_DATA_DIR/install-actions-snapshot.json` | Catálogo entero (órdenes incluidas) con esquema, idioma y sello de la build que lo escribió | `packages/commands.rs`; se descarta si cambia el esquema, el idioma o la build (22-11) |
 | `LEGACY_USER_DATA_DIR` | Datos antiguos bajo el nombre visible | `config/migration.rs` los migra al slug estable |
 | `documents/<nombre de proyectos>` | Carpeta inicial de repositorios descargados | `projects/commands.rs`, ajustable por usuario |
 | `temp/<slug>/<pid>/` | Archivos de inicialización, banner y ayuda de esta sesión | `terminal/session_files.rs`; cada proceso usa su PID |
@@ -2384,7 +2503,7 @@ cinco herramientas salían como no instaladas.
 
 | Archivo | Responsabilidad y conexiones |
 |---|---|
-| `src/main.ts` | Decide entre interfaz normal y preview; monta Svelte sobre `#app`. |
+| `src/main.ts` | Decide entre interfaz normal y preview; monta Svelte sobre `#app` e instala el filtro del menú del navegador. |
 | `src/App.svelte` | Raíz y composición; registra una vez listeners PTY, colas de salida, atajos, avisos de actualización y carga inicial. Monta los paneles bajo demanda. `runAppAction` es el único manejador de las acciones de la aplicación (lo usan los atajos y la paleta de comandos); `runPaletteEntry` ejecuta cada entrada de la paleta con el manejador que ya tenía y `submitToActiveTerminal` teclea `clear` o un comando `:` en la pestaña activa por la ruta del teclado. |
 | `src/PreviewApp.svelte` | Vista aislada para la comprobación de estilos sin arrancar Tauri. |
 | `src/styles/app.css` | Layout global, superficies, paneles, scrollbar y variables de tema. |
@@ -2394,6 +2513,7 @@ cinco herramientas salían como no instaladas.
 | `src/components/Panel.svelte` | Contenedor común de los paneles, cabecera y cierre. |
 | `src/components/CommandPalette.svelte` | Paleta de comandos (`Ctrl+Shift+P`): diálogo modal con un `combobox` que controla un `listbox` agrupado (`role="group"` por sección) y anuncia la opción activa con `aria-activedescendant`, así el foco no sale del buscador. Flechas, RePág/AvPág, Intro y Escape (que no cierra el panel de detrás); Tab no escapa del diálogo. Pide el catálogo de LTools con una caché de 60 s (`LTOOLS_CACHE_MS`) y resuelve las fijadas con los helpers de `ltools-selection.ts`. Al cerrar devuelve el foco a donde estaba (cancelar) o a la terminal activa (ejecutar), salvo que la acción se lo haya llevado a un panel o al buscador. |
 | `src/components/HistorySearch.svelte` | Búsqueda en las órdenes escritas (`Ctrl+Shift+R`): diálogo como la paleta (`combobox` + `listbox`) sobre `app.commandHistory`; Intro deja la orden escrita sin ejecutarla con `insertLine` y un rechazo (`draft`, `busy`) se enseña sin cerrar. |
+| `src/components/FirstSteps.svelte` | La guía de primeros pasos (21-11): diálogo con los pasos de `first-steps.ts`, el resaltado del botón del que habla cada uno (`first-steps-highlight`), «Siguiente», «Atrás», «Saltar» y «Empezar»; terminarla o saltarla (también con Esc) apaga `showFirstSteps`. App la monta y esconde los avisos de abajo mientras se ve (`first-steps-active`). |
 | `src/components/SettingsPanel.svelte` | Edita tema, terminal, atajos, idioma, integración, perfiles y plugins; guarda el borrador por `app.savePreferences`. |
 | `src/components/SettingsResetDialog.svelte` | Diálogo de «Restablecer» (13-11): casillas por pestaña y por apartado, cada una con lo que hace y su riesgo; nada marcado de entrada, el foco en «Cancelar» y un resumen en rojo si se marca algo que borra cosas tuyas. Confirma con las preferencias de esos apartados. |
 | `src/components/StorePanel.svelte` | Vista propia de la carpeta propia (panel `store`, se abre desde Ajustes con «Gestionar la carpeta propia…»): carpeta de cada categoría, interruptor por elemento, «Traer lo ya instalado» con progreso, confirmar y deshacer, y exportar o importar la lista con «Instalar» para lo que falte. |
@@ -2412,6 +2532,8 @@ cinco herramientas salían como no instaladas.
 | `src/lib/terminalRegistry.ts` | Relación `tabId → Terminal` que usa el listener único de `App.svelte`, y `tabId → TerminalControls` (`openSearch`, `saveOutput`, `copyLastOutput`, `jumpToCommand`, `submitLine`, `insertLine`) que cada `TerminalPane` registra para la paleta de comandos y la búsqueda en las órdenes escritas. `submitLine` teclea con `term.input` (la ruta de `onData`, nunca escribe en xterm) y rechaza sin tocar nada si la shell no está lista (`not-ready`), hay un programa a pantalla completa o ningún prompt (`busy`) o la línea tiene texto sin enviar (`draft`). |
 | `src/lib/command-palette.ts` | Registro y filtrado de la paleta, puro para probarlo en Node: `PALETTE_APP_ACTIONS` (acciones de `runAppAction` con su atajo y su comando `:` equivalente), `PALETTE_INTERNAL_COMMANDS` (los `:` que informan en la terminal), `buildPaletteEntries` (entradas a partir de preferencias, entornos, temas, fuentes, idiomas y acciones fijadas de LTools, con el motivo si están deshabilitadas), `filterPaletteEntries` (sin tildes, por palabras, comando y sinónimos; subsecuencia como último recurso; deshabilitadas detrás), `paletteResults` (ofrece una línea `:` nueva tal cual), `nextPaletteIndex`, `formatShortcut` y la traducción de grupos de entornos que comparte con `Toolbar.svelte`. |
 | `src/lib/agent-chat.ts` | Lógica pura del chat de agentes: `splitAgentAnswer` (texto y bloques ```código```, también un bloque sin cerrar mientras llega) y `stripAnsi`. La prueba `scripts/test-frontend-logic.mjs`. |
+| `src/lib/agent-chat-history.ts` | Lógica pura del historial de los chats (23-11): `newChatId`, el título automático (`autoTitle`), lo que se guarda de cada mensaje (`toStoredMessages`: una respuesta a medias queda como cortada; sin borradores de clave), la búsqueda sin tildes (`searchChats`), los grupos por fecha (`groupChatsByDate`) y la sesión limpia (`sanitizeSession`), cuándo se retoma la sesión propia de Claude Code o Codex (`canResumeNative`, `nativeAfterAnswer`, 24-11) y el chat de ayuda guardado más reciente (`latestHelpChat`). La prueba `scripts/test-frontend-logic.mjs`. |
+| `src/lib/busy-tabs.ts` | Pestañas ocupadas (26-11), puro para probarlo en Node: `commandLabel` (el nombre de la orden para la pestaña), `classifyCommand` (registros, servidores, compilaciones, instalaciones o red), `chooseBusyColor` (regla propia, color del tipo o por turno, sin rojo), `isExcludedCommand` (editores, monitores y shells solo cambian el nombre), `busyDelayMs` (el tiempo según el bajo consumo) y `watchPanes` (las casillas de la vista de las que siguen en marcha). |
 | `src/lib/command-marks.ts` | Marcas OSC 133, puro para probarlo en Node: `CommandTracker` (qué es una orden, cómo acabó y cuánto tardó; `appCommand` apunta la orden que escribe un botón, que la pestaña no ve teclear, y si no hay prompt libre la ata al siguiente, como mucho 15 s después), `outputRange`, `formatDuration` e `inferCmdExitCode` (en cmd, 9009 si la salida lleva el mensaje de Windows de orden que no existe). |
 | `src/lib/command-history.ts` | Órdenes escritas, puro para probarlo en Node: `rememberCommand` (sin vacías, sin duplicados, sin pegados de varias líneas, hasta 1000) y `searchCommands` (palabras en cualquier orden, la más reciente primero). Solo recibe lo escrito sobre un prompt marcado con OSC 133. |
 | `src/lib/terminal-columns.ts` | Cálculo de columnas de reserva, entrada y salida visible. |
@@ -2419,8 +2541,11 @@ cinco herramientas salían como no instaladas.
 | `src/lib/terminal-links.ts` | Enlaces de la salida: `TERMINAL_LINK_REGEX` (la expresión estricta de `@xterm/addon-web-links` ampliada a `file://`; las rutas sueltas no se detectan para no subrayar cada prompt), `isLinkActivation` (solo Ctrl + botón principal), `checkTerminalLink` (espejo de `validate_link` sin la parte del disco: esquemas `TERMINAL_LINK_SCHEMES`, longitud, caracteres ocultos, credenciales; devuelve la URL normalizada y el host que enseña la confirmación) y `linkRejectionMessageKey` (aviso por código de rechazo). |
 | `src/lib/settings-search.ts` | Buscador de Ajustes: `foldSearchText` (sin mayúsculas ni tildes), `settingsSearchVisibility` (qué títulos de sección, encabezados, filas y notas se ven para una búsqueda) y `visibleSettingsRows` (el recuento). `SettingsPanel` recorre su formulario como bloques y solo esconde lo que esta función diga; también construye el índice de apartados y pone a cada fila su explicación como `title`. |
 | `src/lib/notices.ts` | Los avisos que la app saca por su cuenta (`NOTICE_SETTINGS`, 17-11): cada uno con el ajuste que apaga su «No volver a mostrar» y dónde está su única casilla en Ajustes (`section`, `target`), para que Ajustes › Avisos lleve a ella, y `restoreAllNotices`, que los vuelve a encender todos y olvida lo dejado «para luego» (`DISMISSED_UPDATE_KEY`, `DISMISSED_PACKAGE_UPDATE_KEY`). |
+| `src/lib/first-steps.ts` | Los pasos de la guía de primeros pasos (`FIRST_STEPS`, con el selector del botón que resalta cada uno), `shouldAutoShowFirstSteps` (sale sola hasta apagarla, nunca en E2E) y `openFirstSteps`, que la abre desde Ajustes o la paleta. |
+| `src/lib/profile-update.ts` | El aviso de guardar en el perfil los ajustes cambiados (21-11): `preferencesFingerprint` (huella sin lo que la app escribe sola), `latestProfile` y `shouldOfferProfileUpdate`. App compara la huella al abrir y al cerrar Ajustes. |
 | `src/lib/settings-reset.ts` | Reparto de las preferencias en los apartados de «Restablecer» (`RESET_GROUPS`, con su riesgo: `safe`, `caution` o `danger`), `keysForGroups`, `dangerousGroups` y `tabState`. Puro: una prueba exige que cada preferencia de fábrica esté en exactamente un apartado. |
 | `src/lib/input-selection.ts` | Cortar o borrar una selección de la línea que se escribe: `promptInputStart` (dónde acaba el prompt), `columnAtTextIndex`/`contentEndColumn` (texto a celdas, caracteres anchos), `inputSelectionEdit` (flechas hasta el final de la selección y un DEL por carácter, solo dentro de lo escrito o tocando el cursor) y `selectionSearchText` (texto para «Buscar» del menú). |
+| `src/lib/browser-context-menu.ts` | Quita el menú del clic derecho del navegador interno («Atrás», «Actualizar», «Imprimir») donde la app no pone uno suyo; lo deja en campos de texto y sobre texto seleccionado (`keepsBrowserContextMenu`, `installBrowserContextMenuFilter`). |
 | `src/lib/banner-image.ts` | Imagen a la izquierda del banner: `findBannerBlocks` reconoce cada banner por su título tras un margen de 10 a 42 espacios, el que dejó el backend al imprimirlo (`bannerImagePadding`, `BANNER_IMAGE_GAP` igual que en Rust) y `attachBannerImages` coloca una decoración de xterm anclada a ese título (encima del margen y centrada en él con el mismo hueco a cada lado, `bannerImageBox`, y también debajo, `bannerImageHeight`, para que un prompt pegado al banner no toque la imagen; sin pasar por ConPTY), la retira si el texto cambia y sigue a la configuración y a la imagen elegida. |
 | `src/lib/link-cache.ts` | `invalidateLinkCache`: xterm guarda por fila los enlaces bajo el ratón y no los vuelve a pedir mientras el ratón siga en esa fila; tras cada escritura se olvida esa fila para que un enlace (URL u OSC 8) escrito bajo el ratón se detecte y abra con Ctrl+clic. Toca dos campos internos del `Linkifier`; `test:frontend-logic` comprueba que la versión de xterm los mantiene. |
 | `src/lib/full-screen-app.ts` | Modo pantalla completa de una pestaña: `fullScreenTransition` decide, a partir de los DECSET/DECRST que pasan por xterm, cuándo un programa usa la pantalla alternativa (`?1049`: Amp, OpenCode, vim) o la salida sincronizada en línea (`?2026`: Ink, es decir Claude Code o Gemini) y cuándo termina; las pestañas `ai:*` lo están siempre. En ese modo `TerminalPane` da a la PTY el ancho visible exacto (`pty_resize` con `exact`) en vez de la reserva de 1024 columnas de las shells, que hacía dibujar a esas IA fuera de la vista. En Windows también el REPL de Python (`environmentFullScreenReason`: la pestaña `lang:python` es `python-environment`; `isInteractivePythonCommandLine`: `python` o `py` sin script tecleado en el prompt de una shell es `python-command`, que termina al volver el prompt como `ai-command`), salvo que se apague `pythonReplVisibleWidth`; ver [Problemas conocidos](#problemas-conocidos). El backend deja que esos entornos hereden el ancho exacto al sustituir a otro (`tabs.rs` `keeps_exact_width`). |
@@ -2458,7 +2583,11 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/config/single_file.rs` | Portable de un solo `.exe`: lee los archivos añadidos tras la imagen PE (respetando una firma Authenticode posterior), coloca `conpty.dll`/`OpenConsole.exe` en `%LOCALAPPDATA%\WTerminal\runtime\<huella>` verificados por SHA-256, saca el instalador de WebView2 (solo lo lleva la variante Offline) si falta el runtime y valida el `-Portable.exe` que descarga el actualizador. |
 | `src-tauri/src/config/i18n.rs` | Catálogos y traductor backend. |
 | `src-tauri/src/config/plugins.rs` | Inventario y operaciones del sistema de plugins. |
+| `src-tauri/src/config/regenerable.rs` | Limpieza de lo que se puede volver a generar (24-11): cachés de la carpeta propia (`clearable_cache_paths`), descargas del panel (`clearable_category_dir`, solo si la carpeta no es peligrosa), caché de detección y copia rotada del registro. **`regenerable_sizes`** y **`regenerable_clean`** (en `spawn_blocking`) y **`auto_clean_if_due`**, que con `regenerableAutoClean` limpia al arrancar cada `regenerableAutoCleanDays` días (apunta la última vez en `regenerable-last-clean.txt`). |
 | `src-tauri/src/config/toolchain_store.rs` | Carpeta propia (`%LOCALAPPDATA%\WTerminal\entornos`) por categorías (`Category`: cachés, descargas del panel, modelos de IA, herramientas nuevas, historial de los REPL; `Categories::from_preferences`): variables estándar inyectadas solo en procesos de WTerminal (`overrides_for`), carpetas `bin` de las herramientas nuevas delante del PATH de WTerminal (`extra_path_dirs` → `process::set_extra_path`, que aplican `child_environment`, `hidden_command` y `path_env::which`), `OLLAMA_MODELS` solo si no había modelos, tamaños y vaciado (solo la categoría de cachés); las ubicaciones de siempre de las categorías apagadas se miden con `cached_system_size` y se reutilizan 10 min, las propias se miden siempre. Además mide y explica cada ubicación: `app_locations` (ajustes, scripts, plugins, registros, caché de detección, datos del WebView, temporales de sesión, proyectos, runtime del portable, perfil de Clink) y `external_locations` (Cargo, rustup, Go, Bun, Ollama, cachés de npm/pip/pnpm/Yarn/uv/Deno, WinGet, Docker, Chocolatey, Scoop y el disco de cada distro WSL leído de `HKCU\…\Lxss`). Cada una lleva `LocationInfo` (para qué sirve, si se puede borrar y `Safety`: `safe`/`regenerates`/`caution`/`keep`), que Ajustes enseña en una tarjeta al pasar el ratón. |
+| `src-tauri/src/config/programs.rs` | Pestaña Programas (22-11): cmd (`PROMPT`, `Command Processor`), PowerShell 5 y 7 (bloque «WTerminal» en `profile.ps1`) y Git (`git config --global`); `programs_list`/`programs_set`/`programs_undo`, validación de cada valor y deshacer en `programas/deshacer.json`. |
+| `src-tauri/src/config/programs_more.rs` | Más programas de esa pestaña: Git Bash (`.bashrc`/`.inputrc`), npm, pip, WinGet (`settings.json` con copia), Python y Node (variables de usuario), Claude Code (`settings.json`) y Codex (`config.toml`), cada uno solo con sus claves. |
+| `src/components/ProgramsSettings.svelte` | La pestaña Programas de Ajustes: una tarjeta por programa instalado, el control de cada ajuste, «Deshacer el último cambio» y los no instalados. |
 | `src-tauri/src/config/store_adopt.rs` | «Traer lo ya instalado» a la carpeta propia: vista previa con el espacio de cada cosa, copia sin tocar el original (`copy_tree` + `verify_copy`), diario en `store-journal.json` para confirmar (borra el original) o deshacer, programas con unión y el original en `<carpeta>.wterminal-antes` (los MSI se bloquean: sus actualizaciones fallan en una unión), perfil de Clink propio, y exportar o importar la lista (`wterminal-store-v1`: ajustes de la carpeta propia y acciones «Instalar» ya hechas). |
 | `src-tauri/src/platform/mod.rs` | Selección de implementación de host por sistema. |
 | `src-tauri/src/platform/traits.rs` | Contratos de operaciones dependientes de plataforma. |
@@ -2511,7 +2640,8 @@ cinco herramientas salían como no instaladas.
 | `src-tauri/src/environments/ai.rs` | Entornos de IA: CLIs de asistentes detectadas en el PATH (y Claude Code fuera de él, ver `path_env`), con `cli_args` para abrir en modo chat las que lo necesitan (`llm chat`, `sgpt --repl temp`), y un chat por cada modelo local de Ollama leído de sus manifiestos (sin arrancar `ollama list`); catálogo curado de modelos con tamaños y cálculo de memoria frente a la RAM del equipo; sonda `ollama-model:` del panel. |
 | `src-tauri/src/app/agent_control.rs` | `wterminal --ctl <orden>` (14-11): las IA que lanza WTerminal lo manejan. **`start`:** servidor en 127.0.0.1 con una llave aleatoria por arranque, solo con `agentControl`. **`spawn_env`:** `WTERMINAL_CTL`, `WTERMINAL_CTL_TOKEN` y `WTERMINAL_TAB_ID` para los procesos de las IA (pestañas `ai:*` en `tabs.rs`, preguntas del chat en `agent_chat.rs`). **`classify`:** orden interna, búsqueda (`acciones`, contestada con `packages::commands::search_actions`) o acción (`accion <id>`); `:set` que cambia y las acciones piden permiso; `BLOCKED_SETTINGS` nunca. Lo demás lo hace el frontend (evento `agent-control`, respuesta con `agent_control_reply`). **`run_cli`:** el lado de la IA, atendido en `run` antes de abrir ventana. |
 | `src-tauri/src/environments/agent_guide.rs` | La guía de WTerminal para los agentes de IA (14-11), solo en el código: los principios («primero WTerminal», con su porqué), cómo proponer desde el chat, la tabla de tareas y los límites, más la ayuda interna entera (`build_help_topic_text`) y cada ajuste con su explicación (`default_settings.toml`). **`chat_preamble`:** el resumen oculto que va delante de cada pregunta del chat (`agentChatGuide`). **`guide`:** la guía entera o un tema, para `wterminal --agent-guide [tema]` (`AGENT_GUIDE_ARG`, que `run` atiende antes de abrir ventana). **`tab_args`:** la guía al abrir la pestaña de una IA (`agentTabGuide`): `--append-system-prompt` en Claude Code, `developer_instructions` en Codex, `-i` en Gemini y Qwen. |
-| `src-tauri/src/environments/agent_chat.rs` | Backend del chat lateral con los agentes. **`agent_chat_agents`:** los agentes instalados con modo de una pregunta (`ONE_SHOT`): `claude -p`, `codex exec -`, `gemini`, `qwen`, `copilot -p` (lanzado con node, sin cmd), `crush run`, `llm`, `sgpt`, `mods`, `aichat` y `ollama run <modelo>`, con la opción de modelo de cada uno, sus modelos sugeridos, sus niveles de intensidad, sus modos de permisos (`Mode`) y si tiene modo rápido (`Fast`). Los demás salen con su motivo (`unavailable_reason`): Amp no tiene modo de una pregunta y aider edita archivos. **`one_shot_args_with`:** añade el modelo (`valid_model`: letras, números y `. _ : / @ -`, hasta 80), la intensidad (Claude `--effort`, también `ultracode`; Codex `-c model_reasoning_effort=`), el modo (el de fábrica solo lee; los que editan piden `agentChatCanEdit` y «Omitir permisos», además `agentChatAllowBypass`, con `Allowed`) y el modo rápido (Claude `--settings` con un archivo, Codex `-c service_tier=fast`); lo que ese agente no admite o no está permitido se rechaza, no se ignora. **`agent_chat_models`:** el modelo de fábrica de su configuración y la lista de cada agente (el catálogo de Codex con su intensidad y su «Fast» por modelo, los nombres del paquete de Gemini y Qwen…), sin preguntar nada a la IA. **`agent_chat_read_attachment`:** lee un adjunto de texto (como mucho 5 MB; se mandan los primeros 100 KB, cortados sin partir un carácter; uno binario se rechaza). **`agent_chat_ask`:** abre la CLI una vez, en la carpeta de la pestaña activa, con su clave de `ai_keys` si la hay; la pregunta va por la **entrada estándar** y nunca como argumento (ni cmd ni un `.cmd` la interpretan). Emite `agent-chat-data`/`agent-chat-done`, corta a los 5 min (30 con Ultracode, `answer_timeout`), y el log apunta el agente, el largo, el modelo, la intensidad, el modo y el modo rápido, no el texto. **`agent_chat_cancel`:** mata el árbol (`taskkill /T`). Se apaga con `agentChat`. |
+| `src-tauri/src/environments/agent_chat.rs` | Backend del chat lateral con los agentes. **Sesiones propias (24-11):** `with_native_session` añade a Claude Code `--session-id`/`--resume` y pasa Codex a `exec resume <id> -` (con `-c sandbox_mode`, porque ahí no hay `-s`); el id solo vale si es un UUID (`valid_session_id`), la sesión que abre Codex se lee de su cabecera (`reported_session`, en `agent-chat-status`) y una sesión perdida acaba en `session-missing` (`session_missing`) para que el panel repita con la conversación entera. **`agent_chat_agents`:** los agentes instalados con modo de una pregunta (`ONE_SHOT`): `claude -p`, `codex exec -`, `gemini`, `qwen`, `copilot -p` (lanzado con node, sin cmd), `crush run`, `llm`, `sgpt`, `mods`, `aichat` y `ollama run <modelo>`, con la opción de modelo de cada uno, sus modelos sugeridos, sus niveles de intensidad, sus modos de permisos (`Mode`) y si tiene modo rápido (`Fast`). Los demás salen con su motivo (`unavailable_reason`): Amp no tiene modo de una pregunta y aider edita archivos. **`one_shot_args_with`:** añade el modelo (`valid_model`: letras, números y `. _ : / @ -`, hasta 80), la intensidad (Claude `--effort`, también `ultracode`; Codex `-c model_reasoning_effort=`), el modo (el de fábrica solo lee; los que editan piden `agentChatCanEdit` y «Omitir permisos», además `agentChatAllowBypass`, con `Allowed`) y el modo rápido (Claude `--settings` con un archivo, Codex `-c service_tier=fast`); lo que ese agente no admite o no está permitido se rechaza, no se ignora. **`agent_chat_models`:** el modelo de fábrica de su configuración y la lista de cada agente (el catálogo de Codex con su intensidad y su «Fast» por modelo, los nombres del paquete de Gemini y Qwen…), sin preguntar nada a la IA. **`agent_chat_read_attachment`:** lee un adjunto de texto (como mucho 5 MB; se mandan los primeros 100 KB, cortados sin partir un carácter; uno binario se rechaza). **`agent_chat_ask`:** abre la CLI una vez, en la carpeta de la pestaña activa, con su clave de `ai_keys` si la hay; la pregunta va por la **entrada estándar** y nunca como argumento (ni cmd ni un `.cmd` la interpretan). Emite `agent-chat-data`/`agent-chat-done`, corta a los 5 min (30 con Ultracode, `answer_timeout`), y el log apunta el agente, el largo, el modelo, la intensidad, el modo y el modo rápido, no el texto. **`agent_chat_cancel`:** mata el árbol (`taskkill /T`). Se apaga con `agentChat`. |
+| `src-tauri/src/environments/agent_chat_history.rs` | Historial de los chats (23-11). Un archivo por conversación en `agent-chats/<id>.json` dentro de la carpeta de datos, y `agent-chats/session.json` con los chats abiertos y el activo. **`agent_chat_history_list`/`load`/`save`/`delete`/`clear`** y **`agent_chat_session_load`/`save`**: el id hace de nombre de archivo (`valid_chat_id`: letras, números y guiones), un chat no pasa de 4 MB, se escribe en un temporal y se renombra, y al pasar de 300 chats se borran los más antiguos que no estén abiertos (`prune_in`). Cada resumen dice si es el chat de ayuda (`help`) y si está fijado (`pinned`, de `agent-chats/pins.json`, aparte del chat para que fijar no choque con su guardado). **24-11:** `agent_chat_history_pin` (`help` = el chat de ayuda más reciente), `cleanup_older_in` con `agentChatCleanup` (salvo abiertos y fijados), `agent_chat_export` (solo `.md`) y `agent_chat_native_forget`, que borra la sesión de Claude Code (`~/.claude/projects/*/<uuid>.jsonl`) o de Codex (`~/.codex/sessions/**/rollout-…-<uuid>.jsonl`) solo si es un UUID. Lo usa `AgentChats.svelte` con `agentChatHistory` y `agentChatRestore`. |
 | `src-tauri/src/environments/ai_keys.rs` | Clave de API de las IA que leen su clave de una variable de entorno: Grok (`GROK_API_KEY`), Codex, mods, ShellGPT, llm y aider (`OPENAI_API_KEY`), Gemini (`GEMINI_API_KEY`) y Claude Code (`ANTHROPIC_API_KEY`). **Cuándo se ofrece:** si la pestaña de una de ellas acaba con un código distinto de 0 y lo último que dijo nombra su variable o una «API key», `ai_key_offer` pide al frontend que ofrezca meterla (`data-testid="ai-key-offer"`). **Cómo se guarda:** `ai_key_save` la cifra con DPAPI (solo la descifra ese usuario de Windows) en `ai-keys.json`, junto a los ajustes. **Cómo se usa:** `spawn_env` la pasa como variable al abrir las pestañas de esa IA, salvo que el usuario ya tenga la variable puesta. **Garantías:** la clave no vuelve al frontend ni va al log (`invokeLogged` no registra argumentos), y fuera de Windows no se ofrece. Se apaga con `aiKeyOffer`. |
 
 #### Paneles y servicios
@@ -2955,7 +3085,15 @@ renombrar pestañas y guardar la salida, `tab-tools`, el Intro con la ventana
 minimizada, `hidden-enter` (una orden larga y una corta de PowerShell se tienen
 que ejecutar aunque la ventana no se vea), y los permisos de administrador, `admin-permissions`, que recorre
 también la ruta de NSudo a través de un gsudo simulado sin pedir nunca el
-UAC; además la sugerencia de importar repositorios al hacer `cd`,
+UAC; las shells de administrador DE VERDAD, `admin-real` (22-11): abre las de
+gsudo y NSudo (cmd y PowerShell), pregunta a Windows si de verdad son
+administrador (`net session` / `IsInRole`) y comprueba que empiezan en la
+carpeta del usuario, con el prompt `C:\…#` que pone gsudo (en un equipo sin
+UAC que pregunte; gsudo tarda hasta un minuto en abrir); el catálogo guardado
+por otra build, `stale-catalog` (22-11): antes de abrir la app planta un
+`install-actions-snapshot.json` «de otra build» con una orden falsa y exige
+que la app lo tire, lo diga en el registro y no ofrezca esa orden (así se
+coló la orden vieja de VirtualBox en la 82); además la sugerencia de importar repositorios al hacer `cd`,
 `import-suggestion`; el tamaño de la interfaz escrito a mano (80, 137, 150,
 200, 300 y 500 %, con el tope por el ancho de la ventana) y sus atajos,
 `ui-scale`; las IA de terminal a pantalla completa con un simulador
@@ -3011,6 +3149,10 @@ instalador.
 | Archivos | Función |
 |---|---|
 | `windows/build.ps1`, `windows/build.bat` | Pipeline Windows: comprobaciones, build, instalador y artefactos portables. Termina con `Write-BuildSummary` (release, pruebas, informes, vídeos, capturas y logs) y guarda las evidencias en `artifacts/builds/`. |
+| `windows/build-stages.ps1` | Larga por etapas y reanudable (22-11): comprobación previa opcional, `build.ps1 -FullTests -NoFocusedTests`, una suite cada vez con `run-e2e-suite.mjs` y veredicto; estado en `artifacts\build-stages\<etiqueta>`; reanudación tras reinicio con `-ResumeAfterReboot`. |
+| `windows/build-stages-resume.ps1` | Al iniciar sesión, relanza la build por etapas que un reinicio dejó a medias (`pendiente.txt`), como mucho dos veces seguidas. |
+| `scripts/sign-build.mjs` | Firma una build ya compilada: `SHA256SUMS.txt` de una carpeta o de archivos concretos, con Ed25519 y SSH, verificados; claves como en `dev-test` (`--dir`, `--files`, `--out`, `--keys-dir`). |
+| `windows/make-latest.ps1` | La versión «Latest» (21-11): copia una release ya hecha con «Latest» en lugar del número, comprueba antes sus sumas, calcula `SHA256SUMS.txt`, lo firma como la build y deja `LATEST-ORIGEN.txt`; sin cambios no hace nada. `windows/build.ps1 -Latest` la llama al terminar en verde. |
 | `tests/e2e/suites.mjs` | Catálogo único de suites E2E y niveles de validación (`-FullTests`, `-ReleaseValidation`). |
 | `scripts/run-e2e-suite.mjs` | Ejecuta suites contra un binario y escribe `summary.json`/`summary.md`. |
 | `tests/e2e/run-scenario.mjs` | Lanza un escenario del smoke con informe, log y límite de tiempo; sus capturas y vídeo van a `<id>-captures` junto al informe (`E2E_CAPTURE_DIR`). |
@@ -3261,6 +3403,26 @@ con una cola por pestaña; xterm mantiene su propio parser y renderizador. Estas
 tres fronteras son necesarias porque `AppHandle::emit` no proporciona un orden
 total entre hilos y una impresión del banner puede competir con el lector de la
 PTY.
+
+**Lo que espera turno se escribe junto (26-11).** Romen vio que la salida de
+`ping` salía letra a letra. `ping` escribe su salida carácter a carácter y
+ConPTY la entrega igual, un trozo por letra; un bucle de `echo` llega en unos
+tres trozos por línea. La cola escribía cada trozo esperando a que xterm
+terminara el anterior, a unos 80 trozos por segundo: cmd sacaba 20 líneas por
+segundo (2000 líneas en 100 s) y cada línea de `ping` se veía teclear. Ahora,
+lo que llega mientras se pinta un trozo se junta (`outputBatches`, hasta
+256 KB) y va en la siguiente escritura, en el mismo orden. Un borrado o el fin
+del proceso cierran el grupo, para que nada posterior se cuele delante de
+ellos. Con eso cmd pasa a unas 75 líneas por segundo y PowerShell a 125-165.
+La prueba `output-speed` (focused) lo mide: 2000 líneas en cmd y PowerShell
+y un `ping`, con su tiempo, sus trozos y lo que cuesta atenderlos.
+
+Queda un freno aparte: la consola de Windows sola (`cargo test
+medir_velocidad_de_conpty -- --ignored --nocapture`) saca esas 2000 líneas en
+unos 5 s, a 120 o a 1024 columnas, y dentro de WTerminal tarda 25-33 s. No es
+la interfaz (atender los 6000 trozos le cuesta 0,4 s), ni el ancho, ni el paso
+de mensajes al backend (juntar ahí lo acumulado no cambió nada). Está en
+investigación.
 
 Un `pty-clear` no es “borrar un poco de texto”: es una transición de sesión. El
 frontend invalida la cola pendiente, limpia la pantalla y el scrollback de
@@ -3534,10 +3696,11 @@ fuente, idioma, los comandos `:` y las acciones fijadas de LTools— llamando a
 los mismos manejadores que el selector, `:repl`, `:theme`/Ajustes, el
 interceptor de `:` y la Biblioteca.
 
-Los defaults direccionales son `Ctrl izquierdo+A/D/W/S` (izquierda/derecha/
-arriba/abajo), como en la versión anterior. El lado izquierdo evita que el
-atajo accidentalmente dependa de la tecla Ctrl derecha; el usuario puede elegir
-otra combinación explícita. Si
+Los defaults direccionales son `Ctrl+Alt+flechas` (22-11; antes `Ctrl
+izquierdo+A/D/W/S`, que se comía esas teclas de las shells) y solo actúan con
+la pantalla partida: con una sola terminal la tecla llega a la shell. Un atajo
+de Ctrl + letra puesto a mano sigue pidiendo el Ctrl izquierdo, para que el
+derecho llegue a la shell. Si
 un atajo no funciona, revisar primero el valor normalizado en Ajustes y luego
 si el evento fue consumido por un input con `data-shortcut-input`; no añadir un
 segundo listener local al componente de terminal.
@@ -3933,6 +4096,16 @@ añade justo debajo una ayuda visible: escribe `1 2 + . cr` y debe mostrar `3`, 
 tanto que esa ayuda aparece antes de escribir como el resultado calculado, no
 solo que el proceso haya arrancado.
 
+Al abrir cualquier programa, ConPTY pregunta antes dónde está el cursor y qué
+sabe hacer la terminal, y espera unos 3 segundos la respuesta. En las shells
+contesta la app durante el arranque. En los REPL, desde el 24-11, también: la
+app quita esas dos preguntas hasta la primera salida del programa y las
+contesta ella (`take_startup_probes` en `terminal/tabs.rs`). La ventana se cierra con lo primero que pase: la pregunta de atributos (la última de ConPTY), la primera salida del programa o 1,5 segundos. Si se cerrara solo con la salida, se comería la pregunta del propio Gemini CLI, que la hace antes de dibujar y se quedaba en negro (build 87). Antes las
+contestaba la terminal visible. Si la interfaz iba cargada y tardaba más de
+esos 3 segundos, la respuesta le llegaba a Node como texto tecleado
+(`> 62;4;9;22c`, build 86). Lo que pregunte después el propio programa lo
+sigue contestando la terminal visible.
+
 ### 9. Permisos de administrador y NSudo
 
 WTerminal no necesita ser administrador. Las shells **TrustedInstaller de
@@ -3975,7 +4148,7 @@ gsudo y el sudo de Windows), con:
   la de las actualizaciones de WinGet (desde el 17-11), con **«Instalar
   gsudo»** (lanza la acción `winget-gsudo` de WTerminal en una pestaña, a la
   vista), **«Ahora no»** (esta sesión) y **«No volver a mostrar»** (apaga el
-  ajuste; se recupera en su casilla o en Ajustes › Comportamiento › Avisos).
+  ajuste; se recupera en su casilla o en Ajustes › General › Avisos).
   Nunca sale en las pruebas E2E, donde un aviso que no esperan movería la
   terminal.
 - **Reiniciar sin permisos de administrador** (solo siendo administrador): un
@@ -4013,7 +4186,54 @@ cambia quién pide el UAC y qué pasa si se cancela. Volver a «Sin permisos» l
 quita las dos, pero la copia en marcha sigue elevada hasta reiniciarla: para
 eso está «Reiniciar sin permisos de administrador».
 
-#### 9.4 Cómo se ve que es administrador
+#### 9.4 La carpeta al entrar y salir de NSudo (21-11)
+
+NSudo no hereda la carpeta del proceso que lo lanza: la shell TrustedInstaller
+empezaba en la suya y, al volver después a una shell normal, esta heredaba
+esa carpeta de sistema. La shell nueva **nunca** heredaba los permisos (se abre
+siempre con los de WTerminal), pero sí quedaba en un sitio que no era el del
+usuario. Ahora:
+
+- al entrar, WTerminal le pasa a NSudo `-CurrentDirectory:<carpeta>` con la
+  carpeta en la que estaba la pestaña (`insert_nsudo_current_directory`);
+- la pestaña recuerda la carpeta de antes de elevarse
+  (`cwd_before_elevated`) y, al cambiar de NSudo a cualquier shell o REPL,
+  vuelve a ella (`cwd_for_switch`);
+- una pestaña nueva abierta mientras la activa es NSudo tampoco hereda la
+  carpeta elevada (`active_cwd`).
+
+#### 9.5 Shells de administrador con gsudo (21-11)
+
+Con gsudo instalado y WTerminal sin ser administrador, el selector ofrece
+además **«CMD · administrador (gsudo)»** y **«PowerShell · administrador
+(gsudo)»** (grupo «Shells elevadas · gsudo»): una shell de administrador con la
+cuenta del usuario, sin TrustedInstaller. Windows pide el UAC al abrirla y
+solo esa pestaña es administrador. Si WTerminal ya lo es, no salen: cualquier
+shell normal ya lo es. Si se cancela el UAC, la pestaña lo explica en una
+frase («Lo más habitual es que se cancelara el permiso de Windows…») en vez de
+cerrarse sin decir nada.
+
+#### 9.6 Acciones del catálogo que necesitan administrador (21-11)
+
+Algunas acciones solo funcionan como administrador: añadir o quitar
+capacidades de Windows (OpenSSH), activar características opcionales,
+`dism`, instalar o actualizar WSL (`wsl --install --no-distribution`,
+`wsl --update`) y las instalaciones para todos los usuarios. El catálogo las
+reconoce por su orden (`windows_command_needs_admin`), sin marcarlas a mano,
+para que ninguna nueva se quede fuera; la tarjeta lo avisa antes de pulsar
+(«Necesita administrador…»). Al lanzarla (`install_run`):
+
+1. si WTerminal ya es administrador, se ejecuta tal cual;
+2. si no, se lanza con **gsudo**, o con el **sudo de Windows** en modo «En
+   línea»: Windows pide el UAC solo para esa acción y la salida se ve en la
+   misma pestaña. Una acción de PowerShell va en un PowerShell aparte (el
+   script codificado, con el mismo veredicto de salida que desde cmd);
+3. si no hay ninguno, no se escribe nada que vaya a fallar a medias: sale la
+   barra **«Esta acción necesita permisos de administrador»** con **«Instalar
+   gsudo»**, **«Reiniciar como administrador»** y **«Cerrar»**. No tiene «No
+   volver a mostrar» porque responde a algo que el usuario acaba de pedir.
+
+#### 9.7 Cómo se ve que es administrador
 
 Cuando WTerminal se ejecuta como administrador, la barra superior muestra un
 escudo pequeño junto al botón de volver a detectar entornos (fuera de los
@@ -4029,7 +4249,7 @@ compatibilidad si se marca su casilla. NSudo se busca en `C:\WSCore\Components\H
 Program Files, en `C:\Tools\NSudo` y subiendo desde la carpeta de la propia
 copia (`platform::windows::nsudo_path`).
 
-#### 9.5 Pruebas
+#### 9.8 Pruebas
 
 Pruebas: unidad de la elección del lanzador, de los argumentos del
 relanzamiento, de la decisión de arranque, del modo del sudo y del citado de
@@ -4312,7 +4532,7 @@ de … no tiene sugerencias ni colores al escribir: falta …», con **«Instala
 …»** (abre Entorno y dependencias ya filtrado, como en Ajustes, para ver y
 confirmar lo que se instala), **«Ahora no»** (por shell y distro) y **«No
 volver a mostrar»** (apaga el ajuste; se recupera en su casilla o en Ajustes ›
-Comportamiento › Avisos). Si coincide con el de gsudo o con el de WinGet, se
+General › Avisos). Si coincide con el de gsudo o con el de WinGet, se
 apilan: los que ofrecen instalar algo van encima. Nunca sale en las pruebas
 E2E (`e2eTesting` en la información de la app).
 
@@ -4414,9 +4634,13 @@ conocidos](#problemas-conocidos).
 ### 8. Cómo se escribe cada acción en la terminal
 
 Cada acción se escribe como **una sola línea** en la terminal. De fábrica aparece
-entera de golpe («Escribir de una vez las órdenes de las acciones»,
+entera de golpe («Escribir de golpe la orden de los botones (no la salida)»,
 `actionCommandsAtOnce`, encendido de fábrica desde el 15-11); apagado, se ve
-escribir como la repinta la shell. En PowerShell
+escribir como la repinta la shell. Solo toca **la línea de la orden** que
+escribe el botón, nunca la salida de los programas, y solo se nota con Clink
+(cmd) o PSReadLine (PowerShell), que repintan esa línea letra a letra; sin
+ellos ya sale de golpe. El texto de la casilla lo dice desde el 26-11, porque
+Romen la buscaba para que la salida llegara línea a línea. En PowerShell
 (desde el 14-11) toda la acción va en `ui-N.ps1` de la carpeta de sesión, en
 UTF-8 con BOM, y solo se teclea `. '<carpeta de sesión>\ui-N.ps1'`: el archivo
 borra esa línea, pinta la cabecera, ejecuta la orden en la misma sesión (lo que
@@ -4508,7 +4732,7 @@ Las consultas son las públicas de la API (60 por hora). Cuando se agotan
 WTerminal repite la misma ruta con `gh api --include` y la cabecera dice
 «con tu sesión de GitHub: quedan N» (5.000 por hora; las búsquedas, 30 por
 minuto). WTerminal nunca lee ni guarda el token: la consulta la hace `gh`
-(`github::request_via_gh`). **Ajustes › Comportamiento › Secciones visibles ›
+(`github::request_via_gh`). **Ajustes › General › Secciones visibles ›
 Consultas de Explorar GitHub** elige *al agotarse* (de fábrica), *siempre* o
 *nunca* (`githubSessionMode`). En los E2E, que apuntan a una API local, nunca
 se usa `gh`.
@@ -4526,7 +4750,7 @@ lo guardado (`github::local_repository_state`), nunca de una ruta que mande el
 panel. Si una pestaña entra (`cd`) en un repositorio de GitHub que no está ni
 clonado ni importado, abajo aparece «¿Añadirlo a Proyectos?» con **Importar…**
 y **No volver a sugerir** (`dismissedRepositories`); sale solo cuando no hay
-otro aviso abajo y se apaga en **Ajustes › Comportamiento › Sugerir importar
+otro aviso abajo y se apaga en **Ajustes › General › Sugerir importar
 repositorios** (`suggestRepositoryImport`). Hoy solo se importan repositorios
 con un `origin` de GitHub.
 
@@ -4981,6 +5205,9 @@ inferior, cuatro en cuadrantes. Al llegar a cuatro, el botón vuelve a dejar
 una sola. Cada panel sigue siendo una pestaña normal; la que tiene el foco se
 distingue por un borde de acento.
 
+El **clic central** (la rueda) sobre una pestaña la cierra, igual que en los
+navegadores. Funciona igual en las pestañas del chat con IA (21-11).
+
 ### 2. Renombrar una pestaña
 
 Para **renombrar una pestaña**: doble clic sobre ella, `F2` con la pestaña
@@ -5001,6 +5228,61 @@ Cada opción lee qué pestaña es **antes** de cerrar el menú: «Renombrar» y
 «Cerrar pestaña» lo hacían después, cuando la pestaña del menú ya no existía, y
 no hacían nada (14-11, Romen: «la función de renombrar pestañas no funciona»).
 La prueba `tab-tools` renombra también desde el menú.
+
+### 3.1 Pestañas ocupadas: nombre, color y aviso al terminar (26-11)
+
+**Qué es.** Cuando lanzas algo que tarda (`journalctl -f`, `npm run dev`,
+`ping -t`, `cargo build`…), lo normal es irse a otra pestaña. Para no perder
+la de la orden, WTerminal le pone sola **el nombre de la orden** y **un
+color** mientras corre, y **avisa al terminar** diciendo de qué pestaña viene.
+
+**Cómo funciona.**
+
+- **Cuándo:** si la orden lleva más de 5 segundos (10 con el modo de bajo
+  consumo, que va más lento). Los dos tiempos se cambian en Ajustes > Terminal.
+  Necesita las marcas de órdenes (cmd, PowerShell, bash, zsh y fish).
+- **El nombre:** el programa y, si solo no dice nada, lo que hace:
+  «journalctl», «npm dev», «docker logs», «cargo build». Sin rutas ni `.exe`;
+  `sudo`, `time` o `VAR=x` delante no cuentan. Al terminar vuelve el nombre de
+  siempre y queda unos segundos una marca: ✓ si salió bien, ✕ si falló.
+- **El color:** primero tus reglas («principio de la orden=color», por ejemplo
+  `kubectl logs=pink; ping=yellow`), luego el color de su tipo y, si no se
+  reconoce, uno por turno (nunca el rojo, que es el de los fallos). Los tipos
+  de fábrica: registros que no paran en azul, servidores y modo desarrollo en
+  verde, compilaciones y pruebas en naranja, instalaciones en morado y red en
+  cian. Cada tipo tiene su desplegable en Ajustes.
+- **Lo puesto a mano manda:** un nombre o un color elegidos en el menú de la
+  pestaña nunca se tocan.
+- **Excepciones:** editores, paginadores, monitores, otras shells, sesiones
+  remotas e IA (`vim`, `less`, `htop`, `ssh`, `claude`…) duran pero se están
+  usando: solo cambian el nombre, sin color, sin aviso y sin vigilancia. La
+  lista se edita en Ajustes.
+- **El aviso al terminar:** si la orden tardó al menos 10 segundos (20 en bajo
+  consumo). Si la pestaña se ve, sale dentro de ella, como siempre. Si no, sale
+  abajo en la ventana: «journalctl terminó en 3 min · pestaña 2 (cmd)», con
+  **Ir a la pestaña**, **Cerrar** y **No volver a mostrar** (se recupera en
+  Ajustes > Avisos). Si WTerminal no está delante, además parpadea en la barra
+  de tareas.
+- **Vigilar las que siguen en marcha:** con dos o más, la barra de pestañas
+  enseña el botón **En marcha · N**, y la paleta tiene «Ver juntas las órdenes
+  en marcha»: las junta en la vista dividida, hasta cuatro, la más reciente
+  primero. Con «Al entrar en una pestaña ocupada, verla junto a las demás»
+  (apagado de fábrica, porque cambia lo que ves) basta con pulsar una.
+- **Separarse al terminar:** la que termina sale de esa vista a los 5
+  segundos, salvo la que estás mirando, para no quitarte el resultado de
+  delante. Una vista dividida hecha a mano no se toca.
+
+**Dónde vive.** La parte pura (nombre, tipo, color, casillas) está en
+`src/lib/busy-tabs.ts`, con sus pruebas en `scripts/test-frontend-logic.mjs`.
+El estado vive en `appState` (`busyTabs`, `startBusyTab`, `finishBusyTab`,
+`watchRunningTabs`). `TerminalPane` arranca la cuenta al pulsar Intro sobre un
+prompt marcado, o cuando un botón escribe una orden, y la cierra con la marca
+`D` de fin de orden. Todo tiene su ajuste en el grupo «Pestañas ocupadas y
+avisos al terminar» de Ajustes > Terminal.
+
+**Límites.** Dentro de WSL o SSH solo se sabe el nombre si esa shell tiene la
+integración de WTerminal. El aviso de la ventana no es una notificación de
+Windows: para eso haría falta registrar la app en el sistema.
 
 ### 4. Órdenes escritas (buscar en lo tecleado)
 
@@ -5080,6 +5362,18 @@ que nadie tenga que sabérselos:
   selección toque el cursor. La salida histórica no se puede reescribir, solo
   copiar o buscar.
 
+### 9. Sin el menú del navegador
+
+Donde la app no pone un menú suyo (la barra de pestañas vacía, la cabecera,
+los márgenes de los paneles), el clic derecho ya no saca el menú del navegador
+interno («Atrás», «Actualizar», «Guardar como», «Imprimir»): no sirve en una
+aplicación de escritorio y «Atrás» o «Actualizar» podían recargar la
+interfaz. Se deja solo donde ayuda: en un campo de texto (cortar, copiar,
+pegar) y sobre texto seleccionado (copiar). Lo decide
+`src/lib/browser-context-menu.ts` (`keepsBrowserContextMenu`), que `main.ts`
+instala al arrancar; los menús propios (terminal, pestañas, explorador) deciden
+antes y no pasan por ahí.
+
 ---
 
 ## Atajos de teclado
@@ -5088,7 +5382,7 @@ que nadie tenga que sabérselos:
 
 Los atajos se resuelven en una única captura global, antes de que el textarea
 oculto de xterm reciba la tecla. Hay treinta y cinco acciones configurables en
-Ajustes (`Ajustes › Comportamiento › Atajos de teclado`); las acciones sin valor
+Ajustes (`Ajustes › Atajos`); las acciones sin valor
 se muestran como disponibles pero no secuestran ninguna tecla. Los valores se
 guardan normalizados y se comparan por `KeyboardEvent.code` cuando la tecla
 tiene una representación física ambigua.
@@ -5122,9 +5416,11 @@ como salida en lugar de anunciar un atajo que ya no existe.
 
 ### 3. Moverse entre paneles
 
-Los defaults de navegación de panel son `Ctrl izquierdo+A` (izquierda),
-`Ctrl izquierdo+D` (derecha), `Ctrl izquierdo+W` (arriba) y `Ctrl izquierdo+S`
-(abajo). También se pueden asignar acciones
+Los defaults de navegación de panel son `Ctrl+Alt+←` (izquierda),
+`Ctrl+Alt+→` (derecha), `Ctrl+Alt+↑` (arriba) y `Ctrl+Alt+↓` (abajo), y solo
+actúan con la pantalla partida (22-11). Quien tuviera de fábrica
+`Ctrl+A/D/W/S`, `Alt+flechas` o `Ctrl+Alt+H/J/K/L` pasa a estos al abrir la
+app; un juego propio se respeta. También se pueden asignar acciones
 sin default: abrir un panel concreto, cerrar panel, refrescar entornos, seguir
 la ruta de la terminal, llevar la terminal a la carpeta del explorador, limpiar
 terminal y abrir el explorador del sistema.
@@ -5274,8 +5570,10 @@ Romen: «varios chats con IA, en paralelo, en la barra lateral»):
 - Cada pestaña dice el agente de ese chat, y un punto que late marca los que
   están trabajando, aunque no se vean: un chat escondido sigue con su
   pregunta.
-- «×» cierra ese chat y corta su pregunta si la tiene; cerrar el panel las
-  corta todas.
+- «×» o el **clic central** sobre su pestaña (21-11, como en las pestañas de
+  las shells) cierra ese chat y corta su pregunta si la tiene; cerrar el panel
+  las corta todas. Con un solo chat no hay nada que cerrar: ni sale la × ni
+  hace nada el clic central.
 - La pregunta que prepara el consejero va al chat que se ve.
 - En cada chat, el botón de volver a empezar (junto a ↗) borra solo su
   conversación.
@@ -5464,6 +5762,63 @@ Encendida de fábrica. Con cada pregunta se mandan las últimas 6 vueltas de la
 conversación (como mucho 24 000 caracteres; se quitan antes las más viejas), y
 el agente la recuerda aunque su CLI no guarde nada entre preguntas. «Nueva
 conversación» la borra. Apagada, cada pregunta va sola.
+
+##### 5.1 Historial de chats (`agentChatHistory` y `agentChatRestore`, encendidos)
+
+Cada conversación se guarda sola en este equipo, en `agent-chats` dentro de la
+carpeta de datos (un archivo por chat). Nada sale del ordenador.
+
+- **Cerrar no borra:** cerrar una pestaña de chat, el panel o WTerminal deja la
+  conversación guardada. Si se cierra mientras contesta, queda lo que llegó,
+  marcado como cortado.
+- **Al reabrir el chat** vuelven las pestañas que había, con su conversación
+  (`agentChatRestore`).
+- **El botón del reloj** abre el historial: chats agrupados por Hoy, Ayer,
+  Últimos 7 días, Últimos 30 días y Anteriores; búsqueda sin tildes; abrir,
+  renombrar y borrar (con confirmación), y «Borrar todo el historial».
+- **«Nueva conversación»** deja la anterior en el historial.
+- Como mucho 300 chats: al pasar, se borran los más antiguos que no estén
+  abiertos.
+
+##### 5.1.1 Fijar, exportar, títulos y limpieza del historial (24-11)
+
+- **Fijar:** el botón de la chincheta deja un chat arriba, en «Fijados». El
+  chat de ayuda va fijado de fábrica (`agentChatPinHelp`). También con
+  `:chat pin <help|id>` y `:chat unpin <help|id>`, que puede usar una IA con
+  `wterminal --ctl`. Los fijados no se borran al pasar de 300 ni con la
+  limpieza de viejos.
+- **Exportar:** el botón de la flecha guarda el chat en Markdown donde elijas:
+  título, agente, fechas y cada mensaje con quién lo dijo; el código, tal cual.
+- **Título por la IA** (`agentChatAutoTitle`, apagado): tras la primera
+  respuesta, el agente propone un título corto. Gasta una pregunta más de su
+  cuenta; apagado, el título es la primera pregunta.
+- **Borrar los viejos** (`agentChatCleanup`, apagado): borra los chats que
+  lleven `agentChatCleanupDays` días (90 de fábrica) sin usarse, salvo los
+  abiertos y los fijados.
+- **La sesión del agente al borrar** (`agentChatForgetNative`, apagado): de
+  fábrica, borrar un chat deja la sesión de Claude Code o Codex en su carpeta,
+  porque es suya. Encendido, la borra también (solo archivos con ese UUID).
+
+##### 5.2 Sesiones propias de Claude Code y Codex (`agentChatNativeSessions`, encendido)
+
+Claude Code y Codex guardan sus propias sesiones. Con este ajuste, la primera
+pregunta de una conversación abre una (Claude Code con `--session-id`; Codex
+abre la suya y dice su id al empezar) y las siguientes la retoman
+(`claude -p --resume <id>` y `codex exec resume <id> -`) mandando **solo lo
+nuevo**, no la conversación entera. Así gastan menos y recuerdan también lo
+que leyeron o hicieron.
+
+- Solo se retoma si la última respuesta fue de ese mismo agente y salió bien;
+  si no (se cambió de agente, hubo un fallo), se abre una sesión nueva con la
+  conversación entera.
+- Si la sesión ya no está (Claude Code las guarda por carpeta, y se pueden
+  borrar), se repite la pregunta en una sesión nueva con la conversación entera,
+  sin avisar de error.
+- El modo automático de Codex no se puede retomar (`codex exec resume` no lo
+  admite): con él va siempre la conversación entera.
+- Pide «recordar la conversación». Apagado, siempre va la conversación entera.
+- Las respuestas que retomaron la sesión llevan una marca discreta, «sesión
+  retomada» (`agentChatShowResumed`, encendido).
 
 #### 6. Contexto de la terminal (opcional)
 
@@ -5682,7 +6037,15 @@ Cuando una orden acaba con error, la pestaña enseña «La orden falló (código
 ¿Preguntas al agente?».
 
 - «Preguntar» abre el chat con la pregunta escrita y la orden con su salida como
-  contexto. **No manda nada hasta que pulsas enviar.**
+  contexto. **No manda nada hasta que pulsas enviar**, salvo con
+  `agentChatAdvisorSend` (apagado de fábrica), que la manda sola.
+- **Siempre en el mismo chat:** estas preguntas van al chat «Ayuda de
+  WTerminal». Si está abierto, se va a él; si está en el historial, se reabre;
+  si no, se crea. Así no se llena el historial de chats sueltos. Los chats que
+  abres tú siguen siendo nuevos y normales.
+- De fábrica es uno solo para siempre. Con `agentChatHelpMaxDays` o
+  `agentChatHelpMaxMessages` (0 = nunca) empieza otro al pasar esos días o
+  mensajes; el anterior queda en el historial y deja de estar fijado.
 - El aviso se va solo a los 15 s o con la siguiente orden que salga bien.
 - Solo sale si hay algún agente instalado al que preguntar.
 - También vale para las acciones de los botones (instalar, Git, scripts…): su
@@ -5695,7 +6058,7 @@ Cuando una orden acaba con error, la pestaña enseña «La orden falló (código
 
 ### 1. Qué es
 
-`Ctrl+Shift+P` (se cambia en `Ajustes › Comportamiento › Atajos de teclado`,
+`Ctrl+Shift+P` (se cambia en `Ajustes › Atajos`,
 «Abrir la paleta de comandos») abre un buscador con todo lo que la aplicación
 ya sabe hacer. No es un lenguaje nuevo ni guarda configuración propia: cada
 entrada ejecuta exactamente lo mismo que su atajo, botón, selector o comando
@@ -5759,7 +6122,7 @@ por el predeterminado, nunca rompe la aplicación.
 todo a fábrica sin preguntar. El 13-11 eso devolvió la carpeta propia a la de
 fábrica y dejó sin `PYTHONUSERBASE` a aider, llm e IPython.
 
-- **Qué se elige:** casillas por pestaña (Apariencia, Terminal, Comportamiento)
+- **Qué se elige:** casillas por pestaña (Apariencia, Terminal, IA, General, Atajos y Sistema)
   y por apartado, 18 en total. Cada apartado dice qué hace y su riesgo:
   - «Solo el aspecto»;
   - «Cambia cómo funciona»;
@@ -5781,7 +6144,7 @@ fábrica y dejó sin `PYTHONUSERBASE` a aider, llm e IPython.
 Para encontrar un ajuste sin recorrer las pestañas:
 
 - **Buscar un ajuste…** (bajo las pestañas de Ajustes) enseña a la vez las
-  secciones Apariencia, Terminal y Comportamiento, cada una con su título, y
+  pestañas (Apariencia, Terminal, IA, General, Atajos y Sistema), cada una con su título, y
   solo lo que contiene el texto, sin distinguir mayúsculas ni tildes
   («maximizada», «cursiva», «gsudo»…): la fila que coincide, su encabezado y la
   nota que la acompaña; si coincide un encabezado, todo su grupo. Dice cuántos
@@ -5839,7 +6202,7 @@ editarlos, ejecutar
 | `terminalFontCustom` | nombre de una fuente instalada (letras, números, espacios y `-_.`), delante de la familia elegida | `""` |
 | `terminalFontFamily` | Sistema, JetBrains Mono, Fira Code, Hack, Source Code Pro, IBM Plex Mono, Iosevka, Victor Mono, Ubuntu Mono, Inconsolata, Monaspace, Meslo o monoespaciada genérica | `ubuntu-mono` |
 | `terminalFontSize` | 10–24 | `12` |
-| `terminalLineHeight` | 0.9–5 | `1.5` |
+| `terminalLineHeight` | 0.9–5 | `1.2` |
 | `terminalLetterSpacing` | −1–3 | `0` |
 | `terminalCursorStyle` | `block`, `bar`, `underline`, `beam`, `underline-thick` | `block` |
 | `terminalFontWeight` | `light`, `normal`, `medium`, `semibold`, `bold` | `normal` |
@@ -5848,6 +6211,7 @@ editarlos, ejecutar
 | `terminalLinksConfirm` | booleano: confirmar con el destino a la vista antes de abrir | `true` |
 | `pythonReplVisibleWidth` | booleano, solo Windows: el REPL de Python (su pestaña o `python`/`py` tecleado en la shell) usa el ancho visible y no la reserva de 1024 columnas. Se nota siempre: sus líneas largas (`print`, `help()`) se parten en el borde en vez de seguir hacia la derecha. Con `pyreadline3` además evita que teclear vaya a 2-3 letras por segundo ([Problemas conocidos](#problemas-conocidos)) | `true` |
 | `actionCommandsAtOnce` | booleano: la orden de una acción (instalar, actualizar…) aparece entera de una vez, en vez de verse escribir como la repinta la shell | `true` |
+| `keepActionCommandLine` | booleano: la línea que teclea una acción se queda a la vista (de fábrica se borra porque la orden ya sale en la cabecera; 22-11) | `false` |
 | `aiKeyOffer` | booleano, en Windows y en Linux con `secret-tool`: si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave de API, la pestaña ofrece meterla y la guarda cifrada (`environments/ai_keys.rs`) | `true` |
 | `agentChat` | booleano: el chat lateral con los agentes de IA (`:chat`, paleta, atajo) | `true` |
 | `agentChatAdvisor` | booleano, modo consejero: al fallar una orden, la pestaña ofrece preguntar al agente con la orden y su salida; solo deja la pregunta escrita en el chat, nunca la manda sola. No vale en todas las shells, porque depende de las marcas OSC 133 (`terminalCommandMarks`): sí en PowerShell y bash (Git Bash, WSL con bash); en cmd solo cuando la orden no existe (mensaje 9009 de Windows, `terminal/cmd_failure.rs`); no en zsh, fish ni sh (WSL con zsh, como Kali) salvo que la shell emita las marcas por su cuenta, ni dentro de un REPL (Python, Node…) o una IA de terminal | `true` |
@@ -5861,9 +6225,9 @@ editarlos, ejecutar
 | `agentChatRemember` | booleano: el chat manda con cada pregunta las últimas 6 vueltas de la conversación, para que el agente la recuerde; «Nueva conversación» la borra | `true` |
 | `showAgentChatButton` | booleano: el botón ✦ al final de la fila de pestañas, que abre y cierra el chat de agentes (sin él, `:chat`, la paleta o su atajo) | `true` |
 | `terminalScrollSensitivity` | 1–10 | `3` |
-| `copyOnSelect` | booleano | `false` |
+| `copyOnSelect` | booleano | `true` |
 | `terminalPadding` | 4–24 | `10` |
-| `terminalScrollback` | 1000–100000 | `5000` |
+| `terminalScrollback` | 1000–100000 | `10000` |
 | `fastfetchColor` | `#rrggbb` | color del banner de información del sistema |
 | `terminalCursorColor` | `#rrggbb` | color del cursor |
 | `uiDensity` | `comfortable`, `compact`: separaciones y margen mínimo de cada control respecto al borde de su panel (`--space-min`: 8 px en cómoda, 4 px en compacta, nunca 0) | `comfortable` |
@@ -5871,7 +6235,9 @@ editarlos, ejecutar
 | `githubSessionMode` | `onExhausted`, `always`, `never`: cuándo usar la sesión de `gh` en Explorar GitHub | `onExhausted` |
 | `suggestRepositoryImport` | booleano: sugerir importar el repositorio de GitHub de la carpeta de una pestaña | `true` |
 | `lowPowerMode` | booleano: modo de bajo consumo. La precarga del catálogo de Dependencias no se hace al arrancar (se construye al abrir el panel), la comprobación de actualizaciones de WinGet espera dos minutos y las sondas de ecosistema van de una en una. Se aplica en el siguiente arranque | `false` |
-| `lowPowerSuggest` | booleano: sugerir abajo el modo de bajo consumo cuando el equipo tiene 2 hilos de CPU o menos, menos de 8 GB de memoria, o la primera pestaña tarda más de 8 s en dar el prompt (una vez por sesión; «No volver a sugerir» lo apaga). Casilla: Comportamiento › «Sugerir el modo de bajo consumo» | `true` |
+| `probeLowPriority` | booleano: las sondas de detección (versiones de lenguajes, IA, gestores de paquetes, WinGet) corren con prioridad baja para ceder el paso a las pestañas. 26-11: con todas a la vez y prioridad normal, cmd sacaba 49 líneas por segundo durante la detección del arranque y 153 después. Solo las sondas (`run_with_timeout` y `output_text_probe`), nunca los programas que abre el usuario. Casilla: General › «Detectar entornos con prioridad baja» | `true` |
+| `probeMaxParallel` | número de 0 a 64: cuántas sondas corren a la vez. 0 es automático (`process::probe_parallel_limit`): una con el modo de bajo consumo y, si no, la mitad de los hilos de la CPU. El límite se lee en cada sonda: un cambio vale sin reiniciar. Su plazo cuenta desde que le toca, no desde la cola. Va con la prioridad baja: sola, con la CPU ocupada en un equipo de 2 núcleos, la detección casi no avanzaba (por eso `configure_background_command` deja la prioridad normal al resto de procesos ocultos) | `0` |
+| `lowPowerSuggest` | booleano: sugerir abajo el modo de bajo consumo cuando el equipo tiene 2 hilos de CPU o menos, menos de 8 GB de memoria, o la primera pestaña tarda más de 8 s en dar el prompt (una vez por sesión; «No volver a sugerir» lo apaga). Casilla: General › «Sugerir el modo de bajo consumo» | `true` |
 | `checkUpdatesOnStartup` | booleano: buscar una versión nueva de WTerminal en GitHub al arrancar ([Privacidad y red](#11-privacidad-y-red)) | `true` |
 | `checkPackageUpdatesOnStartup` | booleano: preguntar al gestor de paquetes por actualizaciones al arrancar | `true` |
 | `webview2Missing` | `ask`, `download`, `never`: qué hace el arranque de Windows si falta WebView2 | `ask` |
@@ -5922,11 +6288,11 @@ editarlos, ejecutar
 | `shortcutCyclePanes` | atajo: Dividir terminales (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+Backslash` |
 | `shortcutToggleExplorer` | atajo: Mostrar explorador (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+E` |
 | `shortcutToggleTerminalOnly` | atajo: Modo terminal limpia (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+M` |
-| `shortcutPaneLeft` | atajo: Foco a la izquierda (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+A` |
-| `shortcutPaneRight` | atajo: Foco a la derecha (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+D` |
-| `shortcutPaneUp` | atajo: Foco arriba (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+W` |
-| `shortcutPaneDown` | atajo: Foco abajo (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+S` |
-| `shortcutOpenSettings` | atajo: Abrir ajustes (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutPaneLeft` | atajo: Foco a la izquierda (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+ArrowLeft` |
+| `shortcutPaneRight` | atajo: Foco a la derecha (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+ArrowRight` |
+| `shortcutPaneUp` | atajo: Foco arriba (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+ArrowUp` |
+| `shortcutPaneDown` | atajo: Foco abajo (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+ArrowDown` |
+| `shortcutOpenSettings` | atajo: Abrir ajustes (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Comma` |
 | `shortcutOpenProjects` | atajo: Abrir proyectos (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
 | `shortcutOpenScripts` | atajo: Abrir biblioteca (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
 | `shortcutOpenDependencies` | atajo: Abrir entorno y dependencias (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
@@ -5943,14 +6309,15 @@ editarlos, ejecutar
 | `shortcutUiScaleDown` | atajo: Reducir el tamaño de la interfaz (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+Minus` |
 | `shortcutUiScaleReset` | atajo: Tamaño de la interfaz al 100 % (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Alt+0` |
 | `shortcutOpenSystemExplorer` | atajo: Abrir en el explorador del sistema (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
-| `shortcutCloseTab` | atajo: Cerrar la pestaña (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutCloseTab` | atajo: Cerrar la pestaña (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+W` |
 | `shortcutRenameTab` | atajo: Renombrar la pestaña (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
 | `shortcutCopyLastOutput` | atajo: Copiar la salida de la última orden (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
 | `shortcutSaveTerminalOutput` | atajo: Guardar la salida en un archivo (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
-| `shortcutTerminalFontUp` | atajo: Agrandar la letra de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
-| `shortcutTerminalFontDown` | atajo: Achicar la letra de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
-| `shortcutTerminalFontReset` | atajo: Letra de la terminal a su tamaño de fábrica (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
-| `shortcutToggleAgentChat` | atajo: Mostrar u ocultar el chat de agentes (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `""` |
+| `shortcutTerminalFontUp` | atajo: Agrandar la letra de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Equal` |
+| `shortcutTerminalFontDown` | atajo: Achicar la letra de la terminal (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Minus` |
+| `shortcutTerminalFontReset` | atajo: Letra de la terminal a su tamaño de fábrica (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+0` |
+| `shortcutToggleAgentChat` | atajo: Mostrar u ocultar el chat de agentes (vacío = sin tecla; ver [Atajos de teclado](#atajos-de-teclado)) | `Ctrl+Shift+A` |
+| `shortcutGoToTab` | atajo: Ir a la pestaña 1; con los mismos modificadores, 2…9 van a las pestañas 2 a 9 y 0 a la 10 (vacío = sin tecla) | `Ctrl+Shift+1` |
 | `uiBackgroundColor` | `#rrggbb`: fondo de la interfaz (lo rellena el tema; se puede retocar) | `#0d0d0d` |
 | `uiSurfaceColor` | `#rrggbb`: superficie de paneles y barras | `#1e1e1e` |
 | `uiSurfaceAltColor` | `#rrggbb`: superficie alternativa (filas, cajas) | `#161616` |
@@ -6017,7 +6384,7 @@ del sistema.
 
 WTerminal no envía telemetría. Lo único que hace por su cuenta contra la red
 o contra el sistema al arrancar tiene su propia opción en Ajustes ›
-Comportamiento › **Privacidad y red** (`data-testid="settings-privacy-network"`),
+General › **Privacidad y red** (`data-testid="settings-privacy-network"`),
 porque cada comportamiento automático de la app se tiene que poder apagar:
 
 | Opción | Clave | De fábrica | Qué hace al apagarla |
@@ -6051,6 +6418,16 @@ ble.sh (y el de gsudo) era una caja flotante arriba a la derecha.
 - **Uno cada vez:** los que solo sugieren algo (bajo consumo, importar un
   repositorio, guardar un perfil) esperan a que no haya otro abajo.
 
+#### 12.2 bis Mismos botones en todos (22-11)
+
+Todos los avisos llevan, por este orden, su botón principal, **Ahora no** (`…-dismiss`)
+y **No volver a mostrar** (`…-never`). La guía de la terminal limpia decía «Cerrar
+esta vez» y «No mostrar nunca más», y el de guardar en el perfil, «Cerrar»: ya
+no. «No sugerir este» del de importar se queda, porque solo apaga ese
+repositorio. La prueba `notices` (suite `nuevas`) saca a la fuerza los que en
+las pruebas no salen solos (`window.__wtE2eForceNotice`, solo con
+`e2eTesting`) y pulsa sus botones.
+
 #### 12.3 «No volver a mostrar»
 
 Cada aviso tiene su botón «No volver a mostrar», que apaga su ajuste:
@@ -6068,6 +6445,8 @@ Cada aviso tiene su botón «No volver a mostrar», que apaga su ajuste:
 | Modo de bajo consumo en equipos modestos | `lowPowerSuggest` |
 | gsudo para abrir las pestañas de NSudo (solo Windows) | `offerGsudo` |
 | Guía del modo de pantalla limpia | `showTerminalOnlyGuide` |
+| Guardar los ajustes cambiados en tu perfil | `offerProfileUpdate` |
+| Guía de primeros pasos (no tiene el botón: terminarla o saltarla lo apaga) | `showFirstSteps` |
 
 «Ahora no» (o «Descartar») solo lo cierra esa vez. Importar un repositorio
 tiene además «No sugerir este», que olvida solo ese repositorio.
@@ -6086,14 +6465,15 @@ Cada aviso tiene **una sola casilla** en Ajustes, en su sitio:
 | Herramienta que falta | Terminal › «Ofrecer instalar las órdenes que faltan» |
 | Preguntar a la IA | Terminal › «Modo consejero» |
 | Clave de API de una IA | Terminal › «Ofrecer la clave de API cuando una IA la pida» |
-| Actualizaciones de las aplicaciones y versión nueva | Comportamiento › Privacidad y red |
-| Bajo consumo | Comportamiento › «Sugerir el modo de bajo consumo» |
-| Importar un repositorio | Comportamiento › «Sugerir importar repositorios» |
-| Guía de pantalla limpia | Comportamiento › «Guía visible en pantalla limpia» |
-| gsudo | Comportamiento › Permisos de administrador |
-| Perfil portable | Comportamiento › Perfiles portables |
+| Actualizaciones de las aplicaciones y versión nueva | General › Privacidad y red |
+| Bajo consumo | General › «Sugerir el modo de bajo consumo» |
+| Importar un repositorio | General › «Sugerir importar repositorios» |
+| Guía de pantalla limpia | General › «Guía visible en pantalla limpia» |
+| gsudo | Sistema › Permisos de administrador |
+| Perfil portable y guardar los ajustes cambiados | Sistema › Perfiles portables |
+| Primeros pasos | General › «Guía de primeros pasos al arrancar» |
 
-Ajustes › Comportamiento › **Avisos** (`data-testid="settings-notices"`) no
+Ajustes › General › **Avisos** (`data-testid="settings-notices"`) no
 repite esas casillas:
 
 - **Lista los apagados:** solo los que están apagados ahora, cada uno como un
@@ -6106,7 +6486,118 @@ repite esas casillas:
 La lista sale de `src/lib/notices.ts`, la misma que usan los botones de los
 avisos. Allí cada aviso dice en qué pestaña y en qué casilla está su ajuste.
 
+#### 12.5 Primeros pasos (21-11)
+
+Romen, 21-11: «al abrir la app por primera vez, el usuario va a tener que ver
+todos los popup, ¿por qué no hacer un tour?». La **guía de primeros pasos**
+(`FirstSteps.svelte`, pasos en `src/lib/first-steps.ts`) sale sola al arrancar
+mientras `showFirstSteps` esté encendido:
+
+- **Siete pasos:** bienvenida, pestañas, shells y REPL, paleta de comandos,
+  Entorno y dependencias, chat con IA, y Ajustes y avisos. Cada uno resalta el
+  botón del que habla si está a la vista.
+- **Botones:** «Siguiente» (o Intro/→), «Atrás» (←), «Saltar» (o Esc) y
+  «Empezar» en el último. Sin «No volver a mostrar» (21-11, Romen: «mejor
+  quedarse solo con siguiente, atrás y saltar»): **terminarla o saltarla apaga
+  sola `showFirstSteps`**, y vuelve a salir al arrancar solo si se enciende otra
+  vez su casilla.
+- **Los avisos esperan:** mientras se ve, las barras de abajo no se muestran
+  (siguen en su estado) y salen al cerrarla.
+- **Volver a verla:** Ajustes › General › «Ver los primeros pasos
+  ahora», o «Ver los primeros pasos» en la paleta de comandos. Su casilla
+  («Guía de primeros pasos al arrancar») también está en Avisos.
+- **Nunca en E2E** salvo que la prueba la abra: un aviso que no esperan
+  movería la terminal.
+
 ---
+
+### 13. Las pestañas de Ajustes (22-11)
+
+Romen, 22-11: «reorganiza un poco los ajustes». Comportamiento tenía once
+bloques y los ajustes de IA estaban dentro de Terminal, mezclados con la
+fuente y el cursor. Ahora:
+
+| Pestaña | Qué tiene |
+|---|---|
+| Apariencia | Tema y colores |
+| Terminal | Texto y cursor, enlaces, marcas de orden, acciones, sugerencias de la shell y banner |
+| IA | Chat de agentes, consejero, permisos, guía y control de WTerminal por las IA, clave de API |
+| General (antes Comportamiento) | Inicio y paneles, secciones visibles, interfaz modular, entornos, carpeta propia, avisos, privacidad y red |
+| Atajos | Atajos de teclado y alias manuales |
+| Sistema | PATH, integración de Windows y permisos de administrador, perfiles portables, plugins y LTools |
+| Programas | cmd, PowerShell y Git (apartado 14) |
+| Información | Versión, actualización y créditos |
+
+El id interno de General sigue siendo `behavior` (`settings-tab-behavior`)
+para no romper los enlaces de Avisos ni las pruebas. Las pruebas E2E buscan
+un control de Ajustes en todas las pestañas si no está en la abierta
+(`showSettingsTabContaining` en `smoke.mjs`), así una reorganización no las
+rompe.
+
+### 14. Programas (cmd, PowerShell y Git)
+
+Desde el 22-11 Ajustes tiene la pestaña **Programas**: ajustes de los
+programas que se usan en la terminal, no de la terminal. Romen: «se podrían
+añadir ajustes para las aplicaciones de la terminal y no solo para la
+terminal».
+
+#### 13.1 Qué hay
+
+| Programa | Ajustes | Dónde se guarda |
+|---|---|---|
+| cmd | Texto del prompt (con plantillas: normal, en dos líneas, con la hora), expansión retardada de variables, extensiones de órdenes | La variable `PROMPT` del usuario y `HKCU\Software\Microsoft\Command Processor` |
+| Windows PowerShell 5 y PowerShell 7 | Modo de edición (Windows, Emacs, Vi), sin órdenes repetidas en el historial, tamaño del historial, pitido, salida en UTF-8 | Un bloque marcado «WTerminal» al final de `Documentos\WindowsPowerShell\profile.ps1` o `Documentos\PowerShell\profile.ps1`; lo de fuera del bloque no se toca |
+| Git | Nombre, correo, rama inicial, finales de línea, editor, pull con rebase, subir ramas nuevas sin más, limpiar ramas borradas, rutas largas, colores | `git config --global` |
+| Git Bash | Tamaño del historial, no guardar repetidas, modo de edición (Emacs/Vi), pitido, completar sin mayúsculas | Bloque «WTerminal» en `~\.bashrc` (historial) y `~\.inputrc` (línea) |
+| npm | Mensajes de financiación, auditoría al instalar, aviso de versiones nuevas, registro | `npm config --location=user` |
+| pip | Aviso de versiones nuevas, tiempo de descarga, índice | `pip config --user` |
+| WinGet | Barra de progreso, telemetría, instalar para el usuario o el equipo | Su `settings.json` (copia `settings.json.wterminal-bak` antes del primer cambio; se leen sus comentarios `//`) |
+| Python | Modo UTF-8 (`PYTHONUTF8`), sin `__pycache__` | Variables de usuario |
+| Node.js | Historial del REPL (`NODE_REPL_HISTORY_SIZE`) | Variable de usuario |
+| Claude Code | Modelo, modo de permisos (sin «Omitir permisos»), firmar commits, días de conversaciones | `~\.claude\settings.json` (solo esas claves) |
+| Codex | Modelo, intensidad, cuándo pide permiso, qué puede tocar (sin acceso total) | `~\.codex\config.toml` (solo esas claves de primer nivel) |
+
+#### 14.2 Por qué solo esos
+
+Están los que **se notan dentro de WTerminal**. Los de la ventana clásica de
+cmd (fuente, tamaño, colores del clic derecho › Propiedades) no: WTerminal
+pinta su propia terminal y esos se ajustan en Apariencia y Terminal. Tampoco el
+«AutoRun» de cmd (WTerminal abre cmd con `/d`) ni la directiva de ejecución de
+PowerShell (WTerminal abre PowerShell con `-ExecutionPolicy Bypass`): solo se
+notarían fuera. El prompt de cmd se respeta (WTerminal solo le añade las marcas
+de orden) y WTerminal ya pone UTF-8 en cmd.
+
+#### 14.3 Seguridad y deshacer
+
+- Cada valor se valida antes de guardarlo (opciones cerradas, números en su
+  rango, sin saltos de línea; un valor no puede colar una orden en el perfil).
+- Antes de cada cambio se apunta el valor anterior en
+  `USER_DATA_DIR/programas/deshacer.json`; **Deshacer el último cambio**
+  devuelve, programa a programa, el anterior.
+- El prompt de cmd vale en las pestañas nuevas sin reiniciar: además de
+  guardarse, se pone en el entorno de WTerminal, del que nacen las pestañas.
+- Solo salen los programas instalados; Linux, por ahora, sin esta pestaña.
+- **Valores recomendados** (`applyProgramDefaults`, encendido de fábrica,
+  23-11): a cada programa instalado, también si se instala después, WTerminal
+  le pone UNA vez y sin pisar lo que tuviera el usuario: Git Bash completa sin
+  distinguir mayúsculas, npm sin mensajes de financiación y WinGet sin
+  telemetría (`RECOMMENDED`; lo ya mirado en `programas/recomendados.json`). Se
+  hace al arrancar (en segundo plano, 45 s después) y al abrir la pestaña.
+- **Caché** (23-11): lo último leído se guarda en `programas/cache.json`; la
+  pestaña lo enseña al momento y lo de ahora llega detrás («Comprobando los
+  valores actuales…»). Los programas se leen a la vez, cada uno en su hilo, y
+  tras un cambio solo se relee ese programa (antes la casilla quedaba
+  deshabilitada varios segundos mientras se releían npm y pip).
+- **Aspecto:** cada programa en su desplegable, con cuántos ajustes has
+  cambiado; los desplegables enseñan el valor que rige (por ejemplo «master»)
+  y «Lo que trae el programa» solo cuando no se sabe cuál es.
+
+#### 14.4 Lo que falta
+
+Falta: bash y zsh dentro de WSL (sin hipervisor en la VM no se pueden probar),
+Gemini y Qwen (sus ajustes cambian mucho entre versiones) y Docker. WTools y
+LTools no tienen un archivo de ajustes propio: su integración está en Sistema y
+sus acciones fijadas en la Biblioteca (`config/programs_more.rs`).
 
 ## Internacionalización
 
@@ -6272,7 +6763,29 @@ perfil, unos 45 s después de arrancar sale un aviso abajo: «Guardar perfil»,
 «Ahora no» y «No volver a mostrar» (`offerPortableProfile`). No sale en las
 pruebas E2E: el perfil de la prueba siempre trae ajustes propios.
 
-#### 1.3 Al restablecer y al desinstalar
+#### 1.3 Guardar los ajustes que cambias (21-11)
+
+Romen, 21-11: «cuando cambias algún ajuste, no ofrece guardarlo». Si ya hay
+algún perfil en su carpeta, al **cerrar Ajustes con cambios** sale abajo:
+
+- **«Guardar en el perfil actual»**: reescribe el perfil más reciente de la
+  carpeta (`profile_update`, que solo acepta un archivo que ya existe dentro de
+  la carpeta de perfiles: `profile_inside`);
+- **«Crear otro perfil»**: lo mismo que «Guardar perfil ahora»;
+- **«Cerrar»** y **«No volver a mostrar»** (`offerProfileUpdate`, encendido de
+  fábrica; casilla en Sistema › Perfiles portables, y recuperable en
+  Avisos).
+
+Se compara la huella de los ajustes al abrir y al cerrar Ajustes
+(`src/lib/profile-update.ts`), sin contar lo que la app escribe sola (tamaño de
+la terminal y gestor de archivos). Sin ningún perfil sigue mandando la
+sugerencia de 1.2.
+
+La comparación se hace cuando ha terminado de guardarse el último cambio
+(`app.preferencesSettled()`), no a un tiempo fijo: con el equipo cargado,
+guardar llegó a tardar 6,6 s y el aviso no salía (build 81, 22-11).
+
+#### 1.4 Al restablecer y al desinstalar
 
 - **Restablecer:** el diálogo dice cuántos perfiles hay y dónde, recuerda que
   restablecer no los toca y ofrece «Guardar perfil ahora» antes de confirmar.

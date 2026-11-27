@@ -129,6 +129,39 @@ pub struct InstallAction {
     /// Nombre del framework dentro de un ecosistema padre (por ejemplo,
     /// `Paket` dentro de `.NET`).
     pub subgroup_item: Option<String>,
+    /// Necesita administrador en Windows (`windows_command_needs_admin`). Si
+    /// WTerminal no lo es, `install_run` la lanza con gsudo o el sudo de
+    /// Windows, o explica cómo conseguirlo (21-11).
+    #[serde(default)]
+    pub admin: bool,
+}
+
+/// Órdenes de Windows que solo funcionan como administrador. Se deduce del
+/// comando, no se marca a mano, para que ninguna acción nueva se quede fuera
+/// (21-11: «Instalar cliente SSH» fallaba sin decir por qué).
+pub fn windows_command_needs_admin(command: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "add-windowscapability",
+        "remove-windowscapability",
+        "enable-windowsoptionalfeature",
+        "disable-windowsoptionalfeature",
+        "dism ",
+        "dism.exe",
+        "wsl --install --no-distribution",
+        "wsl.exe --install --no-distribution",
+        "wsl --update",
+        "wsl.exe --update",
+        "-scope allusers",
+        "--scope machine",
+        "set-executionpolicy -scope localmachine",
+    ];
+    let lower = command.to_ascii_lowercase();
+    PATTERNS.iter().any(|pattern| lower.contains(pattern))
+}
+
+fn mark_admin(mut action: InstallAction) -> InstallAction {
+    action.admin = action.admin || windows_command_needs_admin(&action.command);
+    action
 }
 
 impl InstallAction {
@@ -156,6 +189,7 @@ impl InstallAction {
             group_key: None,
             subgroup_description: None,
             subgroup_item: None,
+            admin: false,
         }
     }
 
@@ -1147,13 +1181,29 @@ const WINGET_QUERY_FLAGS: &str =
 /// unión en su sitio (rutas, accesos directos y registro siguen valiendo).
 /// Mover pide permisos de administrador una vez. Sin la variable, la orden es
 /// la de siempre.
+///
+/// 21-11: si el instalador falla con la carpeta propia (WinGet devuelve
+/// `0x8A150006`, «falló el instalador»), se repite una vez sin `--location`:
+/// hay instaladores que la rechazan. Los que se sabe que la rechazan
+/// ([`WINGET_SYSTEM_LOCATION`]) ni lo intentan.
 fn winget_install_command(pkg: &str) -> String {
     centralized_install(
         pkg,
         "--location",
         &format!("winget install --id {pkg} {WINGET_INSTALL_FLAGS} @wtLocation"),
+        !WINGET_SYSTEM_LOCATION.contains(&pkg),
     )
 }
+
+/// Paquetes de WinGet que solo se instalan en su carpeta de siempre: ni se
+/// les pasa la carpeta propia ni se ofrece moverlos después.
+///
+/// - VirtualBox (21-11, Romen): su instalador rechaza cualquier carpeta en la
+///   que un usuario normal pueda escribir («Invalid installation directory
+///   specified!», error 1603 en el Visor de eventos) y su protección carga
+///   sus controladores solo desde una carpeta segura, así que tampoco vale
+///   moverlo y dejar una unión.
+const WINGET_SYSTEM_LOCATION: &[&str] = &["Oracle.VirtualBox"];
 
 /// El PHP de WinGet llega sin `php.ini`: sin intl, mbstring, openssl, zip o
 /// curl, Composer no puede instalar casi ningún framework del catálogo
@@ -1179,15 +1229,18 @@ fn chocolatey_install_command(pkg: &str) -> String {
         pkg,
         "",
         &chocolatey_command(&format!("install {pkg} -y --no-progress")),
+        true,
     )
 }
 
 /// Envuelve una orden de instalación que admite una carpeta de destino:
 /// `__INSTALL__` recibe `@wtLocation` (vacío sin `WTERMINAL_PROGRAMS`, o
 /// `<opción> <carpeta>\<nombre>`). Después comprueba si el instalador la
-/// respetó y, si no, ofrece moverlo dejando una unión en su sitio.
-fn centralized_install(leaf: &str, flag: &str, install: &str) -> String {
+/// respetó y, si no, ofrece moverlo dejando una unión en su sitio. Con
+/// `own_folder` falso, el programa va a su carpeta de siempre y no se toca.
+fn centralized_install(leaf: &str, flag: &str, install: &str, own_folder: bool) -> String {
     CENTRALIZED_INSTALL
+        .replace("__OWN__", if own_folder { "1" } else { "" })
         .replace("__LEAF__", leaf)
         .replace("__FLAG__", flag)
         .replace("__INSTALL__", install)
@@ -1203,7 +1256,7 @@ fn centralized_install(leaf: &str, flag: &str, install: &str) -> String {
 ///
 /// Plantilla de [`centralized_install`]; sin `format!` para no duplicar cada
 /// llave de PowerShell.
-const CENTRALIZED_INSTALL: &str = r#"$wtTarget = $null; $wtBefore = @(); $wtWatch = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ -and (Test-Path $_) }; if ($env:WTERMINAL_PROGRAMS) { $wtTarget = Join-Path $env:WTERMINAL_PROGRAMS '__LEAF__'; $wtBefore = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object FullName }) }; $wtLocation = @(); if ($wtTarget -and '__FLAG__') { $wtLocation = @('__FLAG__', $wtTarget) }; $wtOldTemp = $env:TEMP; $wtOldTmp = $env:TMP; if ($env:WTERMINAL_DOWNLOADS) { $wtDl = Join-Path (Split-Path $env:WTERMINAL_DOWNLOADS -Parent) 'winget'; New-Item -ItemType Directory -Force -Path $wtDl -ErrorAction SilentlyContinue | Out-Null; if (Test-Path -LiteralPath $wtDl) { $env:TEMP = $wtDl; $env:TMP = $wtDl } }; try { __INSTALL__; $wtCode = $LASTEXITCODE } finally { $env:TEMP = $wtOldTemp; $env:TMP = $wtOldTmp }; if ($wtTarget -and $wtCode -eq 0 -and -not (Get-ChildItem -LiteralPath $wtTarget -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { $wtNew = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue } | Where-Object { $wtBefore -notcontains $_.FullName -and -not $_.LinkType } | ForEach-Object FullName); if ($wtNew.Count -eq 0) { if ('__FLAG__') { Write-Host "__LEAF__ no usó la carpeta propia ($wtTarget) y no se encontró una carpeta nueva en Program Files ni en LOCALAPPDATA\Programs." } } else { Write-Host "__LEAF__ no se instaló en la carpeta propia; está en: $($wtNew -join ', ')"; $wtAnswer = Read-Host '¿Moverlo a la carpeta propia y dejar una unión en su sitio? Pide permisos de administrador (s/N)'; if ($wtAnswer -match '^[sSyY]') { $wtQuote = { param($text) "'" + ($text -replace "'", "''") + "'" }; $wtFlags = '/E /MOVE /IS /IT /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP'; $wtLines = @(); foreach ($wtDir in $wtNew) { $wtDest = Join-Path $wtTarget (Split-Path $wtDir -Leaf); Get-Process | Where-Object { $_.Path -like "$wtDir\*" } | Stop-Process -Force -ErrorAction SilentlyContinue; $wtSrc = & $wtQuote $wtDir; $wtDst = & $wtQuote $wtDest; $wtLines += "robocopy $wtSrc $wtDst $wtFlags | Out-Null; if (@(Get-ChildItem -LiteralPath $wtSrc -Recurse -File -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $wtSrc -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Junction -Path $wtSrc -Target $wtDst | Out-Null } else { robocopy $wtDst $wtSrc $wtFlags | Out-Null }" }; $wtScript = Join-Path $env:TEMP ('wterminal-move-' + [guid]::NewGuid().ToString() + '.ps1'); Set-Content -LiteralPath $wtScript -Value $wtLines -Encoding UTF8; Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$wtScript`"" -Verb RunAs -Wait -WindowStyle Hidden; Remove-Item -LiteralPath $wtScript -ErrorAction SilentlyContinue; foreach ($wtDir in $wtNew) { $wtItem = Get-Item -LiteralPath $wtDir -Force -ErrorAction SilentlyContinue; if ($wtItem -and $wtItem.LinkType -eq 'Junction') { Write-Host "Movido: $wtDir -> $(@($wtItem.Target)[0])" } else { Write-Host "No se pudo mover $wtDir (¿algún archivo en uso?): sigue en su sitio." } } } } }; $global:LASTEXITCODE = $wtCode"#;
+const CENTRALIZED_INSTALL: &str = r#"$wtStart = Get-Date; $wtTarget = $null; $wtBefore = @(); $wtWatch = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ -and (Test-Path $_) }; if ($env:WTERMINAL_PROGRAMS -and '__OWN__') { $wtTarget = Join-Path $env:WTERMINAL_PROGRAMS '__LEAF__'; $wtBefore = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object FullName }) }; $wtLocation = @(); if ($wtTarget -and '__FLAG__') { $wtLocation = @('__FLAG__', $wtTarget) }; $wtOldTemp = $env:TEMP; $wtOldTmp = $env:TMP; if ($env:WTERMINAL_DOWNLOADS) { $wtDl = Join-Path (Split-Path $env:WTERMINAL_DOWNLOADS -Parent) 'winget'; New-Item -ItemType Directory -Force -Path $wtDl -ErrorAction SilentlyContinue | Out-Null; if (Test-Path -LiteralPath $wtDl) { $env:TEMP = $wtDl; $env:TMP = $wtDl } }; try { __INSTALL__; $wtCode = $LASTEXITCODE; if ($wtCode -eq -1978335226 -and $wtLocation.Count) { Write-Host "El instalador de __LEAF__ no aceptó la carpeta propia ($wtTarget); se instala en su carpeta de siempre."; $wtLocation = @(); $wtTarget = $null; __INSTALL__; $wtCode = $LASTEXITCODE } } finally { $env:TEMP = $wtOldTemp; $env:TMP = $wtOldTmp }; if ($wtCode -in @(-1978335189, -1978335135)) { Write-Host '__LEAF__ ya estaba instalado y no hay una versión más nueva: no había nada que hacer.'; $wtCode = 0; $global:LASTEXITCODE = 0 }; if ($wtCode -ne 0) { $wtWhy = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; StartTime = $wtStart } -ErrorAction SilentlyContinue | Where-Object { $_.Id -in @(10005, 11708, 11603, 11722, 11920) } | ForEach-Object { ($_.Message -split "`r?`n")[0].Trim() } | Where-Object { $_ } | Select-Object -Unique -First 3); if ($wtWhy.Count) { Write-Host 'Windows Installer explica el fallo:'; $wtWhy | ForEach-Object { Write-Host "  $_" } } elseif ($wtCode -eq -1978335226) { Write-Host 'El instalador del programa falló por su cuenta; su registro está en %LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir.' } }; if ($wtTarget -and $wtCode -eq 0 -and -not (Get-ChildItem -LiteralPath $wtTarget -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { $wtNew = @($wtWatch | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue } | Where-Object { $wtBefore -notcontains $_.FullName -and -not $_.LinkType } | ForEach-Object FullName); if ($wtNew.Count -eq 0) { if ('__FLAG__') { Write-Host "__LEAF__ no usó la carpeta propia ($wtTarget) y no se encontró una carpeta nueva en Program Files ni en LOCALAPPDATA\Programs." } } else { Write-Host "__LEAF__ no se instaló en la carpeta propia; está en: $($wtNew -join ', ')"; $wtAnswer = Read-Host '¿Moverlo a la carpeta propia y dejar una unión en su sitio? Pide permisos de administrador (s/N)'; if ($wtAnswer -match '^[sSyY]') { $wtQuote = { param($text) "'" + ($text -replace "'", "''") + "'" }; $wtFlags = '/E /MOVE /IS /IT /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP'; $wtLines = @(); foreach ($wtDir in $wtNew) { $wtDest = Join-Path $wtTarget (Split-Path $wtDir -Leaf); Get-Process | Where-Object { $_.Path -like "$wtDir\*" } | Stop-Process -Force -ErrorAction SilentlyContinue; $wtSrc = & $wtQuote $wtDir; $wtDst = & $wtQuote $wtDest; $wtLines += "robocopy $wtSrc $wtDst $wtFlags | Out-Null; if (@(Get-ChildItem -LiteralPath $wtSrc -Recurse -File -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $wtSrc -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Junction -Path $wtSrc -Target $wtDst | Out-Null } else { robocopy $wtDst $wtSrc $wtFlags | Out-Null }" }; $wtScript = Join-Path $env:TEMP ('wterminal-move-' + [guid]::NewGuid().ToString() + '.ps1'); Set-Content -LiteralPath $wtScript -Value $wtLines -Encoding UTF8; Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$wtScript`"" -Verb RunAs -Wait -WindowStyle Hidden; Remove-Item -LiteralPath $wtScript -ErrorAction SilentlyContinue; foreach ($wtDir in $wtNew) { $wtItem = Get-Item -LiteralPath $wtDir -Force -ErrorAction SilentlyContinue; if ($wtItem -and $wtItem.LinkType -eq 'Junction') { Write-Host "Movido: $wtDir -> $(@($wtItem.Target)[0])" } else { Write-Host "No se pudo mover $wtDir (¿algún archivo en uso?): sigue en su sitio." } } } } }; $global:LASTEXITCODE = $wtCode"#;
 
 /// RubyGems compila extensiones nativas de muchas gemas (Rails, Nokogiri,
 /// Jekyll, etc.) y en Windows necesita `make`.  La acción de Ruby prepara
@@ -5579,6 +5632,31 @@ fn sort_by_group(mut actions: Vec<InstallAction>) -> Vec<InstallAction> {
 /// El catálogo completo para este sistema, ya ordenado por apartados. Sigue sin
 /// filtrar: qué acciones tienen sentido aquí lo decide quien las pide, que es
 /// el único que sabe qué comandos existen en el PATH.
+/// 22-11 (Romen, cargo-binstall: «requires rustc 1.100 or newer» con 1.96):
+/// «no debería fallar, sino actualizar». Si `cargo install` falla y hay
+/// rustup, se actualiza Rust (`rustup update stable`) y se reintenta UNA vez,
+/// diciéndolo en pantalla. En Windows va en PowerShell (la acción se adapta a
+/// cualquier pestaña; PowerShell 5 no entiende `||`); en Linux y macOS,
+/// `a || b && c`, que bash, zsh y fish leen igual. La sonda sigue leyendo el
+/// paquete tras `--verbose`.
+fn cargo_retry_with_newer_rust(mut action: InstallAction, windows: bool) -> InstallAction {
+    let command = action.command.trim().to_string();
+    let is_cargo_install =
+        command.starts_with("cargo install --verbose ") && !command.contains(['&', '|', ';']);
+    if !is_cargo_install {
+        return action;
+    }
+    action.command = if windows {
+        action.shell = Some("powershell".into());
+        format!(
+            "{command} ; if ($LASTEXITCODE -ne 0 -and (Get-Command rustup -ErrorAction SilentlyContinue)) {{ Write-Host 'Cargo no pudo instalarlo; suele ser que pide un Rust más nuevo. Se actualiza Rust (rustup update stable) y se reintenta una vez.'; rustup update stable; if ($LASTEXITCODE -eq 0) {{ {command} }} }}"
+        )
+    } else {
+        format!("{command} || rustup update stable && {command}")
+    };
+    action
+}
+
 pub fn get_install_actions(context: &InstallContext, t: &Translator) -> Vec<InstallAction> {
     let actions = match context.platform.as_str() {
         "windows" => windows_actions(context.wsl.as_ref(), &context.projects_folder, t),
@@ -5592,11 +5670,14 @@ pub fn get_install_actions(context: &InstallContext, t: &Translator) -> Vec<Inst
             t,
         ),
     };
+    let windows = context.platform == "windows";
     sort_by_group(
         actions
             .into_iter()
+            .map(|action| cargo_retry_with_newer_rust(action, windows))
             .map(default_group)
             .map(describe_action)
+            .map(|action| if windows { mark_admin(action) } else { action })
             .collect(),
     )
 }
@@ -5604,6 +5685,99 @@ pub fn get_install_actions(context: &InstallContext, t: &Translator) -> Vec<Inst
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 22-11: una herramienta de Rust que pide un Rust más nuevo no falla:
+    /// se actualiza Rust y se reintenta una vez; la sonda sigue igual.
+    #[test]
+    fn cargo_reintenta_con_un_rust_mas_nuevo() {
+        let windows = get_install_actions(&contexto("windows"), &t());
+        let binstall = windows
+            .iter()
+            .find(|a| a.id == "framework-cargo-binstall")
+            .unwrap();
+        assert_eq!(binstall.shell.as_deref(), Some("powershell"));
+        assert!(binstall
+            .command
+            .starts_with("cargo install --verbose cargo-binstall ; if ($LASTEXITCODE -ne 0"));
+        assert!(binstall.command.contains("rustup update stable"));
+        assert_eq!(
+            binstall.check_cmd.as_deref(),
+            Some("ecosystem:cargo|cargo|cargo-binstall")
+        );
+        let linux = get_install_actions(&contexto("linux"), &t());
+        let binstall = linux
+            .iter()
+            .find(|a| a.id == "framework-cargo-binstall")
+            .unwrap();
+        assert_eq!(
+            binstall.command,
+            "cargo install --verbose cargo-binstall || rustup update stable && cargo install --verbose cargo-binstall"
+        );
+    }
+
+    /// 22-11: si la instalación falla, se dice por qué con lo que apuntó
+    /// Windows Installer (con VirtualBox solo salía «código de salida: 1»).
+    #[test]
+    fn una_instalacion_fallida_explica_lo_que_dijo_windows_installer() {
+        let command = winget_install_command("Oracle.VirtualBox");
+        assert!(command.starts_with("$wtStart = Get-Date; $wtTarget = $null; $wtBefore"));
+        assert!(command.contains("ProviderName = 'MsiInstaller'; StartTime = $wtStart"));
+        assert!(command.contains("Windows Installer explica el fallo:"));
+        assert!(command.contains("if ($wtCode -ne 0)"));
+        // «Ya instalado y sin versión nueva» (0x8A15002B, 0x8A150061) no es
+        // un fallo (22-11, «Preparar OTP para Mix» salía en rojo).
+        assert!(command.contains("if ($wtCode -in @(-1978335189, -1978335135))"));
+        assert!(command
+            .contains("Oracle.VirtualBox ya estaba instalado y no hay una versión más nueva"));
+    }
+
+    /// 21-11 (VirtualBox, Romen): su instalador rechaza la carpeta propia
+    /// («Invalid installation directory specified!»): va a la de siempre y no
+    /// se ofrece moverlo. Los demás la intentan y, si el instalador falla, se
+    /// repite una vez sin ella.
+    #[test]
+    fn virtualbox_se_instala_en_su_carpeta_y_los_demas_reintentan_sin_la_propia() {
+        let actions = get_install_actions(&contexto("windows"), &t());
+        let command = |id: &str| {
+            actions
+                .iter()
+                .find(|action| action.id == id)
+                .unwrap_or_else(|| panic!("falta {id}"))
+                .command
+                .clone()
+        };
+        let vbox = command("winget-virtualbox");
+        assert!(
+            vbox.contains("if ($env:WTERMINAL_PROGRAMS -and '') {"),
+            "{vbox}"
+        );
+        let other = actions
+            .iter()
+            .find(|action| {
+                action.command.contains("winget install --id") && action.id != "winget-virtualbox"
+            })
+            .expect("otra instalación de WinGet")
+            .command
+            .clone();
+        assert!(
+            other.contains("if ($env:WTERMINAL_PROGRAMS -and '1') {"),
+            "{other}"
+        );
+        for text in [&vbox, &other] {
+            assert!(
+                text.contains("if ($wtCode -eq -1978335226 -and $wtLocation.Count) {"),
+                "{text}"
+            );
+            assert!(
+                text.contains("$wtLocation = @(); $wtTarget = $null; winget install --id"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("__OWN__") && !text.contains("__INSTALL__"),
+                "{text}"
+            );
+        }
+    }
     use crate::wsl_env::{InstalledDistro, OnlineDistro};
 
     fn t() -> Translator {
@@ -5948,7 +6122,8 @@ mod tests {
         );
         assert!(
             command.contains(
-                "$wtCode = $LASTEXITCODE } finally { $env:TEMP = $wtOldTemp; $env:TMP = $wtOldTmp }"
+                // 21-11: el reintento sin la carpeta propia también va dentro.
+                "$wtCode = $LASTEXITCODE } } finally { $env:TEMP = $wtOldTemp; $env:TMP = $wtOldTmp }"
             ),
             "{command}"
         );

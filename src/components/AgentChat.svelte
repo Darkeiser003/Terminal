@@ -41,6 +41,7 @@
         stripAnsi,
         type ChatTurn,
     } from '../lib/agent-chat';
+    import { autoTitle, canResumeNative, cleanAgentTitle, nativeAfterAnswer, newChatId, toStoredMessages, type NativeLink, type NativeSession, type StoredChat } from '../lib/agent-chat-history';
     import type { AgentChatAgent, AgentChatAttachment, AgentChatFailureHelp, AgentChatModels } from '../lib/types';
     import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -56,8 +57,12 @@
         context?: string | null;
         attachments?: { name: string; bytes: number; truncated: boolean }[];
         /** Agente: con qué se preguntó (para repetir) y cuánto tardó. */
-        ask?: { agentId: string; prompt: string; question: string; model: string; effort: string; mode: string; fast: boolean };
+        ask?: { agentId: string; prompt: string; question: string; model: string; effort: string; mode: string; fast: boolean; fullPrompt?: string; session?: NativeSession | null };
         startedAt?: number;
+        /** Agente: la sesión que dijo abrir la CLI (Codex). */
+        nativeSession?: string;
+        /** Agente: la pregunta retomó la sesión propia (24-11). */
+        resumed?: boolean;
         finishedAt?: number;
         /** Agente: el reintento por saturación en curso (`agent-chat-status`). */
         retry?: { attempt: number; max: number; status: number } | null;
@@ -75,14 +80,26 @@
     // `embedded`: sin borde, ancho ni cierre propios (los lleva el
     // contenedor); `active`: es el que se ve; `onstatus` le dice al
     // contenedor si está trabajando y con qué agente.
+    //
+    // Historial (23-11): `chatId` es el archivo de esta conversación y
+    // `restore`, la conversación guardada que se reabre. Cada cambio se
+    // guarda (si el ajuste del historial está encendido) y `onstatus` le pasa
+    // al contenedor el id, el título y si está vacío.
     let {
         embedded = false,
         active = true,
+        chatId = undefined,
+        restore = null,
+        help = false,
         onstatus = undefined,
     }: {
         embedded?: boolean;
         active?: boolean;
-        onstatus?: (status: { busy: boolean; agent: string }) => void;
+        chatId?: string;
+        restore?: StoredChat | null;
+        /** El chat de ayuda: recoge las preguntas del aviso de ayuda con IA. */
+        help?: boolean;
+        onstatus?: (status: { busy: boolean; agent: string; chatId: string; title: string; empty: boolean }) => void;
     } = $props();
 
     const WIDTH_KEY = 'wterminal.agentChat.width';
@@ -125,6 +142,26 @@
     let agentSelect = $state<HTMLSelectElement | undefined>(undefined);
     let nextId = 0;
     let clock: ReturnType<typeof setInterval> | undefined;
+    // La conversación guardada: su archivo, su título y cuándo empezó.
+    let conversationId = $state(untrack(() => restore?.id ?? chatId ?? newChatId()));
+    /** El nombre fijo del chat de ayuda. */
+    function helpTitle(): string {
+        return app.t('agentChat.helpChatTitle', 'Ayuda de WTerminal');
+    }
+    let title = $state(untrack(() => restore?.title || (help ? helpTitle() : '')));
+    let titleEdited = $state(untrack(() => restore?.titleEdited === true));
+    let createdAt = untrack(() => restore?.createdAt ?? Date.now());
+    // La sesión propia del agente que ya conoce esta conversación (24-11).
+    let native = $state<NativeLink | null>(untrack(() => restore?.native ?? null));
+    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    let destroyed = false;
+    // Lo guardado vuelve tal cual: mensajes, agente (si sigue en la lista; si
+    // no, `loadAgents` elige otro) y título.
+    untrack(() => {
+        if (!restore) return;
+        messages = restore.messages.map((message) => ({ ...message, id: ++nextId, pending: false, requestId: null }));
+        agentId = restore.agentId;
+    });
     const unlisten: UnlistenFn[] = [];
 
     const pending = $derived(messages.find((message) => message.pending) ?? null);
@@ -150,6 +187,15 @@
         if (effort && !effortLevels.includes(effort)) effort = '';
     });
     const remember = $derived(app.preferences?.agentChatRemember !== false);
+    /** Claude Code y Codex retoman su sesión (`agentChatNativeSessions`). */
+    function nativeOn(id: string): boolean {
+        return remember && app.preferences?.agentChatNativeSessions !== false
+            && agents.some((item) => item.id === id && item.nativeSessions === true);
+    }
+    /** Una sesión nueva (Claude Code la abre con este id; Codex, con el suyo). */
+    function freshSession(id: string): NativeSession | null {
+        return nativeOn(id) ? { id: crypto.randomUUID(), resume: false } : null;
+    }
     const canEdit = $derived(app.preferences?.agentChatCanEdit === true);
     const allowBypass = $derived(canEdit && app.preferences?.agentChatAllowBypass === true);
     // Los modos (14-11, Romen con el menú de Claude: «los permisos tmb»). El
@@ -175,22 +221,119 @@
     // El modo consejero deja una pregunta preparada (sin mandarla): se recoge
     // en el campo, con el contexto marcado, y el usuario decide si la envía.
     // Solo el chat que se ve: con varios, la recogería uno escondido.
+    // La del aviso de ayuda solo la recoge el chat de ayuda (el contenedor lo
+    // abre o lo crea y lo pone delante); con «Mandar sola la pregunta de
+    // ayuda», se manda en cuanto el agente está listo.
+    let sendWhenReady = $state(false);
     $effect(() => {
         const prepared = app.agentChatDraft;
-        if (!prepared || !active) return;
+        if (!prepared || !active || (prepared.help === true && !help)) return;
         draft = prepared.text;
         withContext = prepared.withContext;
         app.agentChatDraft = null;
+        sendWhenReady = prepared.help === true && app.preferences?.agentChatAdvisorSend === true;
         void tick().then(() => {
             autoGrow();
             input?.focus();
         });
     });
-
-    // Al contenedor: si este chat trabaja y con qué agente (su pestaña).
     $effect(() => {
-        onstatus?.({ busy: pending !== null, agent: agentLabel });
+        if (!sendWhenReady || loading || pending) return;
+        sendWhenReady = false;
+        if (agentId && draft.trim()) void send();
     });
+
+    // Al contenedor: si este chat trabaja, con qué agente, su archivo y su
+    // título (su pestaña y la sesión).
+    const historyOn = $derived(app.preferences?.agentChatHistory !== false);
+    $effect(() => {
+        onstatus?.({ busy: pending !== null, agent: agentLabel, chatId: conversationId, title, empty: messages.length === 0 });
+    });
+
+    // ---- Historial ----
+
+    /** Guarda la conversación (sin esperar: un fallo de disco no corta el
+     *  chat). Sin mensajes no hay nada que guardar. */
+    function persistNow(): void {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = undefined;
+        if (!historyOn || messages.length === 0) return;
+        const firstQuestion = messages.find((message) => message.role === 'user')?.text ?? '';
+        if (!titleEdited) title = help ? helpTitle() : autoTitle(firstQuestion) || title;
+        const label = agentLabel || messages.find((message) => message.agent)?.agent || '';
+        const chat: StoredChat = {
+            version: 1,
+            id: conversationId,
+            title,
+            titleEdited: titleEdited || undefined,
+            agentId,
+            agentLabel: label,
+            createdAt,
+            updatedAt: Date.now(),
+            messages: toStoredMessages(messages, app.t('agentChat.interrupted', 'Cortado: se cerró el chat mientras contestaba.')),
+            native: native ?? undefined,
+            help: help || undefined,
+        };
+        void api.agentChatHistorySave(chat).catch(() => {});
+    }
+
+    /** Guarda poco después: varios cambios seguidos (cada trozo de una
+     *  respuesta no, solo los cambios de estado) en una sola escritura. */
+    function persistSoon(): void {
+        if (destroyed) return;
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = setTimeout(persistNow, 400);
+    }
+
+    /** Cambia el título desde el historial; ya no se cambia solo. */
+    export function rename(next: string): void {
+        const clean = next.trim().slice(0, 120);
+        if (!clean) return;
+        title = clean;
+        titleEdited = true;
+        persistNow();
+    }
+
+    /** El historial borró esta conversación: lo de pantalla empieza de cero
+     *  con otro archivo, para no volver a guardarla. */
+    export function forget(): void {
+        if (pending) return;
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = undefined;
+        messages = [];
+        startFresh();
+    }
+
+    /** El chat de ayuda que caducó (24-11): guarda este y empieza otro en la
+     *  misma pestaña. Devuelve el id del que se dejó. */
+    export function restartConversation(): string | null {
+        if (pending) return null;
+        const previous = messages.length ? conversationId : null;
+        persistNow();
+        messages = [];
+        startFresh();
+        return previous;
+    }
+
+    /** El id de esta conversación (el contenedor lo usa para fijarla). */
+    export function currentId(): string {
+        return conversationId;
+    }
+
+    /** Cuándo empezó y cuántos mensajes lleva (caducidad del chat de ayuda). */
+    export function age(): { createdAt: number; messages: number } {
+        return { createdAt, messages: messages.length };
+    }
+
+    function startFresh(): void {
+        titleAsked = false;
+        native = null;
+        conversationId = newChatId();
+        title = help ? helpTitle() : '';
+        titleEdited = false;
+        createdAt = Date.now();
+        notice = '';
+    }
 
     // Al volver a la vista, el foco al campo de la pregunta.
     $effect(() => {
@@ -428,42 +571,52 @@
                 agent: app.t('agentChat.agentRole', 'Agente'),
             })
             : '';
-        const prompt = buildChatPrompt({
-            question,
-            transcript,
-            attachments,
-            context,
-            labels: {
-                conversation: app.t('agentChat.promptConversation', 'Conversación hasta ahora:'),
-                attachment: app.t('agentChat.promptAttachment', 'Archivo adjunto «{name}»:'),
-                truncated: app.t('agentChat.promptTruncated', 'solo el principio'),
-                question: app.t('agentChat.promptQuestion', 'Pregunta:'),
-            },
-        });
+        const labels = {
+            conversation: app.t('agentChat.promptConversation', 'Conversación hasta ahora:'),
+            attachment: app.t('agentChat.promptAttachment', 'Archivo adjunto «{name}»:'),
+            truncated: app.t('agentChat.promptTruncated', 'solo el principio'),
+            question: app.t('agentChat.promptQuestion', 'Pregunta:'),
+        };
+        const fullPrompt = buildChatPrompt({ question, transcript, attachments, context, labels });
+        // Claude Code y Codex retoman su sesión (24-11): solo va lo nuevo. Si
+        // no se puede (otro agente, un fallo en medio), una sesión nueva con
+        // la conversación entera.
+        const resume = nativeOn(agentId) && canResumeNative(native, agentId, messages.length);
+        const session: NativeSession | null = resume && native ? { id: native.id, resume: true } : freshSession(agentId);
+        const prompt = resume ? buildChatPrompt({ question, transcript: '', attachments, context, labels }) : fullPrompt;
         const sent = attachments.map(({ name, bytes, truncated }) => ({ name, bytes, truncated }));
         draft = '';
         attachments = [];
         autoGrow();
         saveChoice();
         messages.push({ id: ++nextId, role: 'user', agent: agentLabel, text: question, pending: false, error: null, requestId: null, context, attachments: sent });
-        await ask({ agentId, prompt, question, model: model.trim(), effort, mode: effectiveMode, fast: fast && fastAvailable });
+        persistSoon();
+        await ask({ agentId, prompt, question, model: model.trim(), effort, mode: effectiveMode, fast: fast && fastAvailable, fullPrompt, session });
+        void titleWithAgent();
     }
 
     async function ask(request: NonNullable<Message['ask']>): Promise<void> {
         const label = agents.find((item) => item.id === request.agentId)?.label ?? agentLabel;
-        const answer: Message = { id: ++nextId, role: 'agent', agent: label, text: '', pending: true, error: null, requestId: null, ask: request, startedAt: Date.now() };
+        const answer: Message = { id: ++nextId, role: 'agent', agent: label, text: '', pending: true, error: null, requestId: null, ask: request, startedAt: Date.now(), resumed: request.session?.resume === true };
         messages.push(answer);
         await scrollToEnd(true);
         try {
-            const requestId = await api.agentChatAsk(request.agentId, request.prompt, app.activeTabId, request.model, request.effort, request.mode, request.fast);
+            const requestId = await api.agentChatAsk(request.agentId, request.prompt, app.activeTabId, request.model, request.effort, request.mode, request.fast, request.session ?? null);
             const target = messages.find((message) => message.id === answer.id);
             if (target) target.requestId = requestId;
         } catch (error) {
             const target = messages.find((message) => message.id === answer.id);
             if (!target) return;
+            const reason = String(error);
+            // El agente o el modo no retoman sesión (Codex en automático) o
+            // el ajuste se apagó: la misma pregunta, con la conversación entera.
+            if (request.session && reason.includes('session-unsupported')) {
+                native = null;
+                await replaceAnswer(target, { ...request, prompt: request.fullPrompt ?? request.prompt, session: null });
+                return;
+            }
             target.pending = false;
             target.finishedAt = Date.now();
-            const reason = String(error);
             const needsKey = /needs-key:([A-Z0-9_]+)/u.exec(reason);
             if (needsKey) {
                 // ShellGPT sin clave la pide por consola y se colgaría: no se
@@ -478,6 +631,7 @@
                 return;
             }
             target.error = describeAskError(reason);
+            persistSoon();
         }
     }
 
@@ -504,20 +658,58 @@
             .replace('{max}', String(retry.max));
     }
 
-    /** Repite la misma pregunta, con el mismo agente, modelo, intensidad y modo. */
+    // ---- Título puesto por el agente (`agentChatAutoTitle`, 24-11) ----
+    // Tras la primera respuesta buena, una pregunta aparte (sin la guía ni la
+    // sesión) pide un título corto. Gasta cuenta: apagado de fábrica.
+    let titleRequest: { id: number | null; text: string } | null = null;
+    let titleAsked = untrack(() => Boolean(restore));
+    async function titleWithAgent(): Promise<void> {
+        if (titleAsked || titleEdited || help || app.preferences?.agentChatAutoTitle !== true) return;
+        // Espera a que la primera respuesta acabe bien.
+        await new Promise<void>((resolve) => {
+            const check = () => (destroyed || !pending ? resolve() : setTimeout(check, 500));
+            check();
+        });
+        const first = messages.find((message) => message.role === 'agent');
+        const question = messages.find((message) => message.role === 'user')?.text ?? '';
+        if (destroyed || titleAsked || titleEdited || !first || first.error || !first.text.trim() || !question) return;
+        titleAsked = true;
+        const prompt = app.t('agentChat.titlePrompt', 'Pon un título de 3 a 6 palabras, en el idioma de la pregunta, a esta conversación. Contesta solo el título, sin comillas.')
+            + `\n\n${question.slice(0, 2000)}\n\n${first.text.slice(0, 2000)}`;
+        titleRequest = { id: null, text: '' };
+        try {
+            const id = await api.agentChatAsk(first.ask?.agentId ?? agentId, prompt, app.activeTabId, first.ask?.model ?? '', '', '', false, null);
+            if (titleRequest) titleRequest.id = id;
+        } catch {
+            titleRequest = null;
+        }
+    }
+
+    /** Quita una respuesta que no llegó a empezar y vuelve a preguntar. */
+    async function replaceAnswer(target: Message, request: NonNullable<Message['ask']>): Promise<void> {
+        const index = messages.findIndex((message) => message.id === target.id);
+        if (index >= 0) messages.splice(index, 1);
+        await ask(request);
+    }
+
+    /** Repite la misma pregunta, con el mismo agente, modelo, intensidad y
+     *  modo. Tras un fallo, siempre con la conversación entera. */
     async function retry(message: Message): Promise<void> {
         if (!message.ask || pending) return;
-        await ask(message.ask);
+        await ask({ ...message.ask, prompt: message.ask.fullPrompt ?? message.ask.prompt, session: freshSession(message.ask.agentId) });
     }
 
     async function stop(): Promise<void> {
         if (pending?.requestId != null) await api.agentChatCancel(pending.requestId);
     }
 
+    /** Empieza otra conversación en esta pestaña. La anterior queda en el
+     *  historial (23-11): antes se perdía. */
     function newConversation(): void {
         if (pending) return;
+        persistNow();
         messages = [];
-        notice = '';
+        startFresh();
         void tick().then(() => input?.focus());
     }
 
@@ -617,9 +809,15 @@
     function insertIntoTerminal(code: string): void {
         const controls = app.activeTabId ? getTerminalControls(app.activeTabId) : undefined;
         const rejected = controls?.insertLine(code.trim()) ?? 'not-ready';
-        notice = rejected
-            ? app.t('agentChat.insertRejected', 'No se pudo escribir en la terminal: tiene que estar en un prompt vacío.')
-            : app.t('agentChat.inserted', 'Escrito en la terminal, sin ejecutar. Revísalo y pulsa Intro si quieres.');
+        // Cada motivo con su aviso (23-11): antes todos decían «tiene que estar
+        // en un prompt vacío», también con la orden ya escrita.
+        notice = rejected === 'draft'
+            ? app.t('agentChat.insertRejectedDraft', 'La línea de la terminal ya tiene otro texto escrito: bórralo y vuelve a insertarlo.')
+            : rejected === 'busy'
+                ? app.t('agentChat.insertRejectedBusy', 'La terminal está ocupada con una orden: espera a que vuelva el prompt.')
+                : rejected
+                    ? app.t('agentChat.insertRejected', 'No se pudo escribir en la terminal: tiene que estar en un prompt vacío.')
+                    : app.t('agentChat.inserted', 'Escrito en la terminal, sin ejecutar. Revísalo y pulsa Intro si quieres.');
     }
 
     async function copy(code: string): Promise<void> {
@@ -667,6 +865,10 @@
 
     onMount(() => {
         void api.onAgentChatData((requestId, text) => {
+            if (titleRequest && titleRequest.id === requestId) {
+                titleRequest.text += stripAnsi(text);
+                return;
+            }
             const target = messages.find((message) => message.requestId === requestId);
             if (!target) return;
             target.text += stripAnsi(text);
@@ -681,12 +883,34 @@
             if (!target || !target.pending) return;
             if (status.retry) target.retry = status.retry;
             if (status.model) target.reportedModel = status.model;
+            if (status.session) target.nativeSession = status.session;
         }).then((stopListening) => unlisten.push(stopListening));
         void api.onAgentChatDone((requestId, code, error, detail) => {
+            if (titleRequest && titleRequest.id === requestId) {
+                const proposed = error ? '' : cleanAgentTitle(titleRequest.text);
+                titleRequest = null;
+                if (proposed && !titleEdited) {
+                    title = proposed;
+                    titleEdited = true;
+                    persistNow();
+                }
+                return;
+            }
             const target = messages.find((message) => message.requestId === requestId);
             if (!target) return;
+            // La sesión ya no está (Claude Code las guarda por carpeta): la
+            // misma pregunta en una sesión nueva, con la conversación entera.
+            if (error === 'session-missing' && target.ask) {
+                native = null;
+                const request = target.ask;
+                void replaceAnswer(target, { ...request, prompt: request.fullPrompt ?? request.prompt, session: freshSession(request.agentId) });
+                return;
+            }
             target.pending = false;
             target.finishedAt = Date.now();
+            if (!error && target.text.trim() && target.ask?.session) {
+                native = nativeAfterAnswer(target.ask.session, target.nativeSession, target.ask.agentId, messages.length);
+            }
             // Lo que escribió por la salida de error, aunque no haya fallado
             // (15-11: Amp acababa bien sin contestar y no se veía por qué).
             const said = detail ? stripAnsi(detail).trim().slice(-4000) : '';
@@ -729,6 +953,7 @@
                 if (said) target.errorDetail = said;
                 offerHelp(said, true);
             }
+            persistSoon();
             void scrollToEnd();
         }).then((stopListening) => unlisten.push(stopListening));
         clock = setInterval(() => {
@@ -737,6 +962,9 @@
     });
 
     onDestroy(() => {
+        // Lo último, sin esperar: una respuesta a medias queda como cortada.
+        persistNow();
+        destroyed = true;
         for (const stopListening of unlisten) stopListening();
         if (clock) clearInterval(clock);
         if (pending?.requestId != null) void api.agentChatCancel(pending.requestId);
@@ -975,6 +1203,7 @@
                         {#if message.ask?.effort}<span>{effortLabel(message.ask.effort)}</span>{/if}
                         {#if message.ask?.mode && EDITING_MODES.includes(message.ask.mode)}<span>{modeLabel(message.ask.mode)}</span>{/if}
                         {#if message.ask?.fast}<span>{app.t('agentChat.fast', 'Modo rápido')}</span>{/if}
+                        {#if message.resumed && app.preferences?.agentChatShowResumed !== false}<span class="resumed" data-testid="agent-chat-resumed" title={app.t('agentChat.resumedHint', 'Se retomó la sesión propia del agente: solo se mandó lo nuevo.')}>{app.t('agentChat.resumed', 'sesión retomada')}</span>{/if}
                         <span class="elapsed" data-testid="agent-chat-elapsed">{elapsed(message)}</span>
                     </p>
                     <div class="answer">
@@ -1605,6 +1834,12 @@
     /* «modelo por defecto»: no es un nombre, se distingue de uno elegido. */
     .meta .default-model {
         font-style: italic;
+    }
+
+    /* «sesión retomada» (24-11): discreta, como el modelo por defecto. */
+    .meta .resumed {
+        font-style: italic;
+        opacity: 0.8;
     }
 
     .cursor {

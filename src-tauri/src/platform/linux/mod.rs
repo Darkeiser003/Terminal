@@ -12,6 +12,9 @@ impl ProcessPlatform for LinuxPlatform {
 
     fn configure_detached_command(&self, _command: &mut Command) {}
 
+    // En Linux las sondas son pocas y cortas: se quedan con su prioridad.
+    fn configure_probe_priority(&self, _command: &mut Command, _low: bool) {}
+
     fn sideloaded_conpty(&self) -> Option<PathBuf> {
         None
     }

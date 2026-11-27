@@ -140,6 +140,8 @@ export interface Preferences {
     showLanguageButton: boolean;
     terminalOnlyMode: boolean;
     showTerminalOnlyGuide: boolean;
+    /** La guía de primeros pasos sale sola al arrancar (21-11). */
+    showFirstSteps: boolean;
     startMaximized: boolean;
     startAsAdmin: boolean;
     manualAliasesText: string;
@@ -181,6 +183,8 @@ export interface Preferences {
     shortcutTerminalFontDown: string;
     shortcutTerminalFontReset: string;
     shortcutToggleAgentChat: string;
+    /** Ir a la pestaña N: el atajo de la 1; con 2…9 y 0, las siguientes (22-11). */
+    shortcutGoToTab: string;
     themeId: string;
     accentColor: string;
     uiBackgroundColor: string;
@@ -215,20 +219,65 @@ export interface Preferences {
     terminalLinks: boolean;
     /** Confirmar con el destino a la vista antes de abrir un enlace. */
     terminalLinksConfirm: boolean;
+    /** Pestañas ocupadas (26-11): el nombre de la orden que tarda. */
+    busyTabRename: boolean;
+    /** Y un color por tipo, regla propia o turno. */
+    busyTabColor: boolean;
+    busyTabSeconds: number;
+    busyTabSecondsLowPower: number;
+    /** «tipo=color» separados por comas. */
+    busyTabColors: string;
+    /** «principio de la orden=color» separados por `;`. */
+    busyTabRules: string;
+    /** Programas que solo cambian el nombre. */
+    busyTabExclude: string;
+    commandDoneNotice: boolean;
+    commandDoneSeconds: number;
+    commandDoneSecondsLowPower: number;
+    /** Avisar en la pestaña que se ve cuando termina otra. */
+    commandDoneOtherTab: boolean;
+    /** Ver juntas las pestañas en marcha al entrar en una. */
+    busyTabGroup: boolean;
+    busyTabUngroup: boolean;
+    busyTabUngroupSeconds: number;
     /** Windows: el REPL de Python con el ancho visible, sin la reserva. */
     pythonReplVisibleWidth: boolean;
     /** Las órdenes de las acciones salen de una vez (de fábrica, poco a poco). */
     actionCommandsAtOnce: boolean;
+    /** Dejar a la vista la línea tecleada de las acciones (22-11). */
+    keepActionCommandLine: boolean;
+    /** Poner los valores recomendados a los programas (22-11). */
+    applyProgramDefaults: boolean;
     /** Ofrecer meter la clave de API cuando una IA acaba pidiéndola. */
     aiKeyOffer: boolean;
     /** El chat lateral con los agentes de IA. */
     agentChat: boolean;
     /** Modo consejero: al fallar una orden, ofrecer preguntar al agente. */
     agentChatAdvisor: boolean;
+    agentChatAdvisorSend: boolean;
     /** El botón «Chat» de la barra superior. */
     showAgentChatButton: boolean;
     /** El chat manda lo hablado antes para que el agente lo recuerde. */
     agentChatRemember: boolean;
+    /** Los chats se guardan en el historial (cerrar no los pierde). */
+    agentChatHistory: boolean;
+    /** Al abrir el chat vuelven las pestañas que estaban abiertas. */
+    agentChatRestore: boolean;
+    agentChatNativeSessions: boolean;
+    agentChatAutoTitle: boolean;
+    agentChatShowResumed: boolean;
+    agentChatPinHelp: boolean;
+    agentChatForgetNative: boolean;
+    agentChatCleanup: boolean;
+    regenerableAutoClean: boolean;
+    regenerableCleanCaches: boolean;
+    regenerableCleanDownloads: boolean;
+    regenerableCleanDetection: boolean;
+    regenerableCleanLogs: boolean;
+    agentChatCleanupDays: number;
+    agentChatHelpMaxDays: number;
+    agentChatHelpMaxMessages: number;
+    regenerableAutoCleanDays: number;
     /** Los agentes del chat pueden editar la carpeta de la pestaña (deja
      *  elegir «Aceptar ediciones» y «Auto»). */
     agentChatCanEdit: boolean;
@@ -255,12 +304,18 @@ export interface Preferences {
     suggestRepositoryImport: boolean;
     /** Modo de bajo consumo (apagado de fábrica). */
     lowPowerMode: boolean;
+    /** Las sondas de detección con prioridad baja (26-11). */
+    probeLowPriority: boolean;
+    /** Sondas a la vez; 0 es automático. */
+    probeMaxParallel: number;
     /** Sugerir el modo de bajo consumo si el equipo va justo. */
     lowPowerSuggest: boolean;
     /** Ofrecer instalar la herramienta que pide una orden que no existe. */
     suggestMissingTools: boolean;
     /** Sugerir guardar un perfil portable si no hay ninguno en su carpeta. */
     offerPortableProfile: boolean;
+    /** Al cambiar ajustes con un perfil ya guardado, ofrecer guardarlos (21-11). */
+    offerProfileUpdate: boolean;
     githubSessionMode: 'always' | 'onExhausted' | 'never';
     /** Buscar versión nueva de WTerminal al arrancar. */
     checkUpdatesOnStartup: boolean;
@@ -439,6 +494,8 @@ export interface AiKeyStored {
 export interface AgentChatAgent {
     id: string;
     label: string;
+    /** Retoma su propia sesión (Claude Code y Codex, 24-11). */
+    nativeSessions?: boolean;
     /** Se le puede preguntar desde el chat; si no, `unavailable` dice por qué
      *  (`args-only`, `edits-files`, `needs-permissions`, `no-one-shot`). */
     chat: boolean;
@@ -593,7 +650,7 @@ export interface ToolchainStoreStatus {
 }
 
 export interface InternalCommand {
-    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'ltools' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'set' | 'chat' | 'panes' | 'openDirectory' | 'darkeiser003' | 'christianlg97';
+    action: 'config' | 'reload' | 'repl' | 'shell' | 'alias' | 'help' | 'banner' | 'quickActions' | 'ltools' | 'panel' | 'theme' | 'font' | 'language' | 'terminal' | 'set' | 'chat' | 'chatPin' | 'panes' | 'openDirectory' | 'darkeiser003' | 'christianlg97';
     argument?: string;
 }
 
@@ -1124,6 +1181,9 @@ export interface InstallAction {
     label: string;
     shortLabel: string | null;
     command: string;
+    /** Necesita administrador (capacidades de Windows, WSL…): la tarjeta lo
+     *  marca y WTerminal la eleva con gsudo o el sudo de Windows (21-11). */
+    admin: boolean;
     /** Apartado de primer nivel, en español; `groupKey` es su traducción. */
     group: string;
     groupKey: string | null;
@@ -1166,6 +1226,11 @@ export interface InstallRunResult {
      *  desde un REPL se busca o se abre una shell de verdad. */
     tabId?: string;
     created: boolean;
+    /** La acción necesita administrador y no hay gsudo ni sudo de Windows en
+     *  línea con que pedirlo: la app ofrece instalar gsudo o reiniciarse. */
+    needsAdmin?: boolean;
+    /** Se lanzó con gsudo o con el sudo de Windows: Windows pide permiso (UAC). */
+    elevated?: boolean;
 }
 
 /** Acción declarativa publicada por LTools. `args` es argv, nunca una cadena
@@ -1294,4 +1359,27 @@ export interface EnvChangedEvent {
 export interface CwdChangedEvent {
     tabId: string;
     cwd: string;
+}
+
+/** Un ajuste de un programa de la terminal (`config/programs.rs`, 22-11). */
+export interface ProgramSetting {
+    id: string;
+    label: string;
+    description: string;
+    kind: 'toggle' | 'text' | 'choice' | 'number';
+    /** Lo guardado ahora; vacío = el del programa, sin tocar. */
+    value: string;
+    defaultValue: string;
+    options: { value: string; label: string }[];
+}
+
+export interface ProgramSection {
+    id: string;
+    name: string;
+    available: boolean;
+    /** Dónde se guarda: archivo, clave del registro u orden. */
+    source: string;
+    note: string | null;
+    canUndo: boolean;
+    settings: ProgramSetting[];
 }

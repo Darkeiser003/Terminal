@@ -1146,6 +1146,10 @@ fn render_internal(lines: &mut Vec<String>, app_name: &str) {
         "Muestra u oculta el chat lateral con los agentes de IA (preguntar sin entrar en su CLI).",
     ));
     lines.push(help_row(
+        ":chat pin|unpin <help|id>",
+        "Fija o desfija un chat arriba del historial del chat; help es el chat de ayuda.",
+    ));
+    lines.push(help_row(
         ":panes [1|2|3|4|cycle]",
         "Muestra o cambia directamente el número de terminales visibles en la rejilla.",
     ));

@@ -5,6 +5,10 @@ use std::process::Command;
 pub trait ProcessPlatform {
     fn configure_background_command(&self, command: &mut Command);
     fn configure_detached_command(&self, command: &mut Command);
+    /// Las sondas de detección con prioridad baja (`probeLowPriority`):
+    /// Windows atiende antes a las pestañas. Solo para las sondas, nunca
+    /// para los programas que abre el usuario.
+    fn configure_probe_priority(&self, command: &mut Command, low: bool);
     fn sideloaded_conpty(&self) -> Option<PathBuf>;
 }
 

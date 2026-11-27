@@ -584,6 +584,7 @@ struct RetryWatch {
     line: String,
     busy: u32,
     model_seen: bool,
+    session_seen: bool,
 }
 
 /// Lo que se ve en la salida de error mientras contesta.
@@ -595,6 +596,8 @@ enum StderrEvent {
     GaveUp(u16),
     /// El modelo que dice estar usando.
     Model(String),
+    /// La sesión que abrió (Codex, `session id: …`).
+    Session(String),
 }
 
 impl RetryWatch {
@@ -614,10 +617,13 @@ impl RetryWatch {
                         status,
                     }
                 });
-            } else if !self.model_seen {
-                if let Some(model) = reported_model(&line) {
-                    self.model_seen = true;
-                    events.push(StderrEvent::Model(model));
+            } else if !self.model_seen && reported_model(&line).is_some() {
+                self.model_seen = true;
+                events.extend(reported_model(&line).map(StderrEvent::Model));
+            } else if !self.session_seen {
+                if let Some(session) = reported_session(&line) {
+                    self.session_seen = true;
+                    events.push(StderrEvent::Session(session));
                 }
             }
         }
@@ -684,6 +690,10 @@ pub struct ChatAgent {
     pub modes: Vec<String>,
     /// Tiene modo rápido (Claude Code y Codex).
     pub fast: bool,
+    /// Puede retomar su propia sesión (24-11): Claude Code (`--session-id` y
+    /// `--resume`) y Codex (`codex exec resume`). Con ella, cada pregunta
+    /// manda solo lo nuevo en vez de la conversación entera.
+    pub native_sessions: bool,
 }
 
 /// Un adjunto leído (`agent_chat_read_attachment`).
@@ -714,6 +724,8 @@ struct ChatStatus {
     retry: Option<ChatRetry>,
     /// El modelo que dice estar usando la CLI.
     model: Option<String>,
+    /// La sesión que abrió la CLI (Codex la dice en su cabecera).
+    session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -888,6 +900,7 @@ pub fn agent_chat_agents(state: State<'_, Arc<AppState>>) -> Vec<ChatAgent> {
                     .map(|spec| spec.modes.iter().map(|mode| mode.id.to_string()).collect())
                     .unwrap_or_default(),
                 fast: spec.is_some_and(|spec| spec.fast.is_some()),
+                native_sessions: native_session_kind(&env.id).is_some(),
                 id: env.id,
                 label: env.label,
             }
@@ -904,6 +917,134 @@ pub struct AskOptions {
     /// Modo de permisos; vacío, el de fábrica del agente.
     pub mode: Option<String>,
     pub fast: bool,
+    /// La sesión propia del agente ([`with_native_session`]); sin ella, la
+    /// pregunta lleva la conversación entera, como siempre.
+    pub session: Option<NativeSession>,
+}
+
+/// La sesión propia de Claude Code o Codex para una pregunta (24-11).
+/// `resume`: retomarla (la pregunta lleva solo lo nuevo); si no, empezar una
+/// (Claude Code la abre con ese `id`; Codex elige el suyo y lo dice en su
+/// cabecera, `session id: …`, que llega en `agent-chat-status`).
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NativeSession {
+    pub id: String,
+    pub resume: bool,
+}
+
+/// Qué agentes retoman su propia sesión y cómo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeKind {
+    Claude,
+    Codex,
+}
+
+fn native_session_kind(env_id: &str) -> Option<NativeKind> {
+    match env_id {
+        "ai:claude" => Some(NativeKind::Claude),
+        "ai:codex" => Some(NativeKind::Codex),
+        _ => None,
+    }
+}
+
+/// Un UUID en su forma de texto (8-4-4-4-12 hexadecimales): lo único que se
+/// pasa como id de sesión, nunca un texto libre en la orden.
+fn valid_session_id(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(part, len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Los argumentos de [`one_shot_args_with`] con la sesión propia del agente.
+/// `Err("session-unsupported")` si ese agente o ese modo no la admiten: el
+/// panel vuelve entonces a mandar la conversación entera.
+///
+/// - Claude Code: `--session-id <id>` la empieza y `--resume <id>` la retoma.
+/// - Codex: empieza sola; retomarla es `codex exec resume <id> -`, que no
+///   tiene `-s` ni `--color` ni `--approve-for-me` (`codex exec resume
+///   --help`, 24-11): el modo de solo leer y el de editar van con
+///   `-c sandbox_mode=…`; el modo automático no se puede retomar.
+fn with_native_session(
+    env_id: &str,
+    args: Vec<String>,
+    session: &NativeSession,
+) -> Result<Vec<String>, &'static str> {
+    let kind = native_session_kind(env_id).ok_or("session-unsupported")?;
+    if (kind == NativeKind::Claude || session.resume) && !valid_session_id(&session.id) {
+        return Err("session-unsupported");
+    }
+    match kind {
+        NativeKind::Claude => {
+            let mut args = args;
+            args.push(
+                if session.resume {
+                    "--resume"
+                } else {
+                    "--session-id"
+                }
+                .to_string(),
+            );
+            args.push(session.id.clone());
+            Ok(args)
+        }
+        NativeKind::Codex if !session.resume => Ok(args),
+        NativeKind::Codex => {
+            let head = ["exec", "--skip-git-repo-check", "--color", "never"];
+            if args.len() < head.len() + 1
+                || args[..head.len()] != head
+                || args.last().map(String::as_str) != Some("-")
+            {
+                return Err("session-unsupported");
+            }
+            let mut out: Vec<String> = ["exec", "resume", "--skip-git-repo-check"]
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect();
+            let middle = &args[head.len()..args.len() - 1];
+            let mut index = 0;
+            while index < middle.len() {
+                match middle[index].as_str() {
+                    "-s" => {
+                        let sandbox = middle.get(index + 1).ok_or("session-unsupported")?;
+                        out.push("-c".to_string());
+                        out.push(format!("sandbox_mode=\"{sandbox}\""));
+                        index += 2;
+                    }
+                    "--approve-for-me" => return Err("session-unsupported"),
+                    other => {
+                        out.push(other.to_string());
+                        index += 1;
+                    }
+                }
+            }
+            out.push(session.id.clone());
+            out.push("-".to_string());
+            Ok(out)
+        }
+    }
+}
+
+/// La salida de error de una sesión que ya no está: Claude Code guarda las
+/// suyas por carpeta («No conversation found with session ID»), y se pueden
+/// borrar. El panel la empieza de nuevo con la conversación entera.
+fn session_missing(errors: &str) -> bool {
+    let lower = errors.to_ascii_lowercase();
+    lower.contains("no conversation found")
+        || lower.contains("no saved session")
+        || lower.contains("session not found")
+        || lower.contains("thread not found")
+        || (lower.contains("session") && lower.contains("not found"))
+}
+
+/// El id de una línea `session id: <uuid>` (la cabecera de `codex exec`).
+fn reported_session(line: &str) -> Option<String> {
+    let line = crate::current_dir::strip_ansi(line);
+    let value = line.trim().strip_prefix("session id:")?.trim();
+    valid_session_id(value).then(|| value.to_ascii_lowercase())
 }
 
 /// La CLI que, sin clave, la pide por consola en vez de fallar: ShellGPT, la
@@ -962,18 +1103,6 @@ pub fn agent_chat_ask(
         return Err("disabled".into());
     }
     let prompt = validate_prompt(&prompt)?.to_string();
-    // La guía de WTerminal, oculta, delante de la pregunta (`agentChatGuide`,
-    // 14-11). Los modelos locales de Ollama no: son pequeños y la pregunta
-    // se les perdería entre tanto texto.
-    let prompt =
-        if crate::preferences::current().agent_chat_guide && !env_id.starts_with("ai:ollama") {
-            format!(
-                "{}{prompt}",
-                crate::environments::agent_guide::chat_preamble()
-            )
-        } else {
-            prompt
-        };
     let env = state
         .environment_by_id(&env_id)
         .ok_or_else(|| "unknown-agent".to_string())?;
@@ -982,7 +1111,29 @@ pub fn agent_chat_ask(
         effort,
         mode,
         fast,
+        session,
     } = options.unwrap_or_default();
+    // Sin el ajuste, nada de sesiones propias: el panel manda entonces la
+    // conversación entera.
+    if session.is_some() && !crate::preferences::current().agent_chat_native_sessions {
+        return Err("session-unsupported".into());
+    }
+    let resuming = session.as_ref().is_some_and(|session| session.resume);
+    // La guía de WTerminal, oculta, delante de la pregunta (`agentChatGuide`,
+    // 14-11). Los modelos locales de Ollama no: son pequeños y la pregunta
+    // se les perdería entre tanto texto.
+    // Al retomar una sesión, la guía ya la tiene de la primera pregunta.
+    let prompt = if crate::preferences::current().agent_chat_guide
+        && !env_id.starts_with("ai:ollama")
+        && !resuming
+    {
+        format!(
+            "{}{prompt}",
+            crate::environments::agent_guide::chat_preamble()
+        )
+    } else {
+        prompt
+    };
     // De fábrica, solo leer; editar la carpeta, con `agentChatCanEdit`, y
     // omitir permisos, además con `agentChatAllowBypass`.
     let args = one_shot_args_with(
@@ -996,6 +1147,10 @@ pub fn agent_chat_ask(
         },
         Allowed::current(),
     )?;
+    let args = match &session {
+        Some(session) => with_native_session(&env.id, args, session)?,
+        None => args,
+    };
     if fast && spec_for(&env.id).and_then(|spec| spec.fast) == Some(Fast::ClaudeSettings) {
         write_claude_fast_settings()?;
     }
@@ -1117,11 +1272,19 @@ pub fn agent_chat_ask(
                                 status,
                             }),
                             model: None,
+                            session: None,
                         },
                         StderrEvent::Model(model) => ChatStatus {
                             request_id,
                             retry: None,
                             model: Some(model),
+                            session: None,
+                        },
+                        StderrEvent::Session(session) => ChatStatus {
+                            request_id,
+                            retry: None,
+                            model: None,
+                            session: Some(session),
                         },
                     };
                     let _ = app.emit("agent-chat-status", status);
@@ -1216,6 +1379,10 @@ pub fn agent_chat_ask(
             Some("cancelled".to_string())
         } else if code == Some(0) {
             None
+        } else if resuming && session_missing(&errors.lock()) {
+            // La sesión ya no está (otra carpeta, o se borró): el panel la
+            // empieza de nuevo con la conversación entera.
+            Some("session-missing".to_string())
         } else {
             let errors = errors.lock().trim().to_string();
             let tail = output_tail.lock().trim().to_string();
@@ -2179,6 +2346,133 @@ mod tests {
         assert_eq!(reported_model("  \"model\": \"gemini-2.5-pro\",\n"), None);
         assert_eq!(reported_model("model: no es un modelo\n"), None);
         assert_eq!(reported_model("the model: x\n"), None);
+    }
+
+    const SESION: &str = "0199a213-81c0-7800-8aa1-bbab2a035a53";
+
+    /// Codex dice su sesión en la cabecera (`session id: …`): se avisa una
+    /// vez, para retomarla en la pregunta siguiente (24-11).
+    #[test]
+    fn la_sesion_que_abre_codex_se_avisa_una_vez() {
+        let cabecera = format!(
+            "--------\nmodel: gpt-5.1-codex\nsandbox: read-only\nsession id: {SESION}\n--------\n"
+        );
+        let mut watch = RetryWatch::default();
+        assert_eq!(
+            watch.push(&cabecera),
+            vec![
+                StderrEvent::Model("gpt-5.1-codex".into()),
+                StderrEvent::Session(SESION.into())
+            ]
+        );
+        assert_eq!(
+            watch.push(&format!("session id: {SESION}\n")),
+            vec![],
+            "solo la primera"
+        );
+        assert_eq!(reported_session("session id: no-es-un-uuid\n"), None);
+        assert_eq!(
+            reported_session(&format!(
+                "\x1b[1msession id:\x1b[0m {}\n",
+                SESION.to_uppercase()
+            )),
+            Some(SESION.into())
+        );
+    }
+
+    #[test]
+    fn solo_un_uuid_vale_como_sesion() {
+        assert!(valid_session_id(SESION));
+        assert!(!valid_session_id(""));
+        assert!(!valid_session_id("0199a213-81c0-7800-8aa1-bbab2a035a5"));
+        assert!(!valid_session_id(
+            "0199a213-81c0-7800-8aa1-bbab2a035a53 --x"
+        ));
+        assert!(!valid_session_id("zz99a213-81c0-7800-8aa1-bbab2a035a53"));
+    }
+
+    /// Claude Code empieza su sesión con `--session-id` y la retoma con
+    /// `--resume`; Codex la retoma con `exec resume`, que no tiene `-s` ni
+    /// `--color` (24-11).
+    #[test]
+    fn la_sesion_propia_cambia_los_argumentos() {
+        let nueva = NativeSession {
+            id: SESION.into(),
+            resume: false,
+        };
+        let retomar = NativeSession {
+            id: SESION.into(),
+            resume: true,
+        };
+        let claude = with("ai:claude", None, None).unwrap();
+        assert_eq!(
+            with_native_session("ai:claude", claude.clone(), &nueva).unwrap(),
+            [claude.clone(), vec!["--session-id".into(), SESION.into()]].concat()
+        );
+        assert_eq!(
+            with_native_session("ai:claude", claude.clone(), &retomar).unwrap(),
+            [claude, vec!["--resume".into(), SESION.into()]].concat()
+        );
+        let codex = with("ai:codex", Some("gpt-5.1-codex"), None).unwrap();
+        assert_eq!(
+            with_native_session("ai:codex", codex.clone(), &nueva).unwrap(),
+            codex,
+            "Codex empieza su sesión solo"
+        );
+        let resumed = with_native_session("ai:codex", codex, &retomar).unwrap();
+        assert_eq!(
+            resumed,
+            [
+                "exec",
+                "resume",
+                "--skip-git-repo-check",
+                "-c",
+                "sandbox_mode=\"read-only\"",
+                "-m",
+                "gpt-5.1-codex",
+                SESION,
+                "-"
+            ]
+            .map(String::from)
+            .to_vec()
+        );
+        // El modo automático de Codex no se puede retomar, ni otro agente.
+        let auto = one_shot_args_with(
+            "ai:codex",
+            &[],
+            Choice {
+                mode: Some("auto"),
+                ..Choice::default()
+            },
+            EDIT,
+        )
+        .unwrap();
+        assert_eq!(
+            with_native_session("ai:codex", auto, &retomar),
+            Err("session-unsupported")
+        );
+        assert_eq!(
+            with_native_session("ai:qwen", vec![], &nueva),
+            Err("session-unsupported")
+        );
+        // Un id que no es un UUID nunca llega a la orden.
+        let mala = NativeSession {
+            id: "--dangerously-skip-permissions".into(),
+            resume: true,
+        };
+        assert_eq!(
+            with_native_session("ai:claude", vec!["-p".into()], &mala),
+            Err("session-unsupported")
+        );
+    }
+
+    #[test]
+    fn la_sesion_perdida_se_reconoce() {
+        assert!(session_missing(
+            "No conversation found with session ID: 0199a213-81c0-7800-8aa1-bbab2a035a53"
+        ));
+        assert!(session_missing("Error: thread not found"));
+        assert!(!session_missing("Error: rate limit exceeded"));
     }
 
     /// opencode (y Amp, pnpm) trae su programa compilado: su `.cmd` de npm

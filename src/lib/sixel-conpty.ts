@@ -64,16 +64,26 @@ export function sixelPixelAspect(p1: number | undefined, data: string): number {
     }
 }
 
+/** ¿La imagen empieza con atributos de trama (`"Pan;Pad;Ph;Pv`)? */
+export function sixelHasRaster(data: string): boolean {
+    return /^"\d+;\d+/u.test(data);
+}
+
 /**
  * Caja de celdas que reserva ConPTY para una imagen de `width`×`height`
- * píxeles Sixel. ConPTY deja el cursor en la fila donde empezaría la banda
- * siguiente (`floor(v)` filas más abajo); el complemento de xterm lo deja en
- * la última fila de la imagen (`filas - 1`). Por eso la caja mide
- * `floor(v) + 1` filas: así ambos acaban en la misma.
+ * píxeles Sixel. Sin atributos de trama, ConPTY deja el cursor en la fila
+ * donde empezaría la banda siguiente (`floor(v)` filas más abajo). Con ellos
+ * (`"Pan;Pad;Ph;Pv`, lo que mandan chafa, img2sixel o fastfetch) conoce el
+ * alto de antemano y lo deja en la fila de su último píxel (`ceil(v) - 1`).
+ * Solo cambia cuando la imagen ocupa un número exacto de celdas (23-11: una
+ * de 60 px a 1:1 dejaba xterm una fila por debajo y, con el alto de línea 1,2,
+ * la orden siguiente salía descolocada). El complemento de xterm deja el
+ * cursor en la última fila de la imagen (`filas - 1`), así que la caja mide
+ * esas filas más una.
  */
-export function conptySixelBox(width: number, height: number, aspect: number, cell: CellSize): SixelBox {
+export function conptySixelBox(width: number, height: number, aspect: number, cell: CellSize, raster = false): SixelBox {
     const virtualRows = (height * aspect) / VT340_CELL.height;
-    const rows = Math.floor(virtualRows) + 1;
+    const rows = raster ? Math.max(1, Math.ceil(virtualRows)) : Math.floor(virtualRows) + 1;
     const cols = Math.max(1, Math.ceil(width / VT340_CELL.width));
     // `floor` mantiene `ceil(caja / celda)` en el número exacto de celdas aunque
     // la celda mida una fracción de píxel.
@@ -108,23 +118,27 @@ export function alignSixelWithConpty(term: Terminal, imageAddon: object): () => 
     const storage = internals._storage;
     if (!storage || typeof storage.addImage !== 'function') return () => {};
     let pendingAspect: number | null = null;
+    let pendingRaster = false;
     // Se registra después del complemento, así que se ejecuta antes que él y
     // devuelve `false` para no consumir la secuencia.
     const observer = term.parser.registerDcsHandler({ final: 'q' }, (data, params) => {
         const first = params[0];
         pendingAspect = sixelPixelAspect(typeof first === 'number' ? first : undefined, data);
+        pendingRaster = sixelHasRaster(data);
         return false;
     });
     const original = storage.addImage.bind(storage);
     storage.addImage = (image) => {
         const aspect = pendingAspect ?? 2;
+        const raster = pendingRaster;
         pendingAspect = null;
+        pendingRaster = false;
         const cell = internals._renderer?.cellSize;
         if (!cell || cell.width <= 0 || cell.height <= 0 || typeof document === 'undefined') {
             original(image);
             return;
         }
-        const box = conptySixelBox(image.width, image.height, aspect, cell);
+        const box = conptySixelBox(image.width, image.height, aspect, cell, raster);
         const canvas = document.createElement('canvas');
         canvas.width = box.boxWidth;
         canvas.height = box.boxHeight;

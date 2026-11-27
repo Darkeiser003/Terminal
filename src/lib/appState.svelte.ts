@@ -9,6 +9,9 @@ import defaultBannerLogo from '../assets/banner/logo.png';
 import { rememberCommand } from './command-history';
 import { createKeyedSerialQueue } from './keyed-serial-queue';
 import { platformBrandText } from './localization';
+import {
+    chooseBusyColor, commandLabel, DEFAULT_BUSY_TAB_COLORS, DEFAULT_BUSY_TAB_EXCLUDE, isExcludedCommand, watchPanes,
+} from './busy-tabs';
 
 /** Cuántas terminales caben a la vez en la rejilla. Cuatro es el límite en el
  *  que cada una sigue siendo usable a tamaño de ventana normal. */
@@ -30,6 +33,30 @@ export const TAB_COLORS = {
     pink: '#db61a2',
 } as const;
 export type TabColor = keyof typeof TAB_COLORS;
+
+/** Una orden larga en una pestaña (ver `busy-tabs.ts`). */
+export interface BusyTab {
+    command: string;
+    /** El nombre que pone en la pestaña ('' con el ajuste apagado). */
+    label: string;
+    color: TabColor | null;
+    /** Editores, monitores, shells…: solo el nombre. */
+    excluded: boolean;
+    startedAt: number;
+    status: 'running' | 'ok' | 'failed';
+}
+
+export interface CommandDoneNotice {
+    id: number;
+    tabId: string;
+    text: string;
+    failed: boolean;
+}
+
+/** Lo que dura la marca de «terminado» en la pestaña. */
+const BUSY_DONE_MARK_MS = 8000;
+/** Lo que dura el aviso de que otra pestaña terminó. */
+const COMMAND_DONE_NOTICE_MS = 12000;
 import { applyTheme } from './theme';
 import type {
     AppInfo,
@@ -84,7 +111,9 @@ class AppStore {
     agentChatVisible = $state(false);
     /** Pregunta que el modo consejero deja preparada en el chat (sin
      *  mandarla): el chat la recoge al abrirse y la vacía. */
-    agentChatDraft = $state<{ text: string; withContext: boolean } | null>(null);
+    /** Una pregunta preparada para el chat. `help`: viene del aviso de ayuda
+     *  con IA y va al chat de ayuda (24-11). */
+    agentChatDraft = $state<{ text: string; withContext: boolean; help?: boolean } | null>(null);
 
     /** Nombres puestos a mano. Viven en la interfaz porque el backend reescribe
      *  la etiqueta al cambiar de shell, y ese cambio no debe borrar el nombre. */
@@ -93,6 +122,19 @@ class AppStore {
     renamingTabId = $state<string | null>(null);
     /** Colores puestos a mano, igual que los nombres: solo de la interfaz. */
     tabColors = $state<Record<string, TabColor>>({});
+    /** Pestañas ocupadas (26-11): la orden larga que corre en cada una, con el
+     *  nombre y el color que se le pusieron solos. Al terminar quedan un rato
+     *  como `ok` o `failed` (la marca de «terminado») y se borran. */
+    busyTabs = $state<Record<string, BusyTab>>({});
+    /** Avisos de «la orden de otra pestaña terminó», el más nuevo al final. */
+    commandDoneNotices = $state<CommandDoneNotice[]>([]);
+    /** Lleva la cuenta del turno de colores de las órdenes sin tipo. */
+    private busyTurn = 0;
+    private busyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /** Las pestañas que juntó la vista de vigilancia: solo esa vista se
+     *  deshace sola; una división hecha a mano no se toca. */
+    private watchSet = new Set<string>();
+    private noticeSeq = 0;
     /** Órdenes escritas en todas las pestañas, la más reciente al final (ver
      *  `command-history.ts`: qué entra y qué no). */
     commandHistory = $state<string[]>([]);
@@ -498,9 +540,150 @@ class AppStore {
         });
     }
 
-    /** El nombre que se enseña: el puesto a mano o el del entorno. */
+    /** El nombre que se enseña: el puesto a mano, el de la orden larga que
+     *  corre o el del entorno. */
     tabTitle(tab: TabSummary): string {
-        return this.tabNames[tab.id] ?? tab.label;
+        const busy = this.busyTabs[tab.id];
+        return this.tabNames[tab.id] ?? (busy?.status === 'running' && busy.label ? busy.label : tab.label);
+    }
+
+    /** El color que se enseña: el puesto a mano manda sobre el de la orden. */
+    tabColor(tabId: string): TabColor | null {
+        const busy = this.busyTabs[tabId];
+        return this.tabColors[tabId] ?? (busy?.status === 'running' ? busy.color : null);
+    }
+
+    /** Una orden de esta pestaña lleva ya el tiempo de los ajustes: su nombre
+     *  y su color mientras corre. Las excepciones (editores, monitores…) solo
+     *  cambian el nombre. */
+    startBusyTab(tabId: string, command: string): void {
+        const prefs = this.preferences;
+        if (!prefs || !this.tabs.some((tab) => tab.id === tabId)) return;
+        this.clearBusyTimer(tabId);
+        const excluded = isExcludedCommand(command, prefs.busyTabExclude ?? DEFAULT_BUSY_TAB_EXCLUDE);
+        const label = prefs.busyTabRename === false ? '' : commandLabel(command);
+        let color: TabColor | null = null;
+        if (prefs.busyTabColor !== false && !excluded) {
+            const inUse = Object.entries(this.busyTabs)
+                .filter(([id, busy]) => id !== tabId && busy.status === 'running' && busy.color)
+                .map(([, busy]) => busy.color as string);
+            const choice = chooseBusyColor({
+                command,
+                categoryColors: prefs.busyTabColors ?? DEFAULT_BUSY_TAB_COLORS,
+                rules: prefs.busyTabRules ?? '',
+                inUse,
+                turn: this.busyTurn,
+            });
+            if (choice.rotated) this.busyTurn += 1;
+            color = choice.color;
+        }
+        this.busyTabs = { ...this.busyTabs, [tabId]: { command, label, color, excluded, startedAt: Date.now(), status: 'running' } };
+    }
+
+    /** La orden terminó: vuelve el nombre de siempre, queda unos segundos la
+     *  marca de terminado y, si se pidió, sale de la vista de vigilancia. */
+    finishBusyTab(tabId: string, failed: boolean): void {
+        const busy = this.busyTabs[tabId];
+        if (!busy || busy.status !== 'running') return;
+        this.busyTabs = { ...this.busyTabs, [tabId]: { ...busy, status: failed ? 'failed' : 'ok' } };
+        this.clearBusyTimer(tabId);
+        this.busyTimers.set(tabId, setTimeout(() => {
+            this.busyTimers.delete(tabId);
+            if (this.busyTabs[tabId]?.status !== 'running') this.dropBusyTab(tabId);
+        }, BUSY_DONE_MARK_MS));
+        const prefs = this.preferences;
+        if (prefs?.busyTabUngroup === false || !this.watchSet.has(tabId)) return;
+        const wait = Math.max(0, Number(prefs?.busyTabUngroupSeconds ?? 5)) * 1000;
+        setTimeout(() => this.ungroupFinished(tabId), wait);
+    }
+
+    /** Sin rastro: la pestaña se cerró o cambió de entorno. */
+    clearBusyTab(tabId: string): void {
+        this.clearBusyTimer(tabId);
+        this.watchSet.delete(tabId);
+        if (this.busyTabs[tabId]) this.dropBusyTab(tabId);
+    }
+
+    /** La marca de terminado se quita al ver la pestaña. */
+    seenBusyTab(tabId: string): void {
+        const busy = this.busyTabs[tabId];
+        if (busy && busy.status !== 'running') {
+            this.clearBusyTimer(tabId);
+            this.dropBusyTab(tabId);
+        }
+    }
+
+    private dropBusyTab(tabId: string): void {
+        const { [tabId]: _removed, ...rest } = this.busyTabs;
+        this.busyTabs = rest;
+    }
+
+    private clearBusyTimer(tabId: string): void {
+        const timer = this.busyTimers.get(tabId);
+        if (timer !== undefined) clearTimeout(timer);
+        this.busyTimers.delete(tabId);
+    }
+
+    /** Las pestañas que siguen en marcha y cuentan para la vigilancia. */
+    get runningBusyTabs(): Array<{ id: string; startedAt: number }> {
+        return Object.entries(this.busyTabs)
+            .filter(([id, busy]) => busy.status === 'running' && !busy.excluded && this.tabs.some((tab) => tab.id === id))
+            .map(([id, busy]) => ({ id, startedAt: busy.startedAt }));
+    }
+
+    /** El clic en una pestaña. Con «agrupar» encendido, entrar en una ocupada
+     *  la enseña junto a las demás en marcha (si no hay ya una división). */
+    async openTab(tabId: string): Promise<void> {
+        const busy = this.busyTabs[tabId];
+        if (this.preferences?.busyTabGroup === true && busy?.status === 'running' && !busy.excluded && this.panes.length < 2) {
+            const ids = watchPanes(this.runningBusyTabs, tabId, MAX_PANES);
+            if (ids.length >= 2) {
+                this.watchSet = new Set(ids);
+                this.panes = ids;
+            }
+        }
+        this.seenBusyTab(tabId);
+        await this.activateTab(tabId);
+    }
+
+    /** «Ver las órdenes en marcha»: todas juntas (hasta cuatro) o, si solo
+     *  hay una, esa pestaña. */
+    async watchRunningTabs(): Promise<boolean> {
+        const running = this.runningBusyTabs;
+        if (running.length === 0) return false;
+        const current = this.activeTabId && running.some((entry) => entry.id === this.activeTabId) ? this.activeTabId : '';
+        const ids = watchPanes(running, current, MAX_PANES);
+        if (ids.length >= 2) {
+            this.watchSet = new Set(ids);
+            this.panes = ids;
+        }
+        await this.activateTab(ids[0]);
+        return true;
+    }
+
+    /** La que terminó sale de la vigilancia, salvo si es la que se está
+     *  mirando o si la división ya no es la de la vigilancia. */
+    private ungroupFinished(tabId: string): void {
+        if (!this.watchSet.has(tabId) || this.busyTabs[tabId]?.status === 'running') return;
+        if (this.activeTabId === tabId || !this.panes.includes(tabId)) return;
+        if (!this.panes.every((id) => this.watchSet.has(id))) {
+            this.watchSet.clear();
+            return;
+        }
+        this.watchSet.delete(tabId);
+        this.removeFromPanes(tabId);
+        if (this.panes.length < 2) this.watchSet.clear();
+    }
+
+    /** Aviso en la pestaña que se ve: la orden de otra terminó. */
+    pushCommandDone(tabId: string, text: string, failed: boolean): void {
+        const id = ++this.noticeSeq;
+        this.commandDoneNotices = [...this.commandDoneNotices.filter((notice) => notice.tabId !== tabId), { id, tabId, text, failed }].slice(-3);
+        setTimeout(() => this.dismissCommandDone(id), COMMAND_DONE_NOTICE_MS);
+    }
+
+    dismissCommandDone(id: number): void {
+        this.commandDoneNotices = this.commandDoneNotices.filter((notice) => notice.id !== id);
     }
 
     /** Un nombre vacío devuelve la pestaña al nombre de su entorno. */
@@ -538,6 +721,8 @@ class AppStore {
         this.activeTabId = activeTabId;
         this.renameTab(tabId, '');
         this.setTabColor(tabId, null);
+        this.clearBusyTab(tabId);
+        this.commandDoneNotices = this.commandDoneNotices.filter((notice) => notice.tabId !== tabId);
         if (this.renamingTabId === tabId) this.renamingTabId = null;
         this.syncPanes();
     }
@@ -580,6 +765,16 @@ class AppStore {
             }
             throw error;
         }
+    }
+
+    /** Espera a que acaben los guardados de preferencias en curso (también
+     *  los que se encolen mientras se espera). No lanza si alguno falló. */
+    async preferencesSettled(): Promise<void> {
+        let queue: Promise<void>;
+        do {
+            queue = this.preferencesSaveQueue;
+            await queue;
+        } while (queue !== this.preferencesSaveQueue);
     }
 
     async savePreferences(patch: Partial<Preferences>): Promise<void> {

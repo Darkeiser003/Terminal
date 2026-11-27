@@ -27,16 +27,48 @@
     } from "../lib/shortcuts";
     import type { AiKeyStored, CustomTheme, DesktopIntegrationStatus, ToolchainStoreCategory, PathIntegrationStatus, PluginInfo, Preferences, ProfileStatus, ShellAssistComponent, ShellAssistStatus, StorageLocationInfo, ThemePreset, ToolchainStoreLocation, ToolchainStoreStatus, UpdateProgress, UpdateStatus, WindowsIntegrationStatus } from "../lib/types";
     import { NOTICE_SETTINGS, restoreAllNotices, type NoticeSetting } from "../lib/notices";
+    import { BUSY_CATEGORIES, BUSY_TAB_COLORS, DEFAULT_BUSY_TAB_COLORS, formatCategoryColors, parseCategoryColors, type BusyCategory, type BusyTabColor } from "../lib/busy-tabs";
+    import { openFirstSteps } from "../lib/first-steps";
     import Panel from "./Panel.svelte";
+    import ProgramsSettings from "./ProgramsSettings.svelte";
     import SettingsResetDialog from "./SettingsResetDialog.svelte";
     import { ANSI_COLOR_KEYS, clampUiScale, DEFAULT_ANSI_COLORS, effectivePalette, effectiveUiScale, themePreferencePatch, UI_SCALE_MAX, UI_SCALE_MIN } from "../lib/theme";
 
-    type Section = "appearance" | "terminal" | "behavior" | "about";
+    type Section = "appearance" | "terminal" | "ai" | "behavior" | "shortcuts" | "system" | "programs" | "about";
 
     let section = $state<Section>("appearance");
     /** Borrador: una copia de las preferencias que solo existe mientras el
      *  panel está abierto. */
     let draft = $state<Preferences | null>(null);
+
+    /** Pestañas ocupadas: el color de cada tipo de orden ('' = por turno). */
+    function busyCategoryColor(category: BusyCategory): string {
+        return parseCategoryColors(draft?.busyTabColors ?? DEFAULT_BUSY_TAB_COLORS)[category] ?? "";
+    }
+    function setBusyCategoryColor(category: BusyCategory, value: string): void {
+        if (!draft) return;
+        const colors = parseCategoryColors(draft.busyTabColors ?? "");
+        if ((BUSY_TAB_COLORS as readonly string[]).includes(value)) colors[category] = value as BusyTabColor;
+        else delete colors[category];
+        draft.busyTabColors = formatCategoryColors(colors);
+    }
+    const busyCategoryName = (category: BusyCategory): string => ({
+        logs: app.t("settings.busyCategoryLogs", "Registros que no paran (journalctl, tail -f, docker logs)"),
+        server: app.t("settings.busyCategoryServer", "Servidores y modo desarrollo (npm run dev, vite)"),
+        build: app.t("settings.busyCategoryBuild", "Compilaciones y pruebas (cargo build, make, npm test)"),
+        install: app.t("settings.busyCategoryInstall", "Instalaciones y actualizaciones (winget, pip, npm install)"),
+        network: app.t("settings.busyCategoryNetwork", "Red (ping, curl, git clone)"),
+    })[category];
+    const busyColorName = (color: BusyTabColor): string => ({
+        red: app.t("tabs.colorRed", "Rojo"),
+        orange: app.t("tabs.colorOrange", "Naranja"),
+        yellow: app.t("tabs.colorYellow", "Amarillo"),
+        green: app.t("tabs.colorGreen", "Verde"),
+        cyan: app.t("tabs.colorCyan", "Turquesa"),
+        blue: app.t("tabs.colorBlue", "Azul"),
+        purple: app.t("tabs.colorPurple", "Morado"),
+        pink: app.t("tabs.colorPink", "Rosa"),
+    })[color];
     let status = $state("");
     let statusError = $state(false);
     let saving = $state(false);
@@ -1087,6 +1119,7 @@
         if (section !== "behavior" || !toolchainStorePreferenceKey) return;
         toolchainStoreConfirmClear = false;
         void refreshToolchainStore();
+        void refreshRegenerable();
     });
 
     /** La carpeta se aplica al confirmar (Intro o salir del campo), no en cada
@@ -1100,6 +1133,49 @@
     async function openToolchainFolder(path: string): Promise<void> {
         const result = await api.openDirectory(app.activeTabId ?? "", path).catch((cause) => ({ ok: false, error: String(cause) }));
         if (!result.ok) toolchainStoreMessage = result.error ?? app.t("error.noFolderOpen", "No hay una carpeta que abrir.");
+    }
+
+    // ---- Limpieza de lo regenerable (24-11) ----
+    // Las casillas son los mismos ajustes que usa la limpieza automática.
+    const REGENERABLE_KINDS: { kind: api.RegenerableKind; key: "regenerableCleanCaches" | "regenerableCleanDownloads" | "regenerableCleanDetection" | "regenerableCleanLogs"; label: string; fallback: string }[] = [
+        { kind: "caches", key: "regenerableCleanCaches", label: "settings.regenerableCaches", fallback: "Cachés de la carpeta propia (npm, pip, Go…)" },
+        { kind: "downloads", key: "regenerableCleanDownloads", label: "settings.regenerableDownloads", fallback: "Descargas del panel (instaladores y archivos que bajan las acciones)" },
+        { kind: "detection", key: "regenerableCleanDetection", label: "settings.regenerableDetection", fallback: "Caché de detección (entornos, discos, hardware y programas)" },
+        { kind: "logs", key: "regenerableCleanLogs", label: "settings.regenerableLogs", fallback: "Copia antigua del registro" },
+    ];
+    let regenerable = $state<Record<string, number> | null>(null);
+    let regenerableBusy = $state(false);
+    let regenerableConfirm = $state(false);
+    let regenerableMessage = $state("");
+    const regenerableChosen = $derived(REGENERABLE_KINDS.filter((item) => draft?.[item.key] !== false).map((item) => item.kind));
+    const regenerableBytes = $derived(regenerable ? regenerableChosen.reduce((sum, kind) => sum + (regenerable?.[kind] ?? 0), 0) : 0);
+
+    async function refreshRegenerable(): Promise<void> {
+        try {
+            const sizes = await api.regenerableSizes();
+            regenerable = Object.fromEntries(sizes.map((item) => [item.kind, item.bytes]));
+        } catch {
+            regenerable = null;
+        }
+    }
+
+    async function cleanRegenerable(): Promise<void> {
+        if (regenerableBusy || regenerableChosen.length === 0) return;
+        if (!regenerableConfirm) {
+            regenerableConfirm = true;
+            return;
+        }
+        regenerableConfirm = false;
+        regenerableBusy = true;
+        try {
+            const freed = await api.regenerableClean(regenerableChosen);
+            regenerableMessage = app.t("settings.regenerableCleaned", "Limpieza hecha: {size} liberados.").replace("{size}", formatBytes(freed));
+        } catch (cause) {
+            regenerableMessage = String(cause);
+        } finally {
+            regenerableBusy = false;
+        }
+        await Promise.all([refreshRegenerable(), refreshToolchainStore()]);
     }
 
     async function clearToolchainCaches(): Promise<void> {
@@ -1173,7 +1249,14 @@
     const sections: { id: Section; label: string }[] = $derived([
         { id: "appearance", label: app.t("settings.appearance", "Apariencia") },
         { id: "terminal", label: app.t("settings.terminal", "Terminal") },
-        { id: "behavior", label: app.t("settings.behavior", "Comportamiento") },
+        { id: "ai", label: app.t("settings.aiTab", "IA") },
+        // 22-11 (Romen: «reorganiza un poco los ajustes»): Comportamiento
+        // tenía once bloques; los atajos y lo que toca Windows tienen pestaña
+        // propia. El id «behavior» se conserva (pruebas y enlaces de Avisos).
+        { id: "behavior", label: app.t("settings.general", "General") },
+        { id: "shortcuts", label: app.t("settings.shortcutsTab", "Atajos") },
+        { id: "system", label: app.t("settings.system", "Sistema") },
+        { id: "programs", label: app.t("settings.programs", "Programas") },
         { id: "about", label: app.t("settings.about", "Información") },
     ]);
 </script>
@@ -1726,6 +1809,143 @@
                             >
                         </span>
                     </label>
+                    <div class="settings-subgroup" data-testid="settings-busy-tabs">
+                        <strong class="subgroup-title">{app.t("settings.busyTabsTitle", "Pestañas ocupadas y avisos al terminar")}</strong>
+                        <small class="subgroup-hint">{app.t("settings.busyTabsHint", "Funciona en las shells que marcan sus órdenes (cmd, PowerShell, bash, zsh y fish). El nombre y el color puestos a mano siempre mandan.")}</small>
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-busy-tab-rename"
+                                disabled={!draft.terminalCommandMarks}
+                                bind:checked={draft.busyTabRename}
+                            />
+                            <span>
+                                <strong>{app.t("settings.busyTabRename", "Poner el nombre de la orden a la pestaña mientras corre")}</strong>
+                                <small>{app.t("settings.busyTabRenameHint", "Si una orden tarda (journalctl, npm run dev, ping -t…), la pestaña se llama como ella hasta que termina y luego vuelve a su nombre.")}</small>
+                            </span>
+                        </label>
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-busy-tab-color"
+                                disabled={!draft.terminalCommandMarks}
+                                bind:checked={draft.busyTabColor}
+                            />
+                            <span>
+                                <strong>{app.t("settings.busyTabColor", "Y darle un color según el tipo de orden")}</strong>
+                                <small>{app.t("settings.busyTabColorHint", "Primero tus reglas, luego el color del tipo de orden y, si no se reconoce, uno por turno. El color se cambia a mano desde el menú de la pestaña.")}</small>
+                            </span>
+                        </label>
+                        <div class="grid">
+                            <label class="field">
+                                <span>{app.t("settings.busyTabSeconds", "A partir de estos segundos")}</span>
+                                <input type="number" data-testid="settings-busy-tab-seconds" min="1" max="3600" step="1" bind:value={draft.busyTabSeconds} />
+                            </label>
+                            <label class="field">
+                                <span>{app.t("settings.busyTabSecondsLowPower", "En modo de bajo consumo")}</span>
+                                <input type="number" data-testid="settings-busy-tab-seconds-low-power" min="1" max="3600" step="1" bind:value={draft.busyTabSecondsLowPower} />
+                            </label>
+                            {#each BUSY_CATEGORIES as category (category)}
+                                <label class="field span-2">
+                                    <span>{busyCategoryName(category)}</span>
+                                    <select
+                                        data-testid={`settings-busy-color-${category}`}
+                                        disabled={!draft.busyTabColor}
+                                        value={busyCategoryColor(category)}
+                                        onchange={(event) => setBusyCategoryColor(category, (event.currentTarget as HTMLSelectElement).value)}
+                                    >
+                                        <option value="">{app.t("settings.busyColorTurn", "Por turno")}</option>
+                                        {#each BUSY_TAB_COLORS as color (color)}
+                                            <option value={color}>{busyColorName(color)}</option>
+                                        {/each}
+                                    </select>
+                                </label>
+                            {/each}
+                            <label class="field span-2" title={app.t("settings.busyTabRulesHint", "Principio de la orden = color, separadas por punto y coma. Colores: red, orange, yellow, green, cyan, blue, purple, pink.")}>
+                                <span>{app.t("settings.busyTabRules", "Tus reglas (mandan sobre el tipo)")}</span>
+                                <input
+                                    type="text"
+                                    data-testid="settings-busy-tab-rules"
+                                    maxlength="2000"
+                                    spellcheck="false"
+                                    placeholder="kubectl logs=pink; ping=yellow"
+                                    disabled={!draft.busyTabColor}
+                                    bind:value={draft.busyTabRules}
+                                />
+                            </label>
+                            <label class="field span-2" title={app.t("settings.busyTabExcludeHint", "Programas que duran pero estás usando (editores, monitores, otras shells): solo cambian el nombre, sin color, aviso ni vista de vigilancia.")}>
+                                <span>{app.t("settings.busyTabExclude", "Programas que no cuentan como «cargando»")}</span>
+                                <input
+                                    type="text"
+                                    data-testid="settings-busy-tab-exclude"
+                                    maxlength="2000"
+                                    spellcheck="false"
+                                    bind:value={draft.busyTabExclude}
+                                />
+                            </label>
+                        </div>
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-command-done-notice"
+                                disabled={!draft.terminalCommandMarks}
+                                bind:checked={draft.commandDoneNotice}
+                            />
+                            <span>
+                                <strong>{app.t("settings.commandDoneNotice", "Avisar cuando termina una orden larga")}</strong>
+                                <small>{app.t("settings.commandDoneNoticeHint", "Con lo que tardó y, si falló, su código. Si WTerminal no está delante, también parpadea en la barra de tareas.")}</small>
+                            </span>
+                        </label>
+                        <div class="grid">
+                            <label class="field">
+                                <span>{app.t("settings.commandDoneSeconds", "Si tardó al menos estos segundos")}</span>
+                                <input type="number" data-testid="settings-command-done-seconds" min="1" max="86400" step="1" disabled={!draft.commandDoneNotice} bind:value={draft.commandDoneSeconds} />
+                            </label>
+                            <label class="field">
+                                <span>{app.t("settings.commandDoneSecondsLowPower", "En modo de bajo consumo")}</span>
+                                <input type="number" data-testid="settings-command-done-seconds-low-power" min="1" max="86400" step="1" disabled={!draft.commandDoneNotice} bind:value={draft.commandDoneSecondsLowPower} />
+                            </label>
+                        </div>
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-command-done-other-tab"
+                                disabled={!draft.commandDoneNotice}
+                                bind:checked={draft.commandDoneOtherTab}
+                            />
+                            <span>
+                                <strong>{app.t("settings.commandDoneOtherTab", "Si termina en otra pestaña, avisar en la que estás viendo")}</strong>
+                                <small>{app.t("settings.commandDoneOtherTabHint", "Dice qué orden, cuánto tardó y de qué pestaña viene, con un botón para ir a ella.")}</small>
+                            </span>
+                        </label>
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-busy-tab-group"
+                                disabled={!draft.terminalCommandMarks}
+                                bind:checked={draft.busyTabGroup}
+                            />
+                            <span>
+                                <strong>{app.t("settings.busyTabGroup", "Al entrar en una pestaña ocupada, verla junto a las demás en marcha")}</strong>
+                                <small>{app.t("settings.busyTabGroupHint", "Hasta cuatro en la vista dividida, si no tenías ya una. Con dos o más en marcha también sale el botón «En marcha» en la barra de pestañas.")}</small>
+                            </span>
+                        </label>
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-busy-tab-ungroup"
+                                bind:checked={draft.busyTabUngroup}
+                            />
+                            <span>
+                                <strong>{app.t("settings.busyTabUngroup", "Sacar de esa vista las que terminan")}</strong>
+                                <small>{app.t("settings.busyTabUngroupHint", "Nunca la que estás mirando, para no quitarte el resultado de delante. Una vista dividida hecha a mano no se toca.")}</small>
+                            </span>
+                        </label>
+                        <label class="field">
+                            <span>{app.t("settings.busyTabUngroupSeconds", "Pasados estos segundos")}</span>
+                            <input type="number" data-testid="settings-busy-tab-ungroup-seconds" min="0" max="3600" step="1" disabled={!draft.busyTabUngroup} bind:value={draft.busyTabUngroupSeconds} />
+                        </label>
+                    </div>
                     <label class="check">
                         <input
                             type="checkbox"
@@ -1795,6 +2015,27 @@
                     <label class="check">
                         <input
                             type="checkbox"
+                            data-testid="settings-keep-action-command-line"
+                            bind:checked={draft.keepActionCommandLine}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.keepActionCommandLine",
+                                    "Dejar a la vista la línea de las acciones",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.keepActionCommandLineHint",
+                                    "Apagado, la línea que escribe una acción se borra y la orden se lee en su cabecera. Encendido, se queda en la terminal como una orden escrita a mano.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
                             data-testid="settings-action-commands-at-once"
                             bind:checked={draft.actionCommandsAtOnce}
                         />
@@ -1802,13 +2043,13 @@
                             <strong
                                 >{app.t(
                                     "settings.actionCommandsAtOnce",
-                                    "Escribir de una vez las órdenes de las acciones",
+                                    "Escribir de golpe la orden de los botones (no la salida)",
                                 )}</strong
                             >
                             <small
                                 >{app.t(
                                     "settings.actionCommandsAtOnceHint",
-                                    "Al instalar, actualizar o lanzar una acción, su orden aparece entera de golpe en vez de verse escribir letra a letra. Apagado, se ve como la repinta la shell.",
+                                    "Solo la línea de la orden que escriben los botones de Biblioteca, Entorno y dependencias, Proyectos y LTools (por ejemplo «winget install …»): aparece entera de golpe en vez de verse teclear. Se nota con Clink en cmd o PSReadLine en PowerShell, que repintan esa línea letra a letra; sin ellos ya sale de golpe. No cambia la velocidad de la salida de los programas.",
                                 )}</small
                             >
                         </span>
@@ -1818,216 +2059,6 @@
                         <span>
                             <strong>{app.t("settings.suggestMissingTools", "Ofrecer instalar las órdenes que faltan")}</strong>
                             <small>{app.t("settings.suggestMissingToolsHint", "Si escribes una orden que no existe y WTerminal sabe instalarla, lo ofrece abajo (nunca instala nada solo).")}</small>
-                        </span>
-                    </label>
-                    <!-- Windows (DPAPI) y, desde el 17-11, Linux con el llavero del
-                         escritorio (`secret-tool`). -->
-                    {#if app.appInfo?.aiKeysSupported}
-                        <label class="check">
-                            <input
-                                type="checkbox"
-                                data-testid="settings-ai-key-offer"
-                                bind:checked={draft.aiKeyOffer}
-                            />
-                            <span>
-                                <strong
-                                    >{app.t(
-                                        "settings.aiKeyOffer",
-                                        "Ofrecer la clave de API cuando una IA la pida",
-                                    )}</strong
-                                >
-                                <small
-                                    >{app.appInfo?.platform === "windows"
-                                        ? app.t(
-                                              "settings.aiKeyOfferHint",
-                                              "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda cifrada para tu usuario de Windows y solo se pasa a esa IA.",
-                                          )
-                                        : app.t(
-                                              "settings.aiKeyOfferHintLinux",
-                                              "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda en el llavero de tu escritorio (secret-tool) y solo se pasa a esa IA.",
-                                          )}</small
-                                >
-                            </span>
-                        </label>
-                        {#if savedAiKeys.length > 0}
-                            <div class="saved-ai-keys" data-testid="settings-ai-keys">
-                                <small>{app.t("settings.aiKeysSaved", "Claves guardadas (cifradas):")}</small>
-                                {#each savedAiKeys as item (item.envVar)}
-                                    <span class="saved-ai-key">
-                                        <code>{item.envVar}</code>
-                                        <button type="button" data-testid="settings-ai-key-clear" data-env-var={item.envVar} onclick={() => void clearAiKey(item)}>
-                                            {app.t("settings.aiKeyClear", "Borrar")}
-                                        </button>
-                                    </span>
-                                {/each}
-                            </div>
-                        {/if}
-                    {/if}
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            data-testid="settings-agent-chat"
-                            bind:checked={draft.agentChat}
-                        />
-                        <span>
-                            <strong
-                                >{app.t(
-                                    "settings.agentChat",
-                                    "Chat lateral con los agentes de IA",
-                                )}</strong
-                            >
-                            <small
-                                >{app.t(
-                                    "settings.agentChatHint",
-                                    "Una barra a la derecha para preguntar a Claude Code, Gemini, Codex, Ollama… sin entrar en su CLI. Se abre con el botón «Chat IA» de arriba, :chat, la paleta o su atajo. Nunca ejecuta nada por su cuenta.",
-                                )}</small
-                            >
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            data-testid="settings-agent-chat-advisor"
-                            disabled={!draft.agentChat}
-                            bind:checked={draft.agentChatAdvisor}
-                        />
-                        <span>
-                            <strong
-                                >{app.t(
-                                    "settings.agentChatAdvisor",
-                                    "Modo consejero: ofrecer ayuda cuando falla una orden",
-                                )}</strong
-                            >
-                            <small
-                                >{app.t(
-                                    "settings.agentChatAdvisorHint",
-                                    "Si una orden acaba con error, la pestaña ofrece preguntar al agente con la orden y su salida. Solo lo ofrece: no pregunta ni manda nada sin que pulses. No vale en todas las shells: sí en PowerShell y bash (Git Bash, WSL con bash); en cmd, solo si la orden no existe; no en zsh, fish ni sh (como WSL con zsh), ni dentro de Python, Node u otros REPL. Necesita «Marcar dónde empieza y acaba cada orden».",
-                                )}</small
-                            >
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            data-testid="settings-show-agent-chat-button"
-                            disabled={!draft.agentChat}
-                            bind:checked={draft.showAgentChatButton}
-                        />
-                        <span>
-                            <strong
-                                >{app.t(
-                                    "settings.showAgentChatButton",
-                                    "Botón «Chat IA» en la barra",
-                                )}</strong
-                            >
-                            <small
-                                >{app.t(
-                                    "settings.showAgentChatButtonHint",
-                                    "Muestra arriba el botón que abre y cierra el chat de agentes. Sin él, el chat se abre con :chat, la paleta o su atajo.",
-                                )}</small
-                            >
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            data-testid="settings-agent-chat-remember"
-                            disabled={!draft.agentChat}
-                            bind:checked={draft.agentChatRemember}
-                        />
-                        <span>
-                            <strong
-                                >{app.t(
-                                    "settings.agentChatRemember",
-                                    "Recordar la conversación del chat",
-                                )}</strong
-                            >
-                            <small
-                                >{app.t(
-                                    "settings.agentChatRememberHint",
-                                    "Con cada pregunta se manda lo hablado antes en esa conversación (las últimas 6 vueltas), para que el agente lo recuerde. «Nueva conversación» lo borra.",
-                                )}</small
-                            >
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            data-testid="settings-agent-chat-can-edit"
-                            disabled={!draft.agentChat}
-                            bind:checked={draft.agentChatCanEdit}
-                        />
-                        <span>
-                            <strong
-                                >{app.t(
-                                    "settings.agentChatCanEdit",
-                                    "Dejar que los agentes del chat editen archivos",
-                                )}</strong
-                            >
-                            <small
-                                >{app.t(
-                                    "settings.agentChatCanEditHint",
-                                    "Apagado, el chat solo ofrece los modos que leen (Manual y Plan): Codex va en solo lectura, Qwen y Gemini en plan, a Copilot se le niegan la shell y escribir, y a Claude Code lo que pide permiso. Encendido, también «Aceptar ediciones» (el de fábrica) y «Auto»: pueden cambiar archivos de la carpeta de la pestaña sin preguntarte; las órdenes que Codex ejecuta en su sandbox también pueden escribir en ella.",
-                                )}</small
-                            >
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            data-testid="settings-agent-chat-allow-bypass"
-                            disabled={!draft.agentChat || !draft.agentChatCanEdit}
-                            bind:checked={draft.agentChatAllowBypass}
-                        />
-                        <span>
-                            <strong
-                                >{app.t(
-                                    "settings.agentChatAllowBypass",
-                                    "Dejar elegir «Omitir permisos» en el chat",
-                                )}</strong
-                            >
-                            <small
-                                >{app.t(
-                                    "settings.agentChatAllowBypassHint",
-                                    "Peligroso: con ese modo el agente hace todo sin preguntarte, también ejecutar órdenes y borrar archivos (Claude Code con --dangerously-skip-permissions, Codex sin sandbox, Gemini y Qwen en yolo, Copilot con la shell). Nunca es el de fábrica: se elige a mano en el chat, y pide también el ajuste de arriba.",
-                                )}</small
-                            >
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            data-testid="settings-agent-chat-guide"
-                            disabled={!draft.agentChat}
-                            bind:checked={draft.agentChatGuide}
-                        />
-                        <span>
-                            <strong
-                                >{app.t(
-                                    "settings.agentChatGuide",
-                                    "Dar a los agentes la guía de WTerminal",
-                                )}</strong
-                            >
-                            <small
-                                >{app.t(
-                                    "settings.agentChatGuideHint",
-                                    "Con cada pregunta del chat va, sin que la veas, una guía corta: que te propongan Entorno y dependencias, las órdenes internas (:shell, :panel, :set…) y los ajustes antes que winget, apt o pip a pelo, y cómo pedir la guía entera. Los modelos locales de Ollama no la reciben. Apagado, la pregunta va sola.",
-                                )}</small
-                            >
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input type="checkbox" data-testid="settings-agent-tab-guide" bind:checked={draft.agentTabGuide} />
-                        <span>
-                            <strong>{app.t("settings.agentTabGuide", "Dar la guía también al abrir la pestaña de una IA")}</strong>
-                            <small>{app.t("settings.agentTabGuideHint", "Una vez, al empezar su sesión: Claude Code y Codex la reciben como instrucciones de arranque (no sale en la conversación); Gemini y Qwen, como su primer mensaje (lo verás y contestarán «Listo»).")}</small>
-                        </span>
-                    </label>
-                    <label class="check">
-                        <input type="checkbox" data-testid="settings-agent-control" bind:checked={draft.agentControl} />
-                        <span>
-                            <strong>{app.t("settings.agentControl", "Dejar que las IA manejen WTerminal")}</strong>
-                            <small>{app.t("settings.agentControlHint", "Las IA que lanza WTerminal (su chat y sus pestañas) pueden usar wterminal --ctl: órdenes internas (:panes, :shell, :panel, :theme…) y acciones de Entorno y dependencias, en una pestaña de shell a la vista. Instalar, desinstalar o cambiar un ajuste te pide permiso; los permisos del chat y la seguridad nunca se pueden tocar así. Se aplica al reiniciar WTerminal.")}</small>
                         </span>
                     </label>
                     <label class="check">
@@ -2302,6 +2333,460 @@
                 </section>
             {/if}
 
+            {#if section === "ai" || searchingSettings}
+                {#if searchingSettings}<h3 class="settings-search-section" data-search-section>{app.t("settings.aiTab", "IA")}</h3>{/if}
+                <section>
+                    <div class="heading">
+                        <strong>{app.t("settings.aiHeading", "Inteligencia artificial")}</strong>
+                        <span>{app.t("settings.aiHeadingHint", "El chat de agentes, sus permisos y lo que pueden hacer en WTerminal.")}</span>
+                    </div>
+                    <!-- Windows (DPAPI) y, desde el 17-11, Linux con el llavero del
+                         escritorio (`secret-tool`). -->
+                    {#if app.appInfo?.aiKeysSupported}
+                        <label class="check">
+                            <input
+                                type="checkbox"
+                                data-testid="settings-ai-key-offer"
+                                bind:checked={draft.aiKeyOffer}
+                            />
+                            <span>
+                                <strong
+                                    >{app.t(
+                                        "settings.aiKeyOffer",
+                                        "Ofrecer la clave de API cuando una IA la pida",
+                                    )}</strong
+                                >
+                                <small
+                                    >{app.appInfo?.platform === "windows"
+                                        ? app.t(
+                                              "settings.aiKeyOfferHint",
+                                              "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda cifrada para tu usuario de Windows y solo se pasa a esa IA.",
+                                          )
+                                        : app.t(
+                                              "settings.aiKeyOfferHintLinux",
+                                              "Si una IA (Grok, Codex…) acaba al abrirse pidiendo su clave, la pestaña ofrece meterla. Se guarda en el llavero de tu escritorio (secret-tool) y solo se pasa a esa IA.",
+                                          )}</small
+                                >
+                            </span>
+                        </label>
+                        {#if savedAiKeys.length > 0}
+                            <div class="saved-ai-keys" data-testid="settings-ai-keys">
+                                <small>{app.t("settings.aiKeysSaved", "Claves guardadas (cifradas):")}</small>
+                                {#each savedAiKeys as item (item.envVar)}
+                                    <span class="saved-ai-key">
+                                        <code>{item.envVar}</code>
+                                        <button type="button" data-testid="settings-ai-key-clear" data-env-var={item.envVar} onclick={() => void clearAiKey(item)}>
+                                            {app.t("settings.aiKeyClear", "Borrar")}
+                                        </button>
+                                    </span>
+                                {/each}
+                            </div>
+                        {/if}
+                    {/if}
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat"
+                            bind:checked={draft.agentChat}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChat",
+                                    "Chat lateral con los agentes de IA",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatHint",
+                                    "Una barra a la derecha para preguntar a Claude Code, Gemini, Codex, Ollama… sin entrar en su CLI. Se abre con el botón «Chat IA» de arriba, :chat, la paleta o su atajo. Nunca ejecuta nada por su cuenta.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-advisor"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatAdvisor}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatAdvisor",
+                                    "Modo consejero: ofrecer ayuda cuando falla una orden",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatAdvisorHint",
+                                    "Si una orden acaba con error, la pestaña ofrece preguntar al agente con la orden y su salida. Solo lo ofrece: no pregunta ni manda nada sin que pulses. No vale en todas las shells: sí en PowerShell y bash (Git Bash, WSL con bash); en cmd, solo si la orden no existe; no en zsh, fish ni sh (como WSL con zsh), ni dentro de Python, Node u otros REPL. Necesita «Marcar dónde empieza y acaba cada orden».",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-advisor-send"
+                            disabled={!draft.agentChat || !draft.agentChatAdvisor}
+                            bind:checked={draft.agentChatAdvisorSend}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatAdvisorSend",
+                                    "Mandar sola la pregunta de ayuda",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatAdvisorSendHint",
+                                    "Las preguntas de ese aviso van siempre al chat «Ayuda de WTerminal» (si no existe, se crea), para no llenar el historial de chats sueltos. Apagado, la pregunta se deja escrita y la mandas tú; encendido, se manda sola con la orden y su salida.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-show-agent-chat-button"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.showAgentChatButton}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.showAgentChatButton",
+                                    "Botón «Chat IA» en la barra",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.showAgentChatButtonHint",
+                                    "Muestra arriba el botón que abre y cierra el chat de agentes. Sin él, el chat se abre con :chat, la paleta o su atajo.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-remember"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatRemember}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatRemember",
+                                    "Recordar la conversación del chat",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatRememberHint",
+                                    "Con cada pregunta se manda lo hablado antes en esa conversación (las últimas 6 vueltas), para que el agente lo recuerde. «Nueva conversación» lo borra.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-history"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatHistory}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatHistory",
+                                    "Guardar los chats en el historial",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatHistoryHint",
+                                    "Cada conversación se guarda en este equipo: cerrar su pestaña o el panel no la pierde, y el botón del reloj del chat la vuelve a abrir. Apagado, no se guarda nada nuevo (lo ya guardado se borra desde el historial).",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-restore"
+                            disabled={!draft.agentChat || !draft.agentChatHistory}
+                            bind:checked={draft.agentChatRestore}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatRestore",
+                                    "Reabrir los chats que estaban abiertos",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatRestoreHint",
+                                    "Al abrir el chat (también tras cerrar WTerminal) vuelven sus pestañas con la conversación. Apagado, empieza con un chat vacío y lo anterior sigue en el historial.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-native-sessions"
+                            disabled={!draft.agentChat || !draft.agentChatRemember}
+                            bind:checked={draft.agentChatNativeSessions}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatNativeSessions",
+                                    "Claude Code y Codex retoman su propia sesión",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatNativeSessionsHint",
+                                    "Cada pregunta manda solo lo nuevo y el agente recuerda también lo que leyó o hizo, gastando menos. Si su sesión ya no está, se vuelve a mandar la conversación entera. Apagado, siempre va la conversación entera.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-show-resumed"
+                            disabled={!draft.agentChat || !draft.agentChatNativeSessions}
+                            bind:checked={draft.agentChatShowResumed}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatShowResumed",
+                                    "Marcar las respuestas que retoman la sesión",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatShowResumedHint",
+                                    "Una marca discreta «sesión retomada» en las respuestas en las que Claude Code o Codex retomaron su sesión (solo se mandó lo nuevo).",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-forget-native"
+                            disabled={!draft.agentChat || !draft.agentChatHistory}
+                            bind:checked={draft.agentChatForgetNative}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatForgetNative",
+                                    "Al borrar un chat, borrar también su sesión del agente",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatForgetNativeHint",
+                                    "Claude Code y Codex guardan sus sesiones en sus propias carpetas. Apagado (de fábrica), se dejan: son suyas. Encendido, borrar un chat del historial borra también su sesión.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-auto-title"
+                            disabled={!draft.agentChat || !draft.agentChatHistory}
+                            bind:checked={draft.agentChatAutoTitle}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatAutoTitle",
+                                    "El agente pone el título del chat",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatAutoTitleHint",
+                                    "Tras la primera respuesta, el agente propone un título corto. Gasta una pregunta más de su cuenta. Apagado, el título es la primera pregunta.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-pin-help"
+                            disabled={!draft.agentChat || !draft.agentChatHistory}
+                            bind:checked={draft.agentChatPinHelp}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatPinHelp",
+                                    "Fijar el chat de ayuda arriba del historial",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatPinHelpHint",
+                                    "El chat «Ayuda de WTerminal» sale el primero del historial. Se puede desfijar desde el historial o con :chat unpin help (también una IA).",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="field">
+                        <span>{app.t("settings.agentChatHelpMaxDays", "Empezar otro chat de ayuda pasados estos días (0: nunca)")}</span>
+                        <input
+                            type="number"
+                            data-testid="settings-agent-chat-help-max-days"
+                            min="0"
+                            max="3650"
+                            step="1"
+                            disabled={!draft.agentChat}
+                            bind:value={draft.agentChatHelpMaxDays}
+                        />
+                    </label>
+                    <label class="field">
+                        <span>{app.t("settings.agentChatHelpMaxMessages", "Empezar otro chat de ayuda pasados estos mensajes (0: nunca)")}</span>
+                        <input
+                            type="number"
+                            data-testid="settings-agent-chat-help-max-messages"
+                            min="0"
+                            max="10000"
+                            step="1"
+                            disabled={!draft.agentChat}
+                            bind:value={draft.agentChatHelpMaxMessages}
+                        />
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-cleanup"
+                            disabled={!draft.agentChat || !draft.agentChatHistory}
+                            bind:checked={draft.agentChatCleanup}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatCleanup",
+                                    "Borrar solos los chats viejos",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatCleanupHint",
+                                    "Borra los chats que lleven los días de abajo sin usarse, salvo los abiertos y los fijados. Apagado de fábrica.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="field">
+                        <span>{app.t("settings.agentChatCleanupDays", "Días sin usarse antes de borrarlo")}</span>
+                        <input
+                            type="number"
+                            data-testid="settings-agent-chat-cleanup-days"
+                            min="1"
+                            max="3650"
+                            step="1"
+                            disabled={!draft.agentChat || !draft.agentChatHistory || !draft.agentChatCleanup}
+                            bind:value={draft.agentChatCleanupDays}
+                        />
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-can-edit"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatCanEdit}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatCanEdit",
+                                    "Dejar que los agentes del chat editen archivos",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatCanEditHint",
+                                    "Apagado, el chat solo ofrece los modos que leen (Manual y Plan): Codex va en solo lectura, Qwen y Gemini en plan, a Copilot se le niegan la shell y escribir, y a Claude Code lo que pide permiso. Encendido, también «Aceptar ediciones» (el de fábrica) y «Auto»: pueden cambiar archivos de la carpeta de la pestaña sin preguntarte; las órdenes que Codex ejecuta en su sandbox también pueden escribir en ella.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-allow-bypass"
+                            disabled={!draft.agentChat || !draft.agentChatCanEdit}
+                            bind:checked={draft.agentChatAllowBypass}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatAllowBypass",
+                                    "Dejar elegir «Omitir permisos» en el chat",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatAllowBypassHint",
+                                    "Peligroso: con ese modo el agente hace todo sin preguntarte, también ejecutar órdenes y borrar archivos (Claude Code con --dangerously-skip-permissions, Codex sin sandbox, Gemini y Qwen en yolo, Copilot con la shell). Nunca es el de fábrica: se elige a mano en el chat, y pide también el ajuste de arriba.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            data-testid="settings-agent-chat-guide"
+                            disabled={!draft.agentChat}
+                            bind:checked={draft.agentChatGuide}
+                        />
+                        <span>
+                            <strong
+                                >{app.t(
+                                    "settings.agentChatGuide",
+                                    "Dar a los agentes la guía de WTerminal",
+                                )}</strong
+                            >
+                            <small
+                                >{app.t(
+                                    "settings.agentChatGuideHint",
+                                    "Con cada pregunta del chat va, sin que la veas, una guía corta: que te propongan Entorno y dependencias, las órdenes internas (:shell, :panel, :set…) y los ajustes antes que winget, apt o pip a pelo, y cómo pedir la guía entera. Los modelos locales de Ollama no la reciben. Apagado, la pregunta va sola.",
+                                )}</small
+                            >
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input type="checkbox" data-testid="settings-agent-tab-guide" bind:checked={draft.agentTabGuide} />
+                        <span>
+                            <strong>{app.t("settings.agentTabGuide", "Dar la guía también al abrir la pestaña de una IA")}</strong>
+                            <small>{app.t("settings.agentTabGuideHint", "Una vez, al empezar su sesión: Claude Code y Codex la reciben como instrucciones de arranque (no sale en la conversación); Gemini y Qwen, como su primer mensaje (lo verás y contestarán «Listo»).")}</small>
+                        </span>
+                    </label>
+                    <label class="check">
+                        <input type="checkbox" data-testid="settings-agent-control" bind:checked={draft.agentControl} />
+                        <span>
+                            <strong>{app.t("settings.agentControl", "Dejar que las IA manejen WTerminal")}</strong>
+                            <small>{app.t("settings.agentControlHint", "Las IA que lanza WTerminal (su chat y sus pestañas) pueden usar wterminal --ctl: órdenes internas (:panes, :shell, :panel, :theme…) y acciones de Entorno y dependencias, en una pestaña de shell a la vista. Instalar, desinstalar o cambiar un ajuste te pide permiso; los permisos del chat y la seguridad nunca se pueden tocar así. Se aplica al reiniciar WTerminal.")}</small>
+                        </span>
+                    </label>
+                </section>
+            {/if}
+
             {#if section === "behavior" || searchingSettings}
                 {#if searchingSettings}<h3 class="settings-search-section" data-search-section>{app.t("settings.behavior", "Comportamiento")}</h3>{/if}
                 <section>
@@ -2485,6 +2970,11 @@
                     <label class="check"><input data-testid="settings-show-projects" type="checkbox" bind:checked={draft.showProjectsPanel} /><span><strong>{app.t("toolbar.projects", "Proyectos")}</strong><small>{app.t("settings.showProjectsHint", "Tus repositorios de GitHub: anclados, clonados, explorar y Mi GitHub.")}</small></span></label>
                     <label class="check"><input data-testid="settings-low-power" type="checkbox" bind:checked={draft.lowPowerMode} /><span><strong>{app.t("settings.lowPowerMode", "Modo de bajo consumo")}</strong><small>{app.t("settings.lowPowerModeHint", "Para equipos modestos: la detección de Dependencias espera a que abras el panel, las comprobaciones de actualizaciones esperan dos minutos y las sondas van de una en una. Se aplica en el próximo arranque.")}</small></span></label>
                     <label class="check"><input data-testid="settings-low-power-suggest" type="checkbox" bind:checked={draft.lowPowerSuggest} /><span><strong>{app.t("settings.lowPowerSuggest", "Sugerir el modo de bajo consumo")}</strong><small>{app.t("settings.lowPowerSuggestHint", "Con pocos hilos de CPU, poca memoria o un arranque lento, se sugiere el modo de bajo consumo.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-probe-low-priority" type="checkbox" bind:checked={draft.probeLowPriority} /><span><strong>{app.t("settings.probeLowPriority", "Detectar entornos con prioridad baja")}</strong><small>{app.t("settings.probeLowPriorityHint", "Las sondas que buscan lenguajes, IA y paquetes ceden el paso a tus pestañas: la salida de la terminal no se frena al abrir WTerminal. En un equipo muy ocupado la detección tarda algo más.")}</small></span></label>
+                    <label class="field">
+                        <span>{app.t("settings.probeMaxParallel", "Sondas de detección a la vez (0: automático, ahora {count})").replace("{count}", String(draft.lowPowerMode ? 1 : Math.max(1, Math.floor((app.appInfo?.cpuThreads ?? 2) / 2))))}</span>
+                        <input type="number" data-testid="settings-probe-max-parallel" min="0" max="64" step="1" bind:value={draft.probeMaxParallel} />
+                    </label>
                     <label class="check"><input data-testid="settings-suggest-repo-import" type="checkbox" bind:checked={draft.suggestRepositoryImport} /><span><strong>{app.t("settings.suggestRepositoryImport", "Sugerir importar repositorios")}</strong><small>{app.t("settings.suggestRepositoryImportHint", "Si la terminal entra en un repositorio de GitHub que no está en Proyectos, ofrece añadirlo abajo, sin moverlo.")}</small></span></label>
                     <label class="field">
                         <span>{app.t("settings.githubSessionMode", "Consultas de Explorar GitHub")}</span>
@@ -2524,57 +3014,9 @@
                     <label class="check"><input data-testid="settings-show-language" type="checkbox" bind:checked={draft.showLanguageButton} /><span><strong>{app.t("settings.showLanguageButton", "Selector de idioma")}</strong><small>{app.t("settings.showLanguageButtonHint", "Botón de la barra para cambiar el idioma de la interfaz.")}</small></span></label>
                     <label class="check"><input data-testid="settings-terminal-only" type="checkbox" bind:checked={draft.terminalOnlyMode} /><span><strong>{app.t("settings.terminalOnlyMode", "Modo terminal limpia")}</strong><small>{app.t("settings.terminalOnlyModeHint", "Oculta la barra superior y las pestañas para dejar la ventana dedicada a la terminal. Se recupera con el atajo configurado.")}</small></span></label>
                     <label class="check"><input data-testid="settings-terminal-only-guide" type="checkbox" bind:checked={draft.showTerminalOnlyGuide} /><span><strong>{app.t("settings.terminalOnlyGuide", "Guía visible en pantalla limpia")}</strong><small>{app.t("settings.terminalOnlyGuideHint", "Muestra el atajo actual para volver al modo normal mientras la pantalla limpia está activa.")}</small></span></label>
+                    <label class="check"><input data-testid="settings-show-first-steps" type="checkbox" bind:checked={draft.showFirstSteps} /><span><strong>{app.t("settings.showFirstSteps", "Guía de primeros pasos al arrancar")}</strong><small>{app.t("settings.showFirstStepsHint", "Sale sola hasta que la terminas o pulsas «No volver a mostrar».")}</small></span></label>
+                    <div class="update-row"><button type="button" class="secondary" data-testid="settings-open-first-steps" onclick={() => { panels.close(); openFirstSteps(); }}>{app.t("settings.openFirstSteps", "Ver los primeros pasos ahora")}</button></div>
                     <label class="check"><input data-testid="settings-start-maximized" type="checkbox" bind:checked={draft.startMaximized} onchange={scheduleAutoSave} /><span><strong>{app.t("settings.startMaximized", "Iniciar maximizada")}</strong><small>{app.t("settings.startMaximizedHint", "Abre la ventana ocupando todo el espacio disponible al iniciar.")}</small></span></label>
-                    <div class="heading">
-                        <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
-                        <span>{app.t("settings.shortcutsHint", "Pulsa una combinación para grabarla. Se capturan antes que la terminal; deja un campo vacío para no asignar ese atajo.")}</span>
-                    </div>
-                    <div class="field-grid">
-                        {#each SHORTCUT_DEFINITIONS as shortcut (shortcut.key)}
-                            <label class="field shortcut-field">
-                                <span>{app.t(shortcut.labelKey, shortcut.fallback)}</span>
-                                <div class="shortcut-control">
-                                    <input
-                                        data-shortcut-input
-                                        data-testid={`shortcut-${shortcut.key}`}
-                                        readonly
-                                        spellcheck="false"
-                                        value={draft[shortcut.key]}
-                                        placeholder={app.t("settings.shortcutUnset", "Sin asignar")}
-                                        aria-label={app.t(shortcut.labelKey, shortcut.fallback)}
-                                        onkeydown={(event) => captureShortcut(event, shortcut.key)}
-                                    />
-                                    <button
-                                        type="button"
-                                        class="secondary shortcut-clear"
-                                        title={app.t("common.clearFilter", "Borrar")}
-                                        aria-label={`${app.t("common.clearFilter", "Borrar")} ${app.t(shortcut.labelKey, shortcut.fallback)}`}
-                                        onclick={() => {
-                                            if (draft) {
-                                                draft[shortcut.key] = '';
-                                                scheduleAutoSave();
-                                            }
-                                        }}
-                                    >×</button>
-                                </div>
-                                {#if draft[shortcut.key]}
-                                    {@const conflict = shortcutConflicts(shortcut.key, draft)}
-                                    {#if conflict.duplicateOf}
-                                        <small class="shortcut-warning" data-testid={`shortcut-duplicate-${shortcut.key}`}>{app.t("settings.shortcutDuplicate", "También es el atajo de «{other}»: solo funcionará uno.").replace("{other}", app.t(SHORTCUT_DEFINITIONS.find((item) => item.key === conflict.duplicateOf)?.labelKey ?? "", SHORTCUT_DEFINITIONS.find((item) => item.key === conflict.duplicateOf)?.fallback ?? ""))}</small>
-                                    {:else if conflict.shell}
-                                        <small class="shortcut-warning" data-testid={`shortcut-shell-${shortcut.key}`}>{app.t("settings.shortcutShellConflict", "Las shells también usan esta tecla para editar la línea (bash, zsh, PowerShell): dentro de la terminal ganará el atajo.")}</small>
-                                    {/if}
-                                {/if}
-                            </label>
-                        {/each}
-                    </div>
-                    <div class="heading">
-                        <strong>{app.t("settings.manualAliases", "Alias manuales")}</strong>
-                        <span>{app.t("settings.manualAliasesHint", "Uno por línea: nombre=comando. Admite comandos compuestos; Fish los convierte en functions y conserva $argv. Se aplican a pestañas nuevas.")}</span>
-                    </div>
-                    <label class="field wide alias-editor">
-                        <textarea rows="6" spellcheck="false" placeholder={app.t("settings.aliasExample", "serve=npm run dev&#10;gs=git status")} bind:value={draft.manualAliasesText}></textarea>
-                    </label>
                     <div class="heading">
                         <strong>{app.t("settings.enabledEnvironments", "Entornos habilitados")}</strong>
                         <span>{app.t("settings.enabledEnvironmentsHint", "Oculta shells, contenedores, dispositivos o REPL concretos sin desinstalarlos.")}</span>
@@ -2706,6 +3148,46 @@
                         {#if toolchainStoreMessage}
                             <div class="field-hint" role="status">{toolchainStoreMessage}</div>
                         {/if}
+                        <!-- Limpieza de lo que se puede volver a generar (24-11). -->
+                        <div class="regenerable" data-testid="settings-regenerable">
+                            <strong>{app.t("settings.regenerableTitle", "Limpiar archivos que se pueden volver a generar")}</strong>
+                            <small>{app.t("settings.regenerableHint", "Nada de esto toca programas instalados, ajustes, chats ni proyectos: lo que se borra se vuelve a descargar o a crear cuando haga falta. Los temporales de sesión ya se borran solos al arrancar.")}</small>
+                            {#each REGENERABLE_KINDS as item (item.kind)}
+                                <label class="check">
+                                    <input type="checkbox" data-testid={`settings-regenerable-${item.kind}`} bind:checked={draft[item.key]} />
+                                    <span>{app.t(item.label, item.fallback)}</span>
+                                    <span class="store-size">{regenerable === null ? "…" : formatBytes(regenerable[item.kind] ?? 0)}</span>
+                                </label>
+                            {/each}
+                            <div class="update-row">
+                                <button type="button" data-testid="settings-regenerable-measure" disabled={regenerableBusy} onclick={() => void refreshRegenerable()}>{app.t("settings.regenerableMeasure", "Medir")}</button>
+                                <button
+                                    type="button"
+                                    class:danger={regenerableConfirm}
+                                    data-testid="settings-regenerable-clean"
+                                    disabled={regenerableBusy || regenerableChosen.length === 0}
+                                    onclick={() => void cleanRegenerable()}
+                                >
+                                    {regenerableConfirm
+                                        ? app.t("settings.regenerableConfirm", "¿Limpiar {size}? Se vuelve a generar cuando haga falta.").replace("{size}", regenerable === null ? "…" : formatBytes(regenerableBytes))
+                                        : app.t("settings.regenerableClean", "Limpiar lo marcado")}
+                                </button>
+                            </div>
+                            <label class="check">
+                                <input type="checkbox" data-testid="settings-regenerable-auto" bind:checked={draft.regenerableAutoClean} />
+                                <span>
+                                    <strong>{app.t("settings.regenerableAutoClean", "Limpiar lo marcado automáticamente")}</strong>
+                                    <small>{app.t("settings.regenerableAutoCleanHint", "Al abrir WTerminal, si ya pasaron los días de abajo desde la última vez. Apagado de fábrica.")}</small>
+                                </span>
+                            </label>
+                            <label class="field">
+                                <span>{app.t("settings.regenerableAutoCleanDays", "Cada cuántos días")}</span>
+                                <input type="number" data-testid="settings-regenerable-days" min="1" max="365" step="1" disabled={!draft.regenerableAutoClean} bind:value={draft.regenerableAutoCleanDays} />
+                            </label>
+                            {#if regenerableMessage}
+                                <div class="field-hint" role="status" data-testid="settings-regenerable-message">{regenerableMessage}</div>
+                            {/if}
+                        </div>
                     {/if}
                     {#if toolchainExternal === null}
                         <div class="field-hint" data-testid="settings-toolchain-store-external-pending">{app.t("settings.toolchainStoreExternal", "Otras ubicaciones (solo lectura)")}: {app.t("settings.toolchainStoreCalculating", "Calculando el espacio…")}</div>
@@ -2756,6 +3238,88 @@
                             <p class={`storage-safety ${storageTip.info.safety}`}><span>{storageSafetyLabel(storageTip.info.safety)}</span>{storageTip.info.deletion}</p>
                         </div>
                     {/if}
+                    <div class="heading" data-testid="settings-notices" data-hidden={hiddenNoticeRows.length}>
+                        <strong>{app.t("settings.notices", "Avisos")}</strong>
+                        <span>{app.t("settings.noticesHint", "Cada aviso de WTerminal tiene «No volver a mostrar». Los que hayas apagado salen aquí: pulsa uno para ir a su ajuste, o vuelve a mostrarlos todos.")}</span>
+                    </div>
+                    {#if hiddenNoticeRows.length > 0}
+                        <div class="update-row hidden-notices" data-testid="settings-notices-hidden">
+                            {#each hiddenNoticeRows as notice (notice.key)}
+                                <button type="button" class="secondary" data-testid={`settings-notice-${notice.id}`} onclick={() => goToNotice(notice)}>
+                                    {app.t(`settings.notice.${notice.id}`, notice.label)}
+                                </button>
+                            {/each}
+                        </div>
+                    {/if}
+                    <div class="update-row">
+                        <button type="button" class="secondary" data-testid="settings-notices-restore" disabled={hiddenNoticeRows.length === 0} onclick={restoreNotices}>
+                            {hiddenNoticeRows.length === 0
+                                ? app.t("settings.noticesAllShown", "Todos los avisos se muestran")
+                                : app.t("settings.noticesRestore", "Volver a mostrar todos los avisos (apagados: {count})").replace("{count}", String(hiddenNoticeRows.length))}
+                        </button>
+                    </div>
+                </section>
+            {/if}
+
+            {#if section === "shortcuts" || searchingSettings}
+                {#if searchingSettings}<h3 class="settings-search-section" data-search-section>{app.t("settings.shortcutsTab", "Atajos")}</h3>{/if}
+                <section>
+                    <div class="heading">
+                        <strong>{app.t("settings.shortcuts", "Atajos de teclado")}</strong>
+                        <span>{app.t("settings.shortcutsHint", "Pulsa una combinación para grabarla. Se capturan antes que la terminal; deja un campo vacío para no asignar ese atajo.")}</span>
+                    </div>
+                    <div class="field-grid">
+                        {#each SHORTCUT_DEFINITIONS as shortcut (shortcut.key)}
+                            <label class="field shortcut-field">
+                                <span>{app.t(shortcut.labelKey, shortcut.fallback)}</span>
+                                <div class="shortcut-control">
+                                    <input
+                                        data-shortcut-input
+                                        data-testid={`shortcut-${shortcut.key}`}
+                                        readonly
+                                        spellcheck="false"
+                                        value={draft[shortcut.key]}
+                                        placeholder={app.t("settings.shortcutUnset", "Sin asignar")}
+                                        aria-label={app.t(shortcut.labelKey, shortcut.fallback)}
+                                        onkeydown={(event) => captureShortcut(event, shortcut.key)}
+                                    />
+                                    <button
+                                        type="button"
+                                        class="secondary shortcut-clear"
+                                        title={app.t("common.clearFilter", "Borrar")}
+                                        aria-label={`${app.t("common.clearFilter", "Borrar")} ${app.t(shortcut.labelKey, shortcut.fallback)}`}
+                                        onclick={() => {
+                                            if (draft) {
+                                                draft[shortcut.key] = '';
+                                                scheduleAutoSave();
+                                            }
+                                        }}
+                                    >×</button>
+                                </div>
+                                {#if draft[shortcut.key]}
+                                    {@const conflict = shortcutConflicts(shortcut.key, draft)}
+                                    {#if conflict.duplicateOf}
+                                        <small class="shortcut-warning" data-testid={`shortcut-duplicate-${shortcut.key}`}>{app.t("settings.shortcutDuplicate", "También es el atajo de «{other}»: solo funcionará uno.").replace("{other}", app.t(SHORTCUT_DEFINITIONS.find((item) => item.key === conflict.duplicateOf)?.labelKey ?? "", SHORTCUT_DEFINITIONS.find((item) => item.key === conflict.duplicateOf)?.fallback ?? ""))}</small>
+                                    {:else if conflict.shell}
+                                        <small class="shortcut-warning" data-testid={`shortcut-shell-${shortcut.key}`}>{app.t("settings.shortcutShellConflict", "Las shells también usan esta tecla para editar la línea (bash, zsh, PowerShell): dentro de la terminal ganará el atajo.")}</small>
+                                    {/if}
+                                {/if}
+                            </label>
+                        {/each}
+                    </div>
+                    <div class="heading">
+                        <strong>{app.t("settings.manualAliases", "Alias manuales")}</strong>
+                        <span>{app.t("settings.manualAliasesHint", "Uno por línea: nombre=comando. Admite comandos compuestos; Fish los convierte en functions y conserva $argv. Se aplican a pestañas nuevas.")}</span>
+                    </div>
+                    <label class="field wide alias-editor">
+                        <textarea rows="6" spellcheck="false" placeholder={app.t("settings.aliasExample", "serve=npm run dev&#10;gs=git status")} bind:value={draft.manualAliasesText}></textarea>
+                    </label>
+                </section>
+            {/if}
+
+            {#if section === "system" || searchingSettings}
+                {#if searchingSettings}<h3 class="settings-search-section" data-search-section>{app.t("settings.system", "Sistema")}</h3>{/if}
+                <section>
                     {#if pathIntegration?.supported}
                         <div class="heading">
                             <strong>{app.t("settings.pathIntegration", "Invocar WTerminal desde el PATH")}</strong>
@@ -2894,6 +3458,13 @@
                             <small>{app.t("settings.offerPortableProfileHint", "Si has cambiado ajustes y la carpeta de los perfiles está vacía, sale un aviso abajo para guardar uno.")}</small>
                         </span>
                     </label>
+                    <label class="check">
+                        <input type="checkbox" data-testid="settings-offer-profile-update" bind:checked={draft.offerProfileUpdate} />
+                        <span>
+                            <strong>{app.t("settings.offerProfileUpdate", "Ofrecer guardar en el perfil los ajustes que cambies")}</strong>
+                            <small>{app.t("settings.offerProfileUpdateHint", "Al cerrar Ajustes con cambios, si ya tienes un perfil, un aviso ofrece guardarlos en él o en uno nuevo.")}</small>
+                        </span>
+                    </label>
                     <div class="heading">
                         <strong>{app.t("settings.plugins", "Plugins")}</strong>
                         <span>{app.t("settings.pluginsHint", "Extensiones declarativas validadas; no cargan código dentro de la aplicación.")}</span>
@@ -2917,31 +3488,14 @@
                          sitio («ajustes duplicados»); aquí solo se listan los
                          apagados, con un enlace a su casilla, y se vuelven a
                          mostrar todos a la vez. -->
-                    <div class="heading" data-testid="settings-notices" data-hidden={hiddenNoticeRows.length}>
-                        <strong>{app.t("settings.notices", "Avisos")}</strong>
-                        <span>{app.t("settings.noticesHint", "Cada aviso de WTerminal tiene «No volver a mostrar». Los que hayas apagado salen aquí: pulsa uno para ir a su ajuste, o vuelve a mostrarlos todos.")}</span>
-                    </div>
-                    {#if hiddenNoticeRows.length > 0}
-                        <div class="update-row hidden-notices" data-testid="settings-notices-hidden">
-                            {#each hiddenNoticeRows as notice (notice.key)}
-                                <button type="button" class="secondary" data-testid={`settings-notice-${notice.id}`} onclick={() => goToNotice(notice)}>
-                                    {app.t(`settings.notice.${notice.id}`, notice.label)}
-                                </button>
-                            {/each}
-                        </div>
-                    {/if}
-                    <div class="update-row">
-                        <button type="button" class="secondary" data-testid="settings-notices-restore" disabled={hiddenNoticeRows.length === 0} onclick={restoreNotices}>
-                            {hiddenNoticeRows.length === 0
-                                ? app.t("settings.noticesAllShown", "Todos los avisos se muestran")
-                                : app.t("settings.noticesRestore", "Volver a mostrar todos los avisos (apagados: {count})").replace("{count}", String(hiddenNoticeRows.length))}
-                        </button>
+                    <!-- 22-11 (Romen: «¿por qué las tools no tienen ningún tipo de
+                         apartado?»): el título va fuera de la tarjeta para que el
+                         índice y el buscador lo vean como apartado. -->
+                    <div class="heading">
+                        <strong>{app.t("scripts.ltools.title", "Acciones de LTools")}</strong>
+                        <span>{app.t("settings.ltoolsExperimentalHint", "Integración experimental. Desactivada por defecto; al activarla aparecerá en la Biblioteca y permitirá descubrir e instalar LTools.")}</span>
                     </div>
                     <div class="ltools-settings" data-testid="settings-ltools">
-                        <div class="heading">
-                            <strong>{app.t("scripts.ltools.title", "Acciones de LTools")}</strong>
-                            <span>{app.t("settings.ltoolsExperimentalHint", "Integración experimental. Desactivada por defecto; al activarla aparecerá en la Biblioteca y permitirá descubrir e instalar LTools.")}</span>
-                        </div>
                         <label class="check ltools-toggle">
                             <input data-testid="settings-ltools-enabled" type="checkbox" bind:checked={draft.ltoolsEnabled} />
                             <span><strong>{app.t("settings.ltoolsEnabled", "Habilitar LTools experimental")}</strong><small>{app.t("settings.ltoolsEnabledHint", "Muestra las acciones, el selector y la instalación de LTools en la Biblioteca.")}</small></span>
@@ -2953,6 +3507,10 @@
                         {/if}
                     </div>
                 </section>
+            {/if}
+
+            {#if section === "programs"}
+                <ProgramsSettings />
             {/if}
 
             {#if section === "about"}
@@ -3329,6 +3887,25 @@
         font-size: 10px;
     }
 
+    /* Un grupo de ajustes dentro de un apartado (pestañas ocupadas, 26-11). */
+    .settings-subgroup {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin: 4px 0;
+        padding: 10px 0 4px;
+        border-top: 1px solid var(--border);
+    }
+
+    .subgroup-title {
+        font-size: 12px;
+    }
+
+    .subgroup-hint {
+        color: var(--muted);
+        font-size: 10px;
+    }
+
     /* Las columnas salen del ancho REAL del panel, no de un numero fijo: con
        trece temas y el panel estrechado, tres columnas dejaban los nombres en
        una letra por linea. */
@@ -3698,6 +4275,17 @@
     .about-card span {
         color: var(--muted);
         font-size: 10px;
+    }
+
+    /* Limpieza de lo regenerable (24-11). */
+    .regenerable {
+        display: grid;
+        gap: 6px;
+        margin-top: 14px;
+    }
+
+    .regenerable .check .store-size {
+        margin-left: auto;
     }
 
     .update-row {

@@ -329,7 +329,9 @@ pub fn env_switch(
     // La sesión nueva empieza donde estaba ESTA pestaña. `active_cwd()` puede
     // pertenecer a otra si el usuario cambió el selector mientras había varias
     // pestañas visibles, y entonces la shell nueva caía en el home.
-    let inherited = state.tabs.cwd_of(&tab_id);
+    // Al salir de una shell NSudo se vuelve a la carpeta de antes de entrar
+    // (`cwd_for_switch`), no a la de la sesión elevada.
+    let inherited = state.tabs.cwd_for_switch(&tab_id, &env);
     let ok = state
         .tabs
         .spawn_pty(&app, &tab_id, &env, inherited.as_deref());
@@ -773,6 +775,39 @@ pub fn profile_save_now() -> ProfileTransferResult {
     result
 }
 
+/// «Guardar en el perfil actual» del aviso de ajustes cambiados (21-11):
+/// reescribe un perfil que ya existe en la carpeta de los perfiles. Solo
+/// acepta uno de esa carpeta: el frontend no puede hacer escribir en
+/// cualquier ruta.
+#[tauri::command(async)]
+pub fn profile_update(path: String) -> ProfileTransferResult {
+    let dir = profiles_dir();
+    let target = Path::new(&path);
+    if !profile_inside(&dir, target) {
+        return ProfileTransferResult {
+            ok: false,
+            error: Some(format!("{path}: no es un perfil de {}", dir.display())),
+            preferences: None,
+        };
+    }
+    let result = profile_export(path.clone());
+    if result.ok {
+        log_info!(
+            "Perfil portable actualizado",
+            serde_json::json!({ "path": path })
+        );
+    }
+    result
+}
+
+/// `target` es un archivo que ya existe directamente dentro de `dir`.
+fn profile_inside(dir: &Path, target: &Path) -> bool {
+    let (Ok(dir), Ok(target)) = (dir.canonicalize(), target.canonicalize()) else {
+        return false;
+    };
+    target.is_file() && target.parent() == Some(dir.as_path())
+}
+
 #[tauri::command(async)]
 pub fn profile_import(path: String) -> ProfileTransferResult {
     let target = Path::new(&path);
@@ -954,6 +989,25 @@ pub fn log_frontend_performance(payload: FrontendPerformancePayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solo_se_reescribe_un_perfil_de_su_carpeta() {
+        let dir = tempfile::tempdir().unwrap();
+        let perfil = dir.path().join("WTerminal-Perfil-2026-11-21.ps1");
+        std::fs::write(&perfil, "# perfil").unwrap();
+        assert!(profile_inside(dir.path(), &perfil));
+        // Uno que no existe, uno de otra carpeta o la propia carpeta: no.
+        assert!(!profile_inside(dir.path(), &dir.path().join("otro.ps1")));
+        let fuera = tempfile::tempdir().unwrap();
+        let ajeno = fuera.path().join("x.ps1");
+        std::fs::write(&ajeno, "x").unwrap();
+        assert!(!profile_inside(dir.path(), &ajeno));
+        assert!(!profile_inside(dir.path(), dir.path()));
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("y.ps1"), "y").unwrap();
+        assert!(!profile_inside(dir.path(), &sub.join("y.ps1")));
+    }
 
     #[test]
     fn restablecer_solo_toca_lo_elegido_y_sin_eleccion_todo() {

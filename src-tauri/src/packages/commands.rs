@@ -325,7 +325,10 @@ fn filter_available_actions_with_depth(
                         "-e",
                         "case Application.ensure_all_started(:public_key) do {:ok, _} -> :ok; _ -> System.halt(1) end",
                     ],
-                    std::time::Duration::from_secs(4),
+                    // Arrancar la VM de Erlang tardó 4,1 s en la VM (22-11):
+                    // con 4 s salía «falta public_key» estando bien y se
+                    // ofrecía reinstalar Erlang sin motivo.
+                    std::time::Duration::from_secs(15),
                 ) {
                     crate::process::ProbeOutput::Success(_) => DetectionState::Installed,
                     crate::process::ProbeOutput::TimedOut => DetectionState::Unknown,
@@ -1960,13 +1963,58 @@ struct CachedInstallStatus {
 struct CachedInstallSnapshot {
     schema: u8,
     language: String,
+    /// Qué programa lo escribió ([`install_snapshot_build`]).
+    #[serde(default)]
+    build: String,
     actions: Vec<InstallAction>,
+}
+
+/// La instantánea guarda las acciones ENTERAS, órdenes incluidas. Sin saber
+/// qué programa la escribió, una build nueva seguía ejecutando las órdenes de
+/// la anterior: la 82 instaló VirtualBox con la orden del 21-11 por la mañana
+/// (con `--location`, que su instalador rechaza), aunque el arreglo ya iba en
+/// el programa (Romen, 22-11). Cada build distinta la descarta y la rehace.
+const INSTALL_SNAPSHOT_SCHEMA: u8 = 2;
+
+/// Sello del programa en marcha: tamaño y fecha del ejecutable. Cambia con
+/// cada compilación; el número de versión (1.0.0) no.
+fn install_snapshot_build() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::metadata(exe).ok())
+        .map(|meta| {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|age| age.as_secs())
+                .unwrap_or_default();
+            format!("{}-{}-{modified}", env!("CARGO_PKG_VERSION"), meta.len())
+        })
+        .unwrap_or_default()
+}
+
+/// ¿Vale esta instantánea para el programa y el idioma de ahora?
+fn install_snapshot_usable(snapshot: &CachedInstallSnapshot, build: &str, language: &str) -> bool {
+    snapshot.schema == INSTALL_SNAPSHOT_SCHEMA
+        && !build.is_empty()
+        && snapshot.build == build
+        && snapshot.language == language
 }
 
 fn read_install_snapshot() -> Option<InstallList> {
     let text = std::fs::read_to_string(install_snapshot_cache_path()).ok()?;
     let snapshot = serde_json::from_str::<CachedInstallSnapshot>(&text).ok()?;
-    if snapshot.schema != 1 || snapshot.language != crate::i18n::active_language() {
+    if !install_snapshot_usable(
+        &snapshot,
+        &install_snapshot_build(),
+        &crate::i18n::active_language(),
+    ) {
+        crate::log_info!(
+            "Catálogo guardado de otra build o de otro idioma: se rehace",
+            serde_json::json!({ "build": snapshot.build, "schema": snapshot.schema })
+        );
+        let _ = std::fs::remove_file(install_snapshot_cache_path());
         return None;
     }
     (!snapshot.actions.is_empty()).then_some(InstallList {
@@ -1988,8 +2036,9 @@ fn write_install_snapshot(actions: &[InstallAction]) {
         let _ = std::fs::create_dir_all(parent);
     }
     let snapshot = CachedInstallSnapshot {
-        schema: 1,
+        schema: INSTALL_SNAPSHOT_SCHEMA,
         language: crate::i18n::active_language(),
+        build: install_snapshot_build(),
         actions: actions.to_vec(),
     };
     if let Ok(text) = serde_json::to_string(&snapshot) {
@@ -2398,11 +2447,21 @@ fn build_list(
 /// PowerShell y en bash, `"$var"` dentro de comillas dobles se interpola, lo que
 /// dejaría el script roto. Por eso cada familia usa su propio entrecomillado.
 fn wrap_powershell_command(ps_command: &str, kind: ShellKind, transport: Transport) -> String {
+    // La barra de progreso de PowerShell (`Add-WindowsCapability`,
+    // `Invoke-WebRequest`, `Install-Module`…) se dibuja arriba de la ventana,
+    // encima del banner, y al borrarse descolocaba la cabecera, la salida y
+    // el prompt de la acción (21-11, «Instalar cliente SSH»). En TODAS las
+    // acciones de PowerShell se apaga: el marco ya dice qué se está haciendo.
+    let ps_command = format!("$ProgressPreference = 'SilentlyContinue'; {ps_command}");
+    let ps_command = ps_command.as_str();
     match kind {
         // Ya estamos en PowerShell. Capturamos errores terminantes para que un
         // `throw` de una acción no cierre la sesión interactiva ni impida que
-        // `console_ui::decorate` pinte el resultado de la operación.
-        ShellKind::Powershell => format!("try {{ {ps_command} }} catch {{ Write-Error $_ }}"),
+        // `console_ui::decorate` pinte el resultado de la operación. La
+        // preferencia de progreso del usuario se le devuelve al acabar.
+        ShellKind::Powershell => format!(
+            "$wtProgress = $ProgressPreference; try {{ {ps_command} }} catch {{ Write-Error $_ }} finally {{ $ProgressPreference = $wtProgress }}"
+        ),
         // cmd no sabe escapar comillas dentro de comillas: cada `"` del script
         // le cambia el estado y un `|` o un `>` que queda «fuera» parte la
         // línea. La plantilla de WinGet lleva muchas, y «Instalar GitHub CLI»
@@ -2492,16 +2551,41 @@ fn notice_for(action: &InstallAction, command: &str, t: &Translator) -> crate::c
         .unwrap_or_else(|| t.t("verb.install", "Instalar"));
     // El asunto es la herramienta, que es lo que el usuario reconoce; dentro de
     // un plegable la etiqueta corta ya no la nombra ("Actualizar a la última
-    // versión"), así que ahí manda el subgrupo.
+    // versión"), así que ahí manda el subgrupo. Si la acción es de un
+    // elemento concreto del subgrupo (un framework dentro de «JavaScript /
+    // TypeScript · herramientas y frameworks»), manda su nombre: con el
+    // subgrupo, todas las cabeceras de los frameworks salían iguales (Romen,
+    // 22-11: «que la cabecera sea igual en todos es algo confuso»).
     let subject = action
-        .subgroup
+        .subgroup_item
         .clone()
+        .or_else(|| action.subgroup.clone())
         .unwrap_or_else(|| action.label.clone());
-    let notice = crate::console_ui::Notice::new(verb, subject, command).note(action.hint.clone());
+    let notice = crate::console_ui::Notice::new(verb, subject, &command_preview(command))
+        .note(action.hint.clone());
     match action.done.clone() {
         Some(done) => notice.done(done),
         None => notice,
     }
+}
+
+/// La orden que enseña la cabecera. Las instalaciones de WinGet y Chocolatey
+/// van envueltas en un guion largo (carpeta propia, descargas, mover a la
+/// carpeta propia): en la cabecera salía entero, decenas de líneas en cmd
+/// (21-11, VirtualBox). Se enseña solo la orden que instala; el guion entero
+/// sigue ejecutándose igual.
+fn command_preview(command: &str) -> String {
+    const START: &str = "try { ";
+    const END: &str = "; $wtCode = $LASTEXITCODE";
+    if command.contains("$wtTarget = $null; $wtBefore") {
+        if let Some(start) = command.find(START) {
+            let rest = &command[start + START.len()..];
+            if let Some(end) = rest.find(END) {
+                return rest[..end].replace(" @wtLocation", "").trim().to_string();
+            }
+        }
+    }
+    command.to_string()
 }
 
 /// Las familias de shell que pueden ejecutar una acción del panel, por orden de
@@ -2560,6 +2644,12 @@ pub struct InstallRunResult {
     /// La pestaña se acaba de abrir para esta acción: el frontend tiene que
     /// montarle su xterm y activarla.
     pub created: bool,
+    /// Necesita administrador y no hay con qué pedirlo (21-11).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub needs_admin: bool,
+    /// Se lanzó elevada con gsudo o el sudo de Windows.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub elevated: bool,
 }
 
 impl InstallRunResult {
@@ -2622,10 +2712,33 @@ pub fn install_run(
         ));
     };
 
-    let base_command = if action.shell.as_deref() == Some("powershell") {
-        wrap_powershell_command(&action.command, env.kind, env.transport)
+    // Una acción de administrador (21-11): si WTerminal no lo es, se lanza con
+    // gsudo o con el sudo de Windows «en línea», que piden permiso (UAC) solo
+    // para ella. Sin ninguno de los dos, no se escribe nada que vaya a fallar
+    // a medias: la app ofrece instalar gsudo o reiniciarse como administrador.
+    let elevation = if action.admin {
+        match admin_launcher() {
+            AdminLauncher::NotNeeded => None,
+            AdminLauncher::Missing => {
+                return InstallRunResult {
+                    needs_admin: true,
+                    ..InstallRunResult::failed(t.t(
+                        "error.needsAdmin",
+                        "Esta acción necesita permisos de administrador. Instala gsudo (pedirá permiso solo para ella) o reinicia WTerminal como administrador.",
+                    ))
+                };
+            }
+            AdminLauncher::Use(launcher) => Some(launcher),
+        }
     } else {
-        action.command.clone()
+        None
+    };
+    let base_command = match elevation.as_deref() {
+        Some(launcher) => elevated_command(&action, launcher, env.kind),
+        None if action.shell.as_deref() == Some("powershell") => {
+            wrap_powershell_command(&action.command, env.kind, env.transport)
+        }
+        None => action.command.clone(),
     };
     // La cabecera enseña el comando del CATÁLOGO, no el envuelto: el
     // `powershell -NoProfile -Command '...'` de alrededor es fontanería para
@@ -2668,12 +2781,167 @@ pub fn install_run(
         tab_id: Some(target_tab),
         created,
         error: None,
+        elevated: elevation.is_some(),
+        ..Default::default()
+    }
+}
+
+/// Cómo conseguir administrador para una acción que lo necesita.
+enum AdminLauncher {
+    /// WTerminal ya es administrador (o no es Windows).
+    NotNeeded,
+    /// Ni gsudo ni el sudo de Windows en línea.
+    Missing,
+    /// El ejecutable que eleva la orden: gsudo o `sudo.exe`.
+    Use(String),
+}
+
+fn admin_launcher() -> AdminLauncher {
+    #[cfg(windows)]
+    {
+        if crate::platform::is_process_elevated() {
+            return AdminLauncher::NotNeeded;
+        }
+        if let Some(gsudo) = crate::platform::gsudo_path() {
+            return AdminLauncher::Use(gsudo.to_string_lossy().into_owned());
+        }
+        if crate::platform::windows_sudo() == crate::platform::WindowsSudo::Inline {
+            return AdminLauncher::Use(
+                crate::platform::windows_sudo_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        AdminLauncher::Missing
+    }
+    #[cfg(not(windows))]
+    {
+        AdminLauncher::NotNeeded
+    }
+}
+
+/// La orden de una acción de administrador, elevada con `launcher` (gsudo o
+/// `sudo.exe`). Una acción de PowerShell va en un PowerShell aparte (el
+/// script codificado, con el mismo veredicto de salida que desde cmd): la
+/// sesión elevada no puede ser la de la pestaña.
+fn elevated_command(action: &InstallAction, launcher: &str, kind: ShellKind) -> String {
+    let inner = if action.shell.as_deref() == Some("powershell") {
+        let script = format!(
+            "$ProgressPreference = 'SilentlyContinue'; {}",
+            action.command
+        );
+        cmd_powershell_command(&script, None)
+    } else {
+        action.command.clone()
+    };
+    match kind {
+        ShellKind::Powershell => format!("& '{}' {inner}", launcher.replace('\'', "''")),
+        ShellKind::Cmd => format!("\"{launcher}\" {inner}"),
+        // Git Bash, WSL…: el ejecutable de Windows por su nombre, que está en
+        // el PATH (WSL añade el de Windows), con el sufijo .exe.
+        _ => {
+            let name = std::path::Path::new(launcher)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "gsudo.exe".to_string());
+            format!("{name} {inner}")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 21-11 (VirtualBox): la cabecera enseña la orden que instala, no el
+    /// guion entero de la carpeta propia.
+    /// 22-11: el catálogo guardado por otra build (o sin sello, de antes de
+    /// este arreglo) no se usa: llevaba las órdenes viejas.
+    #[test]
+    fn el_catalogo_guardado_por_otra_build_no_se_usa() {
+        let snapshot = |schema: u8, build: &str, language: &str| CachedInstallSnapshot {
+            schema,
+            language: language.into(),
+            build: build.into(),
+            actions: Vec::new(),
+        };
+        assert!(install_snapshot_usable(
+            &snapshot(INSTALL_SNAPSHOT_SCHEMA, "b1", "es"),
+            "b1",
+            "es"
+        ));
+        assert!(!install_snapshot_usable(
+            &snapshot(INSTALL_SNAPSHOT_SCHEMA, "b1", "es"),
+            "b2",
+            "es"
+        ));
+        assert!(!install_snapshot_usable(
+            &snapshot(INSTALL_SNAPSHOT_SCHEMA, "b1", "es"),
+            "b1",
+            "en"
+        ));
+        assert!(!install_snapshot_usable(
+            &snapshot(1, "b1", "es"),
+            "b1",
+            "es"
+        ));
+        // Sin sello (las de antes) o sin poder leer el programa: no se fía.
+        assert!(!install_snapshot_usable(
+            &snapshot(INSTALL_SNAPSHOT_SCHEMA, "", "es"),
+            "",
+            "es"
+        ));
+        let old: CachedInstallSnapshot =
+            serde_json::from_str(r#"{"schema":1,"language":"es","actions":[]}"#).unwrap();
+        assert!(old.build.is_empty());
+        assert!(!install_snapshot_build().is_empty());
+    }
+
+    /// 22-11: cada framework con su nombre en la cabecera, no el del grupo.
+    #[test]
+    fn la_cabecera_de_un_framework_lleva_su_nombre() {
+        let t = Translator::default();
+        let mut action = InstallAction::new(
+            "framework-parcel",
+            "Parcel (JavaScript / TypeScript)",
+            "npm install --global parcel",
+        );
+        action.subgroup = Some("JavaScript / TypeScript · herramientas y frameworks".into());
+        action.subgroup_item = Some("Parcel".into());
+        assert_eq!(
+            notice_for(&action, &action.command.clone(), &t).subject,
+            "Parcel"
+        );
+        // Sin elemento concreto sigue mandando el subgrupo.
+        action.subgroup_item = None;
+        assert_eq!(
+            notice_for(&action, &action.command.clone(), &t).subject,
+            "JavaScript / TypeScript · herramientas y frameworks"
+        );
+    }
+
+    #[test]
+    fn la_cabecera_de_una_instalacion_ensena_solo_la_orden_que_instala() {
+        let actions = install_actions::get_install_actions(
+            &InstallContext {
+                platform: "windows".into(),
+                ..Default::default()
+            },
+            &Translator::default(),
+        );
+        let vbox = actions
+            .iter()
+            .find(|action| action.id == "winget-virtualbox")
+            .expect("VirtualBox está en el catálogo de Windows");
+        let preview = command_preview(&vbox.command);
+        assert!(
+            preview.starts_with("winget install --id Oracle.VirtualBox"),
+            "{preview}"
+        );
+        assert!(!preview.contains("$wt"), "{preview}");
+        assert!(preview.len() < 200, "{preview}");
+        assert_eq!(command_preview("winget --version"), "winget --version");
+    }
     use crate::install_actions::InstallAction;
 
     /// `wterminal --ctl acciones <texto>` (14-11): todas las palabras, sin
@@ -3244,9 +3512,90 @@ mod tests {
     fn en_powershell_el_script_se_ejecuta_en_la_sesion_sin_perder_sus_variables() {
         let script = "$dest = 'x'; Write-Host $dest";
         let wrapped = wrap_powershell_command(script, ShellKind::Powershell, Transport::Native);
-        assert!(wrapped.starts_with("try { "));
+        assert!(wrapped.starts_with("$wtProgress = $ProgressPreference; try { "));
         assert!(wrapped.contains(script));
-        assert!(wrapped.ends_with(" } catch { Write-Error $_ }"));
+        assert!(wrapped.ends_with(
+            " } catch { Write-Error $_ } finally { $ProgressPreference = $wtProgress }"
+        ));
+    }
+
+    #[test]
+    fn las_acciones_de_administrador_se_reconocen_por_su_orden() {
+        use crate::install_actions::windows_command_needs_admin as admin;
+        assert!(admin(
+            "Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
+        ));
+        assert!(admin("Remove-WindowsCapability -Online -Name X"));
+        assert!(admin(
+            "Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform"
+        ));
+        assert!(admin("wsl.exe --install --no-distribution"));
+        assert!(admin("wsl.exe --update"));
+        assert!(!admin("wsl.exe --install -d Ubuntu"));
+        assert!(!admin("winget install --id Git.Git -e"));
+        assert!(!admin("ssh -V"));
+    }
+
+    #[test]
+    fn el_catalogo_de_windows_marca_openssh_como_de_administrador() {
+        let actions = install_actions::get_install_actions(
+            &InstallContext {
+                platform: "windows".into(),
+                ..Default::default()
+            },
+            &Translator::default(),
+        );
+        let find = |id: &str| actions.iter().find(|action| action.id == id);
+        assert!(find("winget-ssh").is_some_and(|action| action.admin));
+        assert!(find("ssh-check").is_some_and(|action| !action.admin));
+    }
+
+    #[test]
+    fn una_accion_de_administrador_se_eleva_con_gsudo_en_cada_shell() {
+        let mut action =
+            InstallAction::new("winget-ssh", "SSH", "Add-WindowsCapability -Online -Name X");
+        action.shell = Some("powershell".into());
+        let gsudo = r"C:\Program Files\gsudo\Current\gsudo.exe";
+        let cmd = elevated_command(&action, gsudo, ShellKind::Cmd);
+        assert!(
+            cmd.starts_with("\"C:\\Program Files\\gsudo\\Current\\gsudo.exe\" powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "),
+            "{cmd}"
+        );
+        let ps = elevated_command(&action, gsudo, ShellKind::Powershell);
+        assert!(
+            ps.starts_with("& 'C:\\Program Files\\gsudo\\Current\\gsudo.exe' powershell "),
+            "{ps}"
+        );
+        let bash = elevated_command(&action, gsudo, ShellKind::Bash);
+        assert!(bash.starts_with("gsudo.exe powershell "), "{bash}");
+        // Una orden que no es de PowerShell se eleva tal cual.
+        let plain = InstallAction::new("wsl-update", "WSL", "wsl.exe --update");
+        assert_eq!(
+            elevated_command(&plain, r"C:\Windows\System32\sudo.exe", ShellKind::Cmd),
+            "\"C:\\Windows\\System32\\sudo.exe\" wsl.exe --update"
+        );
+    }
+
+    #[test]
+    fn ninguna_accion_de_powershell_pinta_la_barra_de_progreso() {
+        // La barra se dibujaba arriba de la ventana y descolocaba el marco de
+        // la acción (21-11, OpenSSH desde cmd).
+        for (kind, transport) in [
+            (ShellKind::Powershell, Transport::Native),
+            (ShellKind::Bash, Transport::Msys),
+            (ShellKind::Bash, Transport::Wsl),
+            (ShellKind::Fish, Transport::Native),
+        ] {
+            let wrapped =
+                wrap_powershell_command("Add-WindowsCapability -Online -Name X", kind, transport);
+            // En bash y fish las comillas simples van escapadas a su manera.
+            let progress = wrapped.find("$ProgressPreference = ");
+            let order = wrapped.find("Add-WindowsCapability");
+            assert!(
+                wrapped.contains("SilentlyContinue") && progress.is_some() && progress < order,
+                "{kind:?}/{transport:?}: {wrapped}"
+            );
+        }
     }
 
     #[test]
@@ -3350,7 +3699,9 @@ mod tests {
         // llegar a PowerShell y el script llegaría roto.
         let wrapped = wrap_powershell_command("$env:Path", ShellKind::Bash, Transport::Msys);
         assert!(wrapped.starts_with("powershell -NoProfile"));
-        assert!(wrapped.ends_with("'$env:Path'"));
+        // Entre comillas simples, detrás del `$ProgressPreference` (21-11).
+        assert!(wrapped.contains(" -Command '$ProgressPreference"));
+        assert!(wrapped.ends_with("; $env:Path'"));
     }
 
     #[test]
@@ -3362,7 +3713,7 @@ mod tests {
     #[test]
     fn fish_escapa_las_comillas_con_barra_porque_no_admite_la_forma_de_bash() {
         let wrapped = wrap_powershell_command("Write-Host 'x'", ShellKind::Fish, Transport::Native);
-        assert!(wrapped.ends_with("'Write-Host \\'x\\''"));
+        assert!(wrapped.ends_with("; Write-Host \\'x\\''"));
     }
 
     #[test]
